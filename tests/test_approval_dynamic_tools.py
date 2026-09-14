@@ -29,12 +29,14 @@ from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.response_turn import CompletedApprovalRun
 from mindroom.tool_system import dynamic_toolkits
+from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session, save_loaded_tools_for_session
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_openai_native_compaction import _ANSWER, _event, _response
+from tests.test_plugins import _preserved_plugin_loader_state
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -156,6 +158,42 @@ async def test_saved_approval_restores_deferred_local_tool(
 
 
 @pytest.mark.asyncio
+async def test_saved_approval_restores_deferred_plugin_without_function_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing plugins may expose real functions without declaring their names in metadata."""
+    plugin_path = tmp_path / "approval-plugin"
+    plugin_path.mkdir()
+    (plugin_path / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "approval-plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_path / "tools.py").write_text(
+        "from agno.tools.calculator import CalculatorTools\n"
+        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='approval_calculator',\n"
+        "    display_name='Approval Calculator',\n"
+        "    description='Perform synthetic arithmetic',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def approval_calculator_tools():\n"
+        "    return CalculatorTools\n",
+        encoding="utf-8",
+    )
+    with _preserved_plugin_loader_state():
+        await _exercise_saved_approval(
+            tmp_path,
+            monkeypatch,
+            tool_name="approval_calculator",
+            plugin_path=plugin_path,
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("restriction", ["removed", "include", "exclude"])
 async def test_saved_approval_respects_current_tool_restrictions(
     tmp_path: Path,
@@ -230,6 +268,7 @@ async def _exercise_saved_approval(  # noqa: PLR0915
     approved: bool = True,
     restriction: str | None = None,
     mixed_calls: bool = False,
+    plugin_path: Path | None = None,
 ) -> None:
     function_name = "example_lookup" if tool_name == "mcp_example" else "add"
     arguments = {} if tool_name == "mcp_example" else {"a": 2, "b": 3}
@@ -242,6 +281,7 @@ async def _exercise_saved_approval(  # noqa: PLR0915
         Config.model_validate(
             {
                 "defaults": {"tools": [], "learning": False},
+                "plugins": [str(plugin_path)] if plugin_path is not None else [],
                 "agents": {
                     "general": {
                         "display_name": "General",
@@ -329,6 +369,8 @@ async def _exercise_saved_approval(  # noqa: PLR0915
         )
         original_schema = agent_tool_definition_payloads_for_logging(initial)
         original_names = {entry["name"] for entry in original_schema}
+        if plugin_path is not None:
+            assert TOOL_METADATA[tool_name].function_names == ()
         if tool_name == "mcp_example":
             assert {"example_connection_status", "example_list_tools", "example_call_tool"} <= original_names
             assert function_name not in original_names

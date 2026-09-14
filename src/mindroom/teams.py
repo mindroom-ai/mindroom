@@ -2524,16 +2524,20 @@ async def continue_paused_team_run(
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
-    required_tool_names = {
-        name: await required_approval_tool_names(
-            name,
-            (required_function_names or {}).get(name, frozenset()),
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-        for name in member_names
-    }
+    async with asyncio.TaskGroup() as recovery:
+        required_tool_tasks = {
+            name: recovery.create_task(
+                required_approval_tool_names(
+                    name,
+                    (required_function_names or {}).get(name, frozenset()),
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                ),
+            )
+            for name in member_names
+        }
+    required_tool_names = {name: task.result() for name, task in required_tool_tasks.items()}
     members = await asyncio.to_thread(
         materialize_exact_team_members,
         list(member_names),

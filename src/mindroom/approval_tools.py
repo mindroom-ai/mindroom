@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.logging_config import get_logger
 from mindroom.mcp.config import resolved_mcp_tool_prefix
 from mindroom.mcp.function_surface import catalog_function_names_for_tool_config
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
@@ -17,8 +19,82 @@ from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_targe
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+logger = get_logger(__name__)
+
+
+def _constructed_tool_function_names(
+    entry: EffectiveToolConfig,
+    *,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> frozenset[str]:
+    """Inspect current functions when a registered toolkit omits optional metadata."""
+    try:
+        toolkit = build_agent_toolkit(
+            entry.name,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            worker_tools=resolve_runtime_worker_tools(
+                agent_name,
+                config,
+                runtime_paths,
+                [entry.name],
+                tool_registry_preloaded=True,
+            ),
+            runtime_overrides=config.resolve_entity(agent_name).tool_runtime_overrides(entry.name),
+            tool_config_overrides=entry.tool_config_overrides,
+            execution_identity=execution_identity,
+            session_id=execution_identity.session_id,
+        )
+    except (ValueError, ImportError) as exc:
+        logger.debug("Skipping unavailable tool during approval recovery", tool=entry.name, error=str(exc))
+        return frozenset()
+    return frozenset(toolkit.get_async_functions()) if toolkit is not None else frozenset()
+
+
+async def _discover_mcp_function_names(
+    server_id: str,
+    entry: EffectiveToolConfig,
+    *,
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> set[str]:
+    """Discover current catalog functions through normal agent credential routing."""
+    manager = require_mcp_server_manager()
+    if manager is None:
+        msg = f"MCP tool {entry.name!r} is unavailable for approval continuation"
+        raise RuntimeError(msg)
+    runtime = await asyncio.to_thread(
+        resolve_agent_runtime,
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+        create=False,
+    )
+    catalog = await manager.get_request_catalog(
+        server_id,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=build_agent_toolkit_worker_target(
+            runtime.execution.execution_scope,
+            agent_name,
+            is_private=runtime.execution.is_private,
+            execution_identity=execution_identity,
+            runtime_paths=runtime_paths,
+        ),
+        expected_config=config,
+    )
+    return catalog_function_names_for_tool_config(catalog, entry)
 
 
 async def required_approval_tool_names(
@@ -58,34 +134,32 @@ async def required_approval_tool_names(
                 continue
             prefix = f"{resolved_mcp_tool_prefix(server_id, server_config)}_"
             if any(name.startswith(prefix) for name in function_names - matching_names):
-                manager = require_mcp_server_manager()
-                if manager is None:
-                    msg = f"MCP tool {entry.name!r} is unavailable for approval continuation"
-                    raise RuntimeError(msg)
-                runtime = await asyncio.to_thread(
-                    resolve_agent_runtime,
-                    agent_name,
-                    config,
-                    runtime_paths,
-                    execution_identity=execution_identity,
-                    create=False,
-                )
-                catalog = await manager.get_request_catalog(
-                    server_id,
-                    credentials_manager=get_runtime_credentials_manager(runtime_paths),
-                    worker_target=build_agent_toolkit_worker_target(
-                        runtime.execution.execution_scope,
-                        agent_name,
-                        is_private=runtime.execution.is_private,
-                        execution_identity=execution_identity,
+                matching_names |= function_names.intersection(
+                    await _discover_mcp_function_names(
+                        server_id,
+                        entry,
+                        agent_name=agent_name,
+                        config=config,
                         runtime_paths=runtime_paths,
+                        execution_identity=execution_identity,
                     ),
-                    expected_config=config,
                 )
-                matching_names |= function_names.intersection(catalog_function_names_for_tool_config(catalog, entry))
+        elif metadata is not None and metadata.factory is not None and not metadata.function_names:
+            matching_names = function_names.intersection(
+                await asyncio.to_thread(
+                    _constructed_tool_function_names,
+                    entry,
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                ),
+            )
         for name in matching_names:
             owners[name].add(entry.authored_name or entry.name)
     if any(len(tool_names) > 1 for tool_names in owners.values()):
+        # A current collision winner cannot identify the toolkit that owned an
+        # older paused call. Never redirect approval to another implementation.
         msg = "Saved approval function has ambiguous configured tool ownership"
         raise RuntimeError(msg)
     return tuple(sorted({owner for tool_names in owners.values() for owner in tool_names}))

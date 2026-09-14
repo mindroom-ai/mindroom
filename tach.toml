@@ -754,7 +754,9 @@ visibility = ["mindroom.response_runner"]
 [[modules]]
 path = "mindroom.approval_tools"
 depends_on = [
+    "mindroom.agents",
     "mindroom.credentials",
+    "mindroom.logging_config",
     "mindroom.mcp.function_surface",
     "mindroom.mcp.registry",
     "mindroom.mcp.toolkit",

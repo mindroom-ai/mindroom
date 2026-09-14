@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -15,11 +16,12 @@ from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import TeamMode, continue_paused_team_run
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.runtime_context import ToolDispatchContext
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.agent import Agent
@@ -71,14 +73,13 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         source_event_ids=("$source",),
         calls=calls,
         state="claimed",
-        execution_identity={},
+        execution_identity=serialize_tool_execution_identity(identity),
         runtime_model_name="default",
         team_member_names=("alpha", "beta"),
         team_mode="coordinate",
     )
     continued = AsyncMock(return_value=CompletedApprovalRun(response_text="done", metadata_content={}))
     with (
-        patch("mindroom.response_runner.parse_tool_execution_identity_payload", return_value=identity),
         patch.object(
             runner.deps.tool_runtime,
             "build_dispatch_context",
@@ -108,6 +109,75 @@ async def test_team_approval_restores_tools_only_for_the_frozen_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real team member assembly cannot give a sibling the paused owner's required tools."""
+    await _exercise_team_member_assembly(tmp_path, monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_team_approval_discovers_independent_member_tools_concurrently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One member's catalog request cannot prevent another member's discovery from starting."""
+    barrier = asyncio.Barrier(2)
+    beta_completed = asyncio.Event()
+
+    async def resolve_member_tools(
+        name: str,
+        function_names: frozenset[str],
+        **_kwargs: object,
+    ) -> tuple[str, ...]:
+        await barrier.wait()
+        if name == "alpha":
+            await beta_completed.wait()
+            assert function_names == frozenset({"add"})
+            return ("calculator",)
+        assert name == "beta"
+        assert function_names == frozenset()
+        beta_completed.set()
+        return ()
+
+    async with asyncio.timeout(10):
+        await _exercise_team_member_assembly(tmp_path, monkeypatch, required_resolver=resolve_member_tools)
+
+
+@pytest.mark.asyncio
+async def test_team_approval_failed_discovery_cancels_and_drains_siblings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed approval reconstruction must settle other catalog requests before returning."""
+    barrier = asyncio.Barrier(2)
+    sibling_settled = asyncio.Event()
+
+    async def resolve_member_tools(name: str, *_args: object, **_kwargs: object) -> tuple[str, ...]:
+        if name == "alpha":
+            await barrier.wait()
+            msg = "Synthetic catalog unavailable"
+            raise RuntimeError(msg)
+        try:
+            await barrier.wait()
+            await asyncio.Event().wait()
+        finally:
+            sibling_settled.set()
+        msg = "Sibling discovery unexpectedly completed"
+        raise AssertionError(msg)
+
+    async with asyncio.timeout(10):
+        with pytest.raises(ExceptionGroup) as failure:
+            await _exercise_team_member_assembly(tmp_path, monkeypatch, required_resolver=resolve_member_tools)
+    assert len(failure.value.exceptions) == 1
+    assert isinstance(failure.value.exceptions[0], RuntimeError)
+    assert str(failure.value.exceptions[0]) == "Synthetic catalog unavailable"
+    assert sibling_settled.is_set()
+
+
+async def _exercise_team_member_assembly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    required_resolver: Callable[..., Awaitable[tuple[str, ...]]] | None = None,
+) -> None:
+    """Inspect real member construction after the optional catalog transport boundary."""
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config.model_validate(
@@ -146,6 +216,8 @@ async def test_team_approval_restores_tools_only_for_the_frozen_member(
         "mindroom.agents._load_agent_model_instance",
         lambda *_args, **_kwargs: SyntheticModel(id="synthetic", tool_call_probability=0),
     )
+    if required_resolver is not None:
+        monkeypatch.setattr("mindroom.teams.required_approval_tool_names", required_resolver)
 
     def inspect_members(*, agents: list[Agent], **_kwargs: object) -> None:
         functions = {
