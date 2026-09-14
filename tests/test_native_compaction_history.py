@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
 from agno.db.sqlite import SqliteDb
+from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.session.summary import SessionSummary
@@ -15,7 +17,7 @@ from agno.team import Team
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
-from mindroom.history.native import restore_native_history
+from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
@@ -27,11 +29,44 @@ from mindroom.history.storage import write_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.openai_models import MindRoomOpenAIResponses
-from tests.conftest import seed_session
+from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import _agent, _completed_run, _completed_team_run, _make_config, _session, _team_session
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def test_reused_responses_model_uses_current_replay_budget(tmp_path: Path) -> None:
+    """An unbounded plan must not inherit portable replay from a prior bounded plan."""
+    config, _ = _make_config(tmp_path)
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(model=model),
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    messages = [
+        Message(role="assistant", content="Previous answer", provider_data={"response_id": "resp_previous"}),
+        Message(role="user", content="Continue"),
+    ]
+    for budget in (1000, None, 2000):
+        configure_native_history(
+            model,
+            plan=replace(resolved.execution_plan, hard_replay_budget_tokens=budget),
+            history_settings=resolved.history_settings,
+            session=None,
+            allowed=False,
+        )
+        request = model.get_request_params(messages=messages)
+        replay = model._format_messages(messages)
+        if budget is None:
+            assert request["previous_response_id"] == "resp_previous"
+            assert replay == [{"role": "user", "content": "Continue"}]
+        else:
+            assert "previous_response_id" not in request
+            assert replay[0] == {"role": "assistant", "content": "Previous answer"}
 
 
 @pytest.mark.parametrize("change", ["none", "model", "endpoint", "summary", "disabled", "missing", "invalid_threshold"])
@@ -136,6 +171,81 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
     assert final.replays_persisted_history
     assert len(session.runs or []) == 1
     assert len(session.runs[0].messages[0].content) > 900000
+    db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auto_compact", [False, True])
+async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    auto_compact: bool,
+) -> None:
+    """Dense text and hidden stored context must not bypass portable replay fitting."""
+    config, paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=auto_compact, reserve_tokens=1000, replay_window_tokens=6000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=30000)},
+    )
+    monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_args, **_kwargs: FakeModel(id="summary"))
+    monkeypatch.setattr(
+        "mindroom.history.compaction.generate_compaction_summary",
+        AsyncMock(return_value=SessionSummary(summary="Keep the recent instruction")),
+    )
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", base_url="https://proxy.example/v1", store=True)
+    latest = [
+        Message(role="user", content="Keep the recent instruction"),
+        Message(
+            role="assistant",
+            content="Ready",
+            provider_data={"response_id": "resp_large_context"},
+            metrics=MessageMetrics(input_tokens=9000, output_tokens=10),
+        ),
+    ]
+    session = _session(
+        "session",
+        runs=[
+            _completed_run("old", messages=[Message(role="user", content="0123456789" * 1800)]),
+            _completed_run("recent", messages=latest),
+        ],
+    )
+    db = SqliteDb(db_file=str(tmp_path / "history.db"))
+    seed_session(db, session)
+    agent = _agent(model=model, db=db)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    resolved = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    prepared = await prepare_scope_history(
+        agent=agent,
+        agent_name="test_agent",
+        resolved_inputs=resolved,
+        runtime_paths=paths,
+        config=config,
+        scope_context=ScopeSessionContext(scope, db, session),
+    )
+    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+    assert final.replay_plan is not None
+    if auto_compact:
+        assert prepared.compaction_reply_outcome == "success"
+        assert session.summary is not None
+        assert session.summary.summary == "Keep the recent instruction"
+        assert len(session.runs or []) == 0
+    else:
+        assert final.replay_plan.mode == "limited"
+        assert final.replay_plan.num_history_runs == 1
+        assert final.replay_plan.estimated_tokens < 100
+        assert len(session.runs or []) == 2
+    assert model.native_compaction is None
+    messages = [*latest, Message(role="user", content="Continue")]
+    assert "previous_response_id" not in model.get_request_params(messages=messages)
+    assert model._format_messages(messages)[0] == {"role": "user", "content": "Keep the recent instruction"}
+    assert latest[-1].provider_data == {"response_id": "resp_large_context"}
     db.close()
 
 

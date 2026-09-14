@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
 
     from mindroom.history.summary_call import SummaryRetryDecision
+    from mindroom.native_compaction import NativeCompactionModel
 
 
 logger = get_logger(__name__)
@@ -173,6 +174,7 @@ async def compact_scope_history(
     fallback_summary_model: SummaryModel | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = scope_visible_runs(session, scope)
@@ -183,6 +185,7 @@ async def compact_scope_history(
         state=state,
         history_settings=history_settings,
         available_history_budget=available_history_budget,
+        replay_model=replay_model,
     )
     if not compactable_runs:
         _persist_cleared_force_state_if_needed(
@@ -210,6 +213,7 @@ async def compact_scope_history(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     before_run_count = len(visible_runs)
     working_session = deepcopy(session)
@@ -247,6 +251,7 @@ async def compact_scope_history(
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
         before_persist_callback=emit_before_persist,
+        replay_model=replay_model,
     )
     if rewrite_result is None:
         _persist_cleared_force_state_if_needed(
@@ -288,6 +293,7 @@ async def compact_scope_history(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     outcome = CompactionOutcome(
         mode="manual" if state.force_compact_before_next_run else "auto",
@@ -340,6 +346,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     summary_timeout_seconds: float,
     fallback_summary_model: SummaryModel | None = None,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = current_summary_text(working_session) or ""
     token_estimator, _estimate_kind = _compaction_sizing(summary_model.model)
@@ -439,6 +446,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             threshold_tokens=threshold_tokens,
             total_compacted_run_count=total_compacted_run_count,
             selected_runs_remaining=len(pending_selected_run_ids),
+            replay_model=replay_model,
         )
 
     if total_compacted_run_count == 0:
@@ -483,6 +491,7 @@ async def _emit_lifecycle_progress_after_persist(
     threshold_tokens: int | None,
     total_compacted_run_count: int,
     selected_runs_remaining: int,
+    replay_model: NativeCompactionModel | None = None,
 ) -> None:
     """Emit lifecycle progress after a compaction chunk has been durably persisted."""
     remaining_runs = scope_visible_runs(working_session, scope)
@@ -492,6 +501,7 @@ async def _emit_lifecycle_progress_after_persist(
         session=working_session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     await progress_callback(
         CompactionLifecycleProgress(
@@ -691,6 +701,7 @@ def _select_compaction_candidates(
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> list[RunOutput | TeamRunOutput]:
     if not visible_runs:
         return []
@@ -702,6 +713,7 @@ def _select_compaction_candidates(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     return visible_runs if current_tokens > available_history_budget else []
 

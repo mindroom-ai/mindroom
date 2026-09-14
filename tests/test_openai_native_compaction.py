@@ -276,9 +276,11 @@ def test_portable_replay_never_chains_to_unstored_native_response(*, fresh_model
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("disable_native", [False, True])
-async def test_reasoning_survives_native_tool_loop(*, stream: bool, disable_native: bool) -> None:
+@pytest.mark.parametrize("portable", [False, True])
+async def test_reasoning_survives_native_tool_loop(*, stream: bool, disable_native: bool, portable: bool) -> None:  # noqa: C901
     """Every reasoning item must precede its call, even with an empty terminal output."""
     requests: list[dict[str, Any]] = []
+    executions: list[str] = []
     second_reasoning = {**_REASONING, "id": "rs_second"}
     second_call = {**_CALL, "id": "fc_second", "call_id": "call_second"}
     search = {
@@ -326,11 +328,14 @@ async def test_reasoning_survives_native_tool_loop(*, stream: bool, disable_nati
         api_key="test",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     ) as client:
-        model = MindRoomOpenAIResponses(id="gpt-6-astra", async_client=client)
+        model = MindRoomOpenAIResponses(id="gpt-6-astra", async_client=client, store=True if portable else None)
+        if portable:
+            model.configure_portable_replay()
         model.configure_native_compaction(threshold=1024)
 
         def lookup() -> str:
             """Look up the current status."""
+            executions.append("lookup")
             if disable_native:
                 model.configure_native_compaction(threshold=None)
             return "Found it"
@@ -349,6 +354,11 @@ async def test_reasoning_survives_native_tool_loop(*, stream: bool, disable_nati
         {"type": "function_call_output", "call_id": "call_second", "output": "Found it"},
     ]
     assert "previous_response_id" not in requests[1]
+    assert executions == ["lookup", "lookup"]
+    if portable:
+        assert all(request["store"] is True for request in requests)
+        assert all("reasoning.encrypted_content" in request["include"] for request in requests)
+        assert all("context_management" not in request for request in requests)
 
 
 @pytest.mark.parametrize("retain_call", [False, True])

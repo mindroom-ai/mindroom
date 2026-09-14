@@ -23,6 +23,7 @@ from agno.session.agent import AgentSession
 from openai import AsyncOpenAI, OpenAI
 
 from mindroom.codex_model import CodexResponses
+from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.provider_media_fallback import install_provider_media_fallback
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.models.response import ModelResponse
+    from openai.types.responses import ResponseStreamEvent
 
 
 pytestmark = pytest.mark.asyncio
@@ -88,13 +90,14 @@ def _tool_stream() -> str:
 
 
 class _InterruptedStream(httpx.SyncByteStream, httpx.AsyncByteStream):
-    def __init__(self, data: str) -> None:
+    def __init__(self, data: str, error: Exception | None = None) -> None:
         self.data = data.encode()
+        self.error = error
 
     def __iter__(self) -> Iterator[bytes]:
         yield self.data
         msg = "Connection dropped"
-        raise httpx.ReadError(msg)
+        raise self.error or httpx.ReadError(msg)
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self:
@@ -358,6 +361,30 @@ async def test_agent_records_truncated_followup_as_error_after_completed_tool(tm
 @pytest.mark.parametrize(
     ("stream", "disconnect"),
     [
+        (
+            _event(
+                kind,
+                response=_response(
+                    "resp_snapshot",
+                    "in_progress",
+                    [
+                        {
+                            "type": "function_call",
+                            "id": "fc_snapshot",
+                            "call_id": "call_snapshot",
+                            "name": "get_status",
+                            "arguments": "{}",
+                        },
+                    ],
+                ),
+            ),
+            True,
+        )
+        for kind in ("response.created", "response.in_progress")
+    ]
+    + [
+        (_tool_stream().split("event: response.output_item.done")[0], True),
+        (_created() + _event("response.web_search_call.in_progress", item_id="ws_search", output_index=0), True),
         (_created() + _text(), False),
         (_created() + _text(), True),
         (_tool_stream().split("event: response.completed")[0], False),
@@ -370,6 +397,10 @@ async def test_agent_records_truncated_followup_as_error_after_completed_tool(tm
         ),
     ],
     ids=[
+        "created-with-tool-snapshot",
+        "in-progress-with-tool-snapshot",
+        "tool-start-transport-error",
+        "hosted-tool-start-transport-error",
         "partial-text-eof",
         "partial-text-transport-error",
         "partial-tool-eof",
@@ -478,12 +509,22 @@ async def test_codex_media_fallback_does_not_retry_incomplete_tool_stream(
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
 @pytest.mark.parametrize("status_code", [429, 503, None], ids=["429", "503", "transport-error"])
-async def test_agent_still_retries_transient_provider_errors(status_code: int | None, *, sync: bool) -> None:
+@pytest.mark.parametrize(
+    "lifecycle",
+    ["", _created(), _created() + _event("response.in_progress", response=_response("resp_unfinished", "in_progress"))],
+    ids=["before-events", "after-created", "after-in-progress"],
+)
+async def test_agent_still_retries_transient_provider_errors(
+    status_code: int | None,
+    lifecycle: str,
+    *,
+    sync: bool,
+) -> None:
     """The incomplete-stream guard must preserve ordinary provider retries before any output."""
     failed = (
         httpx.Response(status_code, json={"error": {"message": "Temporarily unavailable", "type": "server_error"}})
         if status_code is not None
-        else httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_InterruptedStream(""))
+        else httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_InterruptedStream(lifecycle))
     )
     completed = (
         _created("resp_answer") + _text() + _event("response.completed", response=_response("resp_answer", "completed"))
@@ -499,3 +540,49 @@ async def test_agent_still_retries_transient_provider_errors(status_code: int | 
 
     assert not any(isinstance(event, RunErrorEvent) for event in events)
     assert [event.content for event in events if isinstance(event, RunCompletedEvent)] == ["Ready"]
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize("prefix", [_created(), _created() + _text()], ids=["lifecycle-only", "partial-text"])
+async def test_partial_stream_diagnostic_preserves_cause_type(prefix: str, *, sync: bool) -> None:
+    """A wrapped transport failure must keep its type without copying provider payloads."""
+    failed = httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        stream=_InterruptedStream(prefix, httpx.ReadTimeout("")),
+    )
+    async with _model(failed) as model:
+        with pytest.raises(ModelProviderError, match="ReadTimeout"):
+            _ = [chunk async for chunk in _invoke(model, sync=sync)]
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("content", "Partial"), ("reasoning_content", "Thinking"), ("tool_calls", [{"id": "call_partial"}])],
+)
+async def test_parsed_lifecycle_output_prevents_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    *,
+    sync: bool,
+) -> None:
+    """Lifecycle labels must not override output exposed by an upstream parser."""
+    original = OpenAIResponses._parse_provider_response_delta
+
+    def parse_with_output(
+        self: OpenAIResponses,
+        stream_event: ResponseStreamEvent,
+        assistant_message: Message,
+        tool_use: dict[str, Any],
+    ) -> tuple[ModelResponse, dict[str, Any]]:
+        parsed, tool_use = original(self, stream_event, assistant_message, tool_use)
+        setattr(parsed, field, value)
+        return parsed, tool_use
+
+    monkeypatch.setattr(OpenAIResponses, "_parse_provider_response_delta", parse_with_output)
+    failed = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_InterruptedStream(_created()))
+    async with _model(failed) as model:
+        with pytest.raises(IncompleteResponsesStreamError):
+            _ = [chunk async for chunk in _invoke(model, sync=sync)]

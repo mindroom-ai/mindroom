@@ -13,7 +13,12 @@ from agno.models.llama_cpp import LlamaCpp
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
-from openai.types.responses import ResponseCompletedEvent, ResponseCreatedEvent, ResponseOutputItemDoneEvent
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseOutputItemDoneEvent,
+)
 
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
@@ -33,6 +38,7 @@ from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
 )
+from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator
@@ -97,7 +103,11 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
     """llama.cpp server model that can replay tool calls from other providers."""
 
 
-def _prepare_response_continuation(messages: list[Message]) -> tuple[list[Message], bool]:
+def _prepare_response_continuation(
+    messages: list[Message],
+    *,
+    explicit_replay: bool = False,
+) -> tuple[list[Message], bool]:
     """Avoid chaining to an unstored response or an older incomplete server context."""
     latest = next(
         (
@@ -107,7 +117,7 @@ def _prepare_response_continuation(messages: list[Message]) -> tuple[list[Messag
         ),
         None,
     )
-    if latest is None or latest.get("mindroom_response_stored") is not False:
+    if not explicit_replay and (latest is None or latest.get("mindroom_response_stored") is not False):
         return messages, False
     return [
         message.model_copy(
@@ -121,6 +131,18 @@ def _prepare_response_continuation(messages: list[Message]) -> tuple[list[Messag
     ], True
 
 
+def _stream_error_types(error: BaseException) -> str:
+    """Keep causal exception types without exposing provider payloads or URLs."""
+    names: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        names.append(type(current).__name__)
+        current = current.__cause__ or current.__context__
+    return " caused by ".join(names)
+
+
 @dataclass
 class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
     """OpenAI Responses model that preserves completed continuation and ordered output."""
@@ -129,6 +151,18 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
     supports_prompt_cache_breakpoints: ClassVar[bool] = True
     cache_system_prompt: bool = True
     _store_before_native_compaction: bool | None = field(default=None, init=False, repr=False)
+    _portable_replay: bool = field(default=False, init=False, repr=False)
+
+    def configure_portable_replay(self, *, enabled: bool = True) -> None:
+        """Replay the locally budgeted history without hidden server-side context."""
+        self._portable_replay = enabled
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        """Count the explicit Responses payload used by portable history planning."""
+        replay_model = copy(self)
+        replay_model._portable_replay = True
+        replay_model.native_compaction = None
+        return approximate_o200k_tokens(stable_serialize(replay_model._format_messages(messages)))
 
     def native_compaction_supported(self) -> bool:
         """Use explicit replay on public Responses and Codex routes."""
@@ -211,7 +245,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
     ) -> dict[str, Any]:
         """Tag deferred functions and add hosted tool search."""
         if messages is not None:
-            messages, _ = _prepare_response_continuation(messages)
+            messages, _ = _prepare_response_continuation(messages, explicit_replay=self._portable_replay)
         request_params = super().get_request_params(
             messages=messages,
             response_format=response_format,
@@ -219,6 +253,16 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
             tool_choice=tool_choice,
             run_response=run_response,
         )
+        if self._portable_replay:
+            request_params.pop("previous_response_id", None)
+            if isinstance(extra_body := request_params.get("extra_body"), dict):
+                request_params["extra_body"] = {
+                    key: value for key, value in extra_body.items() if key != "previous_response_id"
+                }
+            include = list(request_params.get("include") or [])
+            if "reasoning.encrypted_content" not in include:
+                include.append("reasoning.encrypted_content")
+            request_params["include"] = include
         if self.native_compaction is not None:
             request_params["context_management"] = [
                 {"type": "compaction", "compact_threshold": self.native_compaction.threshold},
@@ -232,7 +276,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         tools: list[Function | dict[str, Any]] | None = None,
     ) -> list[Any]:
         """Reconstruct ordered provider output after canonical history conversion."""
-        messages, explicit_replay = _prepare_response_continuation(messages)
+        messages, explicit_replay = _prepare_response_continuation(messages, explicit_replay=self._portable_replay)
         messages = repair_legacy_openai_tool_replay(messages)
         route = self.native_compaction.route if self.native_compaction is not None else None
         messages = native_replay_messages(messages, route)
@@ -273,7 +317,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         if response.status == "completed":
             items = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
             record_native_checkpoint(model_response, items, self.native_compaction)
-            if self.store is False:
+            if self.store is False or self._portable_replay:
                 record_response_output(model_response, items)
         return model_response
 
@@ -309,14 +353,17 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         )
         try:
             for chunk in stream:
-                yielded = True
+                lifecycle_only = bool(chunk.extra and chunk.extra.pop("mindroom_stream_lifecycle_only", False))
+                yielded = yielded or not lifecycle_only
                 # The parser publishes response_id only on response.completed.
                 completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
                 yield chunk
         except ModelProviderError as error:
             if not yielded:
+                if not str(error).strip():
+                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(error)})"
                 raise
-            msg = "OpenAI Responses stream failed after yielding output"
+            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(error)})"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
         finally:
             # Agno returns a generator, annotated only as Iterator.
@@ -353,13 +400,16 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         )
         try:
             async for chunk in stream:
-                yielded = True
+                lifecycle_only = bool(chunk.extra and chunk.extra.pop("mindroom_stream_lifecycle_only", False))
+                yielded = yielded or not lifecycle_only
                 completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
                 yield chunk
         except ModelProviderError as error:
             if not yielded:
+                if not str(error).strip():
+                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(error)})"
                 raise
-            msg = "OpenAI Responses stream failed after yielding output"
+            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(error)})"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
         finally:
             # Finalize Agno's async generator when the consumer stops at a yield.
@@ -395,13 +445,24 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
             if not items:
                 items = [response_items[index] for index in sorted(response_items)]
             record_native_checkpoint(model_response, items, self.native_compaction)
-            if self.store is False:
+            if self.store is False or self._portable_replay:
                 record_response_output(model_response, items)
             response_items = {}
         if isinstance(stream_event, ResponseOutputItemDoneEvent):
             record_tool_search_items(model_response, [stream_event.item])
-            if self.store is False:
+            if self.store is False or self._portable_replay:
                 response_items[stream_event.output_index] = stream_event.item.model_dump(mode="json", exclude_none=True)
         if response_items:
             tool_use["mindroom_response_items"] = response_items
+        if (
+            isinstance(stream_event, (ResponseCreatedEvent, ResponseInProgressEvent))
+            and not stream_event.response.output
+            and not tool_use
+            and not any(
+                value for name, value in vars(model_response).items() if name not in {"created_at", "event", "role"}
+            )
+        ):
+            # A lifecycle snapshot can already contain output the upstream
+            # parser ignores. Only empty snapshots and parsed chunks may retry.
+            model_response.extra = {"mindroom_stream_lifecycle_only": True}
         return model_response, tool_use

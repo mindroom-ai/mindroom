@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
     from agno.team import Team
 
+    from mindroom.native_compaction import NativeCompactionModel
+
 
 logger = get_logger(__name__)
 
@@ -35,6 +37,7 @@ def estimate_prompt_visible_history_tokens(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     native_route: str | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = _estimate_session_summary_tokens(current_summary_text(session))
@@ -44,7 +47,12 @@ def estimate_prompt_visible_history_tokens(
         history_settings=history_settings,
     )
     if native_route is None:
-        return summary_tokens + _estimate_history_messages_tokens(history_messages)
+        estimated = _estimate_history_messages_tokens(history_messages)
+        if replay_model is not None:
+            provider_estimate = replay_model.estimate_portable_replay_tokens(history_messages)
+            if provider_estimate is not None:
+                estimated = max(estimated, provider_estimate)
+        return summary_tokens + estimated
     projected = native_replay_messages(history_messages, native_route)
     return summary_tokens + sum(
         checkpoint_estimated_tokens(items)
@@ -208,6 +216,7 @@ def plan_replay_that_fits(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
+    replay_model: NativeCompactionModel | None = None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
     if current_history_tokens <= available_history_budget:
@@ -228,6 +237,7 @@ def plan_replay_that_fits(
         available_history_budget=available_history_budget,
         limit_mode=limit_mode,
         max_limit=max_limit,
+        replay_model=replay_model,
     )
     if fitting_limit > 0:
         num_history_runs, num_history_messages = _history_limit_fields(limit_mode, fitting_limit)
@@ -281,6 +291,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
+    replay_model: NativeCompactionModel | None = None,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -299,6 +310,7 @@ def _find_fitting_history_limit_for_budget(
                 mode=limit_mode,
                 limit=mid,
             ),
+            replay_model=replay_model,
         )
         if candidate_tokens <= available_history_budget:
             best = mid

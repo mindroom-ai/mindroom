@@ -339,6 +339,7 @@ async def prepare_scope_history(
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
         native_route=native_history_route(native_model),
+        replay_model=native_model,
     )
     visible_runs = scope_visible_runs(session, scope_context.scope)
     compaction_decision = classify_compaction_decision(
@@ -380,6 +381,7 @@ async def prepare_scope_history(
             session=session,
             scope=scope_context.scope,
             history_settings=resolved_inputs.history_settings,
+            replay_model=native_model,
         )
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
@@ -393,6 +395,7 @@ async def prepare_scope_history(
             history_budget=execution_plan.hard_replay_budget_tokens,
             current_history_tokens=current_history_tokens,
             runs_before=len(visible_runs),
+            replay_model=native_model,
             config=config,
             runtime_paths=runtime_paths,
             compaction_lifecycle=compaction_lifecycle,
@@ -437,6 +440,7 @@ async def _run_scope_compaction_with_lifecycle(
     config: Config,
     runtime_paths: RuntimePaths,
     compaction_lifecycle: CompactionLifecycle | None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> _ScopeCompactionLifecycleResult:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -491,6 +495,7 @@ async def _run_scope_compaction_with_lifecycle(
             runtime_paths=runtime_paths,
             lifecycle_notice_event_id=notice_event_id,
             progress_callback=progress_callback,
+            replay_model=replay_model,
         )
     except asyncio.CancelledError as error:
         await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
@@ -541,6 +546,7 @@ async def _run_scope_compaction(
     runtime_paths: RuntimePaths,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
     assert execution_plan.summary_input_budget_tokens is not None
@@ -581,6 +587,7 @@ async def _run_scope_compaction(
             )
     return await compact_scope_history(
         storage=storage,
+        replay_model=replay_model,
         session=session,
         scope=scope,
         state=state,
@@ -668,6 +675,7 @@ def finalize_history_preparation(
         scope=prepared_scope_history.scope,
         history_settings=resolved_inputs.history_settings,
         native_route=native_history_route(prepared_scope_history.native_model),
+        replay_model=prepared_scope_history.native_model,
     )
     if history_budget is not None and current_history_tokens > history_budget:
         # Never trim a native checkpoint by run/message count. Fall back to the
@@ -678,6 +686,7 @@ def finalize_history_preparation(
             session=prepared_scope_history.session,
             scope=prepared_scope_history.scope,
             history_settings=resolved_inputs.history_settings,
+            replay_model=prepared_scope_history.native_model,
         )
     if history_budget is not None:
         replay_plan = plan_replay_that_fits(
@@ -686,6 +695,7 @@ def finalize_history_preparation(
             history_settings=resolved_inputs.history_settings,
             available_history_budget=history_budget,
             current_history_tokens=current_history_tokens,
+            replay_model=prepared_scope_history.native_model,
         )
         log_replay_plan(
             replay_plan=replay_plan,
