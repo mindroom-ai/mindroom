@@ -344,6 +344,8 @@ async def test_handle_interactive_selection_threaded_streaming_keeps_reply_targe
     assert captured_metadata is not None
     assert captured_metadata[MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]
     assert captured_metadata[MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY] == [selection.question_event_id]
+    request = bot._response_runner.generate_response.await_args.args[0]
+    assert request.history_boundary_event_id == "$selection:localhost"
     _assert_interactive_turn_aliases(bot, selection, "$selection:localhost")
 
 

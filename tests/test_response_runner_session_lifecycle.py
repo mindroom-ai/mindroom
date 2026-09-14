@@ -2201,7 +2201,11 @@ async def test_generate_response_appends_matrix_tool_prompt_context(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_generate_response_passes_resolved_correlation_id_to_ai_response(tmp_path: Path) -> None:
+@pytest.mark.parametrize("history_boundary_event_id", [None, "$selection"])
+async def test_generate_response_passes_resolved_correlation_id_to_ai_response(
+    tmp_path: Path,
+    history_boundary_event_id: str | None,
+) -> None:
     """Edit regeneration can correlate on a different event than the reply anchor."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
@@ -2227,12 +2231,15 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(t
         )
 
         await coordinator.generate_response(
-            _response_request(
-                prompt="Regenerate this edit",
-                user_id="@alice:localhost",
-                thread_id="$thread-root",
-                reply_to_event_id="$original",
-                correlation_id="$edit",
+            replace(
+                _response_request(
+                    prompt="Regenerate this edit",
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                    reply_to_event_id="$original",
+                    correlation_id="$edit",
+                ),
+                history_boundary_event_id=history_boundary_event_id,
             ),
         )
 
@@ -2240,3 +2247,4 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(t
     ctx = seen_ctx[-1]
     assert ctx.reply_to_event_id == "$original"
     assert ctx.correlation_id == "$edit"
+    assert ctx.history_boundary_event_id == history_boundary_event_id

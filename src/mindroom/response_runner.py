@@ -483,6 +483,7 @@ class ResponseRequest:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
+    history_boundary_event_id: str | None = None
     scheduled_model: str | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
@@ -2939,6 +2940,7 @@ class ResponseRunner:
             thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
             matrix_run_metadata=_materialize_matrix_run_metadata(request.matrix_run_metadata),
+            history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
             active_model_name=runtime.active_model_name,
             active_event_ids=frozenset(active_event_ids),
@@ -3824,6 +3826,7 @@ class ResponseRunner:
             thread_id=resolved_target.resolved_thread_id,
             requester_id=requester_user_id or execution_identity.requester_id,
             matrix_run_metadata=matrix_run_metadata,
+            history_boundary_event_id=request.history_boundary_event_id,
             member_display_names=request.member_display_names,
             active_event_ids=frozenset(active_event_ids),
             transient_enrichment_items=_with_matrix_message_target(

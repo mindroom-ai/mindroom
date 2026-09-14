@@ -380,7 +380,11 @@ async def test_generate_team_response_allows_explicit_private_ad_hoc_member(tmp_
 
 
 @pytest.mark.asyncio
-async def test_generate_team_response_passes_resolved_correlation_id_to_team_response(tmp_path: Path) -> None:
+@pytest.mark.parametrize("history_boundary_event_id", [None, "$selection"])
+async def test_generate_team_response_passes_resolved_correlation_id_to_team_response(
+    tmp_path: Path,
+    history_boundary_event_id: str | None,
+) -> None:
     """Team execution should share the lifecycle/tool-runtime correlation id."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
@@ -407,12 +411,15 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
         _install_inert_post_response_effects(coordinator)
 
         await coordinator.generate_team_response_helper(
-            _response_request(
-                prompt="Regenerate team edit",
-                user_id="@alice:localhost",
-                thread_id="$thread-root",
-                reply_to_event_id="$original",
-                correlation_id="$edit",
+            replace(
+                _response_request(
+                    prompt="Regenerate team edit",
+                    user_id="@alice:localhost",
+                    thread_id="$thread-root",
+                    reply_to_event_id="$original",
+                    correlation_id="$edit",
+                ),
+                history_boundary_event_id=history_boundary_event_id,
             ),
             team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
             team_mode="coordinate",
@@ -421,6 +428,7 @@ async def test_generate_team_response_passes_resolved_correlation_id_to_team_res
     ctx = seen_kwargs["ctx"]
     assert ctx.reply_to_event_id == "$original"
     assert ctx.correlation_id == "$edit"
+    assert ctx.history_boundary_event_id == history_boundary_event_id
 
 
 @pytest.mark.asyncio

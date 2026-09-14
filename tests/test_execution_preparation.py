@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -216,6 +217,61 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
         body="older context",
         event_id="$older",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
+@pytest.mark.parametrize("numeric_selection", [True, False], ids=["numeric", "reaction"])
+async def test_interactive_selection_keeps_context_after_question(
+    persisted_replay: bool,
+    numeric_selection: bool,
+) -> None:
+    """Selection history ends at the answer, preserving intervening clarification."""
+    provisional_prompts: list[str] = []
+
+    async def prepare_scope_history(prepared_prompt: str) -> PreparedScopeHistory:
+        provisional_prompts.append(prepared_prompt)
+        scope = _prepared_scope_with_persisted_replay()
+        return scope if persisted_replay else replace(scope, session=None)
+
+    history = [
+        make_visible_message(sender="@alice:localhost", body="Choose a deployment", event_id="$root"),
+        make_visible_message(sender="@mindroom_code:localhost", body="Deploy or cancel?", event_id="$question"),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Use staging; production is frozen.",
+            event_id="$clarification",
+        ),
+    ]
+    if numeric_selection:
+        history.extend(
+            [
+                make_visible_message(sender="@alice:localhost", body="1", event_id="$selection"),
+                make_visible_message(sender="@bob:localhost", body="Later message", event_id="$later"),
+            ],
+        )
+    prepared = await _prepare_execution_context_common(
+        replace(make_turn_context(reply_to_event_id="$question"), history_boundary_event_id="$selection"),
+        scope_context=None,
+        prompt="The user selected: Deploy",
+        thread_history=history,
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        current_event_id="$question",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert prepared.prepared_history.replays_persisted_history is persisted_replay
+    assert prepared.unseen_event_ids == ["$root", "$question", "$clarification"]
+    for prompt in [*provisional_prompts, prepared.final_prompt]:
+        assert "Use staging; production is frozen." in prompt
+        assert "The user selected: Deploy" in prompt
+        assert "Later message" not in prompt
+        assert "$selection" not in prompt
 
 
 def test_scheduled_limit_zero_disables_replay_plan() -> None:

@@ -227,6 +227,7 @@ Active prompts are derived by joining those immutable revisions to the Matrix-vi
 The active Matrix target and the pending source's immutable selection use separate journal rows, while the exact selecting source—not the reusable target event ID—is the response turn's execution and deduplication identity.
 When the current event is present in Matrix thread history, execution preparation bounds that history at its position before selecting unseen messages or applying a scheduled history budget.
 Later thread entries cannot enter that backlog turn's Matrix context or displace its prior history from the budget.
+Interactive selections use the selecting source as their history boundary while retaining the question as the Matrix reply target, so intervening clarification remains available.
 
 ### Deferred callback outcome
 
