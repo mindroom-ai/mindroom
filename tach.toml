@@ -1639,6 +1639,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.native_compaction",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -1673,8 +1674,23 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.native"
-depends_on = ["mindroom.history.types"]
+depends_on = ["mindroom.native_compaction"]
 visibility = ["mindroom.history.runtime"]
+
+[[modules]]
+path = "mindroom.native_compaction"
+depends_on = []
+visibility = [
+    "mindroom.claude_native_compaction",
+    "mindroom.history.compaction",
+    "mindroom.history.native",
+    "mindroom.openai_models",
+]
+
+[[modules]]
+path = "mindroom.claude_native_compaction"
+depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
+visibility = ["mindroom.claude_compat"]
 
 [[modules]]
 path = "mindroom.history.storage"

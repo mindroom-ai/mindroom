@@ -13,6 +13,7 @@ __all__ = (
     "AWS_BEDROCK_CLAUDE_OPUS",
     "AZURE_OPENAI_DEFAULT_DEPLOYMENT",
     "CARTESIA_TTS",
+    "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "CODEX_GPT",
     "CODEX_GPT_ALIAS",
@@ -81,6 +82,17 @@ _ANTHROPIC_FABLE = "claude-fable-5-1"
 _ANTHROPIC_OPUS = "claude-opus-5"
 _ANTHROPIC_SONNET = "claude-sonnet-5"
 _ANTHROPIC_HAIKU = "claude-haiku-4-5"
+CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
+    "claude-sonnet-4-6",
+    _ANTHROPIC_SONNET,
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    _ANTHROPIC_OPUS,
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-mythos-preview",
+)
 # Claude models that predate tool_search_tool_regex_20251119 (Opus 4.1 and
 # earlier — a closed set, so new releases take the native tool-search path
 # without a list update). Prefixes cover the aliases plus the dated

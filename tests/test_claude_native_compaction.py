@@ -13,6 +13,10 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.metrics import ModelMetrics, RunMetrics
 from agno.models.message import Message
+from agno.run.agent import RunOutput
+from agno.run.base import RunStatus
+from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
+from agno.run.team import TeamRunOutput
 from anthropic import AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
@@ -22,6 +26,13 @@ from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.history.types import PreparedHistoryState
+from mindroom.teams import (
+    _build_streamed_team_run_metadata_content,
+    _build_team_run_metadata_content,
+    _PreparedMaterializedTeamExecution,
+    _TeamStreamUsage,
+)
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 from tests.history_helpers import _make_config
 
@@ -293,6 +304,7 @@ def test_native_usage_metadata_separates_billing_from_context(tmp_path: Path) ->
         model="claude-sonnet-5",
         model_provider="Anthropic",
         metrics=metrics,
+        context_metrics=metrics,
         context_raw_input_tokens=62000,
         context_cache_read_tokens=530,
         context_cache_write_tokens=120,
@@ -339,3 +351,98 @@ def test_plain_claude_request_refreshes_active_context_metrics() -> None:
     metrics = ModelMetrics(provider_metrics=compacted.response_usage.provider_metrics)
     metrics.accumulate(ModelMetrics(provider_metrics=plain.response_usage.provider_metrics))
     assert metrics.provider_metrics["context_usage"]["input_tokens"] == 3000
+
+
+@pytest.mark.parametrize("region", ["global", "us", "eu", "us-central1"])
+def test_vertex_checkpoint_route_survives_lazy_client_creation(region: str) -> None:
+    """An unchanged endpoint must keep its checkpoint across SDK initialization."""
+    model = MindroomVertexAIClaude(
+        id="claude-sonnet-5",
+        project_id="test-project",
+        region=region,
+        client_params={"credentials": Credentials(token="test-token")},
+    )
+    model.configure_native_compaction(threshold=60000)
+    route = model.native_compaction.route
+    parsed = model._parse_provider_response(BetaMessage.model_validate(_response([_CHECKPOINT, _TEXT])))
+    messages = [
+        Message(role="user", content="Original facts."),
+        Message(role="assistant", content=parsed.content, provider_data=parsed.provider_data),
+    ]
+    client = model.get_client()
+    model.configure_native_compaction(threshold=60000)
+    assert model.native_compaction.route == route
+    assert len(model.native_replay_messages(messages)) == 1
+    client.close()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_team_context_uses_leader_metrics_for_shared_model(tmp_path: Path, *, stream: bool) -> None:
+    """Same-model member billing must not replace the leader's active context."""
+    config, _ = _make_config(
+        tmp_path,
+        models={
+            "default": ModelConfig(provider="anthropic", id="claude-sonnet-5", context_window=200000),
+        },
+    )
+    leader = RunMetrics(
+        input_tokens=90000,
+        details={
+            "model": [
+                ModelMetrics(
+                    id="claude-sonnet-5",
+                    provider="Anthropic",
+                    input_tokens=90000,
+                    provider_metrics={"context_usage": {"input_tokens": 90000}},
+                ),
+            ],
+        },
+    )
+    member = RunOutput(
+        metrics=RunMetrics(
+            input_tokens=1000,
+            details={
+                "model": [
+                    ModelMetrics(
+                        id="claude-sonnet-5",
+                        provider="Anthropic",
+                        input_tokens=1000,
+                        provider_metrics={"context_usage": {"input_tokens": 1000}},
+                    ),
+                ],
+            },
+        ),
+    )
+    prepared = _PreparedMaterializedTeamExecution(
+        messages=(),
+        run_metadata=None,
+        unseen_event_ids=[],
+        prepared_history=PreparedHistoryState(),
+        runtime_model_name="default",
+    )
+    if stream:
+        metadata = _build_streamed_team_run_metadata_content(
+            config=config,
+            prepared_execution=prepared,
+            completed_run_event=TeamRunCompletedEvent(metrics=leader, member_responses=[member]),
+            usage=_TeamStreamUsage(latest_model_id="claude-sonnet-5", latest_model_provider="Anthropic"),
+            run_id="run",
+            session_id="session",
+            status=RunStatus.completed,
+            tool_count=0,
+        )
+    else:
+        metadata = _build_team_run_metadata_content(
+            config=config,
+            prepared_execution=prepared,
+            response=TeamRunOutput(
+                model="claude-sonnet-5",
+                model_provider="Anthropic",
+                metrics=leader,
+                member_responses=[member],
+            ),
+            session_id="session",
+            tool_count=0,
+        )
+    assert metadata[AI_RUN_METADATA_KEY]["usage"]["input_tokens"] == 91000
+    assert metadata[AI_RUN_METADATA_KEY]["context"]["input_tokens"] == 90000

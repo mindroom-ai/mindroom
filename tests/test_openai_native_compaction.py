@@ -222,3 +222,43 @@ def test_incompatible_checkpoint_uses_canonical_messages(change: str) -> None:
     replay = model._format_messages(messages)
     assert replay[0] == {"role": "user", "content": "Original facts."}
     assert all(item.get("type") != "compaction" for item in replay)
+
+
+@pytest.mark.parametrize("fresh_model", [False, True])
+@pytest.mark.parametrize("compacted", [False, True])
+def test_portable_replay_never_chains_to_unstored_native_response(*, fresh_model: bool, compacted: bool) -> None:
+    """Disabling native compaction must replay canonical input without an unavailable response ID."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra")
+    model.configure_native_compaction(threshold=1024)
+    reasoning = {"type": "reasoning", "id": "rs_native", "summary": [], "encrypted_content": "opaque-reasoning"}
+    output = [reasoning, _ANSWER]
+    if compacted:
+        output.insert(0, _CHECKPOINT)
+    native = model._parse_provider_response(Response.model_validate(_response(output)))
+    messages = [
+        Message(role="assistant", content="Old stored answer", provider_data={"response_id": "resp_old_stored"}),
+        Message(role="user", content="Original facts."),
+        Message(role="assistant", content=native.content, provider_data=native.provider_data),
+        Message(role="user", content="Continue."),
+    ]
+    if fresh_model:
+        model = MindRoomOpenAIResponses(id="gpt-6-astra")
+    else:
+        model.configure_native_compaction(threshold=None)
+    assert model.store is None
+    assert "previous_response_id" not in model.get_request_params(messages=messages)
+    replay = [
+        item if isinstance(item, dict) else item.model_dump(exclude_none=True)
+        for item in model._format_messages(messages)
+    ]
+    assert any(item.get("content") == "Original facts." for item in replay)
+    assert all(item.get("type") != "compaction" for item in replay)
+    assert messages[2].provider_data["response_id"] == "resp_done"
+    assert reasoning in replay
+    # A subsequent stored response establishes a valid server continuation.
+    stored = model._parse_provider_response(Response.model_validate({**_response([_ANSWER]), "id": "resp_stored"}))
+    messages += [
+        Message(role="assistant", content=stored.content, provider_data=stored.provider_data),
+        Message(role="user", content="Next."),
+    ]
+    assert model.get_request_params(messages=messages)["previous_response_id"] == "resp_stored"

@@ -246,9 +246,17 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         """Keep Vertex checkpoint replay inside its project and endpoint."""
         client = self.async_client or self.client
         if client is not None:
-            return f"{client.base_url}|{client.project_id}|{client.region}"
-        params = self._get_client_params()
-        return f"{params['base_url']}|{params['project_id']}|{params['region']}"
+            endpoint, project, region = str(client.base_url), client.project_id, client.region
+        else:
+            params = self._get_client_params()
+            project, region = params["project_id"], params["region"]
+            default_endpoint = {
+                "global": "https://aiplatform.googleapis.com/v1",
+                "us": "https://aiplatform.us.rep.googleapis.com/v1",
+                "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
+            }.get(region, f"https://{region}-aiplatform.googleapis.com/v1")
+            endpoint = str(params["base_url"] or default_endpoint)
+        return f"{endpoint.rstrip('/')}|{project}|{region}"
 
     def _request_input_kwargs(
         self,

@@ -266,6 +266,7 @@ class AgentApprovalExecution:
                 model=response.model,
                 model_provider=response.model_provider,
                 metrics=response.metrics,
+                context_metrics=response.metrics,
                 tool_count=len(response.tools or ()),
             ),
         )

@@ -1794,6 +1794,7 @@ def _build_team_run_metadata_content(
             response.metrics,
             response.member_responses if isinstance(response, TeamRunOutput) else (),
         ),
+        context_metrics=response.metrics,
         context_input_tokens=prepared_execution.prepared_history.prepared_context_tokens,
         tool_count=tool_count,
         prepared_history=prepared_execution.prepared_history,
@@ -1871,6 +1872,7 @@ def _build_streamed_team_run_metadata_content(
         model=usage.latest_model_id,
         model_provider=usage.latest_model_provider,
         metrics=aggregated if aggregated is not None else fallback_payload,
+        context_metrics=completed_run_event.metrics if completed_run_event is not None else None,
         metrics_fallback=fallback_payload if aggregated is not None else None,
         context_input_tokens=prepared_execution.prepared_history.prepared_context_tokens,
         tool_count=tool_count,
@@ -2617,6 +2619,7 @@ async def continue_paused_team_run(
                 model=continued.model,
                 model_provider=continued.model_provider,
                 metrics=_aggregate_team_usage_metrics(continued.metrics, continued.member_responses),
+                context_metrics=continued.metrics,
                 tool_count=len(_collect_team_tool_executions(continued)),
             ),
         )

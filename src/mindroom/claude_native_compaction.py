@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from anthropic.lib.streaming import MessageStopEvent, ParsedBetaMessageStopEvent, ParsedMessageStopEvent
 from anthropic.types.beta import BetaUsage
 
+from mindroom.model_defaults import CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES
 from mindroom.native_compaction import (
     NativeCompactionModel,
     checkpoint_items,
@@ -28,17 +29,6 @@ if TYPE_CHECKING:
     from anthropic.types.beta import BetaMessage
 
 _COMPACTION_BETA = "compact-2026-01-12"
-_SUPPORTED_MODELS = (
-    "claude-sonnet-4-6",
-    "claude-sonnet-5",
-    "claude-opus-4-6",
-    "claude-opus-4-7",
-    "claude-opus-4-8",
-    "claude-opus-5",
-    "claude-fable-5",
-    "claude-mythos-5",
-    "claude-mythos-preview",
-)
 
 
 class ClaudeNativeCompaction(NativeCompactionModel):
@@ -54,7 +44,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
         """Respect explicit context-management settings and supported Claude models."""
         return (
             self.provider in {"Anthropic", "VertexAI"}
-            and self.id.startswith(_SUPPORTED_MODELS)
+            and self.id.startswith(CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
             and self.context_management is None
             and "context_management" not in (self.request_params or {})
             and (self.provider == "VertexAI" or self.native_compaction_endpoint() == "https://api.anthropic.com")

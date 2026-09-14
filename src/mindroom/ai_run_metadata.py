@@ -175,7 +175,7 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
 
 
 def _native_context_counts(
-    metrics: RunMetrics | dict[str, Any] | None,
+    metrics: RunMetrics | None,
     model_id: str | None,
     provider: str | None,
 ) -> tuple[int | None, int | None, int | None] | None:
@@ -204,6 +204,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     model_provider: str | None,
     metrics: RunMetrics | dict[str, Any] | None = None,
     metrics_fallback: dict[str, Any] | None = None,
+    context_metrics: RunMetrics | None = None,
     context_raw_input_tokens: int | None = None,
     context_input_tokens: int | None = None,
     context_cache_read_tokens: int | None = None,
@@ -217,6 +218,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     It must not be re-resolved here: the per-thread override store can change
     mid-run (for example via `switch_thread_model`), and this metadata must
     describe the model that actually produced the response.
+    `context_metrics` belongs to that model run before team-member billing is aggregated.
     """
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
@@ -236,7 +238,7 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
         usage_input_tokens = None
     # Native compaction adds a billed sampling iteration. Its cost is included
     # above, while the final iteration alone describes the active context.
-    if native_counts := _native_context_counts(metrics, model_id, provider):
+    if native_counts := _native_context_counts(context_metrics, model_id, provider):
         context_raw_input_tokens, context_cache_read_tokens, context_cache_write_tokens = native_counts
     explicit_context_scope = any(
         value is not None

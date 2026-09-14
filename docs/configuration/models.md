@@ -432,7 +432,7 @@ MindRoom uses it to budget persisted replay and required destructive compaction 
 MindRoom always applies a final replay-fit step when the active runtime model has a known `context_window`.
 That replay-fit step reduces or disables persisted replay for the current run when needed.
 On `vertexai_claude` models, a known `context_window` also enables a request-time guard inside the provider call.
-Before each request, including follow-up requests after tool results, MindRoom estimates the full provider payload and checks it against Vertex's exact token counter when it approaches the window.
+Before each asynchronous runtime request, including follow-up requests after tool results, MindRoom estimates the full provider payload and checks it against Vertex's exact token counter when it approaches the window.
 When a request would exceed the window, MindRoom drops the oldest replayed history turns for that request only and logs a warning.
 When the current turn alone cannot fit, the request fails with a clear provider error instead of being sent oversized.
 Automatic compaction is enabled by default through `defaults.compaction`.
@@ -488,6 +488,7 @@ This is useful for models with smaller context windows or long-running conversat
 
 MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude compaction](https://platform.claude.com/docs/en/build-with-claude/compaction).
 OpenAI native replay uses the official Responses endpoint or the Codex login backend with `store: false`.
+When native mode is disabled, the authored storage setting is restored; canonical replay retains stateless reasoning and never chains to a response the provider did not store.
 Automatic enablement covers GPT-5.3 Codex, GPT-5.4, and GPT-6 model families; other models retain the portable path.
 An explicitly configured `store: true`, background mode, alternate OpenAI endpoint, or custom context-management request stays on the portable path.
 Claude native compaction supports direct Anthropic and Vertex Claude on the supported Sonnet, Opus, Fable, and Mythos models; it is a provider beta and requires a trigger of at least 50,000 tokens.
