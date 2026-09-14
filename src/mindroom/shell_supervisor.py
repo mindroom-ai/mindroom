@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import json
-import math
 import os
 import re
 import shutil
@@ -182,8 +181,7 @@ def _run_timings(payload: dict[str, object]) -> tuple[float, float | None]:
     if max_runtime_payload is not None and (
         isinstance(max_runtime_payload, bool)
         or not isinstance(max_runtime_payload, int | float)
-        or not math.isfinite(max_runtime_payload)
-        or max_runtime_payload <= 0
+        or not 0 < max_runtime_payload <= sys.float_info.max
     ):
         msg = "run request 'max_runtime_seconds' must be a positive finite number"
         raise TypeError(msg)

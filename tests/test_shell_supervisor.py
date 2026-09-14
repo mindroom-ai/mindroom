@@ -254,6 +254,22 @@ async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime_seconds",
+    [0, -1, float("inf"), float("nan"), 10**1000, -(10**1000)],
+    ids=["zero", "negative", "infinite", "nan", "oversized-positive", "oversized-negative"],
+)
+async def test_invalid_process_deadline_returns_structured_error(runtime_seconds: float) -> None:
+    """Invalid deadlines cannot spawn a process or break the supervisor response protocol."""
+    registry: dict[str, ProcessRecord] = {}
+    async with _running_server(registry) as socket_path:
+        result = await _run(socket_path, ["sleep", "300"], timeout=0, max_runtime_seconds=runtime_seconds)
+
+    assert result.startswith("Error: Invalid shell supervisor request:")
+    assert registry == {}
+
+
+@pytest.mark.asyncio
 async def test_process_deadlines_are_independent_and_leave_ordinary_background_calls_running(tmp_path: Path) -> None:
     """Each maximum runtime kills only its original process group and drains its timer."""
     registry: dict[str, ProcessRecord] = {}
@@ -275,7 +291,7 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
             [sys.executable, "-c", resistant_script, str(ready_path)],
             timeout=0,
             handle=resistant_handle,
-            max_runtime_seconds=0.8,
+            max_runtime_seconds=3.0,
         )
         ordinary, completed, cancelled = await asyncio.gather(
             _run(socket_path, ["sleep", "300"], timeout=0),
@@ -284,14 +300,14 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
                 [sys.executable, "-c", "pass"],
                 timeout=0,
                 handle=completed_handle,
-                max_runtime_seconds=0.3,
+                max_runtime_seconds=10.0,
             ),
             _run(
                 socket_path,
                 ["sleep", "300"],
                 timeout=0,
                 handle=cancelled_handle,
-                max_runtime_seconds=0.4,
+                max_runtime_seconds=10.0,
             ),
         )
         ordinary_handle = _extract_handle(ordinary)
