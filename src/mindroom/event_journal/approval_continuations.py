@@ -1,4 +1,4 @@
-"""Paused Agno runs owned by their original event-journal sources."""
+"""Paused Agno runs owned by their exact pending journal events."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from mindroom.history.types import HistoryScope
 from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import journal, membership_state, outbox
+from . import journal, membership_state, outbox, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     from mindroom.turn_record import TurnRecord
 
@@ -549,20 +549,23 @@ def edited_sources_for_user_stop(
         """,
         (principal_id, room_id, response_event_id, stop_receipt_order),
     )
-    for final in finals:
-        result = json.loads(str(final["result_json"]))
-        prepared_result = result.get("prepared_edit_record")
-        if prepared_result is None:
-            continue
-        prepared = TurnRecordCodec._from_ledger_record(source_event_id, prepared_result)
+    for final, prepared in _prepared_delivery_snapshots(finals, source_event_id):
         if (
-            prepared is not None
-            and source_event_id in prepared.indexed_event_ids
+            source_event_id in prepared.indexed_event_ids
             and prepared.latest_edit_receipt_order is not None
             and prepared.latest_edit_receipt_order <= stop_receipt_order
         ):
             source_ids.append(str(final["delivery_id"]))
     return tuple(dict.fromkeys(source_ids))
+
+
+def _prepared_delivery_snapshots(rows: tuple[Row, ...], source_event_id: str) -> Iterator[tuple[Row, TurnRecord]]:
+    """Yield persisted edit snapshots decoded at the caller's exact source index."""
+    for row in rows:
+        result = json.loads(str(row["result_json"]))
+        prepared = TurnRecordCodec._from_ledger_record(source_event_id, result.get("prepared_edit_record"))
+        if prepared is not None:
+            yield row, prepared
 
 
 def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple[str, ApprovalContinuation], ...]:
@@ -892,20 +895,14 @@ def _newer_answer_is_acknowledged(
         """,
         (continuation.source_event_ids[0], principal_id, continuation.room_id, continuation.response_event_id),
     )
-    for row in rows:
-        result = json.loads(str(row["result_json"]))
-        prepared_result = result.get("prepared_edit_record")
-        if prepared_result is None:
-            continue
-        source_ids = (
-            continuation.source_event_ids
-            if continuation.prepared_edit_record is None
-            else continuation.prepared_edit_record.source_event_ids
-        )
-        prepared = TurnRecordCodec._from_ledger_record(source_ids[0], prepared_result)
+    source_ids = (
+        continuation.source_event_ids
+        if continuation.prepared_edit_record is None
+        else continuation.prepared_edit_record.source_event_ids
+    )
+    for row, prepared in _prepared_delivery_snapshots(rows, source_ids[0]):
         if (
-            prepared is not None
-            and _owns_approval_response(prepared, continuation)
+            _owns_approval_response(prepared, continuation)
             and (prepared.latest_edit_receipt_order or 0) > selected_order
             and str(row["delivery_id"])
             in {revision[1] for revision in (prepared.source_event_revisions or {}).values()}
@@ -951,13 +948,7 @@ def _settle_superseded_failure_delivery(  # noqa: PLR0911
         or final.edits_event_id != continuation.response_event_id
     ):
         return False
-    row = transaction.fetchone(
-        "SELECT record_json FROM turn_records WHERE agent_name = ? AND index_event_id = ?",
-        (continuation.entity_name, source_ids[0]),
-    )
-    current = (
-        None if row is None else TurnRecordCodec._from_ledger_record(source_ids[0], json.loads(str(row["record_json"])))
-    )
+    current = turn_records.load_record(transaction, continuation.entity_name, source_ids[0])
     if current is None or not _owns_approval_response(current, continuation):
         return False
     stopped_before_newer_edit = (
