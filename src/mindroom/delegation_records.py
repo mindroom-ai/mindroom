@@ -75,6 +75,8 @@ class DelegationMetadata:
     model_name: str | None
     task: str
     parent_delegation_id: str | None = None
+    subagent_id: str | None = None
+    previous_delegation_id: str | None = None
 
 
 @dataclass(frozen=True)

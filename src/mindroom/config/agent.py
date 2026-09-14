@@ -321,7 +321,7 @@ class AgentConfig(BaseModel):
     )
     delegate_to: list[str] = Field(
         default_factory=list,
-        description="Allowed agents for run_subagent: each runs with fresh context, including this agent when explicitly listed",
+        description="Allowed agents for run_subagent and continue_subagent, including this agent when explicitly listed",
     )
 
     @property

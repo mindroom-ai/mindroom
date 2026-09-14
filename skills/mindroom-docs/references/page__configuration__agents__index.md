@@ -678,11 +678,14 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 ## Agent Delegation
 
 Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
-The model-facing tool is `run_subagent(task: str, agent_name: str | None = None)`.
+The model-facing tools are `run_subagent(task: str, agent_name: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history while retaining its configured workspace, memory, requester scope, model, and tool policy.
-The caller waits for the child to execute the task, then receives its answer and an audit reference as the tool result.
+The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
+The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
+Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
+The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
+Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
 The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
 Listing the caller itself allows a fresh copy with the same configured capabilities.
 Omitting `agent_name` or passing `None` selects the caller itself; the same `delegate_to` allowlist still applies.

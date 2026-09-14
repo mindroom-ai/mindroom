@@ -22,6 +22,8 @@ class DelegationChild:
     model_name: str
     depth: int
     execution_identity: dict[str, object]
+    subagent_id: str | None = None
+    previous_delegation_id: str | None = None
     parent_requirement_id: str = ""
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     record_locator: dict[str, object] = field(default_factory=dict)
@@ -36,6 +38,7 @@ class DelegationHookState:
     execution_identity: dict[str, object]
     arguments: dict[str, Any]
     started_at: float
+    tool_name: str = "run_subagent"
     blocked_result: str | None = None
     after_called: bool = False
 

@@ -193,6 +193,15 @@ class TestDelegateTools:
             {"type": "null"},
         ]
 
+    def test_continue_subagent_schema(self, tools: DelegateTools) -> None:
+        """Continuation has two required string arguments, without a conditional target."""
+        function = tools.async_functions["continue_subagent"]
+        function.process_entrypoint(strict=False)
+        assert function.parameters["required"] == ["subagent_id", "message"]
+        assert set(function.parameters["properties"]) == {"subagent_id", "message"}
+        assert function.parameters["properties"]["subagent_id"]["type"] == "string"
+        assert function.parameters["properties"]["message"]["type"] == "string"
+
     def test_instructions_contain_agent_descriptions(self, tools: DelegateTools) -> None:
         """Test that toolkit instructions describe available delegation targets."""
         instructions = tools.instructions

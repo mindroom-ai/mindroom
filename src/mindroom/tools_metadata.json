@@ -7873,11 +7873,12 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Run allowed configured agents as fresh subagents and return their results",
+      "description": "Start allowed subagents, continue their conversations, and return their results",
       "display_name": "Subagents",
       "docs_url": null,
       "function_names": [
-        "run_subagent"
+        "run_subagent",
+        "continue_subagent"
       ],
       "helper_text": null,
       "icon": "Users",

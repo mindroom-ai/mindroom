@@ -28,6 +28,7 @@ from mindroom.delegation_records import (
     DelegationRecordOwner,
     DelegationTerminalStatus,
 )
+from mindroom.delegation_sessions import update_subagent_turn
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -82,6 +83,8 @@ async def start_child_record(
             model_name=child.model_name,
             task=child.task,
             parent_delegation_id=parent_delegation_id,
+            subagent_id=child.subagent_id,
+            previous_delegation_id=child.previous_delegation_id,
         ),
         caller_execution_identity=caller_execution_identity,
         child_execution_identity=child_identity,
@@ -223,6 +226,7 @@ async def record_child_response(
 
     if response.status == RunStatus.paused:
         child.status = "paused"
+        await update_subagent_turn(child, runtime_paths)
         if not pending_approval:
             await owner.append_event(
                 handle,
@@ -341,7 +345,9 @@ async def finish_child_record(
         output=result if status == "completed" else None,
         error=result if status != "completed" else None,
     )
-    return handle.to_receipt()
+    await update_subagent_turn(child, runtime_paths)
+    receipt = handle.to_receipt()
+    return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt
 
 
 def _child_identity(child: DelegationChild) -> ToolExecutionIdentity:

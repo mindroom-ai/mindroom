@@ -1,8 +1,7 @@
 """Agent delegation tools for MindRoom agents.
 
-Allows an agent to run configured agents as fresh subagents via tool calls.
-The delegated agent runs independently as a one-shot agent and returns its
-response as the tool result.
+Allows an agent to start configured subagents and continue their sessions.
+Each turn runs independently and returns its response as the tool result.
 """
 
 from __future__ import annotations
@@ -25,7 +24,16 @@ from mindroom.delegation_audit import (
     finish_child_record,
     start_child_record,
 )
+from mindroom.delegation_sessions import (
+    SubagentSessionError,
+    load_subagent,
+    reserve_subagent_turn,
+    subagent_liveness,
+    update_subagent_turn,
+    update_subagent_turn_sync,
+)
 from mindroom.delegation_state import DelegationChild
+from mindroom.delegation_storage import freeze_delegation_storage
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.logging_config import get_logger
@@ -39,6 +47,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
+    parse_tool_execution_identity_payload,
     serialize_tool_execution_identity,
 )
 
@@ -119,12 +128,13 @@ class DelegateTools(Toolkit):
         super().__init__(
             name="delegate",
             instructions=self._build_instructions(),
-            tools=[self.run_subagent],
+            tools=[self.run_subagent, self.continue_subagent],
         )
         delegate_function = self.async_functions["run_subagent"]
         delegate_function.description = self._build_run_subagent_description()
-        delegate_function.pre_hook = _capture_direct_delegation_provenance
-        delegate_function.post_hook = _clear_direct_delegation_provenance
+        for function in self.async_functions.values():
+            function.pre_hook = _capture_direct_delegation_provenance
+            function.post_hook = _clear_direct_delegation_provenance
 
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
@@ -148,9 +158,9 @@ class DelegateTools(Toolkit):
             "Selecting your own name starts a fresh copy of yourself, if listed. "
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
             "The caller waits; this does not create a Matrix thread. "
-            "Use matrix_message for an ongoing conversation instead.\n"
+            "Use continue_subagent with the returned subagent_id for follow-ups in the same child session.\n"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
-            "Returns the child's answer and an audit reference scoped to the child agent."
+            "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."
         )
 
     async def run_subagent(self, task: str, agent_name: str | None = None) -> str:
@@ -168,6 +178,54 @@ class DelegateTools(Toolkit):
 
         """
         return await self.run_delegated_task(self._agent_name if agent_name is None else agent_name, task)
+
+    def caller_identity(self) -> ToolExecutionIdentity:
+        """Return the trusted current caller identity, including its parent session."""
+        context = get_tool_runtime_context()
+        return _require_record_identity(
+            _record_execution_identity(
+                agent_name=self._agent_name,
+                session_id=context.session_id
+                if context is not None
+                else (self._execution_identity.session_id if self._execution_identity is not None else None),
+                runtime_context=context,
+                configured_identity=self._execution_identity,
+                runtime_paths=self._runtime_paths,
+            ),
+        )
+
+    async def resolve_subagent(self, subagent_id: str) -> DelegationChild:
+        """Look up a child only within the current caller's originating conversation."""
+        return await load_subagent(
+            subagent_id,
+            owner=self.caller_identity(),
+            config=self._config,
+            runtime_paths=self._runtime_paths,
+            depth=self._delegation_depth,
+        )
+
+    async def continue_subagent(self, subagent_id: str, message: str) -> str:
+        """Send a follow-up to an existing subagent and wait for its answer.
+
+        Reuses the child's conversation history, tools, workspace, and memory.
+        Use after its previous turn returns; finish pending approvals first.
+        The ID belongs to this caller and conversation, including after restart.
+        Current allowed-subagent and requester permissions still apply.
+        Each follow-up gets a separate audit record and returns the same subagent ID.
+
+        Args:
+            subagent_id: Exact Subagent ID returned by run_subagent or continue_subagent.
+            message: Follow-up instructions or question for that child.
+
+        Returns:
+            The child's answer, stable subagent ID, and this turn's audit reference, or an error.
+
+        """
+        try:
+            child = await self.resolve_subagent(subagent_id)
+        except SubagentSessionError as error:
+            return str(error)
+        return await self.run_delegated_task(child.child_agent_name, message, continuation=child)
 
     def authorize(self, agent_name: str, task: str) -> Config | str:  # noqa: PLR0911
         """Recheck the current caller allowlist and requester authority."""
@@ -221,7 +279,7 @@ class DelegateTools(Toolkit):
             return "Cannot delegate: the maximum delegation depth was reached."
         return active_config
 
-    async def run_delegated_task(  # noqa: C901, PLR0912, PLR0915
+    async def run_delegated_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         agent_name: str,
         task: str,
@@ -231,11 +289,17 @@ class DelegateTools(Toolkit):
         active_model_name: str | None = None,
         supports_native_tool_approval: bool = False,
         run_id_callback: Callable[[str], None] | None = None,
+        continuation: DelegationChild | None = None,
     ) -> str:
         """Execute an authorized fresh child, optionally owned by a durable parent."""
         active_config = self.authorize(agent_name, task)
         if isinstance(active_config, str):
             return active_config
+        if continuation is not None:
+            if continuation.storage_bindings != freeze_delegation_storage(active_config, continuation.storage_bindings):
+                return "Subagent storage scope changed; start a new subagent."
+            session_id = continuation.session_id
+            active_model_name = continuation.model_name
         runtime_context = get_tool_runtime_context()
         provenance_stack = _DIRECT_DELEGATION_PROVENANCE.get()
         direct_provenance = provenance_stack[-1] if provenance_stack else None
@@ -247,6 +311,7 @@ class DelegateTools(Toolkit):
             else None
         )
         record_child: DelegationChild | None = None
+        liveness = AsyncExitStack()
         try:
             session_id = session_id or f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
             execution_identity = (
@@ -254,6 +319,9 @@ class DelegateTools(Toolkit):
                 if self._execution_identity is not None
                 else None
             )
+
+            if continuation is not None:
+                execution_identity = parse_tool_execution_identity_payload(continuation.execution_identity, strict=True)
 
             knowledge_resolution = await resolve_agent_knowledge_access_async(
                 agent_name,
@@ -301,8 +369,12 @@ class DelegateTools(Toolkit):
                     runtime_paths=self._runtime_paths,
                 )
                 child_record_identity = _require_record_identity(child_record_identity)
+                delegation_id = uuid4().hex
                 record_child = DelegationChild(
-                    delegation_id=uuid4().hex,
+                    delegation_id=delegation_id,
+                    subagent_id=continuation.subagent_id if continuation is not None else delegation_id,
+                    previous_delegation_id=continuation.delegation_id if continuation is not None else None,
+                    storage_bindings=freeze_delegation_storage(active_config, (self._agent_name, agent_name)),
                     parent_tool_call_id=(direct_provenance.tool_call_id or "" if direct_provenance is not None else ""),
                     caller_agent_name=self._agent_name,
                     child_agent_name=agent_name,
@@ -313,6 +385,15 @@ class DelegateTools(Toolkit):
                     depth=self._delegation_depth + 1,
                     execution_identity=serialize_tool_execution_identity(child_record_identity),
                 )
+                await liveness.enter_async_context(subagent_liveness(record_child, self._runtime_paths))
+                try:
+                    await reserve_subagent_turn(
+                        record_child,
+                        owner=self.caller_identity(),
+                        runtime_paths=self._runtime_paths,
+                    )
+                except SubagentSessionError as error:
+                    return str(error)
                 await start_child_record(
                     record_child,
                     parent_run_id=direct_provenance.run_id if direct_provenance is not None else None,
@@ -352,6 +433,10 @@ class DelegateTools(Toolkit):
             def note_child_run_id(active_run_id: str) -> None:
                 if record_child is not None:
                     record_child.run_id = active_run_id
+                    context = get_tool_runtime_context()
+                    if context is not None and context.active_model_name is not None:
+                        record_child.model_name = context.active_model_name
+                    update_subagent_turn_sync(record_child, self._runtime_paths)
                 if run_id_callback is not None:
                     run_id_callback(active_run_id)
 
@@ -394,11 +479,10 @@ class DelegateTools(Toolkit):
                 if record_child.status not in {"completed", "failed", "cancelled", "denied"}:
                     record_child.status = "cancelled"
                     record_child.result = "Delegation cancelled."
-                await finish_child_record(
-                    record_child,
-                    config=active_config,
-                    runtime_paths=self._runtime_paths,
-                )
+                if record_child.record_locator:
+                    await finish_child_record(record_child, config=active_config, runtime_paths=self._runtime_paths)
+                else:
+                    await update_subagent_turn(record_child, self._runtime_paths)
             raise
         except ResponsePausedForApproval:
             raise
@@ -414,12 +498,14 @@ class DelegateTools(Toolkit):
                 if record_child.status not in {"completed", "failed", "cancelled", "denied"}:
                     record_child.status = "failed"
                     record_child.result = str(e)
-                receipt = await finish_child_record(
-                    record_child,
-                    config=active_config,
-                    runtime_paths=self._runtime_paths,
-                )
-                return _result_with_receipt(message, receipt)
+                if record_child.record_locator:
+                    receipt = await finish_child_record(
+                        record_child,
+                        config=active_config,
+                        runtime_paths=self._runtime_paths,
+                    )
+                    return _result_with_receipt(message, receipt)
+                await update_subagent_turn(record_child, self._runtime_paths)
             return message
         else:
             result = response or "Agent completed the task but returned no content."
@@ -434,6 +520,8 @@ class DelegateTools(Toolkit):
                 )
                 return _result_with_receipt(result, receipt)
             return result
+        finally:
+            await liveness.aclose()
 
     def _build_delegated_runtime_context(
         self,

@@ -18,7 +18,7 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="delegate",
         display_name="Subagents",
-        description="Run allowed configured agents as fresh subagents and return their results",
+        description="Start allowed subagents, continue their conversations, and return their results",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,
@@ -26,6 +26,6 @@ register_builtin_tool_metadata(
         icon_color="text-blue-500",
         config_fields=[],
         dependencies=[],
-        function_names=("run_subagent",),
+        function_names=("run_subagent", "continue_subagent"),
     ),
 )

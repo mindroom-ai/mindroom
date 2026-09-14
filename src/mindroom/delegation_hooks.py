@@ -34,6 +34,7 @@ async def before_delegation(
     *,
     execution_identity: ToolExecutionIdentity,
     arguments: dict[str, Any],
+    tool_name: str = "run_subagent",
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> DelegationHookState:
@@ -42,13 +43,14 @@ async def before_delegation(
         execution_identity=serialize_tool_execution_identity(execution_identity),
         arguments=deepcopy(arguments),
         started_at=time.time(),
+        tool_name=tool_name,
     )
     state.blocked_result = await dispatch_external_tool_hooks(
         hook_registry=_registry(config, runtime_paths),
         execution_identity=execution_identity,
         config=config,
         runtime_paths=runtime_paths,
-        tool_name="run_subagent",
+        tool_name=state.tool_name,
         arguments=state.arguments,
         before=True,
     )
@@ -75,7 +77,7 @@ async def after_delegation(
         execution_identity=identity,
         config=config,
         runtime_paths=runtime_paths,
-        tool_name="run_subagent",
+        tool_name=state.tool_name,
         arguments=state.arguments,
         before=False,
         result=state.blocked_result or result,

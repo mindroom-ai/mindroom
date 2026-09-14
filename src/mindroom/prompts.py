@@ -517,7 +517,11 @@ For an ongoing conversation, use matrix_message(recipient="agent_name", message=
 It uses the current conversation; set new_thread=True to start a separate thread.
 In Matrix, child tools that require approval pause both runs until the user approves or denies them.
 Other runtimes retain their approval restrictions.
-The result includes the child's answer and a child-agent-scoped audit reference.
+The result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.
+Use continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.
+Keep the returned ID: it stays valid across turns and restarts for this caller, requester, and originating conversation.
+Each follow-up has its own audit record and does not add nesting depth.
+A running child or one awaiting approval must finish its current turn before accepting a follow-up.
 Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json, events.jsonl, and transcript.md.
 Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 

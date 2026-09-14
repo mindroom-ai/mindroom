@@ -947,6 +947,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.delegation_sessions",
+    "mindroom.delegation_storage",
     "mindroom.history.turn_recorder",
     "mindroom.delegation_audit",
     "mindroom.delegation_state",
@@ -5660,6 +5662,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation_execution"
 depends_on = [
+    "mindroom.delegation_sessions",
     "mindroom.tool_system.output_files",
     "mindroom.runtime_resolution",
     "mindroom.workspaces",
@@ -5707,6 +5710,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation_audit"
 depends_on = [
+    "mindroom.delegation_sessions",
     "mindroom.delegation_records",
     "mindroom.tool_system.worker_routing",
 ]
@@ -5714,7 +5718,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation_storage"
 depends_on = ["mindroom.config.agent"]
-visibility = ["mindroom.delegation_execution"]
+visibility = ["mindroom.delegation_execution", "mindroom.custom_tools.delegate", "mindroom.delegation_sessions"]
 
 [[modules]]
 path = "mindroom.history.agno_prompt_compat"
@@ -5797,3 +5801,12 @@ visibility = ["mindroom.history.compaction"]
 path = "mindroom.history.summary_provider_compat"
 depends_on = ["mindroom.claude_prompt_cache"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
+
+[[modules]]
+path = "mindroom.delegation_sessions"
+depends_on = [
+    "mindroom.delegation_state",
+    "mindroom.delegation_storage",
+    "mindroom.delegation_execution",
+    "mindroom.tool_system.worker_routing",
+]

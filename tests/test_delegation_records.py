@@ -96,6 +96,8 @@ def _metadata(module: ModuleType, **overrides: object) -> object:
         "model_name": "test-model",
         "task": "Investigate the failure",
         "parent_delegation_id": None,
+        "subagent_id": None,
+        "previous_delegation_id": None,
     }
     values.update(overrides)
     return module.DelegationMetadata(**values)
@@ -139,6 +141,8 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
         "parent_run_id": "parent-run",
         "parent_tool_call_id": "parent-call",
         "parent_delegation_id": None,
+        "subagent_id": None,
+        "previous_delegation_id": None,
         "source_room_id": "!room:localhost",
         "source_thread_id": "$thread",
         "model_name": "test-model",
