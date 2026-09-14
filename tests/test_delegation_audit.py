@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from agno.metrics import RunMetrics
@@ -12,7 +12,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
 
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.delegation_audit import (
@@ -22,8 +22,11 @@ from mindroom.delegation_audit import (
     record_child_response,
     start_child_record,
 )
+from mindroom.delegation_execution import _settle_interrupted_child
 from mindroom.delegation_records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation_state import DelegationChild
+from mindroom.delegation_storage import freeze_delegation_storage
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
@@ -106,6 +109,49 @@ async def test_start_child_record_persists_restart_locator_and_source_scope(tmp_
     assert run["source_room_id"] == "!room:localhost"
     assert run["source_thread_id"] == "$thread"
     assert run["requester_id"] == "@alice:localhost"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removed_config", [False, True])
+@pytest.mark.parametrize("status", ["cancelled", "failed"])
+async def test_interruption_recovery_preserves_workspace_knowledge_links(
+    tmp_path: Path,
+    removed_config: bool,
+    status: Literal["cancelled", "failed"],
+) -> None:
+    """Settling audit records must not reconcile workspaces with stripped recovery config."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    links: list[Path] = []
+    for name in ("leader", "child"):
+        config.agents[name].private = AgentPrivateConfig(
+            per="user",
+            knowledge=AgentPrivateKnowledgeConfig(path="docs"),
+        )
+        resolved = resolve_agent_runtime(name, config, paths, _identity(name, f"{name}-session"), create=True)
+        assert resolved.workspace is not None
+        link = resolved.workspace.root / "knowledge" / f"__agent_private__:{name}"
+        assert link.is_symlink()
+        links.append(link)
+    child.storage_bindings = freeze_delegation_storage(config, ("leader", "child"))
+    await start_child_record(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    record_dir = await _record_dir(child, config, paths)
+    if removed_config:
+        config = config.model_copy(update={"agents": {}})
+
+    await _settle_interrupted_child(child, config=config, runtime_paths=paths, reason="Interrupted", status=status)
+
+    assert all(link.is_symlink() for link in links)
+    run = json.loads((record_dir / "run.json").read_text())
+    assert run["status"] == status
+    assert run["error"] == "Interrupted"
 
 
 @pytest.mark.asyncio

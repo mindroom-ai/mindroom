@@ -22,14 +22,14 @@ from mindroom.durable_write import (
 )
 from mindroom.file_locks import advisory_file_lock
 from mindroom.redaction import redact_sensitive_data
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
     parse_tool_execution_identity_payload,
     serialize_tool_execution_identity,
 )
-from mindroom.workspaces import resolve_workspace_relative_path
+from mindroom.workspaces import resolve_agent_workspace_from_state_path, resolve_workspace_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -492,16 +492,24 @@ def _resolve_workspace(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> Path:
-    resolved = resolve_agent_runtime(
+    resolved = resolve_agent_storage(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
-        create=True,
     )
-    if resolved.workspace is None:
+    # Record lookup must not seed templates or reconcile knowledge with a
+    # retained storage-only config during cancellation or restart recovery.
+    workspace = resolve_agent_workspace_from_state_path(
+        agent_name,
+        config,
+        runtime_paths=runtime_paths,
+        state_storage_path=resolved.state_root,
+        use_state_storage_path=resolved.execution.policy.private_workspace_enabled,
+    )
+    if workspace is None:
         return agent_workspace_root_path(runtime_paths.storage_root, agent_name)
-    return resolved.workspace.root
+    return workspace.root
 
 
 def _utc_timestamp() -> str:

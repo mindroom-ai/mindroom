@@ -4504,10 +4504,12 @@ from = ["mindroom.agent_policy"]
 expose = [
     "ResolvedAgentExecution",
     "ResolvedAgentRuntime",
+    "ResolvedAgentStorage",
     "ResolvedKnowledgeBinding",
     "resolve_private_requester_scope_root",
     "resolve_agent_execution",
     "resolve_agent_runtime",
+    "resolve_agent_storage",
     "resolve_knowledge_binding",
 ]
 from = ["mindroom.runtime_resolution"]

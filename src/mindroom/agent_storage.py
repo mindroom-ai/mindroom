@@ -23,7 +23,7 @@ from mindroom import agno_session_persistence_patch
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.logging_config import get_logger
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage_preflight import session_storage_preflight
 
 if TYPE_CHECKING:
@@ -201,7 +201,7 @@ def _create_agent_session_db(
     prompt_roles: frozenset[str] | None = None,
 ) -> BaseDb:
     """Create persistent session storage for one agent."""
-    session_state_root = resolve_agent_runtime(
+    session_state_root = resolve_agent_storage(
         agent_name,
         config,
         runtime_paths,
