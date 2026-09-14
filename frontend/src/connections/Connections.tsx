@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plug } from "lucide-react";
+import mindroomLogo from "@/assets/logo-mark-animated.svg";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectedClients } from "./ConnectedClients";
@@ -40,12 +40,10 @@ export function Connections() {
     <main className="min-h-screen bg-muted/20 px-4 py-8 sm:px-6 sm:py-12">
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="flex items-start gap-4">
-          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border bg-background shadow-sm">
-            <Plug className="h-5 w-5 text-primary" aria-hidden="true" />
-          </span>
+          <img src={mindroomLogo} alt="" className="h-12 w-12 shrink-0" />
           <div className="space-y-1.5">
             <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-              Your connections
+              Your MindRoom connections
             </h1>
             <p className="max-w-2xl text-sm text-muted-foreground">
               See each agent’s tools and connect the accounts they need.

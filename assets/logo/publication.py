@@ -36,6 +36,7 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
         image.save(favicon, format="ICO", sizes=[(size, size) for size in (16, 32, 48, 64, 128, 256)])
     return {
         "frontend/public/logo.svg": mark,
+        "frontend/src/assets/logo-mark-animated.svg": artwork["logo-mark-animated.svg"],
         "frontend/public/logo.png": png[1024],
         "frontend/public/favicon.png": png[64],
         "frontend/public/logo-square.png": artwork["preview.png"],

@@ -6,6 +6,7 @@ on:
     paths:
       - assets/logo/**
       - frontend/public/logo*
+      - frontend/src/assets/logo-mark-animated.svg
       - frontend/public/favicon.png
       - docs/assets/logo*
       - docs/assets/favicon.png
@@ -17,6 +18,7 @@ on:
     paths:
       - assets/logo/**
       - frontend/public/logo*
+      - frontend/src/assets/logo-mark-animated.svg
       - frontend/public/favicon.png
       - docs/assets/logo*
       - docs/assets/favicon.png
