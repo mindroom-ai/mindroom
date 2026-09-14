@@ -1224,6 +1224,12 @@ def apply_tool_approval_capability(
 
     if supports_native_tool_approval:
         for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if registered_tool_name == "delegate" and function.name == "run_subagent":
+                # The delegation driver owns the policy gate and exact child wait.
+                function.external_execution = True
+                function.external_execution_silent = True
+                function.requires_confirmation = False
+                continue
             if function_may_require_approval(function) and function.requires_confirmation is not True:
                 function.requires_confirmation = True
                 function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE

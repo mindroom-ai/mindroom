@@ -33,6 +33,7 @@ class ApprovalRecovery:
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
     recover_unavailable_final: Callable[[str, ApprovalContinuation], Awaitable[bool]] | None = None
+    cancel_delegations: Callable[[ApprovalContinuation, str], Awaitable[None]] | None = None
     manager: ApprovalManager | None = None
     _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
@@ -142,6 +143,8 @@ class ApprovalRecovery:
         )
         if current is None:
             return False
+        if self.cancel_delegations is not None:
+            await self.cancel_delegations(current, reason)
         notice_store = await self.deliver_unavailable_notice(current, reason)
         if notice_store is None:
             return False

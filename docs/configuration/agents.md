@@ -174,7 +174,7 @@ agents:
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](../deployment/sandbox-proxy.md) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
-| `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
+| `delegate_to` | list | `[]` | Allowed agent names for `run_subagent`, including itself if listed (see [Agent Delegation](#agent-delegation)) |
 | `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
@@ -677,11 +677,17 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field.
+Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
+The model-facing tool is `run_subagent(agent_name, task)`.
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history.
-It executes the task and returns its response as the tool result.
+The delegated agent runs as a fresh, one-shot instance with no shared session or history while retaining its configured workspace, memory, requester scope, model, and tool policy.
+The caller waits for the child to execute the task, then receives its answer and an audit reference as the tool result.
+The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
+Listing the caller itself allows a fresh copy with the same configured capabilities.
+For an ongoing Matrix conversation, use [matrix_message](../tools/matrix-message.md#agent-conversations).
+Each child writes redacted execution records under `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in its resolved workspace, and the caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
+Approval-gated child calls use the native Matrix approval flow in the source room and thread while the parent-child continuation remains durable.
 
 ```yaml
 agents:
@@ -689,7 +695,7 @@ agents:
     display_name: Leader
     role: Orchestrate tasks by delegating to specialist agents
     model: sonnet
-    delegate_to: [code, research]
+    delegate_to: [leader, code, research]
     rooms: [lobby]
 
   code:
@@ -711,8 +717,9 @@ agents:
 **Constraints:**
 
 - Targets must reference existing agent names in the config
-- An agent cannot delegate to itself
+- An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
+- Each parent runs one child at a time
 
 ## Naming Rules
 

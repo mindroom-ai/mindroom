@@ -30,7 +30,7 @@ register_builtin_tool_metadata(
                 description=(
                     "Tool names workflow participants may call without per-call user approval. "
                     'Use "*" to pre-approve every granted tool. '
-                    "System-mutating tools (claude_agent, config_manager, scheduler, subagents) "
+                    "System-mutating tools (claude_agent, config_manager, scheduler) "
                     "always require per-call approval and cannot be pre-approved."
                 ),
             ),

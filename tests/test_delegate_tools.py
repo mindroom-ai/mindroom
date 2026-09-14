@@ -122,6 +122,11 @@ def _fake_indexing_settings(base_id: str) -> IndexingSettings:
     )
 
 
+def _assert_direct_result_with_receipt(result: str, expected_content: str) -> None:
+    assert result.startswith(f"{expected_content}\n\nDelegation ")
+    assert " record: " in result
+
+
 class TestDelegateTools:
     """Tests for the DelegateTools Toolkit."""
 
@@ -174,9 +179,9 @@ class TestDelegateTools:
         assert tools.name == "delegate"
 
     def test_toolkit_has_delegate_task(self, tools: DelegateTools) -> None:
-        """Test that the toolkit exposes the delegate_task function."""
+        """Test that the toolkit exposes the run_subagent function."""
         func_names = [f.name for f in tools.async_functions.values()]
-        assert "delegate_task" in func_names
+        assert "run_subagent" in func_names
 
     def test_instructions_contain_agent_descriptions(self, tools: DelegateTools) -> None:
         """Test that toolkit instructions describe available delegation targets."""
@@ -189,40 +194,40 @@ class TestDelegateTools:
 
     def test_model_facing_tool_description_lists_allowed_targets(self, tools: DelegateTools) -> None:
         """Test that the model-visible function description includes delegation targets."""
-        function = tools.async_functions["delegate_task"].model_copy(deep=True)
+        function = tools.async_functions["run_subagent"].model_copy(deep=True)
 
         snapshot = cached_processed_schema(function, strict=False)
 
         assert snapshot is not None
         assert snapshot.description is not None
         description = snapshot.description
-        assert "Allowed delegate targets for this caller:" in description
+        assert "Allowed subagents for this caller:" in description
         for target in ("code", "research"):
             assert target in description
-        assert "Do not use any other agent names." in description
-        assert "Use this when" in description
-        assert "delegated agent runs independently" in description
-        assert "no shared conversation history" in description
+        assert "Use only these agent names." in description
+        assert "fresh subagent and wait for its result" in description
+        assert "Selecting your own name starts a fresh copy" in description
+        assert "does not inherit this conversation" in description
 
     @pytest.mark.asyncio
     async def test_delegate_to_unknown_agent(self, tools: DelegateTools) -> None:
         """Test that delegating to an unknown agent returns an error."""
-        result = await tools.delegate_task("unknown_agent", "do something")
+        result = await tools.run_subagent("unknown_agent", "do something")
         assert "Cannot delegate to 'unknown_agent'" in result
         assert "code" in result
         assert "research" in result
-        assert "Run agents_list to inspect can_delegate flags." in result
+        assert "Allowed subagents: code, research." in result
 
     @pytest.mark.asyncio
     async def test_delegate_empty_task(self, tools: DelegateTools) -> None:
         """Test that delegating an empty task returns an error."""
-        result = await tools.delegate_task("code", "")
+        result = await tools.run_subagent("code", "")
         assert "Cannot delegate an empty task" in result
 
     @pytest.mark.asyncio
     async def test_delegate_whitespace_only_task(self, tools: DelegateTools) -> None:
         """Test that delegating a whitespace-only task returns an error."""
-        result = await tools.delegate_task("code", "   ")
+        result = await tools.run_subagent("code", "   ")
         assert "Cannot delegate an empty task" in result
 
     @pytest.mark.asyncio
@@ -245,7 +250,7 @@ class TestDelegateTools:
         )
 
         with patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response:
-            result = await tools.delegate_task("code", "Write a hello world program")
+            result = await tools.run_subagent("code", "Write a hello world program")
 
         assert "requester authorization is unavailable" in result
         mock_ai_response.assert_not_awaited()
@@ -293,7 +298,7 @@ class TestDelegateTools:
             tool_runtime_context(runtime_context),
             patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response,
         ):
-            result = await tools.delegate_task("code", "Write a hello world program")
+            result = await tools.run_subagent("code", "Write a hello world program")
 
         assert "not allowed to reply" in result
         mock_ai_response.assert_not_awaited()
@@ -306,7 +311,7 @@ class TestDelegateTools:
             new_callable=AsyncMock,
             return_value="Here is the generated code: print('hello')",
         ) as mock_ai_response:
-            result = await tools.delegate_task("code", "Write a hello world program")
+            result = await tools.run_subagent("code", "Write a hello world program")
 
             assert mock_ai_response.await_count == 1
             call_kwargs = mock_ai_response.await_args.kwargs
@@ -316,12 +321,12 @@ class TestDelegateTools:
             assert call_kwargs["runtime_paths"] == tools._runtime_paths
             assert call_kwargs["config"] == tools._config
             assert call_kwargs["knowledge"] is None
-            assert call_ctx.requester_id is None
+            assert call_ctx.requester_id == "@alice:example.org"
             assert call_kwargs["include_interactive_questions"] is False
             assert call_kwargs["execution_identity"] is None
             assert call_kwargs["delegation_depth"] == 1
             assert call_ctx.session_id.startswith("delegate:leader:code:")
-            assert result == "Here is the generated code: print('hello')"
+            _assert_direct_result_with_receipt(result, "Here is the generated code: print('hello')")
 
     @pytest.mark.asyncio
     async def test_delegation_accepts_requester_authorized_by_grant_room(self, tmp_path: Path) -> None:
@@ -393,9 +398,9 @@ class TestDelegateTools:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            result = await tools.delegate_task("worker", "do work")
+            result = await tools.run_subagent("worker", "do work")
 
-        assert result == "done"
+        _assert_direct_result_with_receipt(result, "done")
         mock_ai_response.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -406,7 +411,7 @@ class TestDelegateTools:
             new_callable=AsyncMock,
             return_value="",
         ):
-            result = await tools.delegate_task("code", "Do something")
+            result = await tools.run_subagent("code", "Do something")
             assert "returned no content" in result
 
     @pytest.mark.asyncio
@@ -416,7 +421,7 @@ class TestDelegateTools:
             "mindroom.custom_tools.delegate.ai_response",
             side_effect=RuntimeError("Delegated run failed"),
         ):
-            result = await tools.delegate_task("code", "Do something")
+            result = await tools.run_subagent("code", "Do something")
             assert "Delegation to 'code' failed" in result
             assert "Delegated run failed" in result
 
@@ -443,7 +448,7 @@ class TestDelegateTools:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.delegate_task("code", "task")
+            await tools.run_subagent("code", "task")
             assert mock_ai_response.await_args.kwargs["delegation_depth"] == 2
 
     @pytest.mark.asyncio
@@ -473,7 +478,7 @@ class TestDelegateTools:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.delegate_task("code", "update yourself")
+            await tools.run_subagent("code", "update yourself")
             assert mock_ai_response.await_args.kwargs["runtime_paths"] == runtime_paths
 
 
@@ -523,7 +528,7 @@ class TestDelegateKnowledge:
                 return_value="Found relevant docs",
             ) as mock_ai_response,
         ):
-            result = await tools.delegate_task("researcher", "Find info about X")
+            result = await tools.run_subagent("researcher", "Find info about X")
 
             mock_get.assert_awaited_once()
             args, kwargs = mock_get.await_args
@@ -537,7 +542,7 @@ class TestDelegateKnowledge:
             assert ai_kwargs["knowledge"] is mock_knowledge
             assert ai_kwargs["include_interactive_questions"] is False
             assert ai_kwargs["delegation_depth"] == 1
-            assert result == "Found relevant docs"
+            _assert_direct_result_with_receipt(result, "Found relevant docs")
 
     @pytest.mark.asyncio
     @patch("mindroom.agent_storage._ConversationSqliteDb")
@@ -614,9 +619,9 @@ class TestDelegateKnowledge:
                 return_value="Found relevant docs",
             ),
         ):
-            result = await delegate_tool.delegate_task("researcher", "Find info about X")
+            result = await delegate_tool.run_subagent("researcher", "Find info about X")
 
-        assert result == "Found relevant docs"
+        _assert_direct_result_with_receipt(result, "Found relevant docs")
         assert scheduled_base_ids == ["docs"]
 
     @pytest.mark.asyncio
@@ -650,7 +655,7 @@ class TestDelegateKnowledge:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.delegate_task("worker", "do work")
+            await tools.run_subagent("worker", "do work")
             assert mock_ai_response.await_args.args[0].entity_label == "worker"
             assert mock_ai_response.await_args.kwargs["knowledge"] is None
 
@@ -704,7 +709,7 @@ class TestDelegateKnowledge:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.delegate_task("worker", "do work")
+            await tools.run_subagent("worker", "do work")
 
         call_kwargs = mock_ai_response.await_args.kwargs
         call_ctx = mock_ai_response.await_args.args[0]
@@ -797,9 +802,9 @@ class TestDelegateKnowledge:
             tool_runtime_context(runtime_context),
             patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         ):
-            result = await tools.delegate_task("worker", "do work")
+            result = await tools.run_subagent("worker", "do work")
 
-        assert result == "done"
+        _assert_direct_result_with_receipt(result, "done")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -896,9 +901,9 @@ class TestDelegateKnowledge:
             tool_runtime_context(runtime_context),
             patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         ):
-            result = await tools.delegate_task("worker", "do work")
+            result = await tools.run_subagent("worker", "do work")
 
-        assert result == "done"
+        _assert_direct_result_with_receipt(result, "done")
 
 
 class TestDelegateToolRegistration:
@@ -908,7 +913,7 @@ class TestDelegateToolRegistration:
         """Test that delegate tool appears in the metadata registry."""
         assert "delegate" in TOOL_METADATA
         meta = TOOL_METADATA["delegate"]
-        assert meta.display_name == "Agent Delegation"
+        assert meta.display_name == "Subagents"
         assert meta.status.value == "available"
         assert meta.setup_type.value == "none"
         assert meta.category.value == "productivity"
@@ -945,17 +950,18 @@ class TestDelegateConfigValidation:
             )
 
     def test_delegate_to_self(self) -> None:
-        """Test that self-delegation raises ValueError."""
-        with pytest.raises(ValueError, match="cannot delegate to itself"):
-            _make_config(
-                {
-                    "leader": AgentConfig(
-                        display_name="Leader",
-                        role="Lead",
-                        delegate_to=["leader"],
-                    ),
-                },
-            )
+        """Test that an agent may explicitly allow delegation to itself."""
+        config = _make_config(
+            {
+                "leader": AgentConfig(
+                    display_name="Leader",
+                    role="Lead",
+                    delegate_to=["leader"],
+                ),
+            },
+        )
+
+        assert config.agents["leader"].delegate_to == ["leader"]
 
     def test_empty_delegate_to(self) -> None:
         """Test that empty delegate_to is the default."""

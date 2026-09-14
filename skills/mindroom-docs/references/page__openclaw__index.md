@@ -17,7 +17,7 @@ Works well:
 - OpenClaw-inspired behavior and instructions
 - Native MindRoom tool bundle via the `openclaw_compat` preset
 - Native Matrix messaging via the `matrix_message` tool in the preset bundle
-- Native sub-agent session orchestration via the `subagents` tool in the preset bundle
+- Matrix agent conversations through `matrix_message`, with agent discovery through `matrix_room`
 
 Not included:
 
@@ -40,7 +40,6 @@ Preset expansion:
 - `website`
 - `browser`
 - `scheduler`
-- `subagents`
 - `matrix_message`
 - `attachments` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
 - `matrix_room` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
@@ -100,7 +99,7 @@ memory:
 
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
-The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` and `matrix_room` are auto-implied by `matrix_message`), so listing those tools individually is not necessary.
+The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, and `matrix_message` tools (`attachments` and `matrix_room` are auto-implied by `matrix_message`), so listing those tools individually is not necessary.
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
 Native memory mutations schedule semantic-index refresh.
 Arbitrary external edits are not detected by a ready semantic index on access; use the supported memory tools or trigger/restart the index refresh before expecting those edits in semantic results.

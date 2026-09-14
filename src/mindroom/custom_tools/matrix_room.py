@@ -1,10 +1,10 @@
-"""Native Matrix room introspection toolkit for room-info/members/threads/state actions."""
+"""Native Matrix room introspection, agent discovery, and history actions."""
 
 from __future__ import annotations
 
 import json
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from threading import Lock
 from typing import Any, ClassVar, cast
 
@@ -13,6 +13,7 @@ from agno.tools import Toolkit
 from aiohttp import ClientError
 
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.client_visible_messages import (
@@ -45,7 +46,7 @@ class MatrixRoomTools(Toolkit):
     _MAX_THREAD_LIMIT: ClassVar[int] = 50
     _MAX_STATE_EVENTS: ClassVar[int] = 100
     _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
-        {"room-info", "members", "threads", "state"},
+        {"room-info", "members", "agents", "threads", "state"},
     )
 
     def __init__(self) -> None:
@@ -191,6 +192,14 @@ class MatrixRoomTools(Toolkit):
             return await self._room_info(context, room_id=resolved_room_id)
         if request.action == "members":
             return await self._members(context, room_id=resolved_room_id)
+        if request.action == "agents":
+            agents = await available_room_agents(context, resolved_room_id)
+            return self._payload(
+                "ok",
+                action="agents",
+                room_id=resolved_room_id,
+                agents=[asdict(agent) for agent in agents],
+            )
         if request.action == "threads":
             return await self._threads(
                 context,
@@ -463,11 +472,15 @@ class MatrixRoomTools(Toolkit):
         state_key: str | None = None,
         page_token: str | None = None,
     ) -> str:
-        """Inspect Matrix room metadata, members, threads, and state.
+        """Inspect Matrix room metadata, available agents, members, threads, and state.
 
         Actions:
         - room-info: Room metadata (name, topic, encryption, member count, power levels, join rule).
         - members: List joined members with display names and power levels.
+        - agents: List agents available to answer this requester in the room, including yourself.
+          Each row has name, matrix_user_id, description, and thread_mode (thread or room).
+          To start a conversation, send a matrix_message mentioning matrix_user_id with ignore_mentions=False.
+          This lists conversation targets; run_subagent separately lists your allowed subagents.
         - threads: List thread roots with preview, sender, timestamp, reply count.
           Use page_token from a previous response's next_token to paginate.
         - state: Read room state. If event_type is given, return that specific state event.
@@ -493,7 +506,7 @@ class MatrixRoomTools(Toolkit):
             return self._payload(
                 "error",
                 action=request.action,
-                message="Unsupported action. Use room-info, members, threads, or state.",
+                message="Unsupported action. Use room-info, members, agents, threads, or state.",
             )
 
         resolved_room_id = request.room_id or context.room_id

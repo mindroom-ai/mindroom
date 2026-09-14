@@ -52,7 +52,7 @@ A later `allowed_tools` expansion cannot widen a running script's unattended app
 The `browser`, `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
 Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
 Functions that declare their own confirmation requirement still require Matrix approval.
-The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are never preapproved for background scripts.
+The `claude_agent`, `config_manager`, and `scheduler` toolkits are never preapproved for background scripts.
 
 The limits are captured with each run.
 `max_concurrent_runs` defaults to `3` for one requester and agent.

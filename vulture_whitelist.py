@@ -352,6 +352,8 @@ FINAL  # unused variable (src/mindroom/event_journal/models.py)
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
 # Agno 3 adapter overrides: agno reads the run-object cache attribute and calls drop_session itself.
+_.external_execution_silent  # Agno suppresses the internal delegation wait message (src/mindroom/agents.py)
+_.external_execution_required  # Agno reads the retained tool pause flags (src/mindroom/delegation_execution.py)
 _._run_object_cache  # agno SqliteDb attribute replaced by the adapter (src/mindroom/agent_storage.py)
 _.drop_session  # agno SqliteDb calls it on the run-object cache (src/mindroom/agent_storage.py)
 _.runs_from_rows  # agno SqliteDb calls it on the run-object cache (src/mindroom/agent_storage.py)

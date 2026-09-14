@@ -48,6 +48,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     is_silent_schedule_no_report_response,
 )
+from mindroom.delegation_execution import drive_delegation_stream, drive_delegations, has_delegation_state
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -2491,6 +2492,57 @@ def _continued_team_pause(
     )
 
 
+def _team_approval_events(
+    team: Team,
+    persisted: TeamRunOutput,
+    *,
+    configured_team_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    members: ResolvedExactTeamMembers,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool],
+    denial_reasons: dict[str, str | None],
+) -> AsyncIterator[object]:
+    """Resume either the retained child wait or the team's own exact tools."""
+    delegated = has_delegation_state(persisted)
+    if delegated:
+
+        async def retained_run_events() -> AsyncIterator[TeamRunOutput]:
+            yield persisted
+
+        events = retained_run_events()
+    else:
+        requirements = apply_exact_approval_decisions(
+            persisted.requirements or (),
+            decisions=decisions,
+            denial_reasons=denial_reasons,
+        )
+        events = team.acontinue_run(
+            run_response=persisted,
+            requirements=requirements,
+            session_id=persisted.session_id,
+            user_id=execution_identity.requester_id,
+            metadata=deepcopy(persisted.metadata),
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        )
+    return drive_delegation_stream(
+        team,
+        events,
+        agent_name=configured_team_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        decisions=decisions if delegated else None,
+        denial_reasons=denial_reasons if delegated else None,
+        member_config_names=_delegation_member_names(members),
+    )
+
+
 async def continue_paused_team_run(
     *,
     member_names: tuple[str, ...],
@@ -2566,8 +2618,15 @@ async def continue_paused_team_run(
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
-        requirements = apply_exact_approval_decisions(
-            persisted.requirements or (),
+        continuation_stream = _team_approval_events(
+            team,
+            persisted,
+            configured_team_name=configured_team_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            members=members,
+            refresh_scheduler=refresh_scheduler,
             decisions=decisions,
             denial_reasons=denial_reasons,
         )
@@ -2578,18 +2637,8 @@ async def continue_paused_team_run(
             tool_trace=prior_tool_trace,
             prior_response_text=prior_response_text,
         )
-        continuation_stream = team.acontinue_run(
-            run_response=persisted,
-            requirements=requirements,
-            session_id=session_id,
-            user_id=user_id,
-            metadata=deepcopy(persisted.metadata),
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        )
         continued = await _collect_team_continuation(
-            cast("AsyncIterator[object]", continuation_stream),
+            continuation_stream,
             presentation,
         )
         paused = paused_attempt_from_response(
@@ -2713,6 +2762,16 @@ async def prepare_materialized_team_execution(
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
     )
+
+
+def _delegation_member_names(members: ResolvedExactTeamMembers) -> dict[str, str]:
+    """Bind provider and configured member identities to the exact caller allowlist."""
+    return {
+        identity: config_name
+        for config_name, member in zip(members.requested_agent_names, members.agents, strict=True)
+        for identity in (config_name, url_safe_string(config_name), member.id)
+        if identity
+    }
 
 
 async def team_response(  # noqa: C901, PLR0915
@@ -2913,6 +2972,17 @@ async def team_response(  # noqa: C901, PLR0915
                 active_model_name=attempt_runtime_model.model_name,
                 operation=lambda: _run(ai_runtime.copy_run_input(run_input), attempt_run_id),
             )
+            if isinstance(response, (TeamRunOutput, RunOutput)):
+                response = await drive_delegations(
+                    team,
+                    response,
+                    agent_name=configured_team_name or team_name,
+                    config=config,
+                    runtime_paths=orchestrator.runtime_paths,
+                    execution_identity=execution_identity,
+                    refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
+                    member_config_names=_delegation_member_names(attempt_members),
+                )
         except Exception as e:
             logger.exception("team_response_failed", agents=agent_list)
             error_text = get_user_friendly_error_message(e, team_name)
@@ -3148,6 +3218,7 @@ async def _team_response_stream_raw(
             prepared_input,
             stream=True,
             stream_events=True,
+            yield_run_output=True,
             session_id=session_id,
             run_id=run_id,
             user_id=user_id,
@@ -3434,7 +3505,16 @@ async def team_response_stream(  # noqa: C901, PLR0915
         )
         raw_stream = ai_runtime.stream_attempt_with_model(
             attempt_model_runtime,
-            raw_stream,
+            drive_delegation_stream(
+                team,
+                raw_stream,
+                agent_name=configured_team_name or team_label,
+                config=config,
+                runtime_paths=orchestrator.runtime_paths,
+                execution_identity=execution_identity,
+                refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
+                member_config_names=_delegation_member_names(attempt_members),
+            ),
             active_model_name=attempt_runtime_model.model_name,
         )
         raw_stream = _capture_stream_interrupt(

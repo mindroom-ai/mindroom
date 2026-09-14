@@ -22,6 +22,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
+from mindroom.delegation_execution import drive_delegation_stream, has_delegation_state
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -90,12 +91,25 @@ async def _collect_agent_continuation(
         terminal_content,
         saw_content_delta=saw_content_delta,
     )
+    _reconcile_agent_tools(presentation, response)
+    return response
+
+
+def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: RunOutput) -> None:
+    """Retain exact delegated approval anchors alongside the parent's own tools."""
+    paused = paused_attempt_from_response(
+        response,
+        fallback_session_id=response.session_id,
+        fallback_run_id=response.run_id,
+    )
+    if paused is not None:
+        for tool in paused.tools:
+            presentation.start_tool(tool)
     for tool in response.tools or ():
         if tool.is_paused:
             presentation.start_tool(tool)
         else:
             presentation.complete_tool(tool)
-    return response
 
 
 async def _continue_persisted_agent(
@@ -103,17 +117,44 @@ async def _continue_persisted_agent(
     continuation: ApprovalContinuation,
     persisted: RunOutput,
     requirements: list[RunRequirement],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool],
+    denial_reasons: dict[str, str | None],
 ) -> tuple[RunOutput, CollectedStreamPresentation]:
     """Resume a persisted agent with event streaming so presentation order is retained."""
-    events = agent.acontinue_run(
-        run_id=continuation.run_id,
-        requirements=requirements,
-        session_id=continuation.session_id,
-        user_id=continuation.requester_id,
-        metadata=deepcopy(persisted.metadata),
-        stream=True,
-        stream_events=True,
-        yield_run_output=True,
+
+    async def persisted_event() -> AsyncIterator[RunOutput]:
+        yield persisted
+
+    delegated = has_delegation_state(persisted)
+    native_events = (
+        persisted_event()
+        if delegated
+        else agent.acontinue_run(
+            run_id=continuation.run_id,
+            requirements=requirements,
+            session_id=continuation.session_id,
+            user_id=continuation.requester_id,
+            metadata=deepcopy(persisted.metadata),
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        )
+    )
+    events = drive_delegation_stream(
+        agent,
+        cast("AsyncIterator[object]", native_events),
+        agent_name=continuation.entity_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        decisions=decisions if delegated else None,
+        denial_reasons=denial_reasons if delegated else None,
     )
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
@@ -121,7 +162,7 @@ async def _continue_persisted_agent(
         tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
         track_hidden_tools=True,
     )
-    response = await _collect_agent_continuation(cast("AsyncIterator[object]", events), presentation)
+    response = await _collect_agent_continuation(events, presentation)
     return response, presentation
 
 
@@ -198,10 +239,14 @@ class AgentApprovalExecution:
             if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
-            requirements = apply_exact_approval_decisions(
-                [deepcopy(requirement) for requirement in persisted.requirements or ()],
-                decisions=decisions,
-                denial_reasons=denial_reasons,
+            requirements = (
+                []
+                if has_delegation_state(persisted)
+                else apply_exact_approval_decisions(
+                    [deepcopy(requirement) for requirement in persisted.requirements or ()],
+                    decisions=decisions,
+                    denial_reasons=denial_reasons,
+                )
             )
 
             async with typing_indicator(
@@ -218,6 +263,12 @@ class AgentApprovalExecution:
                             continuation,
                             persisted,
                             requirements,
+                            config=config,
+                            runtime_paths=self.runtime_paths,
+                            execution_identity=execution_identity,
+                            refresh_scheduler=self.refresh_scheduler(),
+                            decisions=decisions,
+                            denial_reasons=denial_reasons,
                         ),
                     ),
                 )

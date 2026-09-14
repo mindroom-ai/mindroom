@@ -220,20 +220,22 @@ class MatrixMessageTools(Toolkit):
         limit: int | None = None,
         page_token: str | None = None,
     ) -> str:
-        """Send, reply, react to, read, edit, or inspect Matrix messages.
+        """Send, read, edit, and react to Matrix messages.
 
         Actions:
-        - `send`: Send text/attachments; defaults to the current room timeline.
-        - `reply`: Send text/attachments to the current or explicit thread; errors without one.
-        - `thread-reply`: Alias of `reply` with the same thread behavior.
-        - `react`: React to `target` with `message`, defaulting to 👍.
-        - `read`: Read the active thread, or the room timeline without one.
+        - `send`: Room text/attachments.
+        - `reply`: Thread text/attachments; requires a thread.
+        - `thread-reply`: Alias of `reply`.
+        - `react`: React to `target` with `message` (default 👍).
+        - `read`: Read current thread or room.
         - `room-threads`: Page room thread roots.
         - `thread-list`: List thread messages and edit options.
-        - `edit`: Edit the `target` event, inheriting the current thread.
-        - `context`: Return targeting, requester, and agent metadata.
+        - `edit`: Edit `target`.
+        - `context`: Target, requester, and agent metadata.
 
         Threading: `send` is room-level even inside a thread unless given a thread. `reply` and `thread-reply` inherit the current thread. `thread_id="room"` forces room scope.
+
+        To start an agent conversation, use matrix_room(action="agents"), then `send` mentioning matrix_user_id with ignore_mentions=False. Keep returned event_id as thread_id for `read`/`reply`. Sending returns immediately; run_subagent waits for a result.
 
         Mention safety for text send/reply/thread-reply: default `ignore_mentions=True` sets `com.mindroom.skip_mentions` and suppresses dispatch to prevent loops. Set `False` ONLY for an intentional handoff or self-trigger; then human requesters use `com.mindroom.original_sender` for authorization.
 
@@ -246,17 +248,17 @@ class MatrixMessageTools(Toolkit):
         Full semantics: https://docs.mindroom.chat/tools/matrix-message/
 
         Args:
-            action (str): Action.
-            message (str | None): Text/edit body or reaction emoji.
-            attachment_ids (list[str] | None): `att_*` IDs; writes only, combined max 5.
-            attachment_file_paths (list[str] | None): Local paths; same limits.
-            room_id (str | None): Target room; current by default.
-            target (str | None): Event ID for react/edit.
-            thread_id (str | None): Thread; `"room"` forces room scope.
-            ignore_mentions (bool): `True` except intentional dispatch.
-            message_extras (list[dict[str, object]] | None): Collapsible sections.
-            limit (int | None): 1-50; default 20.
-            page_token (str | None): Next threads page.
+            action: Action.
+            message: Text/edit body or reaction emoji.
+            attachment_ids: `att_*` IDs; writes only, combined max 5.
+            attachment_file_paths: Local paths; same limits.
+            room_id: Target room; current by default.
+            target: Event ID for react/edit.
+            thread_id: Thread; `"room"` forces room scope.
+            ignore_mentions: `True` except intentional dispatch.
+            message_extras: Collapsible sections.
+            limit: 1-50; default 20.
+            page_token: Next threads page.
 
         """
         context = get_tool_runtime_context()

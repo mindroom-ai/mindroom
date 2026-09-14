@@ -10,8 +10,7 @@ Use these tools when you need OAuth recovery, multi-agent coordination, reusable
 ## Tools On This Page
 
 - [`oauth_connections`] - Issue a browser-confirmed reset for one authorized OAuth connection.
-- [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
-- [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
+- [`delegate`] - Run a configured agent as a fresh subagent and wait for its answer.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
 - [`report_publishing`] - Publish authorized report artifacts through revocable public links.
 - [`config_manager`] - Inspect and patch the full MindRoom configuration, and create, update, validate, or template agents and teams.
@@ -22,14 +21,13 @@ Use these tools when you need OAuth recovery, multi-agent coordination, reusable
 
 ## Common Setup Notes
 
-All ten entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
+All nine entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
 [`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
 `agents.<name>.allow_self_config` or `defaults.allow_self_config` auto-enables [`self_config`].
 [`config_manager`] and [`self_config`] both save changes by revalidating the full runtime config before rewriting `config.yaml`.
-[`subagents`] requires a live Matrix tool runtime context with `room_id`, `requester_id`, Matrix client access, and a writable storage path.
 [`dynamic_workflow`] requires a live tool runtime context, a writable storage path, and a configured agent model.
 [`report_publishing`] requires a live tool runtime context, a writable storage path, and an authorized report source.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
@@ -164,89 +162,47 @@ Compacted shared-agent self-service runs and deleted sessions are unavailable to
 Errors use the same envelope with a stable code.
 Common codes are `authorization_error` and `context_unavailable`.
 
-## [`subagents`]
+## Matrix Conversations
 
-`subagents` creates and tracks Matrix-backed sub-agent sessions that can continue across multiple tool calls.
-
-### What It Does
-
-`subagents` exposes `agents_list()`, `sessions_spawn()`, `sessions_send()`, and `list_sessions()`.
-All four calls return JSON strings with a `status` field, a `tool` field, and operation-specific payload data.
-`agents_list()` returns the current agent name plus `agents`, a sorted array of row objects with `name`, `can_delegate`, `can_spawn`, and `description`.
-`name` is the value to pass as `agent_id` when the relevant capability flag allows that operation.
-`can_spawn` means the agent is eligible in the current room, and `can_delegate` means the agent is listed in the caller's `delegate_to` allowlist.
-`sessions_spawn(task, summary, tag, label=None, agent_id=None)` requires a non-empty task plus a normalized summary and tag.
-`sessions_spawn()` posts a fresh room-level Matrix message that mentions the target agent, then treats the resulting event ID as the root of a new isolated session thread.
-After the spawn succeeds, it writes the requested thread summary and tag through the lower-level thread summary and thread tag APIs.
-If you pass a `label` and the current `(agent_name, room_id, requester_id)` scope already has a matching tracked session, `sessions_spawn()` reuses that session instead of creating a new one and still applies the requested summary and tag to the existing thread.
-If the post-spawn summary or tag write fails, the spawn still succeeds and the response includes a `warnings` list describing the follow-up failure.
-`sessions_send()` sends a follow-up message into an existing tracked session.
-If you omit `session_key`, `sessions_send()` defaults to the current room or thread session key from `create_session_id(room_id, thread_id)`.
-If you pass `label` without `session_key`, `sessions_send()` resolves the most recent in-scope session with that label.
-If you pass `agent_id`, `sessions_send()` prefixes the outgoing message with that agent's current full Matrix ID before sending it.
-Tracked sessions are persisted in `subagents/session_registry.json` under the current runtime storage root.
-`list_sessions()` paginates those tracked sessions with a default `limit` of 50 and a maximum of 200.
-Isolated spawned sessions require thread-capable agents.
-If the target agent uses `thread_mode=room`, `sessions_spawn()` fails and threaded `sessions_send()` calls to that session also fail.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
-
-```yaml
-agents:
-  coordinator:
-    display_name: Coordinator
-    role: Break work into long-running threaded sub-sessions
-    model: sonnet
-    tools:
-      - subagents
-```
-
-```python
-agents_list()
-sessions_spawn(
-    task="Review the failing deployment and propose a rollback plan.",
-    summary="Investigate the failing deployment and propose a safe rollback plan.",
-    tag="incident-rollback",
-    label="incident-42",
-    agent_id="ops",
-)
-sessions_send(
-    message="Add a short list of commands we should run first.",
-    label="incident-42",
-)
-list_sessions(limit=20)
-```
-
-### Notes
-
-- Session tracking is scoped to the current `agent_name`, `room_id`, and `requester_id`, so labels are not global across unrelated conversations.
-- `sessions_spawn()` returns normalized `summary` and `tag` values in the success payload and may include `warnings` if the follow-up summary or tag write fails after the session is created.
-- Use [`subagents`] when you want a continuing Matrix thread that other agents or humans can revisit later.
-- Use [`delegate`] instead when you want a one-shot specialist answer returned directly as the tool result.
+Use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to start and continue conversations with agents in Matrix.
+Enable `matrix_message` on the caller; it also enables `matrix_room` for discovering available agents and their exact mention IDs.
+`matrix_room(action="agents")` lists agents eligible to answer this requester in the selected room, including the caller when eligible.
+Send a room-level message mentioning the target's `matrix_user_id` with `ignore_mentions=False` to start a conversation.
+The returned `event_id` is the conversation root: keep it as `thread_id` for later reads and replies.
+Thread-mode agents reply in that thread; room-mode agents reply in the room timeline.
+Messages return immediately and the conversation remains visible in Matrix.
+Use `run_subagent` below when you need a fresh child's result before continuing.
 
 ## [`delegate`]
 
-`delegate` runs another configured agent as a fresh one-shot specialist and returns that agent's response inline.
+`delegate` exposes `run_subagent` to run a configured agent with fresh conversation context and return its response inline.
 
 ### What It Does
 
-`delegate` exposes one tool call, `delegate_task(agent_name, task)`.
+`delegate` exposes one tool call, `run_subagent(agent_name, task)`.
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
-The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result.
+Fresh execution still uses the target agent's configured workspace, memory, requester scope, model, and tool policy.
+The caller waits for the child to finish and receives its answer plus an audit reference.
+Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
+Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
 MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background.
 Interactive questions are disabled for delegated runs.
-Unlike [`subagents`], [`delegate`] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle.
+`run_subagent` does not create a Matrix conversation thread.
+If a delegated Matrix run requests approval, MindRoom posts the native approval request to the source room and thread while durably retaining the paused parent-child continuation.
+Detached OpenAI-compatible runs retain their existing restriction on approval-gated and room-context tools.
 If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string.
 Empty tasks are rejected.
+
+Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
+The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
+Sensitive fields are redacted, and oversized output is retained through referenced artifacts.
+The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
+Completed task results include a reference to the child's record.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
-Enable it by setting `delegate_to` on the agent config.
+Enable it by setting `delegate_to` on the agent config (the dashboard calls this **Allowed subagents**).
 MindRoom adds the tool automatically when `delegate_to` is non-empty, so listing `delegate` in `tools:` is usually unnecessary.
 
 ### Example
@@ -258,6 +214,7 @@ agents:
     role: Coordinate specialist agents
     model: sonnet
     delegate_to:
+      - lead
       - code
       - research
 
@@ -278,17 +235,18 @@ agents:
 ```
 
 ```python
-delegate_task(
+run_subagent(
     agent_name="research",
-    task="Summarize the three main risks in this proposal and cite supporting facts.",
+    task="Compare SQLite and PostgreSQL for a single-host task queue with 20 concurrent writers. Return three risks and cite sources.",
 )
 ```
 
 ### Notes
 
-- `Config.validate_delegate_to()` rejects self-delegation and unknown target agents at config-load time.
+- `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
 - Recursive delegation is supported, but only up to a maximum depth of 3.
-- Use [`subagents`] when you need an ongoing threaded workflow.
+- Each parent runs one child at a time.
+- Use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) when you need an ongoing conversation.
 - Use [`delegate`] when you need a synchronous specialist answer inside the current run.
 
 ## [`dynamic_workflow`]
@@ -412,7 +370,7 @@ agents:
 Use `allowed_tools: ["*"]` to make every granted non-system-mutating tool eligible.
 Tools outside `allowed_tools` are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
 Operator-authored approval rules retain precedence, so a matching `require_approval` rule still makes that function unavailable.
-System-mutating tools (`claude_agent`, `config_manager`, `scheduler`, and `subagents`) are always unavailable to embedded participants.
+System-mutating tools (`claude_agent`, `config_manager`, `scheduler`) are always unavailable to embedded participants.
 
 ### Notes
 
@@ -546,7 +504,7 @@ manage_agent(
     agent_name="triage",
     display_name="Triage",
     role="Sort incoming requests and hand them to the right specialist.",
-    tools=["duckduckgo", "subagents"],
+    tools=["duckduckgo", "matrix_message"],
     model="default",
     rooms=["lobby"],
 )
@@ -610,7 +568,7 @@ update_own_config(
         "Cite sources for factual claims.",
         "Prefer concise summaries with clear takeaways.",
     ],
-    tools=["duckduckgo", "wikipedia", "subagents"],
+    tools=["duckduckgo", "wikipedia", "matrix_message"],
     thread_mode="room",
     context_files=["SOUL.md", "USER.md"],
 )
@@ -630,7 +588,7 @@ update_own_config(
 
 `openclaw_compat` is not a runtime toolkit.
 The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
-`Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+`Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `matrix_message`.
 `matrix_message` then implies `attachments` and `matrix_room`, so the effective enabled set includes both companion toolkits even though the preset does not list them directly.
 Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
 This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.

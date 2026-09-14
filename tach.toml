@@ -371,6 +371,8 @@ depends_on = [
     "mindroom.timing",
     "mindroom.tool_system.events",
     "mindroom.user_turn_time",
+    "mindroom.delegation_execution",
+    "mindroom.delegation_audit",
 ]
 
 [[modules]]
@@ -396,12 +398,15 @@ depends_on = [
     "mindroom.dynamic_tool_continuation",
     "mindroom.logging_config",
     "mindroom.streaming",
+    "mindroom.delegation_state",
 ]
 visibility = [
     "mindroom.ai",
     "mindroom.approval_execution",
     "mindroom.response_runner",
     "mindroom.teams",
+    "mindroom.custom_tools.delegate",
+    "mindroom.delegation_execution",
 ]
 
 [[modules]]
@@ -484,7 +489,7 @@ depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.agents",
     "mindroom.custom_tools.delegate",
-    "mindroom.custom_tools.subagents",
+    "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.routing",
 ]
 
@@ -532,6 +537,7 @@ visibility = [
     "mindroom.response_lifecycle",
     "mindroom.teams",
     "mindroom.turn_store",
+    "mindroom.delegation_execution",
 ]
 
 [[modules]]
@@ -746,6 +752,7 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.delegation_execution",
 ]
 visibility = ["mindroom.response_runner"]
 
@@ -756,11 +763,13 @@ visibility = [
     "mindroom.approval_execution",
     "mindroom.response_runner",
     "mindroom.teams",
+    "mindroom.delegation_execution",
 ]
 
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
+    "mindroom.delegation_execution",
     "mindroom.approval_failure",
     "mindroom.approval_manager",
     "mindroom.constants",
@@ -806,6 +815,7 @@ visibility = [
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestrator",
     "mindroom.tool_system.tool_hooks",
+    "mindroom.delegation_execution",
 ]
 
 [[modules]]
@@ -936,6 +946,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.delegation_audit",
+    "mindroom.delegation_state",
+    "mindroom.delegation_records",
     "mindroom.knowledge.utils",
     "mindroom.agent_run_context",
     "mindroom.agent_descriptions",
@@ -945,6 +958,7 @@ depends_on = [
     "mindroom.logging_config",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.response_turn",
 ]
 
 [[modules]]
@@ -1506,6 +1520,7 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_room"
 depends_on = [
+    "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.matrix.room_history_reads",
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.matrix.client_visible_messages",
@@ -1538,16 +1553,12 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.custom_tools.subagents"
+path = "mindroom.custom_tools.matrix_agent_discovery"
 depends_on = [
     "mindroom.agent_descriptions",
     "mindroom.authorization",
-    "mindroom.constants",
     "mindroom.entity_resolution",
-    "mindroom.matrix.client_delivery",
     "mindroom.responder_availability",
-    "mindroom.thread_tags",
-    "mindroom.thread_summary",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -1916,6 +1927,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.delegation_execution",
     "mindroom.approval_manager",
     "mindroom.approval_recovery",
     "mindroom.matrix.room_reconciliation",
@@ -2066,7 +2078,7 @@ depends_on = [
     "mindroom.teams",
 ]
 visibility = [
-    "mindroom.custom_tools.subagents",
+    "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.turn_policy",
 ]
 
@@ -2110,6 +2122,7 @@ depends_on = [
     "mindroom.response_turn",
     "mindroom.team_exact_members",
     "mindroom.tool_system.events",
+    "mindroom.delegation_execution",
 ]
 visibility = [
     "mindroom.api.openai_compat",
@@ -2523,7 +2536,6 @@ visibility = [
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
-    "mindroom.custom_tools.subagents",
     "mindroom.delivery_gateway",
     "mindroom.hooks.sender",
     "mindroom.matrix.client",
@@ -5602,3 +5614,45 @@ visibility = ["mindroom.approval_recovery", "mindroom.approval_response"]
 path = "mindroom.approval_recovery"
 depends_on = ["mindroom.approval_failure", "mindroom.event_journal", "mindroom.logging_config"]
 visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.delegation_execution"
+depends_on = [
+    "mindroom.delegation_storage",
+    "mindroom.agent_storage",
+    "mindroom.agents",
+    "mindroom.custom_tools.delegate",
+    "mindroom.delegation_state",
+    "mindroom.history.runtime",
+    "mindroom.history.types",
+    "mindroom.knowledge.utils",
+    "mindroom.response_turn",
+    "mindroom.tool_approval",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.approval_receipt",
+    "mindroom.delegation_audit",
+]
+
+[[modules]]
+path = "mindroom.delegation_state"
+depends_on = []
+
+[[modules]]
+path = "mindroom.delegation_records"
+depends_on = [
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.delegation_audit"
+depends_on = [
+    "mindroom.delegation_records",
+    "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.delegation_storage"
+depends_on = ["mindroom.config.agent"]
+visibility = ["mindroom.delegation_execution"]

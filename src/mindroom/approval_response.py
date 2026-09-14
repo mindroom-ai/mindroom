@@ -17,6 +17,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
+from mindroom.delegation_execution import cancel_approval_delegations
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
@@ -131,7 +132,7 @@ def identify_approval_tools(
                 tool,
                 tool.tool_call_id,
                 tool.tool_name,
-                owners.get(tool.tool_call_id) or default_agent_name,
+                paused.approval_agent_name or owners.get(tool.tool_call_id) or default_agent_name,
             ),
         )
     return tuple(identified)
@@ -372,6 +373,7 @@ class ApprovalResponseCoordinator:
             response_text=paused.response_text,
             response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
             response_presentation_state=paused.response_presentation_state,
+            delegation_storage_bindings=paused.delegation_storage_bindings,
         )
         if publishing is None:
             msg = "Could not persist the chained approval pause"
@@ -448,6 +450,12 @@ class ApprovalResponseCoordinator:
         )
         if current is None:
             return False
+        await cancel_approval_delegations(
+            current,
+            config=self.config(),
+            runtime_paths=self.runtime_paths,
+            reason=reason,
+        )
         if await self.store.finish_approval_continuation(current.approval_id):
             return True
         visible_reason = visible_text or (_USER_STOP_VISIBLE_NOTE if reason == _USER_STOP_FAILURE_REASON else reason)

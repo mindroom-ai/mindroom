@@ -1225,14 +1225,10 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
         {"type": "object", "properties": {}},
         name="run_workflow",
     )
-    spawn = _function(lambda: "spawn", {"type": "object", "properties": {}}, name="sessions_spawn")
-    send = _function(lambda: "send", {"type": "object", "properties": {}}, name="sessions_send")
     assert tool_filter(safe) is True
     assert tool_filter(confirm) is False
     assert tool_filter(policy) is False
     assert tool_filter(workflow) is False
-    assert tool_filter(spawn) is False
-    assert tool_filter(send) is False
     assert contexts[0].tool_function_filter is None
     assert tooling.close is not None
     await tooling.close()

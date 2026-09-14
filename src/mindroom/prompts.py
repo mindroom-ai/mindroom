@@ -504,10 +504,21 @@ DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS = (
     "A tool loaded with load_tool() becomes callable once it appears in your available tools, and "
     "unload_tool() removes one. Do not call a newly loaded tool in the same parallel tool-call batch as load_tool()."
 )
-DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can delegate tasks to the following agents:
+DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
 {agent_descriptions}
 
-Use delegate_task to send a task to one of these agents. The agent will execute the task independently and return its response."""
+Use run_subagent(agent_name, task) for a bounded subtask whose result you need before continuing.
+The caller waits for the child to finish; this is not background work.
+The child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.
+It retains its configured tools, workspace, and memory.
+If your own agent name is listed, you can run a fresh copy of yourself.
+Delegation is limited to three nested child levels.
+For an ongoing conversation, use matrix_message to send a message mentioning an agent with ignore_mentions=False.
+In Matrix, child tools that require approval pause both runs until the user approves or denies them.
+Other runtimes retain their approval restrictions.
+The result includes the child's answer and a child-agent-scoped audit reference.
+Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json, events.jsonl, and transcript.md.
+Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 
 
 PROMPT_TEMPLATE_FIELDS = MappingProxyType(

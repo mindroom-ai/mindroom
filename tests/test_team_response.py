@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import tempfile
 from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -66,7 +67,12 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    apply_exact_approval_decisions,
+)
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -841,11 +847,13 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
 
 
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
+@pytest.mark.parametrize("delegated", [False, True])
 @pytest.mark.asyncio
-async def test_team_continuation_executes_real_agno_confirmation(
+async def test_team_continuation_executes_real_agno_confirmation(  # noqa: PLR0915
     tmp_path: Path,
     approved: bool,
     reason: str | None,
+    delegated: bool,
 ) -> None:
     """Exercise the real persisted Agno team pause and continuation spine."""
     executed: list[list[str]] = []
@@ -927,6 +935,39 @@ async def test_team_continuation_executes_real_agno_confirmation(
     storage_factory = MagicMock()
     scope_context = SimpleNamespace(storage=None, storage_factory=storage_factory)
 
+    async def drive_resumed(
+        entity: object,
+        events: AsyncIterator[object],
+        **kwargs: object,
+    ) -> AsyncIterator[object]:
+        """Model the child-to-parent decision mapping at the delegation boundary."""
+        assert entity is team
+        if not delegated:
+            assert kwargs["decisions"] is None
+            async for event in events:
+                yield event
+            return
+        assert kwargs["decisions"] == {"child-call": approved}
+        assert kwargs["denial_reasons"] == {"child-call": reason}
+        async for retained in events:
+            assert isinstance(retained, TeamRunOutput)
+            requirements = apply_exact_approval_decisions(
+                deepcopy(retained.requirements or []),
+                decisions={tool_call_id: approved},
+                denial_reasons={tool_call_id: reason},
+            )
+            async for event in team.acontinue_run(
+                run_response=retained,
+                requirements=requirements,
+                session_id="session-1",
+                user_id="@user:localhost",
+                metadata=deepcopy(retained.metadata),
+                stream=True,
+                stream_events=True,
+                yield_run_output=True,
+            ):
+                yield event
+
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
         patch(
@@ -937,6 +978,8 @@ async def test_team_continuation_executes_real_agno_confirmation(
         patch.object(team, "acontinue_run", new=continue_run),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
         patch("mindroom.teams.ai_runtime.register_queued_notice_storage") as register_notice,
+        patch("mindroom.teams.has_delegation_state", return_value=delegated, create=True),
+        patch("mindroom.teams.drive_delegation_stream", new=drive_resumed),
         approval_receipt_context("trusted approval receipt"),
     ):
         result = await continue_paused_team_run(
@@ -950,8 +993,8 @@ async def test_team_continuation_executes_real_agno_confirmation(
             user_id="@user:localhost",
             configured_team_name="research",
             model_name="default",
-            decisions={tool_call_id: approved},
-            denial_reasons={tool_call_id: reason},
+            decisions={"child-call" if delegated else tool_call_id: approved},
+            denial_reasons={"child-call" if delegated else tool_call_id: reason},
             refresh_scheduler=None,
             history_scope=persisted_scope,
             prior_response_text=prior.render_body(),
@@ -2709,7 +2752,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -2781,7 +2824,7 @@ async def test_team_response_stream_drains_confirmation_pause_before_handoff() -
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -2973,14 +3016,14 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
         )
         yield TeamToolCallStartedEvent(
             tool=ToolExecution(
-                tool_name="delegate_task",
+                tool_name="run_subagent",
                 tool_args={"agent": "general"},
                 tool_call_id="team-call-1",
             ),
         )
         yield TeamToolCallCompletedEvent(
             tool=ToolExecution(
-                tool_name="delegate_task",
+                tool_name="run_subagent",
                 tool_args={"agent": "general"},
                 tool_call_id="team-call-1",
                 result="delegated",
@@ -3074,7 +3117,7 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
                 "team_name": "Team (GeneralAgent)",
                 "tool_scope": "team",
                 "agent_name": None,
-                "tool_name": "delegate_task",
+                "tool_name": "run_subagent",
                 "tool_call_id": "team-call-1",
                 "show_tool_calls": True,
             },
@@ -3086,7 +3129,7 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
                 "team_name": "Team (GeneralAgent)",
                 "tool_scope": "team",
                 "agent_name": None,
-                "tool_name": "delegate_task",
+                "tool_name": "run_subagent",
                 "tool_call_id": "team-call-1",
                 "show_tool_calls": True,
             },
@@ -3382,7 +3425,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3506,7 +3549,7 @@ async def test_team_response_stream_keys_canonical_text_by_provider_member_id() 
     orchestrator.agent_bots = {"Code_Review": MagicMock(running=True)}
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["Code_Review"],
-        agents=[],
+        agents=[_make_test_agent("Code Review")],
         display_names=["Code Review"],
         materialized_agent_names={"Code_Review"},
         failed_agent_names=[],
@@ -3584,7 +3627,7 @@ async def test_team_response_stream_emits_plain_run_output_fallback_with_team_fo
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3649,7 +3692,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3702,7 +3745,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3758,7 +3801,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],

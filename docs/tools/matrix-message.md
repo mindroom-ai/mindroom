@@ -43,6 +43,35 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 - `thread_id="room"` is a sentinel meaning "force room-level scope and do not inherit the current thread."
   Use it when you want the room timeline instead of the active thread.
 
+## Agent conversations
+
+`matrix_message` is sufficient to start and continue Matrix conversations with other agents or yourself.
+Discover available targets with `matrix_room(action="agents")`, which is automatically enabled alongside `matrix_message`.
+Use the returned `matrix_user_id` to mention the agent and deliberately enable dispatch with `ignore_mentions=False`.
+
+```python
+matrix_room(action="agents")
+matrix_message(
+    action="send",
+    message="@ops:example.org Investigate the failed deployment and propose a rollback plan.",
+    ignore_mentions=False,
+)
+# Keep the event_id returned above as the new conversation's thread_id.
+matrix_message(action="read", thread_id="$returned-root")
+matrix_message(
+    action="reply",
+    thread_id="$returned-root",
+    message="@ops:example.org Include the first three commands to run.",
+    ignore_mentions=False,
+)
+```
+
+Sending returns immediately; it does not wait for the agent's answer.
+A target with `thread_mode="thread"` answers in the new thread; one with `thread_mode="room"` answers in the room timeline.
+Use `matrix_message(action="room-threads")` to discover existing threads, and keep the new root ID because a thread may not appear in that list until it has a reply.
+Existing thread-summary and thread-tag tools can label and organize these conversations.
+For a fresh subagent whose result you need before continuing, use [run_subagent](agent-orchestration.md#delegate).
+
 ## Mention handling with `ignore_mentions`
 
 - This flag only affects text sends for `send`, `reply`, and `thread-reply`.

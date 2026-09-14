@@ -14,7 +14,7 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 ## Tools On This Page
 
 - [`matrix_message`] - Send, reply, react, read, list room threads, edit, or inspect Matrix conversation context.
-- [`matrix_room`] - Inspect Matrix room metadata, members, thread roots, and room state.
+- [`matrix_room`] - Inspect Matrix room metadata, available agents, members, thread roots, and room state.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen Matrix threads in the current room.
@@ -93,9 +93,13 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ### What It Does
 
-The supported actions are `room-info`, `members`, `threads`, and `state`.
+The supported actions are `room-info`, `members`, `agents`, `threads`, and `state`.
 `room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, canonical alias, version, guest access, creator, and a power-level summary.
 `members` returns joined users with display names, avatar URLs, and power levels.
+`agents` returns the agents currently eligible to answer this requester in the selected room as a sorted `agents` array with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`).
+It includes the caller when eligible and applies current authorization, configured room scope, and live responder availability.
+These are conversation targets; the separate `run_subagent` tool describes the caller's allowed subagents.
+Use each returned `matrix_user_id` in [matrix_message](matrix-message.md#agent-conversations) to address that agent.
 `threads` returns paginated thread-root previews with sender, timestamp, and reply count; it defaults `limit` to 20, clamps it from 1 through 50, and returns `next_token` plus `has_more` for pagination.
 `state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
 Without `event_type`, `state` returns a room-state summary with at most 100 non-member event previews and elides `m.room.member` events.
@@ -120,6 +124,7 @@ agents:
 ```python
 matrix_room(action="room-info")
 matrix_room(action="members")
+matrix_room(action="agents")
 matrix_room(action="threads", limit=10)
 matrix_room(action="threads", page_token="next-page-token")
 matrix_room(action="state", event_type="m.room.topic")

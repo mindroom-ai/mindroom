@@ -90,7 +90,7 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 )
 
 _MAX_TOOL_RESULT_CHARS = 8000
-_CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow", "sessions_send", "sessions_spawn"})
+_CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
 
 
 @dataclass(frozen=True)
