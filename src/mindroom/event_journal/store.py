@@ -785,15 +785,23 @@ class PrincipalStore:
         sending_device_id: str | None = None,
     ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return the row as it stood."""
-        return await self._backend.write(
-            lambda transaction: outbox.claim(
+
+        def claim(transaction: Transaction) -> MatrixDelivery | None:
+            if stage is DeliveryStage.FINAL and approval_continuations.retire_superseded_failure_for_source(
+                transaction,
+                self._principal_id,
+                event_id=delivery_id,
+            ):
+                return None
+            return outbox.claim(
                 transaction,
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
                 sending_device_id=sending_device_id,
-            ),
-        )
+            )
+
+        return await self._backend.write(claim)
 
     async def record_matrix_delivery_device(
         self,
@@ -1379,6 +1387,26 @@ class PrincipalStore:
                 transaction,
                 self._principal_id,
                 approval_id=approval_id,
+            ),
+        )
+
+    async def edited_approval_sources_for_user_stop(
+        self,
+        *,
+        room_id: str,
+        response_event_id: str,
+        source_event_id: str,
+        stop_receipt_order: int,
+    ) -> tuple[str, ...]:
+        """Resolve edit-owned approvals and finished FINALs within one STOP cutoff."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.edited_sources_for_user_stop(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                response_event_id=response_event_id,
+                source_event_id=source_event_id,
+                stop_receipt_order=stop_receipt_order,
             ),
         )
 

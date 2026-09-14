@@ -19,7 +19,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
-from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps
+from mindroom.edit_regenerator import EditRegenerator, EditRegeneratorDeps, _Edit, _Mailbox
 from mindroom.event_journal import (
     DeliveryStage,
     EventClass,
@@ -574,6 +574,94 @@ async def test_concurrent_coalesced_sibling_edits_are_both_retained(tmp_path: Pa
         second_event_id: (1_000_020, "$edit-second:example.org"),
     }
     assert harness.regenerator._mailboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_coalesced_approval_owns_only_active_edit_revisions(tmp_path: Path) -> None:
+    """A pause owns every selected revision, excluding originals and suppressed siblings."""
+    sources = ("$first", "$second", "$third")
+    record = _turn_record(
+        source_event_ids=sources,
+        source_event_prompts=dict.fromkeys(sources, "original"),
+        source_event_metadata=_source_metadata(*sources),
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    metadata = TurnRecordCodec.to_run_metadata(record)
+    harness.turn_store.build_run_metadata.return_value = metadata
+    mailbox = _Mailbox()
+    for ordinal, source in enumerate(sources, start=1):
+        revision_id = f"$edit-{ordinal}"
+        mailbox.pending[source] = _Edit(
+            original_event_id=source,
+            body=f"edited {ordinal}",
+            context=harness.context,
+            envelope=replace(
+                request_envelope(
+                    room_id=ROOM_ID,
+                    reply_to_event_id=source,
+                    thread_id=THREAD_ID,
+                    user_id=USER_ID,
+                    agent_name=AGENT_NAME,
+                    source_kind=EDIT_SOURCE_KIND,
+                ),
+                source_event_id=revision_id,
+            ),
+            revision=(1_000_000 + ordinal, revision_id),
+            receipt_order=ordinal,
+            suppressed=ordinal == 3,
+        )
+
+    request, prepared, _applied = await harness.regenerator._build_request(harness.room, mailbox)
+
+    assert request is not None
+    assert prepared is not None
+    assert request.journal_source_event_ids == ("$edit-2", "$edit-1")
+    assert request.matrix_run_metadata == metadata
+    assert prepared.source_event_ids == sources
+
+
+@pytest.mark.asyncio
+async def test_coalesced_approval_handoff_defers_each_waiting_participant(tmp_path: Path) -> None:
+    """The drainer and its queued sibling both retain their revision for the same pause."""
+    sources = ("$first", "$second")
+    record = _turn_record(
+        source_event_ids=sources,
+        source_event_prompts=dict.fromkeys(sources, "original"),
+        source_event_metadata=_source_metadata(*sources),
+    )
+    harness = _harness(tmp_path, turn_record=record)
+    mailbox = _Mailbox()
+    harness.regenerator._mailboxes[(ROOM_ID, record.anchor_event_id, USER_ID)] = mailbox
+    await mailbox.lock.acquire()
+    both_entered = asyncio.Event()
+    hooks = 0
+    owned_sources: list[tuple[str, ...]] = []
+
+    async def ingress_hook(**_kwargs: object) -> bool:
+        nonlocal hooks
+        hooks += 1
+        if hooks == 2:
+            both_entered.set()
+        return False
+
+    async def suspend(request: ResponseRequest) -> str:
+        owned_sources.append(request.journal_source_event_ids)
+        assert request.source_handoff is not None
+        request.source_handoff.set()
+        return RESPONSE_EVENT_ID
+
+    harness.ingress_hook_runner.emit_message_received_hooks.side_effect = ingress_hook
+    harness.regenerator.deps = replace(harness.regenerator.deps, generate_response=suspend)
+    tasks = []
+    for index, source in enumerate(sources, start=1):
+        event, info = _edit_event(original_event_id=source, event_id=f"$edit-{index}", server_timestamp=index)
+        tasks.append(asyncio.create_task(harness.regenerator.handle_message_edit(harness.room, event, info, USER_ID)))
+    try:
+        await asyncio.wait_for(both_entered.wait(), timeout=5)
+    finally:
+        mailbox.lock.release()
+    assert await asyncio.gather(*tasks) == [True, True]
+    assert owned_sources == [("$edit-2", "$edit-1")]
 
 
 @pytest.mark.asyncio

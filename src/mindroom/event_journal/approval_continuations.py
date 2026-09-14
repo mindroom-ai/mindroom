@@ -1,4 +1,4 @@
-"""Paused Agno runs owned by their original event-journal sources."""
+"""Paused Agno runs owned by their exact pending journal events."""
 
 from __future__ import annotations
 
@@ -8,16 +8,19 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import journal, membership_state, outbox
+from . import journal, membership_state, outbox, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
+
+    from mindroom.turn_record import TurnRecord
 
     from .backend import Row, Transaction
 
@@ -172,6 +175,7 @@ class ApprovalContinuation:
     runtime_generation: str | None = None
     failure_reason: str | None = None
     generation: int = 0
+    prepared_edit_record: TurnRecord | None = None
 
 
 def _context(continuation: ApprovalContinuation) -> dict[str, object]:
@@ -209,6 +213,11 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
             {"sender": turn.sender, "body": turn.body} for turn in continuation.memory_thread_history
         ],
         "thread_summary_message_count_hint": continuation.thread_summary_message_count_hint,
+        "prepared_edit_record": (
+            TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
+            if continuation.prepared_edit_record is not None
+            else None
+        ),
     }
 
 
@@ -266,6 +275,7 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
+    prepared_edit = stored.get("prepared_edit_record")
     calls = tuple(
         ApprovalCall(
             tool_call_id=str(call["tool_call_id"]),
@@ -335,6 +345,12 @@ def _from_rows(
         runtime_generation=cast("str | None", row["runtime_generation"]),
         failure_reason=cast("str | None", row["failure_reason"]),
         generation=int(row["generation"]),
+        prepared_edit_record=TurnRecordCodec._from_ledger_record(
+            str(prepared_edit.get("anchor_event_id")),
+            prepared_edit,
+        )
+        if isinstance(prepared_edit, dict)
+        else None,
     )
 
 
@@ -485,6 +501,71 @@ def for_entities(
         (*ordered_names, *cursor_params, limit),
     )
     return _load_owners(transaction, rows)
+
+
+def edited_sources_for_user_stop(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    response_event_id: str,
+    source_event_id: str,
+    stop_receipt_order: int,
+) -> tuple[str, ...]:
+    """Find exact edited approval owners before STOP, including already-finished FINALs."""
+    rows = transaction.fetchall(
+        """
+        SELECT continuations.* FROM approval_continuations AS continuations
+        JOIN approval_continuation_sources AS sources
+          ON sources.principal_id = continuations.principal_id
+         AND sources.approval_id = continuations.approval_id AND sources.source_ordinal = 0
+        JOIN journal_events AS events
+          ON events.principal_id = sources.principal_id AND events.event_id = sources.event_id
+        WHERE continuations.principal_id = ? AND events.room_id = ? AND events.receipt_order <= ?
+        ORDER BY events.receipt_order
+        """,
+        (principal_id, room_id, stop_receipt_order),
+    )
+    source_ids = [
+        continuation.source_event_ids[0]
+        for _, continuation in _load_owners(transaction, rows)
+        if continuation.room_id == room_id
+        and continuation.response_event_id == response_event_id
+        and (prepared := continuation.prepared_edit_record) is not None
+        and source_event_id in prepared.indexed_event_ids
+        and prepared.latest_edit_receipt_order is not None
+        and prepared.latest_edit_receipt_order <= stop_receipt_order
+    ]
+    finals = transaction.fetchall(
+        """
+        SELECT delivery.delivery_id, delivery.result_json FROM matrix_delivery_outbox AS delivery
+        JOIN journal_events AS events
+          ON events.principal_id = delivery.principal_id AND events.event_id = delivery.delivery_id
+        WHERE delivery.principal_id = ? AND delivery.room_id = ?
+          AND delivery.stage = 'final' AND delivery.edits_event_id = ?
+          AND delivery.acknowledged_event_id IS NOT NULL AND delivery.result_json IS NOT NULL
+          AND events.receipt_order <= ?
+        ORDER BY events.receipt_order
+        """,
+        (principal_id, room_id, response_event_id, stop_receipt_order),
+    )
+    for final, prepared in _prepared_delivery_snapshots(finals, source_event_id):
+        if (
+            source_event_id in prepared.indexed_event_ids
+            and prepared.latest_edit_receipt_order is not None
+            and prepared.latest_edit_receipt_order <= stop_receipt_order
+        ):
+            source_ids.append(str(final["delivery_id"]))
+    return tuple(dict.fromkeys(source_ids))
+
+
+def _prepared_delivery_snapshots(rows: tuple[Row, ...], source_event_id: str) -> Iterator[tuple[Row, TurnRecord]]:
+    """Yield persisted edit snapshots decoded at the caller's exact source index."""
+    for row in rows:
+        result = json.loads(str(row["result_json"]))
+        prepared = TurnRecordCodec._from_ledger_record(source_event_id, result.get("prepared_edit_record"))
+        if prepared is not None:
+            yield row, prepared
 
 
 def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple[str, ApprovalContinuation], ...]:
@@ -750,13 +831,148 @@ def finish(
         """,
         (principal_id, continuation.source_event_ids[0], DeliveryStage.FINAL.value),
     )
-    if delivered is None and not deleted_delivery_is_terminal(transaction, principal_id, continuation):
+    if (
+        delivered is None
+        and not deleted_delivery_is_terminal(transaction, principal_id, continuation)
+        and not _settle_superseded_failure_delivery(transaction, principal_id, continuation)
+    ):
         return False
     journal.settle_many(transaction, principal_id, continuation.source_event_ids)
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
     )
+    return True
+
+
+def retire_superseded_failure_for_source(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    event_id: str,
+) -> bool:
+    """Fence obsolete approval failure debt before a generic outbox retry can send it."""
+    observed = for_source(transaction, principal_id, event_id=event_id)
+    if observed is None or observed.state != "failing" or observed.source_event_ids[0] != event_id:
+        return False
+    continuation = _get_locked(transaction, principal_id, approval_id=observed.approval_id)
+    return continuation is not None and _settle_superseded_failure_delivery(transaction, principal_id, continuation)
+
+
+def _owns_approval_response(record: TurnRecord, continuation: ApprovalContinuation) -> bool:
+    """Match the complete source set and exact visible response owner."""
+    prepared = continuation.prepared_edit_record
+    return (
+        (
+            set(record.source_event_ids) == set(continuation.source_event_ids)
+            if prepared is None
+            else record.source_event_ids == prepared.source_event_ids
+        )
+        and record.response_owner == continuation.entity_name
+        and record.conversation_target is not None
+        and record.conversation_target.room_id == continuation.room_id
+        and record.response_event_id == continuation.response_event_id
+    )
+
+
+def _newer_answer_is_acknowledged(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+    selected_order: int,
+) -> bool:
+    """Prove a later selected edit delivered a result to this same response and membership."""
+    rows = transaction.fetchall(
+        """
+        SELECT delivery.delivery_id, delivery.result_json FROM matrix_delivery_outbox AS delivery
+        JOIN journal_events AS source
+          ON source.principal_id = delivery.principal_id AND source.event_id = ?
+         AND source.room_id = delivery.room_id AND source.membership_epoch = delivery.membership_epoch
+        WHERE delivery.principal_id = ? AND delivery.room_id = ? AND delivery.edits_event_id = ?
+          AND delivery.stage = 'final' AND delivery.acknowledged_event_id IS NOT NULL
+          AND delivery.result_json IS NOT NULL AND delivery.retired = 0
+          AND delivery.permanent_failure_reason IS NULL
+        """,
+        (continuation.source_event_ids[0], principal_id, continuation.room_id, continuation.response_event_id),
+    )
+    source_ids = (
+        continuation.source_event_ids
+        if continuation.prepared_edit_record is None
+        else continuation.prepared_edit_record.source_event_ids
+    )
+    for row, prepared in _prepared_delivery_snapshots(rows, source_ids[0]):
+        if (
+            _owns_approval_response(prepared, continuation)
+            and (prepared.latest_edit_receipt_order or 0) > selected_order
+            and str(row["delivery_id"])
+            in {revision[1] for revision in (prepared.source_event_revisions or {}).values()}
+        ):
+            return True
+    return False
+
+
+def _settle_superseded_failure_delivery(  # noqa: PLR0911
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> bool:
+    """Settle obsolete failures while preserving every result-bearing frozen FINAL."""
+    prepared = continuation.prepared_edit_record
+    if continuation.state != "failing":
+        return False
+    source_ids = continuation.source_event_ids if prepared is None else prepared.source_event_ids
+    if prepared is None:
+        receipt = transaction.fetchone(
+            """
+            SELECT MAX(events.receipt_order) AS receipt_order FROM approval_continuation_sources AS sources
+            JOIN journal_events AS events
+              ON events.principal_id = sources.principal_id AND events.event_id = sources.event_id
+            WHERE sources.principal_id = ? AND sources.approval_id = ?
+            """,
+            (principal_id, continuation.approval_id),
+        )
+        selected_order = None if receipt is None or receipt["receipt_order"] is None else int(receipt["receipt_order"])
+    else:
+        selected_order = prepared.latest_edit_receipt_order
+    if selected_order is None:
+        return False
+    final = outbox.load(
+        transaction,
+        principal_id,
+        delivery_id=continuation.source_event_ids[0],
+        stage=DeliveryStage.FINAL,
+    )
+    if final is not None and (
+        final.result is not None
+        or final.room_id != continuation.room_id
+        or final.edits_event_id != continuation.response_event_id
+    ):
+        return False
+    current = turn_records.load_record(transaction, continuation.entity_name, source_ids[0])
+    if current is None or not _owns_approval_response(current, continuation):
+        return False
+    stopped_before_newer_edit = (
+        continuation.failure_reason == "cancelled_by_user"
+        and selected_order <= (current.user_stop_receipt_order or 0)
+        and (current.latest_edit_receipt_order or 0) > (current.user_stop_receipt_order or 0)
+    )
+    if not stopped_before_newer_edit and not _newer_answer_is_acknowledged(
+        transaction,
+        principal_id,
+        continuation,
+        selected_order,
+    ):
+        return False
+    if final is not None:
+        retired = outbox.retire(
+            transaction,
+            principal_id,
+            delivery_id=final.delivery_id,
+            stage=DeliveryStage.FINAL,
+            room_id=final.room_id,
+            membership_epoch=final.membership_epoch,
+        )
+        return retired is not None and (retired.retired or retired.acknowledged_event_id is not None)
     return True
 
 
