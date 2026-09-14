@@ -134,6 +134,24 @@ Use `restore full history` or `use unlimited history` in an edit to remove a his
 !edit_schedule task42 every weekday at 8am check build status with no history
 ```
 
+## Model Selection
+
+Use the `model` argument on `schedule()` to choose a configured model alias for each run, for example a cheaper model for simple recurring checks.
+The alias must exist under `models:` in `config.yaml`.
+
+```python
+schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
+edit_schedule("task42", "keep the same schedule and task", model="cheap")
+edit_schedule("task42", "keep the same schedule and task", model="")
+```
+
+The override applies only to the scheduled response, including both the coordinator and members of a team.
+It takes precedence over room and thread model settings without changing them for later messages.
+Omitting `model` on creation uses normal model selection; omitting it on an edit preserves the saved choice.
+Pass an empty string on an edit to remove the override and restore normal model selection.
+Schedule confirmations and listings show the selected alias.
+The option controls task execution; parsing the scheduling request still uses the default model.
+
 ## Timezone
 
 Schedules use the timezone from `config.yaml` (defaults to UTC):

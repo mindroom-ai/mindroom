@@ -164,6 +164,7 @@ async def test_schedule_transport_preserves_requester_and_history_metadata(
     """Visible and silent fires retain provenance while choosing their transport."""
     config = _config(tmp_path)
     workflow = _workflow("Reconcile the queue", history_limit=5, silent=silent)
+    workflow.model = "default"
 
     with patch(
         "mindroom.matrix.client_delivery.send_message_outcome",
@@ -181,6 +182,7 @@ async def test_schedule_transport_preserves_requester_and_history_metadata(
     content = mock_send.await_args.args[2]
     assert content[ORIGINAL_SENDER_KEY] == "@user:localhost"
     assert content[SCHEDULED_HISTORY_LIMIT_KEY] == 5
+    assert content["com.mindroom.scheduled_model"] == "default"
     assert content[SOURCE_KIND_KEY] == source_kind
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert mock_send.await_args.kwargs["message_type"] == message_type
