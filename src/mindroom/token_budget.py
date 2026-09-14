@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, cast
 
 import tiktoken
 
@@ -73,6 +73,15 @@ def estimate_compaction_input_tokens(
 def approximate_o200k_tokens(value: str) -> int:
     """Approximate token count with the o200k_base encoding."""
     return len(tiktoken.get_encoding("o200k_base").encode(value, disallowed_special=()))
+
+
+def image_content_for_token_estimation(value: object) -> object:
+    """Remove transport fields only from a typed image block, retaining its shape."""
+    if isinstance(value, dict):
+        block = cast("dict[str, object]", value)
+        if block.get("type") == "input_image":
+            return {key: item for key, item in block.items() if key not in {"image_url", "file_id"}}
+    return value
 
 
 def compute_compaction_input_budget(

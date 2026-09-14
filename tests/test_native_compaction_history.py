@@ -2,23 +2,29 @@
 
 from __future__ import annotations
 
+from base64 import b64encode
 from dataclasses import replace
+from io import BytesIO
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
 from agno.db.sqlite import SqliteDb
+from agno.media import Image
 from agno.metrics import MessageMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.session.summary import SessionSummary
 from agno.team import Team
+from PIL import Image as PillowImage
 
 from mindroom.agent_storage import get_agent_session
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history.native import configure_native_history, restore_native_history
+from mindroom.history.policy import classify_compaction_decision
+from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.runtime import (
     finalize_history_preparation,
     prepare_bound_scope_history,
@@ -30,11 +36,253 @@ from mindroom.history.storage import write_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint
 from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 from tests.conftest import FakeModel, seed_session
 from tests.history_helpers import _agent, _completed_run, _completed_team_run, _make_config, _session, _team_session
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.parametrize("representation", ["bytes", "path", "data_url", "content_block"])
+def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_bytes(
+    tmp_path: Path,
+    representation: str,
+) -> None:
+    """One uncompressed PNG must fit as visual input after a saved summary."""
+    image_file = tmp_path / "image.png"
+    PillowImage.new("RGB", (256, 256), "blue").save(image_file, compress_level=0)
+    image_bytes = image_file.read_bytes()
+    data_url = "data:image/png;base64," + b64encode(image_bytes).decode()
+    if representation == "content_block":
+        message = Message(
+            role="user",
+            content=[
+                {"type": "input_text", "text": "Describe this image."},
+                {"type": "input_image", "image_url": data_url},
+            ],
+        )
+    else:
+        image = {
+            "bytes": Image(content=image_bytes, format="png"),
+            "path": Image(filepath=str(image_file)),
+            "data_url": Image(url=data_url),
+        }[representation]
+        message = Message(role="user", content="Describe this image.", images=[image])
+    session = _session("session", runs=[_completed_run("recent", messages=[message])])
+    session.summary = SessionSummary(summary="Earlier work is complete.")
+    config, _ = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(reserve_tokens=1000, replay_window_tokens=10_000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=20_000)},
+    )
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(model=model),
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    before = session.to_dict()
+    request_before = model._format_messages([message])
+    for _ in range(2):
+        tokens = estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            history_settings=resolved.history_settings,
+            replay_model=model,
+        )
+        decision = classify_compaction_decision(
+            plan=resolved.execution_plan,
+            force_compact_before_next_run=False,
+            current_history_tokens=tokens,
+        )
+        assert decision.mode == "none", (tokens, decision.reason)
+        assert 77 < tokens < 2000
+    assert session.to_dict() == before
+    assert model._format_messages([message]) == request_before
+
+
+def test_responses_image_budget_preserves_visual_cost_and_ignores_png_encoding_size() -> None:
+    """The same pixels cost the same budget across lossless encodings."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra")
+    estimates = []
+    for compression in (0, 9):
+        buffer = BytesIO()
+        PillowImage.new("RGB", (256, 256), "blue").save(buffer, format="PNG", compress_level=compression)
+        estimates.append(
+            model.estimate_portable_replay_tokens(
+                [Message(role="user", content="Describe.", images=[Image(content=buffer.getvalue(), format="png")])],
+            ),
+        )
+    assert estimates[0] == estimates[1]
+    assert 77 <= estimates[0] < 500
+    assert estimates[0] > model.estimate_portable_replay_tokens([Message(role="user", content="Describe.")])
+
+
+def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(tmp_path: Path) -> None:
+    """A checkpoint keeps its opaque budget while new image input uses visual tokens."""
+    config, _ = _make_config(tmp_path)
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    model.configure_native_compaction(threshold=1024)
+    assert model.native_compaction is not None
+    response = ModelResponse(content="Ready")
+    record_native_checkpoint(
+        response,
+        [{"type": "compaction", "id": "cmp", "encrypted_content": "opaque-checkpoint" * 100}],
+        model.native_compaction,
+    )
+    checkpoint = Message(role="assistant", content=response.content, provider_data=response.provider_data)
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(model=model),
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    estimates = []
+    for compression in (0, 9):
+        buffer = BytesIO()
+        PillowImage.new("RGB", (256, 256), "blue").save(buffer, format="PNG", compress_level=compression)
+        tail = Message(
+            role="user",
+            content=[
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode(),
+                },
+            ],
+        )
+        session = _session("session", runs=[_completed_run("recent", messages=[checkpoint, tail])])
+        estimates.append(
+            estimate_prompt_visible_history_tokens(
+                session=session,
+                scope=HistoryScope(kind="agent", scope_id="test_agent"),
+                history_settings=resolved.history_settings,
+                native_route=model.native_compaction.route,
+                replay_model=model,
+            ),
+        )
+    assert estimates[0] == estimates[1]
+    assert 500 < estimates[0] < 2000
+
+
+@pytest.mark.parametrize("image_format", ["PNG", "JPEG", "GIF", "WEBP"])
+@pytest.mark.parametrize("detail", ["low", "high", "original", "auto"])
+def test_responses_image_header_dimensions_keep_nonzero_visual_budget(image_format: str, detail: str) -> None:
+    """Supported image headers all describe the same visual patch area."""
+    buffer = BytesIO()
+    PillowImage.new("RGB", (1024, 1024), "blue").save(buffer, format=image_format)
+    model = MindRoomOpenAIResponses(id="gpt-6-astra")
+    tokens = model.estimate_portable_replay_tokens(
+        [
+            Message(
+                role="user",
+                content="Describe.",
+                images=[Image(content=buffer.getvalue(), format=image_format, detail=detail)],
+            ),
+        ],
+    )
+    visual_tokens = 308 if detail == "low" else 1229
+    assert visual_tokens <= tokens < visual_tokens + 100
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["https://example.test/image.png", "data:image/png;base64,invalid", "data:image/png;base64,aGVsbG8="],
+)
+@pytest.mark.parametrize(
+    ("detail", "visual_tokens"),
+    [("low", 308), ("high", 3000), ("original", 36_000), ("auto", 36_000)],
+)
+def test_responses_unknown_image_dimensions_use_documented_allowance(
+    source: str,
+    detail: str,
+    visual_tokens: int,
+) -> None:
+    """Remote or unreadable images retain cost without fetching or parsing arbitrary text."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra")
+    tokens = model.estimate_portable_replay_tokens(
+        [
+            Message(role="user", content=[{"type": "input_image", "image_url": source, "detail": detail}]),
+        ],
+    )
+    assert visual_tokens <= tokens < visual_tokens + 100
+
+
+@pytest.mark.parametrize(
+    ("model_id", "size", "detail", "visual_tokens"),
+    [
+        ("gpt-6-astra", (2048, 2048), "high", 3000),
+        ("gpt-6-astra", (2048, 2048), "original", 4916),
+        ("gpt-6-astra", (4096, 512), "high", 2458),
+        ("gpt-5.6-sol", (2048, 2048), "auto", 4916),
+        ("gpt-5.5", (2048, 2048), "auto", 4916),
+        ("gpt-5.4", (2048, 2048), "auto", 3000),
+    ],
+)
+def test_responses_image_budget_obeys_documented_patch_bounds(
+    model_id: str,
+    size: tuple[int, int],
+    detail: str,
+    visual_tokens: int,
+) -> None:
+    """Documented patch examples and default detail policies constrain image sizing."""
+    buffer = BytesIO()
+    PillowImage.new("RGB", size, "blue").save(buffer, format="PNG")
+    tokens = MindRoomOpenAIResponses(id=model_id).estimate_portable_replay_tokens(
+        [
+            Message(
+                role="user",
+                content="Describe.",
+                images=[Image(content=buffer.getvalue(), format="png", detail=detail)],
+            ),
+        ],
+    )
+    assert visual_tokens <= tokens < visual_tokens + 100
+
+
+def test_responses_image_file_id_retains_unknown_dimension_allowance() -> None:
+    """An uploaded image has visual cost even without locally available bytes."""
+    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
+        [
+            Message(role="user", content=[{"type": "input_image", "file_id": "file_image", "detail": "high"}]),
+        ],
+    )
+    assert 3000 <= tokens < 3100
+
+
+def test_responses_budget_preserves_literal_data_urls_files_and_tool_arguments() -> None:
+    """Only typed Responses image input is discounted, never similar-looking text."""
+    literal = "data:image/png;base64," + "aGVsbG8=" * 1000
+    messages = [
+        Message(
+            role="user",
+            content=[
+                {"type": "input_text", "text": literal},
+                {"type": "input_file", "filename": "example.txt", "file_data": literal},
+            ],
+        ),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "call_example",
+                    "type": "function",
+                    "function": {
+                        "name": "example",
+                        "arguments": stable_serialize({"type": "input_image", "image_url": literal}),
+                    },
+                },
+            ],
+        ),
+        Message(role="tool", tool_call_id="call_example", content=literal),
+    ]
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    assert model.estimate_portable_replay_tokens(messages) == approximate_o200k_tokens(
+        stable_serialize(model._format_messages(messages)),
+    )
 
 
 @pytest.mark.asyncio

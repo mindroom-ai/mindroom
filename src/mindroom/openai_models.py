@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import math
 import os
+import struct
 from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -13,6 +16,8 @@ from agno.models.llama_cpp import LlamaCpp
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
+from agno.utils.media import get_image_type
+from agno.utils.tokens import _parse_image_dimensions_from_bytes
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
@@ -39,7 +44,7 @@ from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
 )
-from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
+from mindroom.token_budget import approximate_o200k_tokens, image_content_for_token_estimation, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator
@@ -109,6 +114,57 @@ class MindRoomDeepSeek(OpenAIChatProviderCompat, DeepSeek):
 @dataclass
 class MindRoomLlamaCpp(OpenAIChatProviderCompat, LlamaCpp):
     """llama.cpp server model that can replay tool calls from other providers."""
+
+
+def _embedded_image_dimensions(source: object) -> tuple[int, int] | None:
+    """Read known image headers locally, with no URL fetch or pixel decoding."""
+    if not isinstance(source, str) or not source.startswith("data:image/") or ";base64," not in source:
+        return None
+    try:
+        data = base64.b64decode(source.split(",", 1)[1], validate=True)
+        # Agno's higher-level image helper can fetch URLs; use only its header parser.
+        if get_image_type(data) in {"png", "gif", "jpeg", "webp"}:
+            width, height = _parse_image_dimensions_from_bytes(data)
+            if width > 0 and height > 0:
+                return width, height
+    except (ValueError, TypeError, struct.error):
+        pass
+    return None
+
+
+def _responses_image_tokens(block: dict[str, Any], model_id: str) -> int:
+    """Estimate visual patches, never tokenize encoded image transport as text.
+
+    Current patch-model sizing: https://developers.openai.com/api/docs/guides/images-vision
+    Unknown models retain the existing transport estimate until their visual
+    accounting is known. Unknown dimensions use the model/detail image ceiling.
+    """
+    if not model_id.startswith(("gpt-6", "gpt-5.6", "gpt-5.5", "gpt-5.4")):
+        return approximate_o200k_tokens(stable_serialize(block))
+    detail = block.get("detail", "auto")
+    recent = model_id.startswith(("gpt-6", "gpt-5.6"))
+    if detail == "auto":
+        detail = "high" if model_id.startswith("gpt-5.4") else "original"
+    max_dimension, patch_limit = 65_535, 30_000
+    if detail == "low":
+        max_dimension, patch_limit = (2048, 6144) if model_id.startswith("gpt-5.4") else (512, 256)
+    elif detail == "high":
+        max_dimension, patch_limit = (65_535 if model_id.startswith("gpt-6") else 2048), 2500
+    elif not recent:
+        max_dimension, patch_limit = 6000, 10_000
+
+    dimensions = _embedded_image_dimensions(block.get("image_url"))
+    if dimensions is None:
+        return math.ceil(patch_limit * 1.2)
+    width, height = dimensions
+    scale = min(1, max_dimension / max(width, height))
+    patches = math.ceil(math.ceil(width * scale) / 32) * math.ceil(math.ceil(height * scale) / 32)
+    # The resize budget is a conservative upper bound; exact resized coverage
+    # can be slightly smaller. Original detail on recent models is not resized
+    # to the 30,000-patch rejection limit, so do not hide oversized input.
+    if not (recent and detail == "original"):
+        patches = min(patches, patch_limit)
+    return math.ceil(patches * 1.2)
 
 
 def _prepare_response_continuation(
@@ -196,7 +252,22 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         replay_model = copy(self)
         replay_model._portable_replay = True
         replay_model.native_compaction = None
-        return approximate_o200k_tokens(stable_serialize(replay_model._format_messages(messages)))
+        formatted = replay_model._format_messages(messages)
+        estimated_input = []
+        image_tokens = 0
+        for item in formatted:
+            projected = dict(item)
+            for field_name in ("content", "output"):
+                content = item.get(field_name)
+                if isinstance(content, list):
+                    projected[field_name] = [image_content_for_token_estimation(block) for block in content]
+                    image_tokens += sum(
+                        _responses_image_tokens(block, self.id)
+                        for block in content
+                        if isinstance(block, dict) and block.get("type") == "input_image"
+                    )
+            estimated_input.append(projected)
+        return approximate_o200k_tokens(stable_serialize(estimated_input)) + image_tokens
 
     def native_compaction_supported(self) -> bool:
         """Use explicit replay on public Responses and Codex routes."""
