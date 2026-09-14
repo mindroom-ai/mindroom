@@ -43,7 +43,7 @@ def _persist_voice_handler_accounts(config: Config) -> None:
     persist_actual_entity_accounts(config, runtime_paths, password=TEST_VOICE_ACCOUNT_PASSWORD)
 
 
-def _recording_stt_client(response_text: str) -> tuple[Callable[[], httpx.AsyncClient], list[httpx.Request]]:
+def _recording_stt_client(response_text: str) -> tuple[Callable[..., httpx.AsyncClient], list[httpx.Request]]:
     """Return an HTTP client factory and its captured STT requests."""
     requests: list[httpx.Request] = []
     async_client_type = httpx.AsyncClient
@@ -54,8 +54,8 @@ def _recording_stt_client(response_text: str) -> tuple[Callable[[], httpx.AsyncC
 
     transport = httpx.MockTransport(handle_request)
 
-    def client_factory() -> httpx.AsyncClient:
-        return async_client_type(transport=transport)
+    def client_factory(*, timeout: httpx.Timeout) -> httpx.AsyncClient:
+        return async_client_type(transport=transport, timeout=timeout)
 
     return client_factory, requests
 
