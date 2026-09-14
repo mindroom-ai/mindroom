@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict, deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from threading import Lock
 from typing import Any, ClassVar, cast
 
@@ -12,10 +12,11 @@ import nio
 from agno.tools import Toolkit
 from aiohttp import ClientError
 
-from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.custom_tools.attachment_helpers import resolve_requested_room_id, room_access_allowed
 from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import (
     message_preview,
     thread_root_body_preview,
@@ -23,6 +24,8 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,69 @@ class MatrixRoomTools(Toolkit):
             return 0
         count = thread_metadata.get("count")
         return count if isinstance(count, int) and not isinstance(count, bool) else 0
+
+    @staticmethod
+    def _thread_latest_activity_ts(event: nio.Event) -> int | None:
+        unsigned = event.source.get("unsigned", {})
+        if not isinstance(unsigned, dict):
+            return None
+        relations = unsigned.get("m.relations", {})
+        if not isinstance(relations, dict):
+            return None
+        thread_metadata = relations.get("m.thread", {})
+        if not isinstance(thread_metadata, dict):
+            return None
+        latest_event = thread_metadata.get("latest_event")
+        if not isinstance(latest_event, dict):
+            return None
+        latest_activity_ts = latest_event.get("origin_server_ts")
+        if not isinstance(latest_activity_ts, int) or isinstance(latest_activity_ts, bool):
+            return None
+        return latest_activity_ts
+
+    async def _serialize_thread_root(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        event: nio.Event,
+        trusted_sender_ids: frozenset[str],
+    ) -> dict[str, object] | None:
+        event_id = event.event_id
+        sender = event.sender
+        timestamp = event.server_timestamp
+        source = event.source
+        if (
+            not isinstance(event_id, str)
+            or not isinstance(sender, str)
+            or not isinstance(timestamp, int)
+            or isinstance(timestamp, bool)
+            or not isinstance(source, dict)
+        ):
+            logger.warning(
+                "Skipping malformed room thread root",
+                room_id=context.room_id,
+                event_type=type(event).__name__,
+            )
+            return None
+        body_preview = await thread_root_body_preview(
+            event,
+            client=context.client,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            trusted_sender_ids=trusted_sender_ids,
+        )
+
+        payload: dict[str, object] = {
+            "thread_id": event_id,
+            "sender": sender,
+            "timestamp": timestamp,
+            "body_preview": body_preview,
+            "reply_count": self._thread_reply_count(event),
+        }
+        latest_activity_ts = self._thread_latest_activity_ts(event)
+        if latest_activity_ts is not None:
+            payload["latest_activity_ts"] = latest_activity_ts
+        return payload
 
     @classmethod
     def _check_rate_limit(
@@ -255,6 +321,10 @@ class MatrixRoomTools(Toolkit):
             "ok",
             action="room-info",
             room_id=room_id,
+            thread_id=context.resolved_thread_id if room_id == context.room_id else None,
+            reply_to_event_id=context.reply_to_event_id if room_id == context.room_id else None,
+            requester_id=context.requester_id,
+            agent_name=context.agent_name,
             name=cached_room.name,
             topic=cached_room.topic,
             member_count=cached_room.member_count,
@@ -346,24 +416,16 @@ class MatrixRoomTools(Toolkit):
                 message=self._transport_error_message(exc),
             )
 
-        threads_list: list[dict[str, Any]] = []
+        threads_list: list[dict[str, object]] = []
         trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
         for event in thread_roots:
-            thread_info: dict[str, Any] = {
-                "thread_id": event.event_id,
-                "sender": event.sender,
-                "timestamp": event.server_timestamp,
-            }
-            thread_info["body_preview"] = await thread_root_body_preview(
-                event,
-                client=context.client,
-                config=context.config,
-                runtime_paths=context.runtime_paths,
+            thread_info = await self._serialize_thread_root(
+                context,
+                event=event,
                 trusted_sender_ids=trusted_sender_ids,
             )
-            thread_info["reply_count"] = self._thread_reply_count(event)
-
-            threads_list.append(thread_info)
+            if thread_info is not None:
+                threads_list.append(thread_info)
 
         return self._payload(
             "ok",
@@ -463,7 +525,7 @@ class MatrixRoomTools(Toolkit):
             events=state_events,
         )
 
-    async def matrix_room(
+    async def matrix_room(  # noqa: PLR0911
         self,
         action: str = "room-info",
         room_id: str | None = None,
@@ -475,13 +537,13 @@ class MatrixRoomTools(Toolkit):
         """Inspect Matrix room metadata, available agents, members, threads, and state.
 
         Actions:
-        - room-info: Room metadata (name, topic, encryption, member count, power levels, join rule).
+        - room-info: Room metadata and current thread_id, reply_to_event_id, requester_id, and agent_name.
         - members: List joined members with display names and power levels.
         - agents: List agents and teams available to answer this requester in the room, including yourself.
           Each row has name, matrix_user_id, description, and thread_mode (thread or room).
-          To start a conversation, send a matrix_message mentioning matrix_user_id with ignore_mentions=False.
+          To start a conversation, use matrix_message(recipient=name, message="...").
           This lists conversation targets; run_subagent separately lists your allowed subagents.
-        - threads: List thread roots with preview, sender, timestamp, reply count.
+        - threads: List thread roots with preview, sender, timestamp, reply count, and latest activity when available.
           Use page_token from a previous response's next_token to paginate.
         - state: Read room state. If event_type is given, return that specific state event.
           If omitted, return a summary of all state events (m.room.member events are elided).
@@ -492,6 +554,7 @@ class MatrixRoomTools(Toolkit):
         if context is None:
             return self._context_error()
 
+        context = replace(context, config=context.current_config, config_provider=None)
         request = self._normalize_request(
             action=action,
             room_id=room_id,
@@ -509,7 +572,9 @@ class MatrixRoomTools(Toolkit):
                 message="Unsupported action. Use room-info, members, agents, threads, or state.",
             )
 
-        resolved_room_id = request.room_id or context.room_id
+        resolved_room_id, room_error = resolve_requested_room_id(context, request.room_id)
+        if room_error is not None or resolved_room_id is None:
+            return self._payload("error", action=request.action, message=room_error)
         if not room_access_allowed(context, resolved_room_id):
             return self._payload(
                 "error",

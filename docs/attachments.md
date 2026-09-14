@@ -113,7 +113,7 @@ In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in wor
 `attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
 Relative paths resolve from the agent workspace when one is available.
 Relative paths must stay inside the workspace.
-Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
+Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?
 

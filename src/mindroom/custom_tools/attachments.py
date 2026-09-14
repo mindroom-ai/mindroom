@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import mimetypes
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -20,7 +19,6 @@ from mindroom.attachments import (
     load_attachment,
     register_local_attachment,
 )
-from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
 from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
@@ -54,17 +52,6 @@ if TYPE_CHECKING:
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = Path | RuntimeEncryptedMediaAttachment
 _VIEW_MEDIA_MAX_BYTES = 20 * 1024 * 1024
-
-
-@dataclass(frozen=True)
-class _AttachmentSendResult:
-    """Result payload for internal attachment send operations."""
-
-    room_id: str
-    thread_id: str | None
-    attachment_event_ids: list[str]
-    resolved_attachment_ids: list[str]
-    newly_registered_attachment_ids: list[str]
 
 
 def _attachment_tool_payload(status: str, **kwargs: object) -> str:
@@ -412,87 +399,6 @@ async def send_resolved_attachments(
         attachment_event_ids.append(attachment_event_id)
         latest_thread_event_id = attachment_event_id
     return attachment_event_ids, None
-
-
-async def send_context_attachments(
-    context: ToolRuntimeContext,
-    *,
-    attachment_ids: list[str],
-    attachment_file_paths: list[str],
-    room_id: str | None = None,
-    thread_id: str | None = None,
-    require_joined_room: bool = True,
-    inherit_context_thread: bool = True,
-    workspace_root: Path | None = None,
-    known_latest_thread_event_id: str | None = None,
-) -> tuple[_AttachmentSendResult | None, str | None]:
-    """Resolve and send context-scoped attachments to Matrix."""
-    attachments, resolved_attachment_ids, newly_registered_attachment_ids, resolve_error = resolve_send_attachments(
-        context,
-        attachment_ids=attachment_ids,
-        attachment_file_paths=attachment_file_paths,
-        workspace_root=workspace_root,
-    )
-    if resolve_error is not None:
-        return None, resolve_error
-
-    effective_room_id, effective_thread_id, destination_error = _resolve_send_target(
-        context,
-        room_id=room_id,
-        thread_id=thread_id,
-        require_joined_room=require_joined_room,
-        inherit_context_thread=inherit_context_thread,
-    )
-    if destination_error is not None:
-        return (
-            _AttachmentSendResult(
-                room_id=effective_room_id,
-                thread_id=effective_thread_id,
-                attachment_event_ids=[],
-                resolved_attachment_ids=resolved_attachment_ids,
-                newly_registered_attachment_ids=newly_registered_attachment_ids,
-            ),
-            destination_error,
-        )
-
-    attachment_event_ids, send_error = await send_resolved_attachments(
-        context,
-        room_id=effective_room_id,
-        thread_id=effective_thread_id,
-        attachments=attachments,
-        known_latest_thread_event_id=known_latest_thread_event_id,
-    )
-    result = _AttachmentSendResult(
-        room_id=effective_room_id,
-        thread_id=effective_thread_id,
-        attachment_event_ids=attachment_event_ids,
-        resolved_attachment_ids=resolved_attachment_ids,
-        newly_registered_attachment_ids=newly_registered_attachment_ids,
-    )
-    if send_error is not None:
-        return result, send_error
-    return result, None
-
-
-def _resolve_send_target(
-    context: ToolRuntimeContext,
-    *,
-    room_id: str | None,
-    thread_id: str | None,
-    require_joined_room: bool = True,
-    inherit_context_thread: bool = True,
-) -> tuple[str, str | None, str | None]:
-    """Resolve room/thread destination and validate room access for sending."""
-    effective_room_id = room_id or context.room_id
-    if not room_access_allowed(context, effective_room_id):
-        return effective_room_id, None, "Not authorized to access the target room."
-    if require_joined_room and effective_room_id not in context.client.rooms:
-        return effective_room_id, None, f"Cannot send to room {effective_room_id}: bot has not joined this room."
-    if thread_id is not None:
-        return effective_room_id, thread_id, None
-    if inherit_context_thread and effective_room_id == context.room_id:
-        return effective_room_id, context.resolved_thread_id, None
-    return effective_room_id, None, None
 
 
 class AttachmentTools(Toolkit):

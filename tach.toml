@@ -1478,6 +1478,7 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
+    "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_helpers",
     "mindroom.custom_tools.matrix_conversation_operations",

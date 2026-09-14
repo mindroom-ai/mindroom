@@ -165,11 +165,11 @@ Common codes are `authorization_error` and `context_unavailable`.
 ## Matrix Conversations
 
 Use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to start and continue conversations with agents in Matrix.
-Enable `matrix_message` on the caller; it also enables `matrix_room` for discovering available agents and their exact mention IDs.
+Enable `matrix_message` on the caller; it also enables `matrix_room` for discovering available agents.
 `matrix_room(action="agents")` lists agents and teams eligible to answer this requester in the selected room, including the caller when eligible.
-Send a room-level message mentioning the target's `matrix_user_id` with `ignore_mentions=False` to start a conversation.
-The returned `event_id` is the conversation root: keep it as `thread_id` for later reads and replies.
-Thread-mode agents reply in that thread; room-mode agents reply in the room timeline.
+Send `matrix_message(recipient="agent_name", message="...")` to request a response in the current conversation.
+For a separate conversation with a thread-mode agent, add `new_thread=True` and keep the returned `thread_id` for later reads and messages.
+Room-mode agents use the room timeline and reject requests for separate threads.
 Messages return immediately and the conversation remains visible in Matrix.
 Use `run_subagent` below when you need a fresh child's result before continuing.
 

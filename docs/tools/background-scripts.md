@@ -138,7 +138,7 @@ from mindroom.script_sdk import MindRoomTools
 
 
 STATUS_URL = "https://example.org/controlled-status.txt"
-AGENT_MATRIX_ID = "@mindroom_watcher:example.org"
+AGENT_NAME = "watcher"
 POLL_SECONDS = 15
 
 
@@ -157,8 +157,8 @@ def main() -> None:
             "matrix_message",
             "matrix_message",
             action="send",
-            message=f"{AGENT_MATRIX_ID} the watched value changed; inspect {STATUS_URL} now.",
-            ignore_mentions=False,
+            message=f"The watched value changed; inspect {STATUS_URL} now.",
+            recipient=AGENT_NAME,
         )
 
 
@@ -166,9 +166,9 @@ if __name__ == "__main__":
     main()
 ```
 
-`matrix_message` defaults to `ignore_mentions=True` to prevent accidental agent loops.
-Set `ignore_mentions=False` only for an intentional handoff or self-trigger like the example above.
-The message must mention the actual agent Matrix ID if it is meant to start a new agent turn.
+`matrix_message` starts an agent turn only when `recipient` names an available agent or team.
+Set it to your own agent name for an intentional self-trigger like the example above.
+The message uses the current conversation by default.
 Make the watcher edge-triggered, persist or update its observed value before sending, and avoid reacting to its own unchanged output.
 
 The script inherits the original room, thread, requester, and agent execution identity, so omitting `room_id` sends through that authorized conversation context.

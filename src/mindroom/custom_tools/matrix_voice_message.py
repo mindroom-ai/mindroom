@@ -204,18 +204,17 @@ class MatrixVoiceMessageTools(Toolkit):
 
         return await self._message_operations.dispatch_action(
             context,
-            action="thread-reply" if thread_id is not None else "send",
+            action="send",
             message=companion_text,
-            attachment_ids=[],
-            attachment_file_paths=[],
+            attachments=[],
             room_id=room_id,
-            target=None,
+            event_id=None,
             thread_id=thread_id,
-            ignore_mentions=True,
+            recipient_user_id=None,
+            room_mode=thread_id is None,
+            new_thread=False,
             message_extras=None,
             read_limit=1,
-            page_token=None,
-            room_timeline_sentinel=self._ROOM_TIMELINE_SENTINEL,
         )
 
     def _companion_event_id_or_error(
