@@ -118,6 +118,36 @@ def test_collection_probe_rejects_corrupt_metadata(tmp_path: Path) -> None:
         chroma_collection_exists(tmp_path, "published")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deleted", [False, True])
+async def test_collection_probe_waits_for_writer_and_reads_committed_metadata(
+    published_index: Path,
+    deleted: bool,
+) -> None:
+    """A brief writer must not hide memory; a committed deletion must stay missing."""
+    reading = Event()
+
+    def probe() -> bool:
+        reading.set()
+        return chroma_collection_exists(published_index, "published")
+
+    connection = sqlite3.connect(published_index / "chroma.sqlite3")
+    connection.execute("BEGIN EXCLUSIVE")
+    if deleted:
+        connection.execute("DELETE FROM collections WHERE name = 'published'")
+    task = asyncio.create_task(asyncio.to_thread(probe))
+    try:
+        assert await asyncio.to_thread(reading.wait, 5)
+        # Keep the writer active beyond the old 100 ms read deadline. Waiting
+        # for the read also lets the event loop make progress during contention.
+        done, _pending = await asyncio.wait({task}, timeout=0.25)
+    finally:
+        connection.commit()
+        connection.close()
+    assert await asyncio.wait_for(task, timeout=5) is (not deleted)
+    assert not done, "The probe must wait for the writer before reading metadata"
+
+
 def test_collection_probe_reports_locked_metadata(published_index: Path) -> None:
     """A lock is bounded and reported, never mistaken for a missing collection."""
     connection = sqlite3.connect(published_index / "chroma.sqlite3")
@@ -126,7 +156,7 @@ def test_collection_probe_reports_locked_metadata(published_index: Path) -> None
         started = time.monotonic()
         with pytest.raises(RuntimeError, match="Knowledge collection metadata unavailable"):
             chroma_collection_exists(published_index, "published")
-        assert time.monotonic() - started < 1
+        assert time.monotonic() - started < 10
     finally:
         connection.close()
     assert chroma_collection_exists(published_index, "published")
