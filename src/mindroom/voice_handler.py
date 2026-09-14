@@ -45,6 +45,10 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
+# Allow slow transcription without giving an unavailable service a second attempt.
+# The overall deadline also bounds upload time and responses that keep trickling data.
+_STT_TOTAL_TIMEOUT_SECONDS = 60.0
+_STT_HTTP_TIMEOUT = httpx.Timeout(_STT_TOTAL_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0)
 _STT_AUDIO_EXTENSION_BY_MIME_TYPE = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -522,7 +526,10 @@ async def _transcribe_audio(
         form_data: dict[str, object] = {"model": config.voice.stt.model}
         form_data.update(config.voice.stt.extra_kwargs)
 
-        async with httpx.AsyncClient() as http_client:
+        async with (
+            asyncio.timeout(_STT_TOTAL_TIMEOUT_SECONDS),
+            httpx.AsyncClient(timeout=_STT_HTTP_TIMEOUT) as http_client,
+        ):
             response = await http_client.post(url, headers=headers, files=files, data=form_data)
             if response.status_code != 200:
                 logger.error(
@@ -535,6 +542,9 @@ async def _transcribe_audio(
             result = response.json()
             return result.get("text", "").strip()
 
+    except TimeoutError:
+        logger.warning("stt_transcription_timeout", timeout_seconds=_STT_TOTAL_TIMEOUT_SECONDS)
+        return None
     except Exception:
         logger.exception("Error transcribing audio")
         return None

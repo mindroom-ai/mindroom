@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_table_for_resource_snapshots.
 
 _SCRIPT_RUN_COLUMN_MIGRATIONS = (
+    # Rows created before recovery support cannot adopt workers without independent deadlines.
+    ("recovery_signature", "ALTER TABLE script_runs ADD COLUMN recovery_signature TEXT"),
     ("resource_profile", "ALTER TABLE script_runs ADD COLUMN resource_profile TEXT"),
     (
         "resource_requests_json",

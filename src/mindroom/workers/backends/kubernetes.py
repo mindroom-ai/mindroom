@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.credential_policy import credential_service_policy
@@ -310,6 +312,22 @@ class KubernetesWorkerBackend:
         }
 
     cleanup_locator: str | None = None
+
+    def script_recovery_signature(self) -> str:
+        """Identify the worker authority that must stay fixed while an old image finishes a run."""
+        config = asdict(self.config)
+        config.pop("image")
+        config.pop("image_pull_policy")
+        payload = {
+            "config": config,
+            "owner": self.cleanup_locator,
+            "auth_token": self.auth_token,
+            "encryption_key": self._current_credentials_encryption_key_hash(),
+            "storage_root": str(self.storage_root),
+            "config_snapshot": self._resources.config_snapshot,
+            "grantable_credentials": sorted(self.worker_grantable_credentials),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def __init__(
         self,

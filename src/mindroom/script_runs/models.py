@@ -54,6 +54,7 @@ class ScriptRunRecord:
     worker_id: str | None = None
     worker_backend_locator: str | None = None
     snapshot_locator: str | None = None
+    recovery_signature: str | None = None
     name: str | None = None
     local_unsafe: bool = False
     resource_profile: str | None = None

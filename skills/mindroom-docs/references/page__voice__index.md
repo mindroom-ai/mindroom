@@ -48,6 +48,11 @@ When `voice.enabled: false`, the router posts the fallback text directly without
 
 MindRoom uses the OpenAI-compatible transcription API. Any service that implements the `/v1/audio/transcriptions` endpoint will work.
 
+Each STT request gets one attempt with a 60-second total deadline covering connection setup, upload, and response reading.
+Connection and connection-pool waits are limited to 5 seconds, and upload inactivity to 10 seconds.
+Timeouts and service errors are not retried; MindRoom continues with the existing audio-attachment fallback.
+The STT deadline does not include Matrix media download or transcript normalization.
+
 ### OpenAI Transcription (Cloud)
 
 ```yaml

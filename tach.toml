@@ -1356,6 +1356,7 @@ depends_on = [
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_worker_prep",
     "mindroom.constants",
+    "mindroom.script_runs.compatibility",
     "mindroom.shell_supervisor",
 ]
 
@@ -1382,7 +1383,15 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.script_runs.worker_client"
-depends_on = ["mindroom.workers.models"]
+depends_on = ["mindroom.script_runs.compatibility", "mindroom.workers.models"]
+
+[[modules]]
+path = "mindroom.script_runs.compatibility"
+depends_on = []
+
+[[modules]]
+path = "mindroom.script_runs.recovery"
+depends_on = ["mindroom.script_runs.compatibility"]
 
 [[modules]]
 path = "mindroom.api.schedules"
@@ -1894,6 +1903,7 @@ depends_on = [
     "mindroom.script_runs.broker",
     "mindroom.script_runs.manager",
     "mindroom.script_runs.models",
+    "mindroom.script_runs.recovery",
     "mindroom.script_runs.store",
     "mindroom.script_runs.worker_client",
     "mindroom.tool_approval",

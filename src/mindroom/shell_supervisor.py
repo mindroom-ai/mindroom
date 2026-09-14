@@ -108,6 +108,7 @@ async def _handle_run(
     handle_reservations: set[str],
     payload: dict[str, object],
     reader: asyncio.StreamReader,
+    deadline_tasks: set[asyncio.Task[None]] | None = None,
 ) -> str | None:
     """Run one command, cancelling it if the client disconnects mid-wait."""
     argv_payload = payload["argv"]
@@ -119,6 +120,7 @@ async def _handle_run(
     if handle_payload is not None and not isinstance(handle_payload, str):
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
+    response_timeout, deadline_at = _run_timings(payload)
     command_argv = [str(item) for item in argv_payload]
     if handle_payload is not None and background_script_supervision_supported():
         command_argv = [
@@ -136,7 +138,7 @@ async def _handle_run(
             env={str(key): str(value) for key, value in env_payload.items()},
             cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
             tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
-            timeout=float(payload["timeout"]),  # ty: ignore[invalid-argument-type]
+            timeout=response_timeout,
             handle=handle_payload,
             handle_reservations=handle_reservations,
         ),
@@ -162,12 +164,59 @@ async def _handle_run(
     eof_task.cancel()
     with suppress(asyncio.CancelledError):
         await eof_task
-    return (await run_task).message
+    result = await run_task
+    if result.handle is not None and deadline_at is not None:
+        record = registry.get(result.handle)
+        if record is not None:
+            task = asyncio.create_task(_enforce_process_deadline(record, deadline_at=deadline_at))
+            if deadline_tasks is not None:
+                deadline_tasks.add(task)
+                task.add_done_callback(deadline_tasks.discard)
+    return result.message
+
+
+def _run_timings(payload: dict[str, object]) -> tuple[float, float | None]:
+    """Validate an optional process deadline and derive the foreground wait."""
+    max_runtime_payload = payload.get("max_runtime_seconds")
+    if max_runtime_payload is not None and (
+        isinstance(max_runtime_payload, bool)
+        or not isinstance(max_runtime_payload, int | float)
+        or not 0 < max_runtime_payload <= sys.float_info.max
+    ):
+        msg = "run request 'max_runtime_seconds' must be a positive finite number"
+        raise TypeError(msg)
+    max_runtime_seconds = float(max_runtime_payload) if max_runtime_payload is not None else None
+    deadline_at = time.monotonic() + max_runtime_seconds if max_runtime_seconds is not None else None
+    response_timeout = float(payload["timeout"])  # ty: ignore[invalid-argument-type]
+    if max_runtime_seconds is not None:
+        response_timeout = min(response_timeout, max_runtime_seconds)
+    return response_timeout, deadline_at
+
+
+async def _enforce_process_deadline(record: ProcessRecord, *, deadline_at: float) -> None:
+    """Kill the original process group unless it exits before its monotonic deadline."""
+    process_wait = asyncio.create_task(record.process.wait())
+    try:
+        remaining_seconds = max(0.0, deadline_at - time.monotonic())
+        done, _pending = await asyncio.wait({process_wait}, timeout=remaining_seconds)
+        if process_wait in done:
+            return
+        # The leader may have exited while descendants still hold its output
+        # pipes open, keeping process.wait() pending and the group alive.
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(record.pid, signal.SIGKILL)
+        await process_wait
+    finally:
+        if not process_wait.done():
+            process_wait.cancel()
+        with suppress(asyncio.CancelledError):
+            await process_wait
 
 
 async def _handle_connection(
     registry: dict[str, ProcessRecord],
     handle_reservations: set[str],
+    deadline_tasks: set[asyncio.Task[None]],
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -178,7 +227,7 @@ async def _handle_connection(
         payload = json.loads(line)
         op = payload.get("op")
         if op == "run":
-            message = await _handle_run(registry, handle_reservations, payload, reader)
+            message = await _handle_run(registry, handle_reservations, payload, reader, deadline_tasks)
             if message is None:
                 return
         elif op == "check":
@@ -209,12 +258,13 @@ async def _handle_connection(
 async def _serve(socket_path: str) -> int:
     registry: dict[str, ProcessRecord] = {}
     handle_reservations: set[str] = set()
+    deadline_tasks: set[asyncio.Task[None]] = set()
     parent_pid = os.getppid()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations),
+        partial(_handle_connection, registry, handle_reservations, deadline_tasks),
         path=socket_path,
         limit=_REQUEST_LIMIT_BYTES,
     )
@@ -229,6 +279,9 @@ async def _serve(socket_path: str) -> int:
     # Handles cannot outlive the supervisor; kill their process groups so a
     # runner or worker restart invalidates handles without leaking processes.
     kill_all_records(registry)
+    for task in deadline_tasks:
+        task.cancel()
+    await asyncio.gather(*deadline_tasks, return_exceptions=True)
     if orphaned:
         # The runner died without running its cleanup (e.g. SIGKILL), so
         # remove our runtime dir ourselves.
@@ -256,6 +309,7 @@ async def run_command_via_supervisor(
     tail: int,
     timeout: float,  # noqa: ASYNC109
     handle: str | None = None,
+    max_runtime_seconds: float | None = None,
 ) -> str:
     """Run one shell command through the supervisor and return its message."""
     request = {
@@ -269,6 +323,8 @@ async def run_command_via_supervisor(
     }
     if handle is not None:
         request["handle"] = handle
+    if max_runtime_seconds is not None:
+        request["max_runtime_seconds"] = max_runtime_seconds
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:

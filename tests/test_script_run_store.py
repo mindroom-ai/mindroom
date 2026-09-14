@@ -55,6 +55,20 @@ def _new_run(*, token_hash: str | None = None) -> ScriptRunRecord:
     )
 
 
+def test_run_store_preserves_recovery_contract_across_reopen(runtime_paths: RuntimePaths) -> None:
+    """Restart can recover the launch contract without granting recovery to older rows."""
+    store = ScriptRunStore(runtime_paths)
+    recoverable = replace(_new_run(), recovery_signature="launch-contract-digest")
+    legacy = replace(_new_run(), run_id="legacy-run")
+    store.create_run(recoverable)
+    store.create_run(legacy)
+
+    reopened = ScriptRunStore(runtime_paths)
+
+    assert reopened.get_run(recoverable.run_id).recovery_signature == "launch-contract-digest"
+    assert reopened.get_run(legacy.run_id).recovery_signature is None
+
+
 def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> None:
     """A retry with the same logical call returns its original claim."""
     store = ScriptRunStore(runtime_paths)
@@ -197,6 +211,7 @@ def test_run_store_migrates_existing_table_for_resource_snapshots(runtime_paths:
     )
     profiled = replace(
         _new_run(),
+        recovery_signature="new-worker-contract",
         resource_profile="standard",
         resource_requests={"cpu": "250m", "memory": "512Mi"},
         resource_limits={"cpu": "1", "memory": "2Gi"},
