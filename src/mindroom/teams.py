@@ -42,6 +42,7 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
 )
 from mindroom.approval_receipt import install_approval_receipt_hooks
+from mindroom.approval_tools import required_approval_tool_names
 from mindroom.authorization import get_available_responders_in_room
 from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -2048,6 +2049,7 @@ def materialize_exact_team_members(
     dynamic_tool_continuation: bool = False,
     supports_native_tool_approval: bool = False,
     active_model_names: Mapping[str, str] | None = None,
+    required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ResolvedExactTeamMembers:
     """Materialize the exact team-member set without silent fallback.
 
@@ -2099,6 +2101,7 @@ def materialize_exact_team_members(
             refresh_scheduler=refresh_scheduler,
             dynamic_tool_continuation=dynamic_tool_continuation,
             supports_native_tool_approval=supports_native_tool_approval,
+            required_tool_names=(required_tool_names or {}).get(agent_name, ()),
         )
 
     team_members = materialize_exact_requested_team_members(
@@ -2512,6 +2515,7 @@ async def continue_paused_team_run(
     denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     member_model_names: Mapping[str, str] | None = None,
+    required_function_names: Mapping[str, frozenset[str]] | None = None,
     history_scope: HistoryScope | None = None,
     prior_response_text: str = "",
     prior_tool_trace: Sequence[ToolTraceEntry] = (),
@@ -2520,6 +2524,16 @@ async def continue_paused_team_run(
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
+    required_tool_names = {
+        name: await required_approval_tool_names(
+            name,
+            (required_function_names or {}).get(name, frozenset()),
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
+        for name in member_names
+    }
     members = await asyncio.to_thread(
         materialize_exact_team_members,
         list(member_names),
@@ -2531,6 +2545,7 @@ async def continue_paused_team_run(
         dynamic_tool_continuation=True,
         supports_native_tool_approval=True,
         active_model_names=member_model_names,
+        required_tool_names=required_tool_names,
     )
     for member in members.agents:
         if member.model is not None:

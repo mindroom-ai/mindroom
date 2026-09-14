@@ -739,6 +739,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval_receipt",
+    "mindroom.approval_tools",
     "mindroom.event_journal",
     "mindroom.history.native",
     "mindroom.history.session_context",
@@ -749,6 +750,20 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.approval_tools"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.mcp.function_surface",
+    "mindroom.mcp.registry",
+    "mindroom.mcp.toolkit",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.approval_execution", "mindroom.teams"]
 
 [[modules]]
 path = "mindroom.approval_receipt"
@@ -2126,6 +2141,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval_receipt",
+    "mindroom.approval_tools",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -2417,6 +2433,7 @@ depends_on = [
 path = "mindroom.mcp.function_surface"
 depends_on = []
 visibility = [
+    "mindroom.approval_tools",
     "mindroom.mcp.surface_projection",
     "mindroom.mcp.toolkit",
 ]
@@ -2452,6 +2469,7 @@ depends_on = [
 path = "mindroom.mcp.toolkit"
 depends_on = ["mindroom.mcp.function_surface"]
 visibility = [
+    "mindroom.approval_tools",
     "mindroom.mcp_gateway.toolkits",
     "mindroom.agents",
     "mindroom.mcp.registry",

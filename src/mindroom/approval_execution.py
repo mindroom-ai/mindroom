@@ -22,6 +22,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
+from mindroom.approval_tools import required_approval_tool_names
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
@@ -154,6 +155,13 @@ class AgentApprovalExecution:
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)
+        required_tool_names = await required_approval_tool_names(
+            continuation.entity_name,
+            frozenset(call.tool_name for call in continuation.calls if call.invoking_agent == continuation.entity_name),
+            config=config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=execution_identity,
+        )
         knowledge = (
             await self.knowledge_access.resolve_for_agent_async(
                 continuation.entity_name,
@@ -181,6 +189,7 @@ class AgentApprovalExecution:
                 refresh_scheduler=self.refresh_scheduler(),
                 dynamic_tool_continuation=True,
                 supports_native_tool_approval=True,
+                required_tool_names=required_tool_names,
             )
         except BaseException:
             history_storage.close()

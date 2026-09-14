@@ -47,6 +47,7 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.dynamic_toolkits import (
     VisibleToolSurface,
     deferred_tool_catalog_entries,
+    get_loaded_tools_for_session,
     has_deferred_tools,
     resolve_dynamic_tool_selection,
     suppress_fully_deferred_toolkit_instructions,
@@ -1252,6 +1253,7 @@ def _resolve_agent_dynamic_tool_selection(
     native_deferred_tools: bool,
     eager_deferred_tools: bool,
     include_matrix_room_runtime_tools: bool,
+    required_tool_names: tuple[str, ...],
 ) -> VisibleToolSurface:
     if native_deferred_tools or eager_deferred_tools:
         # Attach every authored deferred tool and skip the dynamic-tools
@@ -1262,6 +1264,18 @@ def _resolve_agent_dynamic_tool_selection(
             loaded_tools=_visible_deferred_tool_names(config, agent_name),
             delegation_depth=delegation_depth,
             enable_dynamic_tools_manager=False,
+            include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
+        )
+    if required_tool_names:
+        return visible_tool_surface(
+            agent_name=agent_name,
+            config=config,
+            session_id=session_id,
+            loaded_tools=[
+                *get_loaded_tools_for_session(agent_name=agent_name, config=config, session_id=session_id),
+                *required_tool_names,
+            ],
+            delegation_depth=delegation_depth,
             include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         )
     return resolve_dynamic_tool_selection(
@@ -1376,6 +1390,7 @@ def _assemble_agent_toolkits(
     supports_native_tool_approval: bool,
     native_deferred_tools: bool,
     eager_deferred_tools: bool,
+    required_tool_names: tuple[str, ...],
 ) -> _AgentToolAssembly:
     """Assemble runtime toolkits and the dynamic-tool visibility for one agent instance."""
     plugins = _load_agent_plugins(config, runtime_paths)
@@ -1405,6 +1420,7 @@ def _assemble_agent_toolkits(
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
         include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
+        required_tool_names=required_tool_names,
     )
     hidden_toolkits = _context_hidden_toolkits(execution_identity)
     resolved_tool_configs = {entry.name: entry for entry in dynamic_tool_selection.runtime_tool_configs}
@@ -1694,6 +1710,7 @@ def create_agent(
     dynamic_tool_continuation: bool = False,
     supports_native_tool_approval: bool = False,
     eager_deferred_tools: bool = False,
+    required_tool_names: tuple[str, ...] = (),
 ) -> Agent:
     """Create an agent instance from configuration.
 
@@ -1736,6 +1753,8 @@ def create_agent(
         eager_deferred_tools: Whether to materialize every deferred toolkit and
             omit the dynamic-tools manager for a runtime with an immutable tool
             schema.
+        required_tool_names: Authored toolkits needed by a saved approval. These
+            augment this instance without changing the session's tool selection.
 
     Returns:
         Configured Agent instance
@@ -1792,6 +1811,7 @@ def create_agent(
         supports_native_tool_approval=supports_native_tool_approval,
         native_deferred_tools=native_deferred_tools,
         eager_deferred_tools=eager_deferred_tools,
+        required_tool_names=required_tool_names,
     )
     _hide_session_mcp_function_collisions(tool_assembly.tools, agent_name=agent_name)
     storage = _open_agent_session_storage(

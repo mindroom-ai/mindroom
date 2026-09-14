@@ -1931,6 +1931,12 @@ class ResponseRunner:
                         denial_reasons=denial_reasons,
                         refresh_scheduler=self._knowledge_refresh_scheduler(),
                         member_model_names=dict(continuation.team_member_model_names) or None,
+                        required_function_names={
+                            name: frozenset(
+                                call.tool_name for call in continuation.calls if call.invoking_agent == name
+                            )
+                            for name in continuation.team_member_names
+                        },
                         history_scope=continuation.history_scope,
                         prior_response_text=continuation.response_text,
                         prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),

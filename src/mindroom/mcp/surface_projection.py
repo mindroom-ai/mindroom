@@ -14,6 +14,7 @@ from mindroom.mcp.function_surface import (
     MCPFunctionCollisionReport,
     MCPFunctionSurfaceSnapshot,
     analyze_mcp_function_collisions,
+    catalog_function_names_for_tool_config,
 )
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
@@ -59,32 +60,6 @@ class MCPFunctionSurfaceContext:
     config: Config
     states: Mapping[str, MCPServerState]
     scoped_states: tuple[MCPScopedFunctionState, ...]
-
-
-def _normalized_tool_filter(value: object) -> set[str]:
-    """Normalize an MCP assignment's remote tool filter."""
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        return {part.strip() for part in value.replace("\n", ",").split(",") if part.strip()}
-    if isinstance(value, list):
-        return {part.strip() for part in value if isinstance(part, str) and part.strip()}
-    return set()
-
-
-def _catalog_function_names_for_tool_config(
-    catalog: MCPServerCatalog,
-    tool_config: EffectiveToolConfig,
-) -> set[str]:
-    """Return catalog function names after one agent MCP assignment's filters."""
-    include_tools = _normalized_tool_filter(tool_config.tool_config_overrides.get("include_tools"))
-    exclude_tools = _normalized_tool_filter(tool_config.tool_config_overrides.get("exclude_tools"))
-    return {
-        tool.function_name
-        for tool in catalog.tools
-        if (not exclude_tools or tool.remote_name not in exclude_tools)
-        and (not include_tools or tool.remote_name in include_tools)
-    }
 
 
 def _scoped_state_is_visible_to_agent(
@@ -278,7 +253,7 @@ def _agent_function_surface_snapshot(
             frozenset(
                 function_name
                 for tool_config in configured_mcp_tool_configs[server_id]
-                for function_name in _catalog_function_names_for_tool_config(catalog, tool_config)
+                for function_name in catalog_function_names_for_tool_config(catalog, tool_config)
             )
             for catalog in catalogs
             if catalog is not None
