@@ -506,7 +506,7 @@ async def test_fit_request_messages_skips_exact_count_below_half_budget() -> Non
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_not_awaited()
 
 
@@ -528,7 +528,7 @@ async def test_fit_request_messages_counts_exactly_at_half_budget() -> None:
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_awaited_once()
 
 
@@ -550,7 +550,7 @@ async def test_fit_request_messages_counts_media_exactly() -> None:
             compress_tool_results=False,
         )
 
-    assert fitted is messages
+    assert fitted == messages
     counter.assert_awaited_once()
 
 

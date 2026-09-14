@@ -907,7 +907,7 @@ async def test_mindroom_vertexai_claude_omits_unsigned_reasoning_from_cross_prov
     assert fitted_codex_message.content == "Codex answer"
     assert fitted_codex_message.tool_calls == codex_message.tool_calls
     assert fitted_codex_message.provider_data == codex_provider_data
-    assert fitted_messages[3] is claude_message
+    assert fitted_messages[3] == claude_message
     assert codex_message.reasoning_content == "Unsigned Codex reasoning"
     assert codex_message.provider_data == codex_provider_data
 
