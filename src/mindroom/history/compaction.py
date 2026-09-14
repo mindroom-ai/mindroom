@@ -294,6 +294,7 @@ async def compact_scope_history(
         progress_callback=progress_callback,
         collect_compaction_hook_messages=collect_compaction_hook_messages,
         before_persist_callback=emit_before_persist,
+        replay_model=replay_model,
     )
     if rewrite_result is None:
         _persist_cleared_force_state_if_needed(
@@ -392,6 +393,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     fallback_summary_model_name: str | None = None,
     fallback_summary_input_budget: int | None = None,
     before_persist_callback: Callable[[Sequence[RunOutput | TeamRunOutput]], Awaitable[None]] | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> _CompactionRewriteResult | None:
     final_summary_text = _current_summary_text(working_session) or ""
     token_estimator, estimate_kind = _compaction_sizing(summary_model)
@@ -502,6 +504,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             threshold_tokens=threshold_tokens,
             total_compacted_run_count=total_compacted_run_count,
             selected_runs_remaining=len(pending_selected_run_ids),
+            replay_model=replay_model,
         )
 
     if total_compacted_run_count == 0:
@@ -547,6 +550,7 @@ async def _emit_lifecycle_progress_after_persist(
     threshold_tokens: int | None,
     total_compacted_run_count: int,
     selected_runs_remaining: int,
+    replay_model: NativeCompactionModel | None = None,
 ) -> None:
     """Emit lifecycle progress after a compaction chunk has been durably persisted."""
     remaining_runs = scope_visible_runs(working_session, scope)
@@ -556,6 +560,7 @@ async def _emit_lifecycle_progress_after_persist(
         session=working_session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     await progress_callback(
         CompactionLifecycleProgress(

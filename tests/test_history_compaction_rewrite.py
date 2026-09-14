@@ -59,6 +59,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.message_target import MessageTarget
+from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -1732,7 +1733,8 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("portable", [False, True])
+async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp_path: Path, *, portable: bool) -> None:
     """Visible compaction should update progress after each durable non-final chunk."""
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
@@ -1747,7 +1749,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
     second_run = _completed_run(
         "run-2",
         messages=[
-            Message(role="user", content="v" * 200),
+            Message(role="user", content="0123456789" * 60),
             Message(role="assistant", content="b" * 200),
         ],
     )
@@ -1785,6 +1787,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         == 1
     )
     progress_events: list[CompactionLifecycleProgress] = []
+    replay_model = MindRoomOpenAIResponses(id="gpt-6-astra") if portable else None
 
     async def record_progress(event: CompactionLifecycleProgress) -> None:
         persisted = get_agent_session(storage, "session-1")
@@ -1797,38 +1800,42 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         "mindroom.history.compaction.generate_compaction_summary",
         new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
     ):
-        rewrite_result = await _rewrite_working_session_for_compaction(
+        outcome = await compact_scope_history(
             storage=storage,
-            persisted_session=working_session,
-            working_session=working_session,
+            session=working_session,
             summary_model=FakeModel(id="summary-model", provider="fake"),
             summary_model_name="summary-model",
-            session_id="session-1",
             scope=scope,
             state=HistoryScopeState(),
             history_settings=history_settings,
             available_history_budget=1,
-            selected_run_ids=("run-1", "run-2"),
             summary_input_budget=summary_input_budget,
-            before_tokens=before_tokens,
-            runs_before=2,
+            replay_window_tokens=None,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
             summary_timeout_seconds=DEFAULT_COMPACTION_TIMEOUT_SECONDS,
             lifecycle_notice_event_id="$notice",
             progress_callback=record_progress,
-            collect_compaction_hook_messages=False,
+            replay_model=replay_model,
         )
 
-    assert rewrite_result is not None
-    assert rewrite_result.compacted_run_count == 2
+    assert outcome is not None
+    assert outcome.compacted_run_count == 2
     assert len(progress_events) == 1
     assert progress_events[0].notice_event_id == "$notice"
     assert progress_events[0].mode == "auto"
     assert progress_events[0].session_id == "session-1"
     assert progress_events[0].scope == "agent:test_agent"
     assert progress_events[0].summary_model == "summary-model"
-    assert progress_events[0].before_tokens == before_tokens
+    assert progress_events[0].before_tokens == outcome.before_tokens
+    if portable:
+        # Six hundred decimal digits need at least two hundred tokens, before
+        # the retained answer, summary wrapper, and Responses framing.
+        assert progress_events[0].after_tokens > 300
+        assert outcome.before_tokens > before_tokens
+    else:
+        assert outcome.before_tokens == before_tokens
+    assert outcome.after_tokens < progress_events[0].after_tokens
     assert progress_events[0].compacted_run_count == 1
     assert progress_events[0].runs_before == 2
     assert progress_events[0].runs_remaining == 1

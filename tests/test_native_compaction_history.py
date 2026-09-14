@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -16,7 +17,7 @@ from agno.team import Team
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
-from mindroom.history.native import restore_native_history
+from mindroom.history.native import configure_native_history, restore_native_history
 from mindroom.history.runtime import (
     ScopeSessionContext,
     finalize_history_preparation,
@@ -33,6 +34,39 @@ from tests.history_helpers import _agent, _completed_run, _completed_team_run, _
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def test_reused_responses_model_uses_current_replay_budget(tmp_path: Path) -> None:
+    """An unbounded plan must not inherit portable replay from a prior bounded plan."""
+    config, _ = _make_config(tmp_path)
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(model=model),
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    messages = [
+        Message(role="assistant", content="Previous answer", provider_data={"response_id": "resp_previous"}),
+        Message(role="user", content="Continue"),
+    ]
+    for budget in (1000, None, 2000):
+        configure_native_history(
+            model,
+            plan=replace(resolved.execution_plan, hard_replay_budget_tokens=budget),
+            history_settings=resolved.history_settings,
+            session=None,
+            allowed=False,
+        )
+        request = model.get_request_params(messages=messages)
+        replay = model._format_messages(messages)
+        if budget is None:
+            assert request["previous_response_id"] == "resp_previous"
+            assert replay == [{"role": "user", "content": "Continue"}]
+        else:
+            assert "previous_response_id" not in request
+            assert replay[0] == {"role": "assistant", "content": "Previous answer"}
 
 
 @pytest.mark.parametrize("change", ["none", "model", "endpoint", "summary", "disabled", "missing", "invalid_threshold"])

@@ -26,8 +26,7 @@ def configure_native_history(
     """Enable native requests only when they preserve the scope's authored semantics."""
     if not isinstance(model, NativeCompactionModel):
         return None
-    if plan.hard_replay_budget_tokens is not None:
-        model.configure_portable_replay()
+    model.configure_portable_replay(enabled=plan.hard_replay_budget_tokens is not None)
     threshold = plan.trigger_threshold_tokens
     static_tokens = plan.static_prompt_tokens
     hard_budget = plan.hard_replay_budget_tokens

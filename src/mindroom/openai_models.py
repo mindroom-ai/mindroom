@@ -13,7 +13,12 @@ from agno.models.llama_cpp import LlamaCpp
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
-from openai.types.responses import ResponseCompletedEvent, ResponseCreatedEvent, ResponseOutputItemDoneEvent
+from openai.types.responses import (
+    ResponseCompletedEvent,
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseOutputItemDoneEvent,
+)
 
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
@@ -148,9 +153,9 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
     _store_before_native_compaction: bool | None = field(default=None, init=False, repr=False)
     _portable_replay: bool = field(default=False, init=False, repr=False)
 
-    def configure_portable_replay(self) -> None:
+    def configure_portable_replay(self, *, enabled: bool = True) -> None:
         """Replay the locally budgeted history without hidden server-side context."""
-        self._portable_replay = True
+        self._portable_replay = enabled
 
     def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
         """Count the explicit Responses payload used by portable history planning."""
@@ -426,10 +431,6 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         """Publish completed response IDs and ordered provider output."""
         response_items = tool_use.pop("mindroom_response_items", {})
         model_response, tool_use = super()._parse_provider_response_delta(stream_event, assistant_message, tool_use)
-        if stream_event.type in {"response.created", "response.in_progress"}:
-            # Every other event stays guarded, including tool starts whose
-            # side effects or partial arguments are not in parsed output yet.
-            model_response.extra = {**(model_response.extra or {}), "mindroom_stream_lifecycle_only": True}
         if isinstance(stream_event, ResponseCreatedEvent) and model_response.provider_data is not None:
             # An unfinished response may contain tool calls we never received.
             # Chaining to it would require outputs that we cannot supply.
@@ -453,4 +454,15 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
                 response_items[stream_event.output_index] = stream_event.item.model_dump(mode="json", exclude_none=True)
         if response_items:
             tool_use["mindroom_response_items"] = response_items
+        if (
+            isinstance(stream_event, (ResponseCreatedEvent, ResponseInProgressEvent))
+            and not stream_event.response.output
+            and not tool_use
+            and not any(
+                value for name, value in vars(model_response).items() if name not in {"created_at", "event", "role"}
+            )
+        ):
+            # A lifecycle snapshot can already contain output the upstream
+            # parser ignores. Only empty snapshots and parsed chunks may retry.
+            model_response.extra = {"mindroom_stream_lifecycle_only": True}
         return model_response, tool_use
