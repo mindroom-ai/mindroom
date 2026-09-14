@@ -40,6 +40,7 @@ from mindroom.script_runs.reasons import (
     SCRIPT_TOOL_REMOVED,
     WORKER_CONFIGURATION_CHANGED,
 )
+from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
 from mindroom.tool_approval import (
@@ -944,10 +945,12 @@ class ScriptRuntimeLifecycle:
         await asyncio.gather(*(reconcile_run(run) for run in runs))
 
     async def _startup_cleanup_pass(self) -> None:
-        """Revoke and retire every inherited nonterminal run before reopening launches."""
+        """Adopt compatible surviving workers and retire other inherited ownership."""
         inherited = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        recoverable = [run for run in inherited if self._preserves_process(run)]
+        recoverable_ids = {run.run_id for run in recoverable}
         durably_revoked = await self._durably_revoke_runs(
-            inherited,
+            [run for run in inherited if run.run_id not in recoverable_ids],
             reason_for=lambda _run: RUNTIME_RESTARTED,
         )
         if durably_revoked:
@@ -956,14 +959,17 @@ class ScriptRuntimeLifecycle:
                 reason_for=lambda _run: RUNTIME_RESTARTED,
                 require_worker_success=False,
             )
+        adopted_ids = await self._recover_startup_runs(recoverable)
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
-        if unfinished:
+        pending = [run for run in unfinished if run.run_id not in adopted_ids]
+        if pending:
             logger.error(
                 "script_startup_cleanup_blocked",
-                run_ids=[run.run_id for run in unfinished],
+                run_ids=[run.run_id for run in pending],
             )
             return
-        await self._release_current_worker_lease()
+        if not adopted_ids:
+            await self._release_current_worker_lease()
         if self.api_enabled:
             try:
                 await self._refresh_worker_backend()
@@ -973,6 +979,55 @@ class ScriptRuntimeLifecycle:
         if self.api_enabled and self._api_ready.is_set():
             self.broker.open_call_admission()
         self._startup_cleanup_pending = False
+
+    def _preserves_process(self, run: ScriptRunRecord) -> bool:
+        """Retain new Kubernetes process ownership while its primary is detached."""
+        return (
+            self.api_enabled
+            and self.runtime_paths.env_flag("MINDROOM_SCRIPT_GATEWAY_ISOLATED")
+            and bool((self.runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip())
+            and not run.local_unsafe
+            and run.recovery_signature is not None
+            and run.cancel_requested_at is None
+            and run.finished_at is None
+            and script_execution_uses_worker(self.runtime_paths, worker_backend_configured=True)
+        )
+
+    async def _recover_startup_runs(self, runs: Sequence[ScriptRunRecord]) -> set[str]:
+        """Verify inherited process authority without creating or updating a worker template."""
+        adopted: set[str] = set()
+        config = self.config_provider()
+        if config is None:
+            return adopted
+        for run in runs:
+            try:
+                backend = await self._refresh_worker_backend(required_backend_locator=run.worker_backend_locator)
+                if backend is not None and run.worker_key is not None:
+                    await asyncio.to_thread(backend.touch_worker, run.worker_key)
+                current_signature = script_recovery_signature(
+                    backend=backend,
+                    config=config,
+                    agent_name=run.agent_name,
+                    gateway_url=self.manager.gateway_url,
+                )
+                if current_signature != run.recovery_signature:
+                    await self.manager.revoke(run.run_id, reason=WORKER_CONFIGURATION_CHANGED)
+                    await self.manager.reconcile_durable(run_id=run.run_id)
+                    continue
+                authorized = self.resolver.is_authorized(run, config=config)
+                if authorized is None:
+                    continue
+                if not authorized:
+                    await self.manager.revoke(run.run_id, reason=OWNER_AUTHORIZATION_REVOKED)
+                reconciled = await self.manager.reconcile_durable(run_id=run.run_id)
+                if reconciled.state is ScriptRunState.RUNNING and reconciled.cancel_requested_at is None:
+                    # A previous primary may have died after claiming a tool call.
+                    # Settle that ownership without replaying it or revoking the surviving process.
+                    await self.broker.cancel_run(run.run_id)
+                    adopted.add(run.run_id)
+            except (ScriptRunManagerError, ScriptWorkerError, WorkerBackendError, _ScriptRuntimeUnavailableError):
+                logger.warning("script_startup_recovery_pending", run_id=run.run_id, exc_info=True)
+        return adopted
 
     async def _interrupt_runs_through_owning_backends(
         self,
@@ -1030,6 +1085,7 @@ class ScriptRuntimeLifecycle:
                     worker_key=worker_key,
                     exc_info=True,
                 )
+                raise
 
     async def _prune_pass(self, *, now: datetime | None = None) -> None:
         cutoff = (now or datetime.now(UTC)) - timedelta(seconds=self.retention_seconds)
@@ -1096,14 +1152,17 @@ class ScriptRuntimeLifecycle:
                 bind_script_run_manager(None)
             await run_coroutine_until_complete(self.manager.begin_shutdown())
             runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+            preserved = [run for run in runs if self._preserves_process(run)]
+            preserved_ids = {run.run_id for run in preserved}
             durably_revoked = await run_coroutine_until_complete(
                 self._durably_revoke_runs(
-                    runs,
+                    [run for run in runs if run.run_id not in preserved_ids],
                     reason_for=lambda _run: RUNTIME_SHUTDOWN,
                 ),
             )
             await self._run_shutdown_cleanup(
                 durably_revoked,
+                preserved_runs=preserved,
                 deadline=shutdown_deadline,
                 timeout_seconds=timeout_seconds,
             )
@@ -1122,6 +1181,7 @@ class ScriptRuntimeLifecycle:
         *,
         deadline: float,
         timeout_seconds: float,
+        preserved_runs: Sequence[ScriptRunRecord] = (),
     ) -> None:
         try:
             await asyncio.wait_for(
@@ -1130,6 +1190,11 @@ class ScriptRuntimeLifecycle:
             )
         except TimeoutError:
             logger.warning("script_shutdown_reconciliation_timeout", timeout_seconds=timeout_seconds)
+        if preserved_runs:
+            await self.broker.detach_runs(
+                {run.run_id for run in preserved_runs},
+                timeout_seconds=max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
         cleanup_drained = await drain_script_tool_cleanup(
             self.broker,
             timeout_seconds=max(0.0, deadline - asyncio.get_running_loop().time()),

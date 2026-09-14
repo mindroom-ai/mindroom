@@ -23,6 +23,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.script_runs import manager as manager_module
+from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.manager import (
     ScriptRunLimits,
     ScriptRunManager,
@@ -164,6 +165,9 @@ class _WorkerBackend:
     def script_resource_profiles(self) -> dict[str, object] | None:
         return self.resource_profiles_payload
 
+    def script_recovery_signature(self) -> str:
+        return "stable-worker-authority"
+
     def ensure_worker(
         self,
         spec: WorkerSpec,
@@ -242,10 +246,12 @@ class _WorkerClient:
         run_id: str,
         source_digest: str,
         gateway_url: str,
+        max_runtime_seconds: int,
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
     ) -> None:
         del source_digest, gateway_url, private_agent_names
+        assert max_runtime_seconds > 0
         self.launch_state_scope_worker_keys.append(state_scope_worker_key)
         starting = self.store.get_run(run_id)
         assert starting.state is ScriptRunState.STARTING
@@ -328,6 +334,21 @@ def _manager(
         cancellation_poll_interval_seconds=0,
     )
     return manager, backend, client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_name", ["kubernetes", "docker"])
+async def test_launch_persists_recovery_contract_only_for_kubernetes(tmp_path: Path, backend_name: str) -> None:
+    """Only isolated Kubernetes launches opt into preserving the process on primary restart."""
+    manager, backend, _client = _manager(tmp_path, backend=backend_name, isolated_script_gateway=True)
+    backend.backend_name = backend_name
+    context = _context(tmp_path, backend=backend_name, isolated_script_gateway=True)
+
+    run = await manager.run(context, source="print('ok')\n")
+
+    assert run.state is ScriptRunState.RUNNING
+    assert (run.recovery_signature is not None) is (backend_name == "kubernetes")
+    assert ScriptRunStore(context.runtime_paths).get_run(run.run_id).recovery_signature == run.recovery_signature
 
 
 async def _wait_for_cancel_request(manager: ScriptRunManager, run_id: str) -> None:
@@ -908,6 +929,8 @@ async def test_concurrent_scripts_use_run_pinned_worker_roots_and_routes(tmp_pat
             "run_id": broad.run_id,
             "worker_key": broad.worker_key,
             "source_digest": broad.source_digest,
+            "max_runtime_seconds": broad.max_runtime_seconds,
+            "protocol_version": SCRIPT_PROTOCOL_VERSION,
             "gateway_url": "http://primary.test/api/script-gateway",
             "private_agent_names": [],
         },
@@ -919,6 +942,8 @@ async def test_concurrent_scripts_use_run_pinned_worker_roots_and_routes(tmp_pat
             "run_id": broad.run_id,
             "worker_key": narrow.worker_key,
             "source_digest": broad.source_digest,
+            "max_runtime_seconds": broad.max_runtime_seconds,
+            "protocol_version": SCRIPT_PROTOCOL_VERSION,
             "gateway_url": "http://primary.test/api/script-gateway",
             "private_agent_names": [],
         },
@@ -2378,7 +2403,10 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         tail: int,
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
+        max_runtime_seconds: float | None = None,
     ) -> str:
+        assert max_runtime_seconds is not None
+        assert max_runtime_seconds > 0
         observed.update(
             socket_path=socket_path,
             namespace=namespace,
@@ -2451,7 +2479,10 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
         tail: int,
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
+        max_runtime_seconds: float | None = None,
     ) -> str:
+        assert max_runtime_seconds is not None
+        assert max_runtime_seconds > 0
         del namespace, argv, env, cwd, tail, timeout
         assert handle is not None
         return f"Started background process\nHandle: {handle}"
@@ -2581,7 +2612,10 @@ async def test_local_launch_adopts_cancellation_before_running_transition(
         tail: int,
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
+        max_runtime_seconds: float | None = None,
     ) -> str:
+        assert max_runtime_seconds is not None
+        assert max_runtime_seconds > 0
         del namespace, argv, env, cwd, tail, timeout
         assert handle is not None
         launch_entered.set()
@@ -2648,7 +2682,10 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
         tail: int,
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
+        max_runtime_seconds: float | None = None,
     ) -> str:
+        assert max_runtime_seconds is not None
+        assert max_runtime_seconds > 0
         del namespace, argv, env, cwd, tail, timeout
         assert handle is not None
         launch_entered.set()

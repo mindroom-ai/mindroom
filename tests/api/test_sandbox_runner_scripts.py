@@ -13,6 +13,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from mindroom import shell_supervisor as shell_supervisor_module
 from mindroom.api import sandbox_runner as sandbox_runner_module
@@ -103,11 +104,60 @@ def _write_run_files(workspace: Path, run_id: str, source: str) -> tuple[str, st
 def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, object]:
     _source_path, _token_path, source_digest = _write_run_files(workspace, run_id, source)
     return {
+        "protocol_version": 1,
         "run_id": run_id,
         "worker_key": _WORKER_KEY,
         "source_digest": source_digest,
         "gateway_url": "http://primary:8765/api/script-gateway",
+        "max_runtime_seconds": 3600,
     }
+
+
+@pytest.mark.parametrize("protocol_version", [0, 2])
+def test_worker_script_endpoint_rejects_mismatched_protocol_version(
+    runner_client: tuple[TestClient, Path],
+    protocol_version: int,
+) -> None:
+    """A worker must reject launches from an incompatible script protocol."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'0' * 32}", source="print('no')\n")
+    payload["protocol_version"] = protocol_version
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "value_error"
+
+
+@pytest.mark.parametrize(
+    ("max_runtime_seconds", "error_type"),
+    [
+        (0, "greater_than"),
+        (-1, "greater_than"),
+        (1.5, "int_type"),
+        (True, "int_type"),
+        (float("inf"), "int_type"),
+        (float("nan"), "int_type"),
+    ],
+)
+def test_worker_script_launch_rejects_invalid_maximum_runtime(
+    max_runtime_seconds: object,
+    error_type: str,
+) -> None:
+    """The worker accepts only finite positive integer process deadlines."""
+    with pytest.raises(ValidationError) as exc_info:
+        sandbox_runner_scripts_module.SandboxScriptRunRequest.model_validate(
+            {
+                "protocol_version": 1,
+                "run_id": f"script-{'0' * 32}",
+                "worker_key": _WORKER_KEY,
+                "source_digest": "a" * 64,
+                "gateway_url": "http://primary:8765/api/script-gateway",
+                "max_runtime_seconds": max_runtime_seconds,
+            },
+        )
+
+    assert exc_info.value.errors()[0]["type"] == error_type
 
 
 def test_worker_script_endpoint_narrow_request_derives_fixed_snapshot_paths(
@@ -384,11 +434,13 @@ router:
             "/api/sandbox-runner/scripts/run",
             headers=_HEADERS,
             json={
+                "protocol_version": 1,
                 "run_id": run_id,
                 "worker_key": worker_key,
                 "state_scope_worker_key": state_scope_worker_key,
                 "source_digest": source_digest,
                 "gateway_url": "http://primary:8765/api/script-gateway",
+                "max_runtime_seconds": 3600,
                 "private_agent_names": ["watcher"],
             },
         )
@@ -541,20 +593,24 @@ async def test_shared_runner_authenticates_before_revealing_script_topology(tmp_
         unauthenticated = await client.post(
             "/api/sandbox-runner/scripts/run",
             json={
+                "protocol_version": 1,
                 "run_id": f"script-{'a' * 32}",
                 "worker_key": _WORKER_KEY,
                 "source_digest": "0" * 64,
                 "gateway_url": "http://primary:8765/api/script-gateway",
+                "max_runtime_seconds": 3600,
             },
         )
         authenticated = await client.post(
             "/api/sandbox-runner/scripts/run",
             headers=_HEADERS,
             json={
+                "protocol_version": 1,
                 "run_id": f"script-{'a' * 32}",
                 "worker_key": _WORKER_KEY,
                 "source_digest": "0" * 64,
                 "gateway_url": "http://primary:8765/api/script-gateway",
+                "max_runtime_seconds": 3600,
             },
         )
 
@@ -627,10 +683,12 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
         json={
+            "protocol_version": 1,
             "run_id": f"script-{'4' * 32}",
             "worker_key": "worker-b",
             "source_digest": "a" * 64,
             "gateway_url": "http://primary.test/api/script-gateway",
+            "max_runtime_seconds": 3600,
         },
     )
 

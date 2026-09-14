@@ -9,6 +9,7 @@ import threading
 import time
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import TYPE_CHECKING, Self
@@ -484,6 +485,91 @@ def test_kubernetes_deployment_snapshot_rejects_non_object_status() -> None:
 
     with pytest.raises(WorkerBackendError, match="non-object status"):
         kubernetes_resources_module._deployment_snapshot(payload)
+
+
+def test_script_recovery_contract_survives_image_upgrade() -> None:
+    """A compatible main-image rollout does not invalidate a live script worker."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    initial = backend.script_recovery_signature()
+    backend.config = replace(backend.config, image="mindroom:upgraded", image_pull_policy="Always")
+
+    assert backend.script_recovery_signature() == initial
+
+
+def test_script_recovery_contract_survives_unrelated_tool_catalog_upgrade() -> None:
+    """A new tool or UI label cannot revoke an unchanged script process authority."""
+    original, _apps, _core = _backend(config_snapshot={})
+    upgraded_snapshot = deepcopy(_TEST_TOOL_VALIDATION_SNAPSHOT)
+    upgraded_snapshot["new_tool"] = {
+        "config_fields": [{"name": "option", "label": "New label", "description": "Updated help"}],
+        "agent_override_fields": [],
+        "authored_override_validator": "default",
+        "runtime_loadable": True,
+    }
+    upgraded, _apps, _core = _backend(config_snapshot={}, tool_validation_snapshot=upgraded_snapshot)
+
+    assert upgraded.script_recovery_signature() == original.script_recovery_signature()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"extra_env": {"SCRIPT_ACCESS": "changed"}},
+        {"storage_mount_path": "/changed/workspace"},
+        {"enable_service_links": True},
+    ],
+)
+def test_script_recovery_contract_rejects_changed_worker_authority(change: dict[str, object]) -> None:
+    """Changed worker environment, mounts or network exposure cannot inherit old authority."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    initial = backend.script_recovery_signature()
+    backend.config = replace(backend.config, **change)
+
+    assert backend.script_recovery_signature() != initial
+
+
+def test_script_recovery_contract_rejects_rotated_worker_authentication() -> None:
+    """A new primary token cannot silently adopt a worker still using the old token."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    initial = backend.script_recovery_signature()
+    backend.auth_token = "rotated-worker-auth"  # noqa: S105
+
+    assert backend.script_recovery_signature() != initial
+    assert "rotated-worker-auth" not in backend.script_recovery_signature()
+
+
+@pytest.mark.parametrize(
+    ("initial_key", "updated_key", "compatible"),
+    [
+        (None, " \t\n", True),
+        ("encryption-material", " encryption-material\n", True),
+        ("old-material", "new-material", False),
+    ],
+)
+def test_script_recovery_contract_compares_effective_encryption_key(
+    initial_key: str | None,
+    updated_key: str,
+    compatible: bool,
+) -> None:
+    """Equivalent key formatting preserves scripts while actual key rotation invalidates them."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    backend.runtime_paths = replace(
+        backend.runtime_paths,
+        process_env={} if initial_key is None else {CREDENTIALS_ENCRYPTION_KEY_ENV: initial_key},
+    )
+    initial = backend.script_recovery_signature()
+    backend.runtime_paths = replace(backend.runtime_paths, process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: updated_key})
+
+    assert (backend.script_recovery_signature() == initial) is compatible
+
+
+def test_script_recovery_contract_rejects_changed_grantable_credentials() -> None:
+    """Credential projection changes during an upgrade invalidate the old runtime authority."""
+    backend, _apps, _core = _backend(config_snapshot={}, worker_grantable_credentials=frozenset())
+    initial = backend.script_recovery_signature()
+    backend.worker_grantable_credentials = frozenset({"github"})
+
+    assert backend.script_recovery_signature() != initial
 
 
 def _backend(

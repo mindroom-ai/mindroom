@@ -261,7 +261,7 @@ class ScriptToolBroker:
     def _require_call_admission(self) -> None:
         if not self._call_admission_open.is_set():
             msg = "Background script call is unavailable."
-            raise ScriptBrokerAuthenticationError(msg)
+            raise ScriptRuntimeUnavailableError(msg)
 
     def _prepare_call(self, request: ScriptToolCallRequest, token: str) -> _PreparedScriptCall:
         run = self.store.require_active_capability(request.run_id, token)
@@ -283,8 +283,8 @@ class ScriptToolBroker:
         request: ScriptToolCallRequest,
         authorization: str | None,
     ) -> _PreparedScriptCall:
-        self._require_call_admission()
         token = self.authenticate(request.run_id, authorization)
+        self._require_call_admission()
         return self._prepare_call(request, token)
 
     async def _accept_prepared_call(
@@ -298,6 +298,14 @@ class ScriptToolBroker:
         preparation_finished = False
         try:
             prepared = await asyncio.to_thread(self._prepare_authenticated_call, request, authorization)
+
+            if prepared.created and not self._call_admission_open.is_set():
+                return await asyncio.to_thread(
+                    self.store.settle_orphaned_call,
+                    run_id=prepared.call.run_id,
+                    call_id=prepared.call.call_id,
+                    error=_INDETERMINATE_ERROR,
+                )
 
             if not prepared.created:
                 owned_elsewhere = self._call_is_owned(key, exclude_current_preparation=True)
@@ -438,6 +446,7 @@ class ScriptToolBroker:
     ) -> ScriptCallRecord:
         """Authenticate a receipt and settle approval debt discovered as orphaned."""
         await asyncio.to_thread(self.authenticate, run_id, authorization)
+        self._require_call_admission()
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
         if receipt.state is ScriptCallState.INDETERMINATE:
             run, call = await asyncio.gather(
@@ -449,6 +458,25 @@ class ScriptToolBroker:
                 reason="Background script call ownership was orphaned after restart.",
             )
         return receipt
+
+    async def detach_runs(self, run_ids: set[str], *, timeout_seconds: float) -> None:
+        """Drain primary-owned calls, retaining each worker process and its durable capability."""
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
+        tasks = tuple(task for (run_id, _call_id), task in self._tasks.items() if run_id in run_ids and not task.done())
+        try:
+            if tasks:
+                await asyncio.wait(tasks, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            cleanup = asyncio.create_task(self._settle_detached_runs(run_ids), name="script-detached-call-cleanup")
+            self._retain_cleanup_task(cleanup)
+        await asyncio.wait({cleanup}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+
+    async def _settle_detached_runs(self, run_ids: set[str]) -> None:
+        for run_id in sorted(run_ids):
+            await self.cancel_run(run_id)
 
     async def _execute_claimed_call(
         self,

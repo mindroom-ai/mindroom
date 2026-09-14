@@ -377,11 +377,11 @@ async def test_script_broker_acceptance_returns_the_durable_call_record(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_script_broker_starts_claim_admission_closed_but_keeps_receipts_readable(tmp_path: Path) -> None:
-    """Startup blocks new claims without hiding an already durable receipt."""
+async def test_script_broker_keeps_submit_and_poll_retryable_until_recovery_completes(tmp_path: Path) -> None:
+    """Startup fences both gateway operations with a transient failure until adoption finishes."""
     broker, token = _broker(tmp_path, events=[], admission_open=False)
 
-    with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
+    with pytest.raises(ScriptRuntimeUnavailableError, match="unavailable"):
         await broker.accept_authenticated(_request(), f"Bearer {token}")
 
     broker.store.claim_call(
@@ -390,6 +390,11 @@ async def test_script_broker_starts_claim_admission_closed_but_keeps_receipts_re
         grant=ScriptToolGrant("calculator", "add"),
         arguments_digest="existing-arguments",
     )
+    with pytest.raises(ScriptRuntimeUnavailableError, match="unavailable"):
+        await broker.get_authenticated("run-1", "existing-call", f"Bearer {token}")
+    assert broker.store.get_call("run-1", "existing-call").state is ScriptCallState.PENDING
+
+    broker.open_call_admission()
     receipt = await broker.get_authenticated("run-1", "existing-call", f"Bearer {token}")
 
     assert receipt.call_id == "existing-call"
@@ -405,6 +410,104 @@ async def test_script_broker_rejects_owner_without_current_reply_authorization(t
         await broker.accept_authenticated(_request(), f"Bearer {token}")
 
     assert broker.store.pending_calls("run-1") == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_call_preparation_never_starts_new_tool_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim completing after the shutdown fence cannot create new tool side effects."""
+    events: list[str] = []
+    broker, token = _broker(tmp_path, events=events)
+    claimed = threading.Event()
+    release = threading.Event()
+    original_claim = broker.store.claim_call
+
+    def delayed_claim(**kwargs: object) -> object:
+        claim = original_claim(**kwargs)
+        claimed.set()
+        assert release.wait(timeout=2)
+        return claim
+
+    monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
+    acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
+    try:
+        assert await asyncio.to_thread(claimed.wait, 2)
+        broker.close_call_admission()
+    finally:
+        release.set()
+    receipt = await acceptance
+    tasks = tuple(broker._tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks)
+
+    assert receipt.state is ScriptCallState.INDETERMINATE
+    assert events == []
+    assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
+
+
+@pytest.mark.asyncio
+async def test_detach_drains_completed_calls_without_revoking_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graceful primary detachment retains a completed result and its script capability."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class PausedCalculator(Toolkit):
+        def __init__(self) -> None:
+            super().__init__(name="calculator", tools=[self.add])
+
+        async def add(self, a: int, b: int) -> int:
+            entered.set()
+            await release.wait()
+            return a + b
+
+    _replace_calculator_toolkit(monkeypatch, PausedCalculator)
+    broker, token = _broker(tmp_path, events=[])
+    await broker.accept_authenticated(_request(), f"Bearer {token}")
+    await entered.wait()
+    broker.close_call_admission()
+    detachment = asyncio.create_task(broker.detach_runs({"run-1"}, timeout_seconds=1))
+    release.set()
+    await detachment
+
+    assert broker.store.get_call("run-1", "call-1").state is ScriptCallState.COMPLETED
+    assert broker.store.get_call("run-1", "call-1").result == 3
+    assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
+
+
+@pytest.mark.asyncio
+async def test_detach_budget_retains_pending_preparation_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked claim cannot delay primary shutdown beyond its budget."""
+    broker, token = _broker(tmp_path, events=[])
+    claimed = threading.Event()
+    release = threading.Event()
+    original_claim = broker.store.claim_call
+
+    def delayed_claim(**kwargs: object) -> object:
+        claim = original_claim(**kwargs)
+        claimed.set()
+        assert release.wait(timeout=2)
+        return claim
+
+    monkeypatch.setattr(broker.store, "claim_call", delayed_claim)
+    acceptance = asyncio.create_task(broker.accept_authenticated(_request(), f"Bearer {token}"))
+    try:
+        assert await asyncio.to_thread(claimed.wait, 2)
+        broker.close_call_admission()
+        await asyncio.wait_for(broker.detach_runs({"run-1"}, timeout_seconds=0), timeout=0.2)
+    finally:
+        release.set()
+        await acceptance
+        await drain_script_tool_cleanup(broker, timeout_seconds=1)
+    assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
+    assert broker.store.get_call("run-1", "call-1").state is ScriptCallState.INDETERMINATE
 
 
 @pytest.mark.asyncio
