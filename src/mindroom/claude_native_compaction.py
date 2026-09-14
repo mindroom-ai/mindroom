@@ -43,6 +43,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
     """Adapt native checkpoints without changing the stored conversation."""
 
     context_management: dict[str, Any] | None
+    thinking: dict[str, Any] | None
     request_params: dict[str, Any] | None
     client_params: dict[str, Any] | None
     client: Anthropic | None
@@ -149,11 +150,17 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             checkpoint_items(message, self.native_compaction.route) for message in messages
         )
 
+    def effective_thinking(self) -> dict[str, Any] | None:
+        """Resolve thinking exactly as the SDK merges the authored request body."""
+        params = {"thinking": self.thinking, **(self.request_params or {})}
+        return (params.get("extra_body") or {}).get("thinking", params.get("thinking"))
+
     def native_replay_messages(self, messages: list[Message]) -> list[Message]:
         """Restore canonical blocks on foreign routes, or select checkpoint plus tail."""
         route = self.native_compaction.route if self.native_compaction is not None else None
         prepared = native_replay_messages(messages, route)
         thinking_route = route if self._uses_native_checkpoint(prepared) else None
+        manual_thinking = (self.effective_thinking() or {}).get("type") == "enabled"
         result: list[Message] = []
         stale_thinking = False
         for message in prepared:
@@ -181,7 +188,10 @@ class ClaudeNativeCompaction(NativeCompactionModel):
                 # that route. Keep it only while replaying the same prefix kind.
                 stale_thinking = not matches
             dropped_types = {"compaction"}
-            if stale_thinking:
+            # Legacy manual mode requires unchanged thinking in a tool turn and
+            # predates prefix binding. Models with prefix binding use adaptive mode.
+            drop_thinking = stale_thinking and not manual_thinking
+            if drop_thinking:
                 dropped_types.update({"thinking", "redacted_thinking", "redacted_reasoning_content"})
             next_data = dict(data)
             for key, blocks in block_lists.items():
@@ -189,7 +199,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             if items:
                 next_data["content_blocks"] = items
             updates: dict[str, Any] = {"provider_data": next_data}
-            if stale_thinking:
+            if drop_thinking:
                 next_data.pop("signature", None)
                 updates.update(reasoning_content=None, redacted_reasoning_content=None)
             result.append(message.model_copy(update=updates))

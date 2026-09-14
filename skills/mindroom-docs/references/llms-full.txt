@@ -3039,6 +3039,7 @@ Automatic enablement covers GPT-5.3 Codex, GPT-5.4, and GPT-6 model families; ot
 An explicitly configured `store: true`, background mode, alternate OpenAI endpoint, or custom context-management request stays on the portable path.
 Claude native compaction supports direct Anthropic and Vertex Claude on the supported Sonnet, Opus, Fable, and Mythos models; it is a provider beta and requires a trigger of at least 50,000 tokens.
 An authored Claude `compact_20260112` policy keeps its own trigger and instructions; compatible checkpoints use the same replay and portable-fallback rules.
+Changing that policy affects future summaries; existing compatible checkpoints remain conversation history.
 Gemini, Chat Completions, and other provider adapters retain text compaction.
 
 Native compaction requires automatic compaction to be enabled, all-history replay, no historical tool-call limit, and a trigger above the current prompt size and below the hard request limit.
@@ -3051,6 +3052,7 @@ Checkpoints and their following native output are persisted through the existing
 The system instructions keep their shared prompt-cache prefix.
 OpenAI checkpoints remain opaque; local budgeting conservatively estimates their serialized size rather than treating billed pre-compaction input as active context.
 Claude usage includes every compaction iteration while context occupancy uses the final iteration.
+Canonical fallback discards thinking bound to a removed checkpoint on adaptive-thinking routes, while preserving the unchanged thinking required by legacy manual-thinking tool turns.
 Claude `pause_after_compaction: true` is rejected because MindRoom's automatic path requires the provider to continue its response.
 
 ## Extra Kwargs

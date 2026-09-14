@@ -288,8 +288,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         sanitized_tools = _strip_vertex_claude_tool_strict(tools)
         if sanitized_tools:
             request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
-        if self.thinking:
-            request_kwargs["thinking"] = self.thinking
+        if thinking := self.effective_thinking():
+            request_kwargs["thinking"] = thinking
         if self.native_compaction is not None:
             params = self.get_request_params()
             request_kwargs["context_management"] = effective_context_management(params)

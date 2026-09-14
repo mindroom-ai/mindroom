@@ -24,8 +24,8 @@ from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_te
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import runtime_paths_for, unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _noop_typing
 from tests.test_openai_native_compaction import _ANSWER, _CALL, _CHECKPOINT, _event, _response
-from tests.test_response_runner_focused import _bot, _noop_typing
 from tests.test_team_response import _build_test_config
 
 if TYPE_CHECKING:
