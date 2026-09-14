@@ -3534,7 +3534,17 @@ async def team_response_stream(  # noqa: C901, PLR0915
         async for event in raw_stream:
             # Agno treats a stream closed at its pause event as cancellation and
             # can overwrite the paused run. Drain its short post-pause tail first.
+            # The retained run also carries child ownership and storage bindings
+            # that the pause event cannot represent.
             if paused_resolution is not None:
+                if isinstance(event, TeamRunOutput) and _is_bound_team_output(event, team_id=bound_team_id):
+                    retained_pause = paused_attempt_from_response(
+                        event,
+                        fallback_session_id=ctx.session_id,
+                        fallback_run_id=attempt_run_id,
+                    )
+                    if retained_pause is not None:
+                        paused_resolution = retained_pause
                 continue
             if isinstance(event, (TeamRunOutput, RunOutput)):
                 if isinstance(event, TeamRunOutput) and not _is_bound_team_output(event, team_id=bound_team_id):
@@ -3700,18 +3710,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     fallback_run_id=attempt_run_id,
                 )
                 if paused_attempt is not None:
-                    paused_attempt = _continued_team_pause(presentation, paused_attempt)
-                    if paused_attempt.response_text:
-                        yield StructuredStreamChunk(
-                            content=paused_attempt.response_text,
-                            tool_trace=list(paused_attempt.tool_trace),
-                            presentation_state=paused_attempt.response_presentation_state,
-                        )
-                    paused_resolution = replace(
-                        paused_attempt,
-                        runtime_model_name=prepared_execution.runtime_model_name,
-                        team_member_model_names=tuple(sorted(holder.member_model_names.items())),
-                    )
+                    paused_resolution = paused_attempt
                     continue
                 yield AttemptResolved(
                     ExcludedAttempt(
@@ -3803,7 +3802,20 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 )
 
         if paused_resolution is not None:
-            yield AttemptResolved(paused_resolution)
+            paused_resolution = _continued_team_pause(presentation, paused_resolution)
+            if paused_resolution.response_text:
+                yield StructuredStreamChunk(
+                    content=paused_resolution.response_text,
+                    tool_trace=list(paused_resolution.tool_trace),
+                    presentation_state=paused_resolution.response_presentation_state,
+                )
+            yield AttemptResolved(
+                replace(
+                    paused_resolution,
+                    runtime_model_name=prepared_execution.runtime_model_name,
+                    team_member_model_names=tuple(sorted(holder.member_model_names.items())),
+                ),
+            )
             return
         if emitted_output and ctx.reply_to_event_id:
             _persist_bound_seen_event_ids(
