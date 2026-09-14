@@ -46,7 +46,6 @@ switch to standalone input within the existing retry limit.
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -401,7 +400,7 @@ async def generate_compaction_summary(
         response.tool_calls
         or response.tool_executions
         or not normalized_text.startswith("## Goal\n")
-        or re.findall(r"^## (.+)$", normalized_text, re.MULTILINE)
+        or [line.removeprefix("## ") for line in normalized_text.splitlines() if line.startswith("## ")]
         != ["Goal", "Constraints", "Progress", "Decisions", "Next Steps", "Critical Context"]
     ):
         msg = "compaction handoff requested tools or returned an invalid summary format"
