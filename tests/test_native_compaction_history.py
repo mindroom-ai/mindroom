@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -382,3 +382,81 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     assert model.native_compaction is not None
     assert model.native_compaction.threshold == 120000
     db.close()
+
+
+@pytest.mark.parametrize(
+    ("provider_data", "portable"),
+    [
+        pytest.param({"mindroom_portable_replay": True}, True, id="saved-canonical"),
+        pytest.param(
+            {
+                "mindroom_portable_replay": False,
+                "mindroom_response_output": [{"type": "reasoning", "encrypted_content": "opaque"}],
+            },
+            False,
+            id="saved-continuation-wins",
+        ),
+        pytest.param({}, False, id="legacy-unknown-policy"),
+        pytest.param({"mindroom_portable_replay": None}, False, id="null-policy"),
+        pytest.param({"mindroom_portable_replay": 1}, False, id="integer-policy"),
+        pytest.param({"mindroom_portable_replay": "true"}, False, id="string-policy"),
+        pytest.param({"mindroom_portable_replay": {}}, False, id="object-policy"),
+        pytest.param({"mindroom_response_stored": False}, True, id="legacy-unstored"),
+        pytest.param(
+            {"mindroom_native_compaction": {"route": "old-route", "threshold": 1024}},
+            True,
+            id="legacy-native",
+        ),
+        pytest.param(
+            {"mindroom_native_compaction": {"route": "old-route", "threshold": True}},
+            False,
+            id="malformed-native",
+        ),
+        pytest.param(
+            {"mindroom_native_compaction": {"route": "", "threshold": 1024}},
+            False,
+            id="empty-native-route",
+        ),
+        pytest.param(
+            {"mindroom_response_output": [{"type": "reasoning", "encrypted_content": "opaque"}]},
+            True,
+            id="legacy-ordered-reasoning",
+        ),
+        pytest.param({"mindroom_response_output": []}, False, id="empty-ordered-output"),
+        pytest.param({"mindroom_response_output": [None]}, False, id="malformed-ordered-output"),
+        pytest.param(
+            {"mindroom_response_output": [{"type": "reasoning", "encrypted_content": ""}]},
+            False,
+            id="empty-reasoning",
+        ),
+        pytest.param(
+            {"mindroom_response_output": [{"type": "reasoning", "encrypted_content": True}]},
+            False,
+            id="malformed-reasoning",
+        ),
+    ],
+)
+def test_restore_portable_policy_requires_latest_provenance(provider_data: dict[str, Any], *, portable: bool) -> None:
+    """Without legacy provenance the original budget is unknown; retain stored continuation."""
+    messages = [
+        Message(
+            role="assistant",
+            content="Older answer",
+            provider_data={"response_id": "resp_older", "mindroom_portable_replay": not portable},
+        ),
+        Message(
+            role="assistant",
+            content="Latest answer",
+            provider_data={"response_id": "resp_latest", "mindroom_response_stored": True, **provider_data},
+        ),
+        Message(role="user", content="Continue"),
+    ]
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model.configure_portable_replay(enabled=not portable)
+    restore_native_history(model, persisted_run=_completed_run("paused", messages=messages), session=None)
+    request = model.get_request_params(messages=messages)
+    if portable:
+        assert "previous_response_id" not in request
+    else:
+        assert request["previous_response_id"] == "resp_latest"
+        assert model._format_messages(messages) == [{"role": "user", "content": "Continue"}]

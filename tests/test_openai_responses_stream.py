@@ -226,19 +226,30 @@ async def test_unsuccessful_stream_raises_without_publishing_response_id(stream:
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
 @pytest.mark.parametrize("store", [True, False], ids=["stored", "stateless"])
-async def test_completed_text_publishes_response_id_only_at_completion(*, sync: bool, store: bool) -> None:
+@pytest.mark.parametrize("portable", [False, True])
+async def test_completed_text_publishes_response_id_only_at_completion(
+    *,
+    sync: bool,
+    store: bool,
+    portable: bool,
+) -> None:
     """Successful completion is independent of usage metrics and storage mode."""
     stream = (
         _created("resp_answer") + _text() + _event("response.completed", response=_response("resp_answer", "completed"))
     )
     async with _model(stream, store=store) as model:
+        model.configure_portable_replay(enabled=portable)
         chunks = [chunk async for chunk in _invoke(model, sync=sync)]
 
     assert "".join(chunk.content or "" for chunk in chunks) == "Ready"
-    assert all(not chunk.provider_data or "response_id" not in chunk.provider_data for chunk in chunks[:-1])
+    assert all(
+        not chunk.provider_data or not {"response_id", "mindroom_portable_replay"} & chunk.provider_data.keys()
+        for chunk in chunks[:-1]
+    )
     assert chunks[-1].provider_data == {
         "response_id": "resp_answer",
         "mindroom_response_stored": store,
+        "mindroom_portable_replay": portable,
         "mindroom_native_compaction": None,
     }
 
@@ -252,6 +263,7 @@ async def test_completed_tool_stream_does_not_complete_the_next_invocation(*, sy
         assert chunks[-1].provider_data == {
             "response_id": "resp_tools",
             "mindroom_response_stored": True,
+            "mindroom_portable_replay": False,
             "mindroom_native_compaction": None,
         }
 

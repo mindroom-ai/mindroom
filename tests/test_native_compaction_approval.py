@@ -25,7 +25,7 @@ from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import runtime_paths_for, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _noop_typing
-from tests.test_openai_native_compaction import _ANSWER, _CALL, _CHECKPOINT, _event, _response
+from tests.test_openai_native_compaction import _ANSWER, _CALL, _CHECKPOINT, _REASONING, _event, _response
 from tests.test_team_response import _build_test_config
 
 if TYPE_CHECKING:
@@ -209,4 +209,105 @@ async def test_rebuilt_approval_resumes_latest_native_policy(
             for run in session.runs or []
             for message in run.messages or []
         )
+    db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entity", ["agent", "team"])
+@pytest.mark.parametrize("portable_before_pause", [False, True], ids=["unbounded", "bounded"])
+@pytest.mark.parametrize("provenance", ["saved", "legacy", "malformed"])
+async def test_rebuilt_approval_preserves_reasoning_context(  # noqa: PLR0915
+    tmp_path: Path,
+    entity: str,
+    provenance: str,
+    *,
+    portable_before_pause: bool,
+) -> None:
+    """Approval rebuilds must retain stored continuation or complete canonical reasoning."""
+    requests: list[dict[str, Any]] = []
+    executed: list[str] = []
+
+    def lookup() -> str:
+        executed.append("lookup")
+        return "Port 4321"
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(200, json=_response([_REASONING, _CALL]))
+        events = _event("response.output_text.delta", delta="Ready", output_index=0, content_index=0)
+        events += _event("response.completed", response=_response([_ANSWER]))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=events)
+
+    name = "general" if entity == "agent" else "research"
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name=name,
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    db = SqliteDb(db_file=str(tmp_path / "approval.db"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        client = AsyncOpenAI(api_key="test-key", http_client=http_client)
+
+        def build_actor(*, portable: bool) -> Agent | Team:
+            model = MindRoomOpenAIResponses(
+                id="gpt-6-astra",
+                async_client=client,
+                store=True,
+                include=["reasoning.encrypted_content"],
+            )
+            model.configure_portable_replay(enabled=portable)
+            kwargs = {
+                "id": name,
+                "model": model,
+                "db": db,
+                "tools": [Function(name="lookup", entrypoint=lookup, requires_confirmation=True)],
+                "add_history_to_context": True,
+                "store_history_messages": False,
+                "telemetry": False,
+            }
+            return Agent(**kwargs) if entity == "agent" else Team(members=[], **kwargs)
+
+        actor = build_actor(portable=portable_before_pause)
+        paused = await actor.arun("Look up the port", session_id="session-1", user_id="@user:localhost")
+        requirement = (paused.requirements or [])[0]
+        assert requirement.tool_execution is not None
+        tool_call_id = requirement.tool_execution.tool_call_id
+        assert tool_call_id is not None
+        if provenance != "saved":
+            session = await actor.aget_session(session_id="session-1", user_id="@user:localhost")
+            assert session is not None
+            persisted = session.get_run(paused.run_id)
+            assert persisted is not None
+            latest = next(message for message in reversed(persisted.messages or []) if message.role == "assistant")
+            assert latest.provider_data is not None
+            latest.provider_data.pop("mindroom_portable_replay", None)
+            if provenance == "malformed":
+                latest.provider_data["mindroom_portable_replay"] = "false"
+            db.upsert_session(session)
+        result = await _resume_approval(
+            build_actor(portable=not portable_before_pause),
+            identity=identity,
+            run_id=paused.run_id,
+            tool_call_id=tool_call_id,
+            tmp_path=tmp_path,
+        )
+        assert isinstance(result, CompletedApprovalRun)
+        assert executed == ["lookup"]
+        assert len(requests) == 2
+        resumed = requests[-1]
+        assert resumed["store"] is True
+        assert sum(item.get("type") == "function_call_output" for item in resumed["input"]) == 1
+        if portable_before_pause:
+            assert "previous_response_id" not in resumed
+            assert _REASONING in resumed["input"]
+            assert sum(item.get("type") == "function_call" for item in resumed["input"]) == 1
+        else:
+            assert resumed["previous_response_id"] == "resp_done"
+            assert not any(item.get("type") in {"reasoning", "function_call"} for item in resumed["input"])
     db.close()
