@@ -483,6 +483,7 @@ class ResponseRequest:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     requires_model_history_refresh: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
+    scheduled_model: str | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
@@ -3674,6 +3675,7 @@ class ResponseRunner:
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
                 thread_id=resolved_target.resolved_thread_id,
+                active_model_name=request.scheduled_model,
             )
         )
         request = await self._prepare_admitted_locked_turn(
@@ -4245,6 +4247,7 @@ class ResponseRunner:
         if active_model_name is None:
             active_model_name = self.deps.runtime.config.resolve_runtime_model(
                 entity_name=self.deps.agent_name,
+                active_model_name=request.scheduled_model,
                 room_id=resolved_target.room_id,
                 thread_id=response_thread_id,
                 runtime_paths=self.deps.runtime_paths,
@@ -4876,6 +4879,7 @@ class ResponseRunner:
         response_thread_id = _response_thread_id(request, resolved_target)
         active_model_name = self.deps.runtime.config.resolve_runtime_model(
             entity_name=self.deps.agent_name,
+            active_model_name=request.scheduled_model,
             room_id=resolved_target.room_id,
             thread_id=response_thread_id,
             runtime_paths=self.deps.runtime_paths,

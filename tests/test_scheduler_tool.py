@@ -125,7 +125,12 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
             new_thread=True,
             silent=True,
         )
-        limited_result = await tools.schedule("every 25 minutes poll the queue", new_thread=False, history_limit=0)
+        limited_result = await tools.schedule(
+            "every 25 minutes poll the queue",
+            new_thread=False,
+            history_limit=0,
+            model="cheap",
+        )
 
     assert result == "✅ Scheduled"
     assert new_thread_result == "✅ Scheduled"
@@ -153,6 +158,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "new_thread": False,
         "history_limit": None,
         "silent": None,
+        "model": None,
     }
     assert second_call == {
         "runtime": expected_runtime,
@@ -163,6 +169,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "new_thread": True,
         "history_limit": None,
         "silent": True,
+        "model": None,
     }
     assert third_call == {
         "runtime": expected_runtime,
@@ -173,6 +180,7 @@ async def test_scheduler_tool_uses_shared_backend() -> None:
         "new_thread": False,
         "history_limit": 0,
         "silent": None,
+        "model": "cheap",
     }
 
 
@@ -280,7 +288,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
             history_limit=5,
             silent=True,
         )
-        visible_result = await tools.edit_schedule("task123", "make it visible", silent=False)
+        visible_result = await tools.edit_schedule("task123", "make it visible", silent=False, model="cheap")
 
     assert "Updated" in result
     assert "Updated" in limited_result
@@ -304,6 +312,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         "thread_id": context.resolved_thread_id,
         "history_limit": None,
         "silent": None,
+        "model": None,
     }
     assert mock_edit.await_args_list[1].kwargs == {
         "runtime": expected_runtime,
@@ -314,6 +323,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         "thread_id": context.resolved_thread_id,
         "history_limit": 5,
         "silent": True,
+        "model": None,
     }
     assert mock_edit.await_args_list[2].kwargs == {
         "runtime": expected_runtime,
@@ -324,6 +334,7 @@ async def test_edit_schedule_tool_calls_backend() -> None:
         "thread_id": context.resolved_thread_id,
         "history_limit": None,
         "silent": False,
+        "model": "cheap",
     }
 
 

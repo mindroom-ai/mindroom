@@ -34,6 +34,7 @@ class SchedulerTools(Toolkit):
         new_thread: bool,
         history_limit: int | None = None,
         silent: bool | None = None,
+        model: str | None = None,
     ) -> str:
         """Schedule a task using natural language.
 
@@ -54,6 +55,9 @@ class SchedulerTools(Toolkit):
                 whitespace-only, or exactly `NO_REPLY`. Findings, failures, and
                 independently sent tool messages remain visible. Leave unset to infer
                 the mode from the scheduling request.
+            model: Configured model alias for each scheduled run (including team
+                members), e.g. "cheap". Leave unset to use normal agent, room, and
+                thread model selection. This does not change the conversation model.
 
         Returns:
             The scheduling result message.
@@ -73,6 +77,7 @@ class SchedulerTools(Toolkit):
             new_thread=new_thread,
             history_limit=history_limit,
             silent=silent,
+            model=model,
         )
         if task_id is None:
             raise RuntimeError(response_text)
@@ -84,6 +89,7 @@ class SchedulerTools(Toolkit):
         request: str,
         history_limit: int | None = None,
         silent: bool | None = None,
+        model: str | None = None,
     ) -> str:
         """Edit an existing scheduled task by replacing its timing and content.
 
@@ -97,6 +103,9 @@ class SchedulerTools(Toolkit):
                 and omit empty, whitespace-only, or exact `NO_REPLY` finals while
                 keeping findings, failures, and independently sent tool messages
                 visible. Leave unset to preserve the existing mode.
+            model: Configured model alias for each run, including team members.
+                Leave unset to preserve the existing choice. Use an empty string
+                to restore normal agent, room, and thread model selection.
 
         Returns:
             The edit result message.
@@ -116,6 +125,7 @@ class SchedulerTools(Toolkit):
             thread_id=context.resolved_thread_id,
             history_limit=history_limit,
             silent=silent,
+            model=model,
         )
         _raise_for_scheduler_error(response_text)
         return response_text

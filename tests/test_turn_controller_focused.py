@@ -2237,11 +2237,20 @@ def _membership_single_agent_config(tmp_path: Path) -> Config:
 
 
 @pytest.mark.asyncio
-async def test_scheduled_fire_history_limit_reaches_response_request(config: Config, tmp_path: Path) -> None:
+@pytest.mark.parametrize(("model", "expected_model"), [("cheap", "cheap"), (None, None), ("", None), (5, None)])
+async def test_scheduled_fire_history_limit_reaches_response_request(
+    config: Config,
+    tmp_path: Path,
+    model: object,
+    expected_model: str | None,
+) -> None:
     """The history limit annotated on a trusted scheduled fire lands on the ResponseRequest."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
-    event = _scheduled_fire_event(config, extra_content={constants.SCHEDULED_HISTORY_LIMIT_KEY: 3})
+    event = _scheduled_fire_event(
+        config,
+        extra_content={constants.SCHEDULED_HISTORY_LIMIT_KEY: 3, constants.SCHEDULED_MODEL_KEY: model},
+    )
 
     await harness.deliver(room, event)
 
@@ -2252,6 +2261,7 @@ async def test_scheduled_fire_history_limit_reaches_response_request(config: Con
         source_event_id="$scheduled:localhost",
     )
     assert request.response_envelope.origin.intent is TurnIntent.SCHEDULED_FIRE
+    assert request.scheduled_model == expected_model
 
 
 @pytest.mark.asyncio
@@ -2364,6 +2374,7 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
                 constants.SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
                 constants.ORIGINAL_SENDER_KEY: _SENDER,
                 constants.SCHEDULED_HISTORY_LIMIT_KEY: 2,
+                "com.mindroom.scheduled_model": "cheap",
                 "m.relates_to": {"m.in_reply_to": {"event_id": "$scheduled:localhost"}},
             },
             "event_id": "$scheduled-router-handoff:localhost",
@@ -2383,6 +2394,7 @@ async def test_scheduled_router_handoff_history_limit_reaches_response_request(
         source_event_id="$scheduled:localhost",
     )
     assert request.response_envelope.origin.intent is TurnIntent.ROUTER_HANDOFF
+    assert request.scheduled_model == "cheap"
 
 
 @pytest.mark.asyncio
@@ -2463,7 +2475,11 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
         test_runtime_paths(tmp_path / "runtime"),
     )
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
-    scheduled_event = _scheduled_fire_event(config, extra_content={}, new_thread=True)
+    scheduled_event = _scheduled_fire_event(
+        config,
+        extra_content={constants.SCHEDULED_MODEL_KEY: "cheap"},
+        new_thread=True,
+    )
     router_harness = _build_harness(config, tmp_path / "router", agent_name=ROUTER_AGENT_NAME)
 
     async def _route_to_general(*_args: object, **_kwargs: object) -> str:
@@ -2478,6 +2494,7 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     assert handoff.target.resolved_thread_id == scheduled_event.event_id
     assert handoff.extra_content is not None
     assert handoff.extra_content[constants.SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
+    assert handoff.extra_content[constants.SCHEDULED_MODEL_KEY] == "cheap"
     assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_KEY] is True
     assert handoff.extra_content[constants.PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] == scheduled_event.event_id
 
@@ -2502,6 +2519,7 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     await agent_harness.deliver(room, relay_event)
 
     assert len(agent_harness.runner.requests) == 1
+    assert agent_harness.runner.requests[0].scheduled_model == "cheap"
     target = agent_harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id == scheduled_event.event_id
     assert target.session_id == f"{_ROOM_ID}:{scheduled_event.event_id}"
@@ -2532,6 +2550,7 @@ async def test_user_message_cannot_spoof_scheduled_history_limit(config: Config,
                 "msgtype": "m.text",
                 constants.SOURCE_KIND_KEY: SCHEDULED_SOURCE_KIND,
                 constants.SCHEDULED_HISTORY_LIMIT_KEY: 0,
+                "com.mindroom.scheduled_model": "cheap",
             },
             "event_id": _EVENT_ID,
             "sender": _SENDER,
@@ -2547,6 +2566,7 @@ async def test_user_message_cannot_spoof_scheduled_history_limit(config: Config,
     request = harness.runner.requests[0]
     assert request.scheduled_history_budget is None
     assert request.response_envelope.origin.intent is not TurnIntent.SCHEDULED_FIRE
+    assert request.scheduled_model is None
 
 
 @pytest.mark.asyncio
@@ -2720,11 +2740,12 @@ async def test_room_level_silent_schedule_trigger_never_replies_to_hidden_source
     config = _single_agent_config(tmp_path, "thread")
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
-    event = _silent_schedule_event(config, extra_content={})
+    event = _silent_schedule_event(config, extra_content={constants.SCHEDULED_MODEL_KEY: "cheap"})
 
     await harness.deliver(room, event)
 
     assert len(harness.runner.requests) == 1
+    assert harness.runner.requests[0].scheduled_model == "cheap"
     envelope = harness.runner.requests[0].response_envelope
     assert envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
     assert envelope.target.source_thread_id is None

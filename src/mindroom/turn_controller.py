@@ -26,6 +26,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
+    SCHEDULED_MODEL_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
@@ -177,6 +178,17 @@ def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
     stripped_content = dict(content)
     stripped_content.pop("m.relates_to", None)
     return replace(event, source={**event.source, "content": stripped_content})
+
+
+def _scheduled_model_for_dispatch(event: DispatchEvent, origin_intent: TurnIntent) -> str | None:
+    """Accept a per-run model only from trusted scheduled fires or router handoffs."""
+    if origin_intent not in {TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER_HANDOFF}:
+        return None
+    content = event.source.get("content") if isinstance(event.source, dict) else None
+    if not isinstance(content, dict):
+        return None
+    model = content.get(SCHEDULED_MODEL_KEY)
+    return model if isinstance(model, str) and model else None
 
 
 def _scheduled_history_budget_for_dispatch(
@@ -1312,6 +1324,7 @@ class TurnController:
                 envelope=envelope,
                 current_prompt_is_structured=current_prompt_is_structured,
                 scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
+                scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
             ),
             replay_guard=replay_guard,
         )
@@ -2043,6 +2056,7 @@ class TurnController:
                     matrix_run_metadata=matrix_run_metadata,
                     requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                     scheduled_history_budget=dispatch.scheduled_history_budget,
+                    scheduled_model=dispatch.scheduled_model,
                     payload_preparation=payload_preparation,
                     current_timestamp_ms=current_timestamp_ms,
                     current_prompt_is_structured=dispatch.current_prompt_is_structured,

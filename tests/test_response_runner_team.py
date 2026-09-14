@@ -284,6 +284,70 @@ class TestAgentBot(AgentBotTestBase):
         assert response_kwargs["member_model_names"] == {"calculator": "large", "general": "large"}
 
     @pytest.mark.asyncio
+    async def test_scheduled_model_overrides_coordinator_and_members(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A schedule model applies to both coordinator and members despite room defaults."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        config.models["large"] = ModelConfig(provider="test", id="large-model")
+        config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+        runtime_paths = runtime_paths_for(config)
+        set_room_model_override(
+            runtime_paths,
+            room_id="!test:localhost",
+            model_name="large",
+            set_by="@admin:localhost",
+        )
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
+        matrix_ids = entity_ids(config, runtime_paths)
+        mock_team_response = AsyncMock(return_value="Team reply")
+
+        async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
+            set_room_model_override(
+                runtime_paths,
+                room_id="!test:localhost",
+                model_name="default",
+                set_by="@admin:localhost",
+            )
+            return await original_prepare_admitted_turn(*args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch.object(coordinator, "_prepare_admitted_locked_turn", new=change_room_default_during_preparation),
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response=mock_team_response,
+            ),
+        ):
+            await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                    scheduled_model="cheap",
+                ),
+                team_agents=[matrix_ids["calculator"], matrix_ids["general"]],
+                team_mode="collaborate",
+            )
+
+        response_kwargs = mock_team_response.await_args.kwargs
+        assert response_kwargs["model_name"] == "cheap"
+        assert response_kwargs["member_model_names"] == {"calculator": "cheap", "general": "cheap"}
+
+    @pytest.mark.asyncio
     async def test_team_model_snapshot_is_complete_before_streaming_check_yields(
         self,
         mock_agent_user: AgentMatrixUser,

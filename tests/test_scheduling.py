@@ -2776,3 +2776,125 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
     assert task_id is None
     assert "@writer is not available in this thread" in message
     save_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
+    """The chosen model survives state storage and edits, and can be cleared."""
+    client = AsyncMock()
+    client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
+    room_state: dict[str, dict[str, Any]] = {}
+    client.room_get_state = AsyncMock(side_effect=lambda room_id: _room_state_response(room_id, room_state))
+    client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key: nio.RoomGetStateEventResponse(
+            content=room_state[state_key]["content"],
+            room_id=room_id,
+            event_type=event_type,
+            state_key=state_key,
+        ),
+    )
+    matrix_admin = _RecordingScheduleStateAdmin(room_state)
+    room = _matrix_room("!test:server")
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", role="Test assistant")},
+            models={name: ModelConfig(provider="test", id=f"{name}-model") for name in ("default", "cheap")},
+        ),
+        runtime_paths,
+    )
+    ids = entity_ids(config, runtime_paths)
+    workflow = ScheduledWorkflow(
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="*/25"),
+        message="poll the queue",
+        description="Queue poller",
+    )
+
+    with (
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
+        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
+        patch(
+            "mindroom.scheduling._parse_workflow_schedule",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: workflow.model_copy(deep=True)),
+        ),
+        patch("mindroom.scheduling._start_scheduled_task", return_value=True),
+        patch("mindroom.scheduling.uuid.uuid4", return_value="task1234"),
+    ):
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=room,
+                matrix_admin=matrix_admin,
+            ),
+            room_id="!test:server",
+            thread_id="$thread",
+            scheduled_by="@alice:server",
+            full_text="every 25 minutes poll the queue with only the last 5 messages",
+            model="cheap",
+            silent=True,
+        )
+
+    assert task_id == "task1234"
+    assert "**Model:** cheap" in message
+    assert "**Mode:** Silent" in message
+    tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
+    assert [task.task_id for task in tasks] == ["task1234"]
+    assert tasks[0].workflow.model == "cheap"
+    assert build_edited_scheduled_workflow(tasks[0].workflow, "!test:server", message="new task").model == "cheap"
+    assert tasks[0].workflow.silent is True
+    listed = await list_scheduled_tasks(client=client, room_id="!test:server", thread_id="$thread", config=config)
+    assert "Model: cheap" in listed
+    assert "Mode: Silent" in listed
+
+    with (
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
+        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
+        patch(
+            "mindroom.scheduling._parse_workflow_schedule",
+            new=AsyncMock(side_effect=lambda *_args, **_kwargs: workflow.model_copy(deep=True)),
+        ),
+    ):
+        for model, expected in [(None, "cheap"), ("default", "default"), ("", None)]:
+            result = await edit_scheduled_task(
+                runtime=_scheduling_runtime(
+                    client=client,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    room=room,
+                    matrix_admin=matrix_admin,
+                ),
+                room_id="!test:server",
+                task_id="task1234",
+                full_text="keep the same task",
+                scheduled_by="@alice:server",
+                model=model,
+            )
+            assert "Updated task" in result
+            stored = await get_scheduled_tasks_for_room(client=client, room_id="!test:server")
+            assert stored[0].workflow.model == expected
+
+
+@pytest.mark.asyncio
+async def test_schedule_rejects_unknown_model_before_parsing() -> None:
+    """An unknown model must fail before parsing or writing schedule state."""
+    with patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock()) as parse:
+        task_id, message = await schedule_task(
+            runtime=_scheduling_runtime(),
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@user:server",
+            full_text="every hour check logs",
+            model="missing-model",
+        )
+    assert task_id is None
+    assert "Unknown model" in message
+    parse.assert_not_awaited()
