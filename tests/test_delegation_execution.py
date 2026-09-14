@@ -472,11 +472,52 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
             assert side_effects == (["written"] * siblings if outcome == "approve" else [])
             messages = resumed.member_responses[0].messages if team_parent else resumed.messages
             result_message = next(message.content for message in messages if message.tool_call_id == "delegate-0")
-            assert ("Cannot delegate" if outcome == "revoke" else "child result") in result_message
+            expected_result = (
+                "Cannot delegate"
+                if outcome == "revoke"
+                else "resume failed"
+                if outcome == "resume_error"
+                else "child result"
+            )
+            assert expected_result in result_message
+            if outcome == "resume_error":
+                records = [
+                    json.loads(path.read_text())
+                    for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
+                ]
+                assert sorted(record["status"] for record in records) == ["cancelled", "failed"]
+                for storage in child_storages:
+                    for session in storage.get_sessions():
+                        assert all(run.status != RunStatus.paused and not run.requirements for run in session.runs)
     finally:
         parent_storage.close()
         for storage in child_storages:
             storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team_parent", [False, True])
+async def test_failed_nested_resume_settles_descendants_and_visible_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    team_parent: bool,
+) -> None:
+    """A failed reconstruction leaves no descendant approval or visible tool pending."""
+
+    async def failed_resume(*_args: object, **_kwargs: object) -> RunOutput:
+        message = "resume failed"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr("mindroom.delegation_execution._continue_child", failed_resume)
+    await test_child_approval_survives_parent_reconstruction(
+        tmp_path,
+        monkeypatch,
+        outcome="resume_error",
+        siblings=1,
+        nested=True,
+        retry=False,
+        team_parent=team_parent,
+    )
 
 
 def test_native_delegate_uses_external_execution() -> None:

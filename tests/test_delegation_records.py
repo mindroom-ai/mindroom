@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -23,6 +24,39 @@ if TYPE_CHECKING:
 
 def _records_module() -> ModuleType:
     return importlib.import_module("mindroom.delegation_records")
+
+
+@pytest.mark.asyncio
+async def test_interrupted_event_publication_preserves_committed_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed flush must leave committed events readable for continuation and finish."""
+    module = _records_module()
+    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await owner.start(
+        _metadata(module),
+        caller_execution_identity=_identity("caller"),
+        child_execution_identity=_identity("child"),
+    )
+    event_path = handle.record_dir / "events.jsonl"
+    committed = event_path.read_bytes()
+
+    def interrupted_flush(_fd: int) -> None:
+        message = "Interrupted durable write"
+        raise OSError(message)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "fsync", interrupted_flush)
+        with pytest.raises(OSError, match="Interrupted durable write"):
+            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Résumé 🙂"}))
+    assert event_path.read_bytes() == committed
+    reopened = await owner.reopen(handle.locator)
+    await owner.append_event(reopened, module.DelegationEvent(kind="output", data={"content": "Resumed"}))
+    await owner.finish(reopened, status="completed", output="Done")
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    assert [event["sequence"] for event in events] == [1, 2, 3]
+    assert _read_json(handle.record_dir / "run.json")["status"] == "completed"
 
 
 def _config(*, private_child: bool = False) -> Config:

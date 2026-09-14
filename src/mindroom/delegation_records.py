@@ -17,7 +17,6 @@ from uuid import uuid4
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.durable_write import (
     create_directory_durable,
-    fsync_directory_durable,
     replace_file_durable,
     write_json_file_durable,
 )
@@ -533,14 +532,10 @@ def _write_run(path: Path, run: Mapping[str, object]) -> None:
 
 
 def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
-    existed = path.exists()
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    if not existed:
-        fsync_directory_durable(path.parent)
+    # These exports already rebuild their transcript after every event. Publish
+    # the log atomically too, so a crash cannot leave an unreadable partial line.
+    previous = path.read_text(encoding="utf-8") if path.exists() else ""
+    _write_text_file_durable(path, previous + json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _load_run(handle: DelegationRecordHandle) -> dict[str, _JsonValue]:

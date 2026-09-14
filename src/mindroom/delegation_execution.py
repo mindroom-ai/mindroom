@@ -7,7 +7,7 @@ from contextlib import suppress
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING, NotRequired, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
 from agno.db.base import BaseDb, SessionType
@@ -166,12 +166,13 @@ async def _read_child(child: DelegationChild, config: Config, paths: RuntimePath
     return response
 
 
-async def _cancel_child(
+async def _settle_interrupted_child(
     child: DelegationChild,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     reason: str,
+    status: Literal["cancelled", "failed"] = "cancelled",
 ) -> None:
     config = delegation_storage_config(config, child.storage_bindings)
     response = await _read_child(child, config, runtime_paths)
@@ -180,10 +181,13 @@ async def _cancel_child(
         return
     if response is not None:
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        response.status = RunStatus.cancelled
+        response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
         response.content = reason
         response.requirements = []
         for tool in response.tools or ():
+            if tool.is_paused:
+                tool.result = reason
+                tool.tool_call_error = True
             tool.requires_confirmation = False
             tool.external_execution_required = False
             tool.requires_user_input = False
@@ -201,7 +205,7 @@ async def _cancel_child(
                 storage.close()
 
         await asyncio.to_thread(persist)
-    child.status = "cancelled"
+    child.status = status
     child.result = reason
     if child.record_locator:
         await finish_child_record(child, config=config, runtime_paths=runtime_paths, reason=reason)
@@ -218,7 +222,7 @@ async def _cancel_delegations(
     state = DelegationState.from_metadata(response.metadata)
     for child in state.children:
         if child.status not in {"completed", "failed", "cancelled", "denied"}:
-            await _cancel_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
+            await _settle_interrupted_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
     for requirement_id, hook_state in state.hooks.items():
         child = next((item for item in state.children if item.parent_requirement_id == requirement_id), None)
         await after_delegation(
@@ -573,6 +577,24 @@ async def _resolved_child_tool(
     return None
 
 
+def _settle_pending_child_tools(
+    response: RunOutput | TeamRunOutput,
+    pending_tools: list[dict[str, object]],
+    on_event: Callable[[object], None],
+    *,
+    reason: str,
+) -> None:
+    """Close the current approval generation's visible tools after an interruption."""
+    for pending_tool in pending_tools:
+        cancelled_tool = ToolExecution.from_dict(pending_tool)
+        cancelled_tool.requires_confirmation = False
+        cancelled_tool.requires_user_input = False
+        cancelled_tool.external_execution_required = False
+        cancelled_tool.result = reason
+        cancelled_tool.tool_call_error = True
+        on_event(_child_completion_event(response, cancelled_tool))
+
+
 def _child_completion_event(
     response: RunOutput | TeamRunOutput,
     tool: ToolExecution,
@@ -672,16 +694,14 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             if isinstance(authorization, str):
                 retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
                 if retained is not None:
-                    await _cancel_child(retained, config=config, runtime_paths=runtime_paths, reason=authorization)
+                    await _settle_interrupted_child(
+                        retained,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        reason=authorization,
+                    )
                     if pending_id == retained.delegation_id and on_event is not None:
-                        for pending_tool in prior_pending_tools:
-                            cancelled_tool = ToolExecution.from_dict(pending_tool)
-                            cancelled_tool.requires_confirmation = False
-                            cancelled_tool.requires_user_input = False
-                            cancelled_tool.external_execution_required = False
-                            cancelled_tool.result = authorization
-                            cancelled_tool.tool_call_error = True
-                            on_event(_child_completion_event(response, cancelled_tool))
+                        _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=authorization)
                 requirement.set_external_execution_result(authorization)
                 if requirement.id in state.hooks:
                     await after_delegation(
@@ -816,7 +836,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                         await _persist(entity, response, state)
                         return response
                 except asyncio.CancelledError:
-                    await _cancel_child(
+                    await _settle_interrupted_child(
                         child,
                         config=config,
                         runtime_paths=runtime_paths,
@@ -832,8 +852,15 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     await _persist(entity, response, state)
                     raise
                 except Exception as error:
-                    child.status = "failed"
-                    child.result = str(error)
+                    await _settle_interrupted_child(
+                        child,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        reason=str(error),
+                        status="failed",
+                    )
+                    if child_decisions is not None and on_event is not None:
+                        _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
                 await _persist(entity, response, state)
             receipt = await finish_child_record(child, config=config, runtime_paths=runtime_paths)
             result = child.result or "Agent completed the task but returned no content."

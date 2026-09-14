@@ -245,7 +245,7 @@ run_subagent(
 
 - `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
 - Recursive delegation is supported, but only up to a maximum depth of 3.
-- Each parent runs one child at a time.
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel.
 - Use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) when you need an ongoing conversation.
 - Use [`delegate`] when you need a synchronous specialist answer inside the current run.
 
