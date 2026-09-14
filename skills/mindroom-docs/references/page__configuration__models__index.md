@@ -249,6 +249,29 @@ If you previously relied on automatic Astra routing through a proxy, add `api: r
 Explicit Chat Completions disables native deferred-tool search and keeps MindRoom's dynamic-tool discovery.
 Selecting Responses on a custom endpoint does not enable OpenAI's hosted tool search; only supported first-party OpenAI and Codex routes use it.
 
+## OrcaRouter via the OpenAI-Compatible Endpoint
+
+[OrcaRouter](https://docs.orcarouter.ai/introduction) works through MindRoom's existing `openai` provider; no dedicated provider or plugin is required.
+Configure its endpoint and an OrcaRouter API key on the model:
+
+```yaml
+models:
+  orcarouter:
+    provider: openai
+    id: orcarouter/auto
+    api: chat_completions
+    extra_kwargs:
+      base_url: https://api.orcarouter.ai/v1
+      api_key: your-orcarouter-api-key
+```
+
+The `orcarouter/auto` ID lets OrcaRouter choose a model per request; you can replace it with a model ID from its [catalog](https://docs.orcarouter.ai/getting-started/models).
+Set an agent's `model: orcarouter`, or select it for a thread with `!model orcarouter`.
+
+To keep the key out of YAML, omit `extra_kwargs.api_key` and save the OrcaRouter key in the dashboard's **Models** editor, in this model's **API Key** field.
+That model-specific credential takes precedence over `extra_kwargs.api_key` and the shared OpenAI key, so OrcaRouter and direct OpenAI models can use separate keys.
+MindRoom does not automatically read `ORCAROUTER_API_KEY` for `provider: openai`.
+
 ## Codex Models with ChatGPT Login
 
 Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API.
