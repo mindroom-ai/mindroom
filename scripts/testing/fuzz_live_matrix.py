@@ -3650,7 +3650,8 @@ class ManagedTuwunelStack:
         """Stop MindRoom and report whether its shutdown stayed bounded and clean."""
         try:
             self._stop_mindroom(timeout=timeout)
-        except (RuntimeError, TimeoutError):
+        except (RuntimeError, TimeoutError) as error:
+            print(f"Managed MindRoom shutdown failed: {error}", file=sys.stderr, flush=True)
             return False
         return True
 
