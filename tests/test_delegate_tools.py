@@ -183,6 +183,16 @@ class TestDelegateTools:
         func_names = [f.name for f in tools.async_functions.values()]
         assert "run_subagent" in func_names
 
+    def test_schema_requires_task_and_allows_omitted_or_null_agent_name(self, tools: DelegateTools) -> None:
+        """The model must be able to request a self subagent using only its task."""
+        function = tools.async_functions["run_subagent"]
+        function.process_entrypoint(strict=False)
+        assert function.parameters["required"] == ["task"]
+        assert function.parameters["properties"]["agent_name"]["anyOf"] == [
+            {"type": "string"},
+            {"type": "null"},
+        ]
+
     def test_instructions_contain_agent_descriptions(self, tools: DelegateTools) -> None:
         """Test that toolkit instructions describe available delegation targets."""
         instructions = tools.instructions
@@ -212,7 +222,7 @@ class TestDelegateTools:
     @pytest.mark.asyncio
     async def test_delegate_to_unknown_agent(self, tools: DelegateTools) -> None:
         """Test that delegating to an unknown agent returns an error."""
-        result = await tools.run_subagent("unknown_agent", "do something")
+        result = await tools.run_subagent(agent_name="unknown_agent", task="do something")
         assert "Cannot delegate to 'unknown_agent'" in result
         assert "code" in result
         assert "research" in result
@@ -221,13 +231,13 @@ class TestDelegateTools:
     @pytest.mark.asyncio
     async def test_delegate_empty_task(self, tools: DelegateTools) -> None:
         """Test that delegating an empty task returns an error."""
-        result = await tools.run_subagent("code", "")
+        result = await tools.run_subagent(agent_name="code", task="")
         assert "Cannot delegate an empty task" in result
 
     @pytest.mark.asyncio
     async def test_delegate_whitespace_only_task(self, tools: DelegateTools) -> None:
         """Test that delegating a whitespace-only task returns an error."""
-        result = await tools.run_subagent("code", "   ")
+        result = await tools.run_subagent(agent_name="code", task="   ")
         assert "Cannot delegate an empty task" in result
 
     @pytest.mark.asyncio
@@ -250,7 +260,7 @@ class TestDelegateTools:
         )
 
         with patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response:
-            result = await tools.run_subagent("code", "Write a hello world program")
+            result = await tools.run_subagent(agent_name="code", task="Write a hello world program")
 
         assert "requester authorization is unavailable" in result
         mock_ai_response.assert_not_awaited()
@@ -298,7 +308,7 @@ class TestDelegateTools:
             tool_runtime_context(runtime_context),
             patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response,
         ):
-            result = await tools.run_subagent("code", "Write a hello world program")
+            result = await tools.run_subagent(agent_name="code", task="Write a hello world program")
 
         assert "not allowed to reply" in result
         mock_ai_response.assert_not_awaited()
@@ -311,7 +321,7 @@ class TestDelegateTools:
             new_callable=AsyncMock,
             return_value="Here is the generated code: print('hello')",
         ) as mock_ai_response:
-            result = await tools.run_subagent("code", "Write a hello world program")
+            result = await tools.run_subagent(agent_name="code", task="Write a hello world program")
 
             assert mock_ai_response.await_count == 1
             call_kwargs = mock_ai_response.await_args.kwargs
@@ -398,7 +408,7 @@ class TestDelegateTools:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            result = await tools.run_subagent("worker", "do work")
+            result = await tools.run_subagent(agent_name="worker", task="do work")
 
         _assert_direct_result_with_receipt(result, "done")
         mock_ai_response.assert_awaited_once()
@@ -411,7 +421,7 @@ class TestDelegateTools:
             new_callable=AsyncMock,
             return_value="",
         ):
-            result = await tools.run_subagent("code", "Do something")
+            result = await tools.run_subagent(agent_name="code", task="Do something")
             assert "returned no content" in result
 
     @pytest.mark.asyncio
@@ -421,7 +431,7 @@ class TestDelegateTools:
             "mindroom.custom_tools.delegate.ai_response",
             side_effect=RuntimeError("Delegated run failed"),
         ):
-            result = await tools.run_subagent("code", "Do something")
+            result = await tools.run_subagent(agent_name="code", task="Do something")
             assert "Delegation to 'code' failed" in result
             assert "Delegated run failed" in result
 
@@ -448,7 +458,7 @@ class TestDelegateTools:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.run_subagent("code", "task")
+            await tools.run_subagent(agent_name="code", task="task")
             assert mock_ai_response.await_args.kwargs["delegation_depth"] == 2
 
     @pytest.mark.asyncio
@@ -478,7 +488,7 @@ class TestDelegateTools:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.run_subagent("code", "update yourself")
+            await tools.run_subagent(agent_name="code", task="update yourself")
             assert mock_ai_response.await_args.kwargs["runtime_paths"] == runtime_paths
 
 
@@ -528,7 +538,7 @@ class TestDelegateKnowledge:
                 return_value="Found relevant docs",
             ) as mock_ai_response,
         ):
-            result = await tools.run_subagent("researcher", "Find info about X")
+            result = await tools.run_subagent(agent_name="researcher", task="Find info about X")
 
             mock_get.assert_awaited_once()
             args, kwargs = mock_get.await_args
@@ -619,7 +629,7 @@ class TestDelegateKnowledge:
                 return_value="Found relevant docs",
             ),
         ):
-            result = await delegate_tool.run_subagent("researcher", "Find info about X")
+            result = await delegate_tool.run_subagent(agent_name="researcher", task="Find info about X")
 
         _assert_direct_result_with_receipt(result, "Found relevant docs")
         assert scheduled_base_ids == ["docs"]
@@ -655,7 +665,7 @@ class TestDelegateKnowledge:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.run_subagent("worker", "do work")
+            await tools.run_subagent(agent_name="worker", task="do work")
             assert mock_ai_response.await_args.args[0].entity_label == "worker"
             assert mock_ai_response.await_args.kwargs["knowledge"] is None
 
@@ -709,7 +719,7 @@ class TestDelegateKnowledge:
                 return_value="done",
             ) as mock_ai_response,
         ):
-            await tools.run_subagent("worker", "do work")
+            await tools.run_subagent(agent_name="worker", task="do work")
 
         call_kwargs = mock_ai_response.await_args.kwargs
         call_ctx = mock_ai_response.await_args.args[0]
@@ -802,7 +812,7 @@ class TestDelegateKnowledge:
             tool_runtime_context(runtime_context),
             patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         ):
-            result = await tools.run_subagent("worker", "do work")
+            result = await tools.run_subagent(agent_name="worker", task="do work")
 
         _assert_direct_result_with_receipt(result, "done")
 
@@ -901,7 +911,7 @@ class TestDelegateKnowledge:
             tool_runtime_context(runtime_context),
             patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         ):
-            result = await tools.run_subagent("worker", "do work")
+            result = await tools.run_subagent(agent_name="worker", task="do work")
 
         _assert_direct_result_with_receipt(result, "done")
 

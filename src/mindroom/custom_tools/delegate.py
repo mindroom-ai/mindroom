@@ -146,27 +146,28 @@ class DelegateTools(Toolkit):
             "Use only these agent names. Include all relevant context, constraints, and expected output in task; "
             "the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\n"
             "Selecting your own name starts a fresh copy of yourself, if listed. "
+            "Omit agent_name or pass null to select yourself; the same allowlist applies. "
             "The caller waits; this does not create a Matrix thread. "
             "Use matrix_message for an ongoing conversation instead.\n"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
             "Returns the child's answer and an audit reference scoped to the child agent."
         )
 
-    async def run_subagent(self, agent_name: str, task: str) -> str:
+    async def run_subagent(self, task: str, agent_name: str | None = None) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
         The runtime-generated tool description lists caller-specific allowed
         targets and model guidance.
 
         Args:
-            agent_name: One of the allowed subagent names, including your own name if listed.
             task: Self-contained task with relevant context, constraints, and expected output.
+            agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
 
         """
-        return await self.run_delegated_task(agent_name, task)
+        return await self.run_delegated_task(self._agent_name if agent_name is None else agent_name, task)
 
     def authorize(self, agent_name: str, task: str) -> Config | str:  # noqa: PLR0911
         """Recheck the current caller allowlist and requester authority."""

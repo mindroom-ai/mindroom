@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("rejection", "expected_result"),
     [
-        ("arguments", "agent_name and task must be strings"),
+        ("arguments", "task must be a string"),
         ("authorization", "Cannot delegate to 'child'"),
         ("policy", "denied by requester"),
         ("plugin", "Subagents disabled by plugin"),

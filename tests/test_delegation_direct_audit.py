@@ -115,7 +115,7 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
             return_value="child answer",
         ),
     ):
-        result = await tools.run_subagent("child", "Do the work")
+        result = await tools.run_subagent(agent_name="child", task="Do the work")
 
     run = _only_run(tmp_path)
     assert run["status"] == "failed"
@@ -169,7 +169,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         tool_runtime_context(context),
         patch("mindroom.custom_tools.delegate.ai_response", side_effect=run_real_envelope),
     ):
-        result = await tools.run_subagent("child", "Do the work")
+        result = await tools.run_subagent(agent_name="child", task="Do the work")
 
     paths = list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*"))
     assert len(paths) == 1
@@ -294,7 +294,7 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
         tool_runtime_context(context),
         patch("mindroom.custom_tools.delegate.ai_response", side_effect=complete_child),
     ):
-        await tools.run_subagent("child", "Run later")
+        await tools.run_subagent(agent_name="child", task="Run later")
 
     run = _only_run(tmp_path)
     assert run["parent_run_id"] is None
@@ -315,7 +315,7 @@ async def test_direct_delegation_records_failure_and_returns_receipt(tmp_path: P
             side_effect=RuntimeError("child exploded"),
         ),
     ):
-        result = await tools.run_subagent("child", "Do the work")
+        result = await tools.run_subagent(agent_name="child", task="Do the work")
 
     run = _only_run(tmp_path)
     assert run["status"] == "failed"
@@ -339,7 +339,7 @@ async def test_direct_delegation_records_cancellation_before_propagating(tmp_pat
         ),
         pytest.raises(asyncio.CancelledError),
     ):
-        await tools.run_subagent("child", "Do the work")
+        await tools.run_subagent(agent_name="child", task="Do the work")
 
     run = _only_run(tmp_path)
     assert run["status"] == "cancelled"
@@ -376,10 +376,10 @@ async def test_direct_delegation_preserves_completed_outcome_after_envelope_erro
     ):
         if error_type is asyncio.CancelledError:
             with pytest.raises(asyncio.CancelledError) as caught:
-                await tools.run_subagent("child", "Do the work")
+                await tools.run_subagent(agent_name="child", task="Do the work")
             assert caught.value is error
         else:
-            result = await tools.run_subagent("child", "Do the work")
+            result = await tools.run_subagent(agent_name="child", task="Do the work")
             assert str(error) in result
 
     run = _only_run(tmp_path)

@@ -118,6 +118,19 @@ def test_matrix_room_tool_registered_and_instantiates() -> None:
     )
 
 
+def test_matrix_room_schema_exposes_supported_actions() -> None:
+    """Agents must receive the allowed actions as a schema enum, not an unrestricted string."""
+    function = MatrixRoomTools().async_functions["matrix_room"]
+    function.process_entrypoint(strict=False)
+    assert function.parameters["properties"]["action"]["enum"] == [
+        "room-info",
+        "members",
+        "agents",
+        "threads",
+        "state",
+    ]
+
+
 # --- Context required ---
 
 

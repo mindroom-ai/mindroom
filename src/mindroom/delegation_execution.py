@@ -759,10 +759,12 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             toolkit = _toolkit(caller, config, runtime_paths, execution_identity, delegation_depth, refresh_scheduler)
             args = tool.tool_args or {}
             child_name, task = args.get("agent_name"), args.get("task")
+            if child_name is None:
+                child_name = caller
             if not isinstance(child_name, str) or not isinstance(task, str):
                 _resolve_delegation_requirement(
                     requirement,
-                    "Cannot delegate: agent_name and task must be strings.",
+                    "Cannot delegate: task must be a string and agent_name must be a string or null.",
                     response,
                     agent_name,
                     on_event,

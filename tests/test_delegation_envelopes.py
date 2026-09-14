@@ -69,7 +69,7 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        result = await toolkit.run_subagent("child", "Do the work")
+        result = await toolkit.run_subagent(agent_name="child", task="Do the work")
 
     assert "Child completed the work." in result
     run = _only_run(tmp_path)

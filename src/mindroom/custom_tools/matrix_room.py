@@ -6,7 +6,7 @@ import json
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, replace
 from threading import Lock
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Literal, cast
 
 import nio
 from agno.tools import Toolkit
@@ -527,7 +527,7 @@ class MatrixRoomTools(Toolkit):
 
     async def matrix_room(  # noqa: PLR0911
         self,
-        action: str = "room-info",
+        action: Literal["room-info", "members", "agents", "threads", "state"] = "room-info",
         room_id: str | None = None,
         limit: int | None = None,
         event_type: str | None = None,

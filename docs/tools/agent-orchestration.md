@@ -185,12 +185,13 @@ Automatic saving of large tool results uses the same configured policy as other 
 
 ### What It Does
 
-`delegate` exposes one tool call, `run_subagent(agent_name, task)`.
+`delegate` exposes one tool call, `run_subagent(task: str, agent_name: str | None = None)`.
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
 Fresh execution still uses the target agent's configured workspace, memory, requester scope, model, and tool policy.
 The caller waits for the child to finish and receives its answer plus an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
+Omitting `agent_name` or passing `None` selects the caller itself, subject to the same allowlist.
 MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background.
 Interactive questions are disabled for delegated runs.
 `run_subagent` does not create a Matrix conversation thread.
@@ -241,6 +242,8 @@ agents:
 ```
 
 ```python
+run_subagent(task="Independently review the proposed design and return its three main risks.")
+
 run_subagent(
     agent_name="research",
     task="Compare SQLite and PostgreSQL for a single-host task queue with 20 concurrent writers. Return three risks and cite sources.",
