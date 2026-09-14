@@ -472,6 +472,8 @@ class ResponseRequest:
     model_prompt: str | None = None
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
+    # Exact pending revisions can differ from logical sources in run metadata.
+    journal_source_event_ids: tuple[str, ...] = ()
     existing_event_is_placeholder: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
@@ -1210,7 +1212,7 @@ class ResponseRunner:
             if request.matrix_run_metadata is not None
             else None
         )
-        source_event_ids = (
+        source_event_ids = request.journal_source_event_ids or (
             tuple(
                 dict.fromkeys(
                     (
@@ -1265,6 +1267,7 @@ class ResponseRunner:
             if response_event_id is None:
                 msg = "Could not publish the suspended approval response"
                 raise RuntimeError(msg)  # noqa: TRY301
+            progress.track_event(response_event_id)
 
             continuation_state: Literal["waiting", "ready"] = (
                 "ready" if all(call.decision is not None for call in plan.calls) else "waiting"
@@ -1281,6 +1284,7 @@ class ResponseRunner:
                     requester_id=requester_id,
                     response_event_id=response_event_id,
                     source_event_ids=source_event_ids,
+                    prepared_edit_record=request.prepared_edit_record,
                     calls=plan.calls,
                     state=continuation_state,
                     response_text=snapshot_text,
@@ -1323,7 +1327,6 @@ class ResponseRunner:
             if continuation is None or continuation.state != continuation_state:
                 msg = "Approval continuation lost its journal source ownership"
                 raise RuntimeError(msg)  # noqa: TRY301
-            progress.track_event(response_event_id)
             if delivery_kind == "sent" and request.on_visible_response is not None:
                 await request.on_visible_response(response_event_id)
 
@@ -1387,6 +1390,7 @@ class ResponseRunner:
                             claimed.attachment_ids,
                         ),
                         defer_source_handoff=True,
+                        prepared_edit_record=claimed.prepared_edit_record,
                     ),
                 ),
                 current,
@@ -3342,6 +3346,39 @@ class ResponseRunner:
             )
         progress.settle(delivery_outcome)
 
+    async def _finalize_failed_approval_handoff(
+        self,
+        *,
+        target: MessageTarget,
+        request: ResponseRequest,
+        progress: _DeliveryProgress,
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Replace an unowned pause with durable failure, even after streaming began."""
+        event_id = progress.tracked_event_id or request.existing_event_id
+        text = "Tool approval could not be started. Please try again."
+        extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+        delivered = False
+        if event_id is not None:
+            delivered = await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=event_id,
+                    new_text=text,
+                    extra_content=extra_content,
+                    delivery_turn_id=request.response_envelope.source_event_id,
+                ),
+            )
+        return FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id=event_id,
+            is_visible_response=event_id is not None,
+            final_visible_body=text if delivered else None,
+            delivery_kind="edited" if delivered else None,
+            failure_reason=failure_reason,
+            extra_content=extra_content,
+        )
+
     async def _finalize_locked_outcome(
         self,
         lifecycle: ResponseLifecycle,
@@ -3422,13 +3459,13 @@ class ResponseRunner:
             except Exception as suspension_error:
                 self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
                 progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
-                await self._settle_missing_delivery_outcome(
-                    target=target,
-                    request=request,
-                    identity=lifecycle.identity,
-                    progress=progress,
-                    terminal_status="error",
-                    failure_reason=progress.failure_reason,
+                progress.settle(
+                    await self._finalize_failed_approval_handoff(
+                        target=target,
+                        request=request,
+                        progress=progress,
+                        failure_reason=progress.failure_reason,
+                    ),
                 )
         except asyncio.CancelledError as error:
             if current_task_is_process_shutdown():

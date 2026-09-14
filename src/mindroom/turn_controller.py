@@ -288,8 +288,8 @@ class _EditRegenerator(Protocol):
         event: nio.RoomMessageFormatted,
         event_info: EventInfo,
         requester_user_id: str,
-    ) -> None:
-        """Regenerate the owned response for one edited user turn."""
+    ) -> bool | None:
+        """Regenerate an edit and report any durable source handoff."""
 
 
 @dataclass(frozen=True)
@@ -826,7 +826,7 @@ class TurnController:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[nio.RoomMessageFormatted],
         event_info: EventInfo,
-    ) -> None:
+    ) -> bool | None:
         """Hand one edited user turn to the edit regenerator."""
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
@@ -836,8 +836,8 @@ class TurnController:
                 prechecked_event.requester_user_id,
                 room.room_id,
             ):
-                return
-            await self.deps.edit_regenerator.handle_message_edit(
+                return None
+            return await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
                 event_info,
@@ -2239,8 +2239,8 @@ class TurnController:
         try:
             if event_info.is_edit:
                 await reservation_owner.release()
-                await self._handle_edit_event(room, prechecked_event, event_info)
-                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+                handed_off = await self._handle_edit_event(room, prechecked_event, event_info)
+                return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
             routed_alias = self.deps.ingress.router_relay_original_event_id(event)
             claim_aliases = (routed_alias,) if routed_alias else ()
             pending_turn = TurnRecord.create(

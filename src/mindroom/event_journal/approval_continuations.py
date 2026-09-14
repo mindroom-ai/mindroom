@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_approval_payloads import resolve_legacy_visibility
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
@@ -18,6 +19,8 @@ from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from mindroom.turn_record import TurnRecord
 
     from .backend import Row, Transaction
 
@@ -172,6 +175,7 @@ class ApprovalContinuation:
     runtime_generation: str | None = None
     failure_reason: str | None = None
     generation: int = 0
+    prepared_edit_record: TurnRecord | None = None
 
 
 def _context(continuation: ApprovalContinuation) -> dict[str, object]:
@@ -209,6 +213,11 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
             {"sender": turn.sender, "body": turn.body} for turn in continuation.memory_thread_history
         ],
         "thread_summary_message_count_hint": continuation.thread_summary_message_count_hint,
+        "prepared_edit_record": (
+            TurnRecordCodec._to_ledger_record(continuation.prepared_edit_record)
+            if continuation.prepared_edit_record is not None
+            else None
+        ),
     }
 
 
@@ -266,6 +275,7 @@ def _from_rows(
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
         raise TypeError(msg)
     stored = cast("dict[str, Any]", context)
+    prepared_edit = stored.get("prepared_edit_record")
     calls = tuple(
         ApprovalCall(
             tool_call_id=str(call["tool_call_id"]),
@@ -335,6 +345,12 @@ def _from_rows(
         runtime_generation=cast("str | None", row["runtime_generation"]),
         failure_reason=cast("str | None", row["failure_reason"]),
         generation=int(row["generation"]),
+        prepared_edit_record=TurnRecordCodec._from_ledger_record(
+            str(prepared_edit.get("anchor_event_id")),
+            prepared_edit,
+        )
+        if isinstance(prepared_edit, dict)
+        else None,
     )
 
 
