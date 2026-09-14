@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
@@ -218,6 +219,61 @@ async def test_prepare_execution_context_skips_fallback_replay_when_persisted_hi
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted_replay", [True, False], ids=["persisted", "fallback"])
+@pytest.mark.parametrize("numeric_selection", [True, False], ids=["numeric", "reaction"])
+async def test_interactive_selection_keeps_context_after_question(
+    persisted_replay: bool,
+    numeric_selection: bool,
+) -> None:
+    """Selection history ends at the answer, preserving intervening clarification."""
+    provisional_prompts: list[str] = []
+
+    async def prepare_scope_history(prepared_prompt: str) -> PreparedScopeHistory:
+        provisional_prompts.append(prepared_prompt)
+        scope = _prepared_scope_with_persisted_replay()
+        return scope if persisted_replay else replace(scope, session=None)
+
+    history = [
+        make_visible_message(sender="@alice:localhost", body="Choose a deployment", event_id="$root"),
+        make_visible_message(sender="@mindroom_code:localhost", body="Deploy or cancel?", event_id="$question"),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Use staging; production is frozen.",
+            event_id="$clarification",
+        ),
+    ]
+    if numeric_selection:
+        history.extend(
+            [
+                make_visible_message(sender="@alice:localhost", body="1", event_id="$selection"),
+                make_visible_message(sender="@bob:localhost", body="Later message", event_id="$later"),
+            ],
+        )
+    prepared = await _prepare_execution_context_common(
+        replace(make_turn_context(reply_to_event_id="$question"), history_boundary_event_id="$selection"),
+        scope_context=None,
+        prompt="The user selected: Deploy",
+        thread_history=history,
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        current_event_id="$question",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert prepared.prepared_history.replays_persisted_history is persisted_replay
+    assert prepared.unseen_event_ids == ["$root", "$question", "$clarification"]
+    for prompt in [*provisional_prompts, prepared.final_prompt]:
+        assert "Use staging; production is frozen." in prompt
+        assert "The user selected: Deploy" in prompt
+        assert "Later message" not in prompt
+        assert "$selection" not in prompt
+
+
 def test_scheduled_limit_zero_disables_replay_plan() -> None:
     """A zero limit disables persisted replay entirely for the scheduled turn."""
     prepared = PreparedHistoryState(
@@ -375,6 +431,42 @@ async def test_scheduled_history_limit_does_not_count_current_event_as_history()
     replay_plan = prepared.prepared_history.replay_plan
     assert replay_plan is not None
     assert replay_plan.add_history_to_context is False
+
+
+@pytest.mark.asyncio
+async def test_scheduled_history_limit_ignores_events_after_current() -> None:
+    """Newer thread events cannot displace prior context from a scheduled turn's budget."""
+
+    async def prepare_scope_history(_prepared_prompt: str) -> PreparedScopeHistory:
+        return _prepared_scope_with_persisted_replay()
+
+    prepared = await _prepare_execution_context_common(
+        make_turn_context(
+            reply_to_event_id="$current",
+            scheduled_history_budget=ScheduledHistoryBudget(limit=2, source_event_id="$current"),
+        ),
+        scope_context=None,
+        prompt="Current request",
+        thread_history=[
+            make_visible_message(sender="@alice:localhost", body="older one", event_id="$older-1"),
+            make_visible_message(sender="@alice:localhost", body="older two", event_id="$older-2"),
+            make_visible_message(sender="@alice:localhost", body="Current request", event_id="$current"),
+            make_visible_message(sender="@alice:localhost", body="newer one", event_id="$newer-1"),
+            make_visible_message(sender="@alice:localhost", body="newer two", event_id="$newer-2"),
+        ],
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+        prepare_scope_history_fn=prepare_scope_history,
+        estimate_static_tokens_fn=lambda text: len(text.split()),
+        render_messages_text_fn=render_prepared_messages_text,
+        fallback_static_token_budget=100,
+    )
+
+    assert [message.content for message in prepared.context_messages] == [
+        render_msg_tag(sender="@alice:localhost", body="older one", event_id="$older-1"),
+        render_msg_tag(sender="@alice:localhost", body="older two", event_id="$older-2"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1243,6 +1335,51 @@ def test_unseen_context_keeps_self_sent_relayed_user_message() -> None:
         body="@mindroom_missing_agent Please investigate this",
         event_id="$spawn-root",
     )
+
+
+def test_unseen_context_stops_at_current_thread_event() -> None:
+    """A backlog turn must not include newer events from its hydrated thread."""
+    thread_history = [
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Older message",
+            event_id="$older",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@alice:localhost",
+            body="Current message",
+            event_id="$current",
+            thread_id="$root",
+        ),
+        make_visible_message(
+            sender="@bob:localhost",
+            body="Newer message",
+            event_id="$newer",
+            thread_id="$root",
+        ),
+    ]
+
+    messages, unseen_event_ids = _build_unseen_context_messages(
+        "Current message",
+        thread_history,
+        seen_event_ids=set(),
+        current_event_id="$current",
+        active_event_ids=(),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@alice:localhost",
+        config=_config(),
+    )
+
+    assert unseen_event_ids == ["$older"]
+    assert len(messages) == 2
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="Older message",
+        event_id="$older",
+    )
+    assert messages[1].content == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Current message]]></msg>'
+    assert all("$newer" not in str(message.content) for message in messages)
 
 
 def test_unseen_context_keeps_unpersisted_self_sent_message() -> None:

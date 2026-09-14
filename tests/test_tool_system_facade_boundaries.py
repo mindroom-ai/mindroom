@@ -16,6 +16,7 @@ FORBIDDEN_FACADE_MODULES = {
     "mindroom.tool_system.runtime",
 }
 PRIVATE_REGISTRY_STATE_INTERFACE_VISIBILITY = {
+    "mindroom.api.sandbox_runner",
     "mindroom.mcp.registry",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
@@ -357,8 +358,9 @@ def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
 
 
 def test_private_registry_state_import_is_whitelisted_outside_tool_system() -> None:
-    """Only the MCP registry may import private registry state directly outside tool_system."""
+    """Only explicitly allowed imports may reach registry state outside tool_system."""
     assert _private_registry_state_importers_outside_tool_system() == {
+        ("mindroom.api.sandbox_runner", "BUILTIN_TOOL_METADATA"),
         ("mindroom.mcp.registry", "TOOL_REGISTRY"),
         ("mindroom.mcp.registry", "reconcile_dynamic_tool_state"),
     }

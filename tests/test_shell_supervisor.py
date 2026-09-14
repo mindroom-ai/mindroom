@@ -374,7 +374,7 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
                     break
                 await asyncio.sleep(0.01)
             assert registry[handle].process.returncode == 0
-            assert "RUNNING" in await _check(socket_path, handle)
+            # The monitor may already have killed the group when the leader exits.
             assert "FINISHED" in await _wait_for_finished(socket_path, handle)
             await _assert_pid_dead(child_pid)
         finally:

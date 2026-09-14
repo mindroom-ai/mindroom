@@ -13,6 +13,7 @@ import time
 from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -677,6 +678,35 @@ def test_live_scenario_is_deterministic_and_json_replayable() -> None:
             }
         ]
         assert len(reply_threads) == len(set(reply_threads))
+
+
+def test_captured_limited_sync_workload_replays_with_current_oracle() -> None:
+    """The captured concurrent backlog stays replayable after retiring the cache runner."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "matrix_fuzz"
+    scenario = LiveFuzzScenario.from_json((fixture_dir / "limited_sync_concurrent_branch_replay.json").read_text())
+    original = json.loads((fixture_dir / "limited_sync_concurrent_branch.json").read_text())
+
+    assert (scenario.profile, scenario.thread_count, scenario.client_count, scenario.room_count) == (
+        "chaos",
+        12,
+        6,
+        1,
+    )
+    assert scenario.batches[0][0].kind is LiveOperationKind.STOP_MINDROOM
+    assert [batch[0].kind for batch in scenario.batches[-4:]] == [
+        LiveOperationKind.START_MINDROOM,
+        LiveOperationKind.CHECKPOINT,
+        LiveOperationKind.RESTART_MINDROOM,
+        LiveOperationKind.CHECKPOINT,
+    ]
+    replayed_batches = scenario.batches[1:-4]
+    assert len(replayed_batches) == len(original["batches"]) == 10
+    for replayed, captured in zip(replayed_batches, original["batches"], strict=True):
+        assert [(op.operation_id, op.kind, op.thread, op.client, op.target) for op in replayed] == [
+            (op["operation_id"], op["kind"], op["thread"], op["client"], op["target"].replace("root:0:", "root:"))
+            for op in captured
+        ]
+    assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
 
 
 def test_live_scenario_schedules_every_interruption_inside_unfinished_work() -> None:
@@ -2584,6 +2614,48 @@ def test_managed_runtime_overrides_inherited_logging(monkeypatch: pytest.MonkeyP
         stack.close()
 
 
+def test_managed_graceful_stop_delivers_one_interrupt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A non-interactive wrapper must not forward a second interrupt during drain."""
+    probe = tmp_path / "signal_probe.py"
+    probe.write_text(
+        "import signal, time\n"
+        "received = []\n"
+        "signal.signal(signal.SIGINT, lambda *_: received.append(time.monotonic()))\n"
+        "print('READY', flush=True)\n"
+        "while not received:\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(0.4)\n"
+        "print(f'SIGNALS={len(received)}', flush=True)\n"
+        f"print({ORDERLY_SHUTDOWN_MARKER!r}, flush=True)\n",
+        encoding="utf-8",
+    )
+    stack = ManagedTuwunelStack(state_root=tmp_path / "state")
+    popen = subprocess.Popen
+
+    def wait_for_probe() -> None:
+        deadline = time.monotonic() + 10
+        while "READY" not in stack.log_tail():
+            assert time.monotonic() < deadline, "signal probe did not start"
+            time.sleep(0.01)
+
+    try:
+        stack.storage_path.mkdir()
+        (stack.storage_path / "matrix_state.yaml").write_text("rooms:\n  lobby:\n    room_id: '!room:example'\n")
+        stack._log_handle = stack.log_path.open("a", encoding="utf-8")
+        stack._env = stack._mindroom_environment()
+        monkeypatch.setattr(live_fuzz, "__file__", str(probe))
+        monkeypatch.setattr(subprocess, "Popen", partial(popen, stdin=subprocess.DEVNULL))
+        monkeypatch.setattr(stack, "_wait_for_runtime_attestation", wait_for_probe)
+        monkeypatch.setattr(stack, "_wait_for_url", lambda *_args, **_kwargs: None)
+
+        stack._start_mindroom(timeout=15)
+        stack._stop_mindroom(timeout=5)
+
+        assert "SIGNALS=1\n" in stack.log_path.read_text(encoding="utf-8")
+    finally:
+        stack.close()
+
+
 def test_managed_runtime_pins_child_to_python_313(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every managed MindRoom child must match the production Python runtime."""
 
@@ -2612,6 +2684,21 @@ def test_managed_runtime_pins_child_to_python_313(monkeypatch: pytest.MonkeyPatc
         def complete_url_wait(_url: str, *, timeout: float) -> None:
             assert 0 < timeout <= 7
 
+        def resolve_python(*command: str, timeout_seconds: float) -> str:
+            assert command == (
+                "uv",
+                "run",
+                "--locked",
+                "--python",
+                "3.13",
+                "python",
+                "-c",
+                "import sys; print(sys.executable)",
+            )
+            assert timeout_seconds == 7
+            return f"{sys.executable}\n"
+
+        monkeypatch.setattr(live_fuzz, "_run_command", resolve_python)
         monkeypatch.setattr(subprocess, "Popen", record_popen)
         monkeypatch.setattr(stack, "_wait_for_url", complete_url_wait)
 
@@ -2620,12 +2707,7 @@ def test_managed_runtime_pins_child_to_python_313(monkeypatch: pytest.MonkeyPatc
 
         assert commands == [
             [
-                "uv",
-                "run",
-                "--locked",
-                "--python",
-                "3.13",
-                "python",
+                sys.executable,
                 str(Path(live_fuzz.__file__).resolve()),
                 "__mindroom_runtime_child__",
                 str(stack.attestation_path),
@@ -8501,11 +8583,11 @@ def test_child_provenance_rejects_pythonpath_checkout_override(
         )
 
 
-def test_start_mindroom_uses_locked_installation_and_persists_each_pid(
+def test_start_mindroom_persists_direct_child_pid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The child uses its locked environment and persists each process identity."""
+    """The manifest owns the actual Python process that receives managed signals."""
     stack = ManagedTuwunelStack(
         state_root=tmp_path / "state",
     )
@@ -8534,12 +8616,13 @@ def test_start_mindroom_uses_locked_installation_and_persists_each_pid(
         stack._wait_for_runtime_attestation = lambda: None  # type: ignore[method-assign]
         stack._wait_for_url = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
         stack._write_manifest = lambda **kwargs: manifests.append(kwargs)  # type: ignore[method-assign]
+        monkeypatch.setattr(live_fuzz, "_run_command", lambda *_args, **_kwargs: sys.executable)
         monkeypatch.setattr("scripts.testing.fuzz_live_matrix.subprocess.Popen", popen)
 
         stack._start_mindroom()
 
         assert commands
-        assert commands[0][:5] == ["uv", "run", "--locked", "--python", "3.13"]
+        assert commands[0][0] == sys.executable
         assert "__mindroom_runtime_child__" in commands[0]
         assert manifests == [
             {"state": "starting_mindroom", "mindroom_pid": 4242},

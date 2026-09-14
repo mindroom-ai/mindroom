@@ -225,6 +225,9 @@ An interactive reaction remains pending while its detached response owns the sel
 Reaction and numeric-answer admission atomically snapshot the prompt revision that the journal projection currently exposes; later edits cannot reinterpret that stored selection, and unrelated Matrix origin clocks are never treated as causal order.
 Active prompts are derived by joining those immutable revisions to the Matrix-visible projection, so history recovery and refetch can restore an unconsumed revision without resurrecting one already answered.
 The active Matrix target and the pending source's immutable selection use separate journal rows, while the exact selecting source—not the reusable target event ID—is the response turn's execution and deduplication identity.
+When the current event is present in Matrix thread history, execution preparation bounds that history at its position before selecting unseen messages or applying a scheduled history budget.
+Later thread entries cannot enter that backlog turn's Matrix context or displace its prior history from the budget.
+Interactive selections use the selecting source as their history boundary while retaining the question as the Matrix reply target, so intervening clarification remains available.
 
 ### Deferred callback outcome
 

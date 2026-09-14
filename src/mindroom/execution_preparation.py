@@ -468,8 +468,9 @@ def _build_unseen_context_messages(
     attachment_context: _ThreadAttachmentContext | None = None,
 ) -> tuple[tuple[Message, ...], list[str]]:
     """Return canonical request messages for unseen thread context plus the current turn."""
+    history_before_current = _thread_history_before_current_event(thread_history, current_event_id)
     unseen_messages, partial_reply_kinds, in_progress_event_ids = _get_unseen_messages_for_sender(
-        thread_history,
+        history_before_current or (),
         sender_id=response_sender_id,
         seen_event_ids=seen_event_ids,
         current_event_id=current_event_id,
@@ -611,16 +612,22 @@ def _thread_history_with_scheduled_budget(
     if not thread_history:
         return thread_history
 
+    history_through_current: list[ResolvedVisibleMessage] = []
+    for message in thread_history:
+        history_through_current.append(message)
+        if current_event_id is not None and message.event_id == current_event_id:
+            break
+
     prompt_event_ids = {source_event_id}
     if current_event_id is not None:
         prompt_event_ids.add(current_event_id)
     history_indices = [
-        index for index, message in enumerate(thread_history) if message.event_id not in prompt_event_ids
+        index for index, message in enumerate(history_through_current) if message.event_id not in prompt_event_ids
     ]
     selected_indices = set(history_indices[-history_limit:]) if history_limit > 0 else set()
     return tuple(
         message
-        for index, message in enumerate(thread_history)
+        for index, message in enumerate(history_through_current)
         if index in selected_indices or message.event_id == current_event_id
     )
 
@@ -779,14 +786,14 @@ async def _prepare_execution_context_common(
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> _PreparedExecutionContext:
     """Prepare one request-scoped prompt/replay plan after unseen-thread handling."""
-    reply_to_event_id = ctx.reply_to_event_id
+    history_boundary_event_id = ctx.history_boundary_event_id or ctx.reply_to_event_id
     active_event_ids = ctx.active_event_ids
     seen_event_ids = _scope_seen_event_ids(scope_context)
     scheduled_history_budget = ctx.scheduled_history_budget
     if scheduled_history_budget is not None:
         thread_history = _thread_history_with_scheduled_budget(
             thread_history,
-            current_event_id=reply_to_event_id,
+            current_event_id=history_boundary_event_id,
             source_event_id=scheduled_history_budget.source_event_id,
             history_limit=scheduled_history_budget.limit,
         )
@@ -801,13 +808,13 @@ async def _prepare_execution_context_common(
         config=config,
         member_display_names=member_display_names,
     )
-    if reply_to_event_id and thread_history:
+    if history_boundary_event_id and thread_history:
         provisional_messages, _ = _build_unseen_context_messages(
             prompt,
             thread_history,
             transient_context_messages=transient_context_messages,
             seen_event_ids=seen_event_ids,
-            current_event_id=reply_to_event_id,
+            current_event_id=history_boundary_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
@@ -831,13 +838,13 @@ async def _prepare_execution_context_common(
         config=config,
         member_display_names=member_display_names,
     )
-    if reply_to_event_id and thread_history:
+    if history_boundary_event_id and thread_history:
         final_messages, unseen_event_ids = _build_unseen_context_messages(
             prompt,
             thread_history,
             transient_context_messages=transient_context_messages,
             seen_event_ids=_scope_seen_event_ids(scope_context),
-            current_event_id=reply_to_event_id,
+            current_event_id=history_boundary_event_id,
             active_event_ids=active_event_ids,
             response_sender_id=response_sender_id,
             current_sender_id=current_sender_id,
@@ -867,7 +874,7 @@ async def _prepare_execution_context_common(
     if pipeline_timing is not None:
         pipeline_timing.mark("prompt_assembly_start")
     if not prepared_history.replays_persisted_history and thread_history:
-        fallback_thread_history = _thread_history_before_current_event(thread_history, reply_to_event_id)
+        fallback_thread_history = _thread_history_before_current_event(thread_history, history_boundary_event_id)
         if fallback_thread_history is not None:
             fallback_thread_history = _sanitize_thread_history_for_replay(
                 fallback_thread_history,

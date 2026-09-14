@@ -332,6 +332,16 @@ def _apply_unresolved_edit(
     if held is None:
         return
     if is_tombstoned(transaction, principal_id, event.room_id, held["edit_event_id"]):
+        # Earlier surviving edits were discarded when this held revision won.
+        # The original cannot stand in for them: ask the server for its winner.
+        transaction.execute(
+            """
+            UPDATE visible_messages
+            SET revision_event_id = ?, revision_ts = ?, content_json = NULL, refresh_token = ?
+            WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+            """,
+            (held["edit_event_id"], int(held["edit_ts"]), receipt_order, principal_id, event.room_id, event.event_id),
+        )
         return
     content = visible_content(_loads(held["content_json"]))
     record_projected_prompt(
@@ -570,9 +580,11 @@ def _project_redaction(
         """,
         (principal_id, event.room_id, target),
     )
+    # Keep only identity and ordering proof so a late original requests a
+    # refetch instead of silently forgetting any earlier surviving edit.
     transaction.execute(
         """
-        DELETE FROM unresolved_edits
+        UPDATE unresolved_edits SET content_json = '{}'
         WHERE principal_id = ? AND room_id = ? AND edit_event_id = ?
         """,
         (principal_id, event.room_id, target),
