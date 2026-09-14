@@ -9,7 +9,7 @@ import signal
 import sqlite3
 import subprocess
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO, StringIO
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, Mock, patch
@@ -294,10 +294,12 @@ async def test_supersession_uses_real_settled_journal_owner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize("redacted_source", ["$old", "$new"])
 @pytest.mark.parametrize("defect", [None, "pending_cleanup", "missing_guard", "incomplete_anchor"])
 async def test_supersession_survives_later_source_redaction(
     tmp_path: Path,
     live_poll: bool,
+    redacted_source: str,
     defect: str | None,
 ) -> None:
     """A later tombstone cannot erase proven supersession or excuse missing proof and cleanup debt."""
@@ -305,21 +307,21 @@ async def test_supersession_survives_later_source_redaction(
     try:
         case.oracle.refresh_ledger_attributions(min_interval=0)
         assert case.oracle.unsettled_required_sources() == []
-        old = case.events["$old"]
+        source = case.events[redacted_source]
         sent = live_fuzz._SentRecord(
-            "$old",
+            redacted_source,
             "!room:example",
             "m.room.message",
-            sender=old["sender"],
-            content=old["content"],
+            sender=source["sender"],
+            content=source["content"],
         )
-        old["content"] = {}
-        old["unsigned"] = {"redacted_because": {"event_id": "$redaction"}}
+        source["content"] = {}
+        source["unsigned"] = {"redacted_because": {"event_id": "$redaction"}}
         tombstone = TurnRecord.create(
-            ("$old",),
-            completed=False,
-            redacted_source_event_ids=("$old",),
-            pending_redaction_cleanup_event_ids=("$old",) if defect == "pending_cleanup" else (),
+            (redacted_source,),
+            completed=redacted_source == "$new",
+            response_event_id="$new-reply" if redacted_source == "$new" else None,
+            redacted_source_event_ids=(redacted_source,),
         )
         await case.journal.turn_records("general").upsert(
             index_event_ids=tombstone.indexed_event_ids,
@@ -329,14 +331,20 @@ async def test_supersession_survives_later_source_redaction(
         if defect == "missing_guard":
             assert case.oracle.log_path is not None
             case.oracle.log_path.write_text("")
-        elif defect == "incomplete_anchor":
-            record = TurnRecord.create(("$new",), response_event_id="$new-reply", completed=False)
-            # Normal upserts preserve completion; deliberately corrupt the
-            # stored proof to verify that the oracle rejects missing completion.
+        elif defect in {"incomplete_anchor", "pending_cleanup"}:
+            target = "$new" if defect == "incomplete_anchor" else redacted_source
+            record = live_fuzz.read_ledger_records(tmp_path / "event_journal.db", include_incomplete=True)[target]
+            record = (
+                replace(record, completed=False)
+                if defect == "incomplete_anchor"
+                else replace(record, pending_redaction_cleanup_event_ids=(target,))
+            )
+            # Normal upserts preserve committed completion and cleanup;
+            # deliberately corrupt the stored proof for each negative case.
             await case.journal.backend.write(
                 lambda tx: tx.execute(
                     "UPDATE turn_records SET record_json = ? WHERE index_event_id = ?",
-                    (json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)), "$new"),
+                    (json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)), target),
                 ),
             )
         case.oracle.sent_records = [sent]
@@ -349,7 +357,7 @@ async def test_supersession_survives_later_source_redaction(
             result = await case.auditor.audit(
                 room_ids=("!room:example",),
                 sent_records=[sent],
-                redacted_targets={"$old": "$redaction"},
+                redacted_targets={redacted_source: "$redaction"},
             )
             assert result["ledger_superseded_sources"] == 1
             assert result["completed_final_bodies"] == 1
@@ -358,7 +366,7 @@ async def test_supersession_survives_later_source_redaction(
                 await case.auditor.audit(
                     room_ids=("!room:example",),
                     sent_records=[sent],
-                    redacted_targets={"$old": "$redaction"},
+                    redacted_targets={redacted_source: "$redaction"},
                 )
         assert "$old" not in case.oracle.optional_sources
     finally:

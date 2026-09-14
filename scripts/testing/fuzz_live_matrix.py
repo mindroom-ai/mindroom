@@ -6239,7 +6239,7 @@ class FinalStateAuditor:
         if (
             record is None
             or not record.completed
-            or source not in record.replay_source_event_ids
+            or source not in record.source_event_ids
             or record.pending_redaction_cleanup_event_ids
             or any(revision.cleanup_pending for revision in (record.revision_replay or {}).values())
         ):
