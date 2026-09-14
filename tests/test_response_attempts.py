@@ -50,6 +50,54 @@ async def test_attempt_binding_rejects_conflicts_and_preserves_frozen_delivery(
     assert delivery.edits_event_id == "$answer"
 
 
+async def test_attempted_new_send_rejects_retry_edit_target_and_remains_acknowledgeable(
+    journal_store: EventJournalStore,
+) -> None:
+    """A frozen new send cannot acquire a retry's unrelated visible edit target."""
+    principal = journal_store.principal("agent@alice")
+    await admit(principal, "$source")
+    attempt = response_sources.ResponseAttempt(
+        "agent",
+        response_sources.ResponseSources(("$source",), ("$source",)),
+    )
+    arguments = {
+        "delivery_id": "$source",
+        "stage": DeliveryStage.FINAL,
+        "room_id": ROOM,
+        "thread_id": None,
+        "payload": {"body": "first"},
+        "result": {"terminal_status": "completed"},
+        "response_attempt": attempt,
+    }
+    transaction_id = await principal.enqueue_matrix_delivery(**arguments)
+    assert transaction_id is not None
+    assert await principal.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    with pytest.raises(ValueError, match="identity"):
+        await principal.enqueue_matrix_delivery(**arguments, edits_event_id="$wrong")
+    stored = await journal_store.backend.read(
+        lambda tx: response_attempts.load_response_attempt(tx, "agent@alice", "$source"),
+    )
+    assert stored.response_event_id is None
+    frozen = await principal.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL)
+    assert frozen.edits_event_id is None
+    assert frozen.transaction_id == transaction_id
+    assert frozen.payload["body"] == "first"
+    assert frozen.result == {"terminal_status": "completed"}
+    assert await principal.enqueue_matrix_delivery(**arguments) == transaction_id
+    acknowledgement = await principal.acknowledge_matrix_delivery(
+        delivery_id="$source",
+        stage=DeliveryStage.FINAL,
+        event_id="$actual-send",
+        delivered_projections=(),
+    )
+    assert acknowledgement.bound
+    assert acknowledgement.settled_event_id == "$actual-send"
+    stored = await journal_store.backend.read(
+        lambda tx: response_attempts.load_response_attempt(tx, "agent@alice", "$source"),
+    )
+    assert stored.response_event_id == "$actual-send"
+
+
 async def test_ack_binds_visible_original_instead_of_edit_event(journal_store: EventJournalStore) -> None:
     """The Matrix edit ACK names a transport event, not the visible response."""
     principal = journal_store.principal("agent@alice")
