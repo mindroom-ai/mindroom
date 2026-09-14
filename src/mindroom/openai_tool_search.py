@@ -13,12 +13,8 @@ effect), so tool discovery never invalidates the cached prompt prefix.
 seams and calls into this module: :func:`request_params_with_deferred_tool_search` tags the
 registered tools and injects the search entry with a deterministic order
 (search tool, then non-deferred tools, then deferred sorted by name) so the
-cached prefix stays byte-stable; :func:`record_tool_search_items` captures the
-``tool_search_call`` / ``tool_search_output`` output items that Agno's parser
-drops into the assistant message's ``provider_data``; and
-:func:`formatted_input_with_tool_search_items` replays the captured items
-verbatim, in order, exactly once when history is resent (the Responses input
-item union accepts both types).
+cached prefix stays byte-stable. Ordered output capture and replay live in
+:mod:`mindroom.openai_response_replay`.
 """
 
 from __future__ import annotations
@@ -31,17 +27,11 @@ from mindroom.model_defaults import OPENAI_TOOL_SEARCH_MIN_GPT_VERSION
 from mindroom.model_instance_checks import isinstance_of_loaded
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
-
-    from agno.models.message import Message
     from agno.models.openai import OpenAIResponses
-    from agno.models.response import ModelResponse
 
 _OPENAI_RESPONSES_CLASS = ("agno.models.openai.responses", "OpenAIResponses")
 
 _DEFERRED_TOOL_NAMES_ATTR = "_mindroom_openai_deferred_tool_names"
-_TOOL_SEARCH_ITEMS_KEY = "tool_search_items"
-_TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 _NATIVE_TOOL_SEARCH_PROVIDERS = frozenset({"codex", "openai", "openai_codex"})
 _OPENAI_API_BASE_URL = "https://api.openai.com/v1"
 # LLM-plugin-style `openai-codex/gpt-N.M` ids match the same way as bare or
@@ -134,89 +124,6 @@ def request_params_with_deferred_tool_search(
     prepared_params["tools"] = [{"type": "tool_search"}, *non_deferred_tools, *deferred_tools]
     record_llm_request_tools(prepared_params["tools"])
     return prepared_params
-
-
-def record_tool_search_items(model_response: ModelResponse, output_items: Iterable[Any]) -> None:
-    """Store tool_search output items on one response's provider data.
-
-    Agno's Responses parser only handles message/function_call/reasoning
-    items, so the search items would otherwise be dropped and could never be
-    replayed. Both the non-streaming output list and streamed
-    ``response.output_item.done`` items land here; Agno's provider-data merge
-    extends lists, so streamed items accumulate in arrival order.
-    """
-    items = [item.model_dump(exclude_none=True) for item in output_items if item.type in _TOOL_SEARCH_ITEM_TYPES]
-    if not items:
-        return
-    if model_response.provider_data is None:
-        model_response.provider_data = {}
-    model_response.provider_data.setdefault(_TOOL_SEARCH_ITEMS_KEY, []).extend(items)
-
-
-def formatted_input_with_tool_search_items(
-    messages: Sequence[Message],
-    formatted_input: list[Any],
-) -> list[Any]:
-    """Reinsert captured tool_search items into the formatted request input.
-
-    Each assistant message's items are inserted once, immediately ahead of the
-    message's replayed function calls (matched by call id) or its replayed
-    content — the position they held in the original response output. The
-    cursor advances past every anchored assistant message, so an earlier turn
-    with identical content can never claim a later message's anchor. A message
-    whose anchor is missing (for example rewritten foreign history) is
-    skipped, so items replay verbatim, in order, at most once. The input list
-    is never mutated.
-    """
-    prepared_input = formatted_input
-    cursor = 0
-    for message in messages:
-        if message.role != "assistant":
-            continue
-        anchor = _anchor_index(prepared_input, cursor, message)
-        if anchor is None:
-            continue
-        items = _message_tool_search_items(message)
-        if items:
-            if prepared_input is formatted_input:
-                prepared_input = list(formatted_input)
-            prepared_input[anchor:anchor] = [dict(item) for item in items]
-            anchor += len(items)
-        cursor = anchor + 1
-    return prepared_input
-
-
-def _message_tool_search_items(message: Message) -> list[dict[str, Any]]:
-    """Return the tool_search items captured on one assistant message."""
-    if not isinstance(message.provider_data, dict):
-        return []
-    items = message.provider_data.get(_TOOL_SEARCH_ITEMS_KEY)
-    if not isinstance(items, list):
-        return []
-    return [item for item in items if isinstance(item, dict)]
-
-
-def _anchor_index(formatted_input: list[Any], start: int, message: Message) -> int | None:
-    """Return the formatted-input index where one message's items belong."""
-    if message.tool_calls:
-        anchor_ids = {tool_call.get("id") for tool_call in message.tool_calls}
-        anchor_ids |= {tool_call.get("call_id") for tool_call in message.tool_calls}
-        anchor_ids.discard(None)
-        for index in range(start, len(formatted_input)):
-            item = _as_dict(formatted_input[index])
-            if (
-                item is not None
-                and item.get("type") == "function_call"
-                and (item.get("id") in anchor_ids or item.get("call_id") in anchor_ids)
-            ):
-                return index
-        return None
-    content = message.content if message.content is not None else ""
-    for index in range(start, len(formatted_input)):
-        item = _as_dict(formatted_input[index])
-        if item is not None and item.get("role") == "assistant" and item.get("content") == content:
-            return index
-    return None
 
 
 def _as_dict(value: object) -> dict[str, Any] | None:

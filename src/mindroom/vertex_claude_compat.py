@@ -19,6 +19,7 @@ from mindroom.claude_prompt_cache import (
     prepare_claude_request_kwargs,
 )
 from mindroom.logging_config import get_logger
+from mindroom.native_compaction import common_native_endpoint
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -27,13 +28,14 @@ if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
+    from anthropic import AnthropicVertex, AsyncAnthropicVertex
 
 logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
 _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
-_VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
-    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE},
+_VERTEX_COUNT_AS_TEXT_BLOCK_TYPES = frozenset(
+    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
 )
 # Before any tools are discovered, Vertex generation reports 213 input tokens
 # for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
@@ -144,7 +146,7 @@ def _referenced_tool_names(search_result_block: object) -> set[str]:
 
 
 def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None, set[str]]:
-    """Convert native search history to text and collect selected tool names."""
+    """Convert unsupported blocks to countable text and collect selected tool names."""
     referenced_tool_names: set[str] = set()
     count_messages: list[Any] | None = None
     if not isinstance(messages, list):
@@ -160,7 +162,7 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
             referenced_tool_names.update(_referenced_tool_names(block))
         count_content = [
             {"type": "text", "text": stable_serialize(block)}
-            if isinstance(block, dict) and block.get("type") in _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES
+            if isinstance(block, dict) and block.get("type") in _VERTEX_COUNT_AS_TEXT_BLOCK_TYPES
             else block
             for block in content
         ]
@@ -204,7 +206,7 @@ def _tools_for_vertex_token_count(
 
 
 def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Build a countable equivalent of a native tool-search request.
+    """Build a countable equivalent of native provider output.
 
     Vertex generation accepts Anthropic's native tool-search schema, but its
     count-tokens endpoint rejects the search tool, ``defer_loading``, and the
@@ -213,6 +215,8 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
     server-side search prefix separately. Definitions selected by a new search
     are generated inside the server-tool loop and cannot be known by any
     preflight count; they become countable on the following request.
+    Compaction blocks are also unsupported, so count their serialized contents
+    as text while generation keeps the actual checkpoint blocks unchanged.
     """
     count_messages, referenced_tool_names = _messages_for_vertex_token_count(request_kwargs.get("messages"))
     count_tools, has_native_search = _tools_for_vertex_token_count(
@@ -238,6 +242,25 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     """Vertex Claude model with Mindroom-specific provider compatibility fixes."""
 
     context_window: int | None = None
+    client: AnthropicVertex | None = None
+    async_client: AsyncAnthropicVertex | None = None
+
+    def native_compaction_endpoint(self) -> str:
+        """Keep Vertex checkpoint replay inside its project and endpoint."""
+        clients = [client for client in (self.async_client, self.client) if client is not None]
+        if clients:
+            return common_native_endpoint(
+                [f"{str(client.base_url).rstrip('/')}|{client.project_id}|{client.region}" for client in clients],
+            )
+        params = self._get_client_params()
+        project, region = params["project_id"], params["region"]
+        default_endpoint = {
+            "global": "https://aiplatform.googleapis.com/v1",
+            "us": "https://aiplatform.us.rep.googleapis.com/v1",
+            "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
+        }.get(region, f"https://{region}-aiplatform.googleapis.com/v1")
+        endpoint = str(params["base_url"] or default_endpoint)
+        return f"{endpoint.rstrip('/')}|{project}|{region}"
 
     def _request_input_kwargs(
         self,
@@ -248,6 +271,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         compress_tool_results: bool,
     ) -> dict[str, Any]:
         """Build the provider-shaped payload used for input token counting."""
+        messages = self.native_replay_messages(messages)
         anthropic_messages, system_prompt = format_messages(
             messages,
             compress_tool_results=compress_tool_results,
@@ -265,8 +289,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         sanitized_tools = _strip_vertex_claude_tool_strict(tools)
         if sanitized_tools:
             request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
-        if self.thinking:
-            request_kwargs["thinking"] = self.thinking
+        if thinking := self.effective_thinking():
+            request_kwargs["thinking"] = thinking
         return prepare_claude_request_kwargs(self, request_kwargs)
 
     def _estimate_request_input_tokens(
@@ -303,7 +327,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         response_format: dict[str, Any] | type[Any] | None,
         compress_tool_results: bool,
     ) -> int:
-        """Count the provider-shaped payload using Vertex's exact tokenizer."""
+        """Count the supported payload representation with Vertex's tokenizer."""
         request_kwargs = await asyncio.to_thread(
             self._request_input_kwargs,
             messages,
@@ -312,7 +336,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
             compress_tool_results=compress_tool_results,
         )
         count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
-        response = await self.get_async_client().messages.count_tokens(**count_kwargs)
+        client = self.get_async_client()
+        response = await client.messages.count_tokens(**count_kwargs)
         return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
@@ -343,7 +368,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         compress_tool_results: bool,
     ) -> list[Message]:
         """Drop the oldest replay turns until the exact request fits."""
-        messages = _messages_with_replay_safe_reasoning(messages)
+        canonical_messages = messages
+        messages = _messages_with_replay_safe_reasoning(self.native_replay_messages(messages))
         if self.context_window is None:
             return messages
         output_reserve = self.max_tokens or 0
@@ -374,11 +400,18 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         if original_tokens <= input_budget:
             return messages
 
-        replay_cuts = self._replay_trim_candidates(messages)
-        if not replay_cuts:
-            msg = f"Vertex Claude request uses {original_tokens} input tokens; limit is {input_budget}."
-            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
+        if self.native_compaction is not None:
+            # A native checkpoint represents the entire replaced prefix. The
+            # canonical guard owns any destructive request-local trimming.
+            self.configure_native_compaction(threshold=None)
+            return await self._fit_request_messages(
+                canonical_messages,
+                tools=tools,
+                response_format=response_format,
+                compress_tool_results=compress_tool_results,
+            )
 
+        replay_cuts = self._replay_trim_candidates(messages)
         best_messages: list[Message] | None = None
         best_tokens: int | None = None
         low = 0

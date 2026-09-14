@@ -974,6 +974,7 @@ async def prepare_agent_execution_context(
             scope_context=scope_context,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
+            allow_native_compaction=ctx.scheduled_history_budget is None,
         )
 
     def _estimate_agent_static_tokens(
@@ -1053,6 +1054,7 @@ async def _prepare_bound_team_execution_context(
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
+            allow_native_compaction=ctx.scheduled_history_budget is None,
         )
 
     def _estimate_team_static_tokens(

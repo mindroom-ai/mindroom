@@ -26,6 +26,7 @@ from mindroom.history.compaction import (
     estimate_session_summary_tokens,
     scope_visible_runs,
 )
+from mindroom.history.native import configure_native_history, native_history_route
 from mindroom.history.policy import (
     classify_compaction_decision,
     describe_compaction_unavailability,
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import CompactionConfig
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome
+    from mindroom.native_compaction import NativeCompactionModel
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -245,6 +247,7 @@ class PreparedScopeHistory:
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
+    native_model: NativeCompactionModel | None = None
 
 
 @dataclass(frozen=True)
@@ -339,15 +342,25 @@ async def prepare_scope_history(
     scope: HistoryScope | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    active_model: Model | None = None,
+    allow_native_compaction: bool = True,
 ) -> PreparedScopeHistory:
     """Prepare durable scope history before final replay planning."""
     resolved_scope = scope or _resolve_history_scope(agent)
+    native_model = configure_native_history(
+        active_model if active_model is not None else agent.model,
+        plan=resolved_inputs.execution_plan,
+        history_settings=resolved_inputs.history_settings,
+        session=scope_context.session if scope_context is not None else None,
+        allowed=allow_native_compaction,
+    )
     if scope_context is None or scope_context.session is None:
         return PreparedScopeHistory(
             scope=resolved_scope,
             session=None,
             resolved_inputs=resolved_inputs,
             compaction_decision=CompactionDecision(mode="none", reason="missing_session"),
+            native_model=native_model,
         )
 
     execution_plan = resolved_inputs.execution_plan
@@ -360,12 +373,15 @@ async def prepare_scope_history(
         scope=scope_context.scope,
         execution_plan=execution_plan,
     )
+    if state.force_compact_before_next_run and native_model is not None:
+        native_model.configure_native_compaction(threshold=None)
     compaction_outcomes: list[CompactionOutcome] = []
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     current_history_tokens = estimate_prompt_visible_history_tokens(
         session=session,
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
+        native_route=native_history_route(native_model),
     )
     visible_runs = scope_visible_runs(session, scope_context.scope)
     compaction_decision = classify_compaction_decision(
@@ -400,6 +416,14 @@ async def prepare_scope_history(
         )
 
     if compaction_decision.mode == "required":
+        # The portable text owner always receives canonical history and counts.
+        if native_model is not None:
+            native_model.configure_native_compaction(threshold=None)
+        current_history_tokens = estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope_context.scope,
+            history_settings=resolved_inputs.history_settings,
+        )
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
         compaction_result = await _run_scope_compaction_with_lifecycle(
@@ -438,6 +462,7 @@ async def prepare_scope_history(
         compaction_outcomes=compaction_outcomes,
         compaction_decision=compaction_decision,
         compaction_reply_outcome=compaction_reply_outcome,
+        native_model=native_model,
     )
 
 
@@ -685,7 +710,18 @@ def finalize_history_preparation(
         session=prepared_scope_history.session,
         scope=prepared_scope_history.scope,
         history_settings=resolved_inputs.history_settings,
+        native_route=native_history_route(prepared_scope_history.native_model),
     )
+    if history_budget is not None and current_history_tokens > history_budget:
+        # Never trim a native checkpoint by run/message count. Fall back to the
+        # existing canonical guard if the final dynamic prompt exhausts its room.
+        if prepared_scope_history.native_model is not None:
+            prepared_scope_history.native_model.configure_native_compaction(threshold=None)
+        current_history_tokens = estimate_prompt_visible_history_tokens(
+            session=prepared_scope_history.session,
+            scope=prepared_scope_history.scope,
+            history_settings=resolved_inputs.history_settings,
+        )
     if history_budget is not None:
         replay_plan = _plan_replay_that_fits(
             session=prepared_scope_history.session,
@@ -743,6 +779,7 @@ async def prepare_bound_scope_history(
     static_prompt_tokens: int | None = None,
     compaction_lifecycle: CompactionLifecycle | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
+    allow_native_compaction: bool = True,
 ) -> PreparedScopeHistory:
     """Prepare one team-owned scope by compacting its persisted session before the run."""
     if scope_context is not None:
@@ -802,6 +839,8 @@ async def prepare_bound_scope_history(
         scope=bound_scope.scope,
         compaction_lifecycle=compaction_lifecycle,
         pipeline_timing=pipeline_timing,
+        active_model=team.model if team is not None else None,
+        allow_native_compaction=allow_native_compaction,
     )
 
 

@@ -23,6 +23,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.delegation_execution import drive_delegation_stream, has_delegation_state
+from mindroom.history.native import restore_native_history
 from mindroom.history.runtime import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     import nio
     from agno.agent import Agent
     from agno.run.requirement import RunRequirement
+    from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -239,6 +241,7 @@ class AgentApprovalExecution:
             if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
+            restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession", session))
             requirements = (
                 []
                 if has_delegation_state(persisted)
@@ -317,6 +320,7 @@ class AgentApprovalExecution:
                 model=response.model,
                 model_provider=response.model_provider,
                 metrics=response.metrics,
+                context_metrics=response.metrics,
                 tool_count=len(response.tools or ()),
             ),
         )

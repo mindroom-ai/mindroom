@@ -740,6 +740,7 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.approval_execution"
 depends_on = [
+    "mindroom.history.native",
     "mindroom.agent_storage",
     "mindroom.agents",
     "mindroom.ai_runtime",
@@ -1650,6 +1651,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.hooks",
     "mindroom.logging_config",
+    "mindroom.native_compaction",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_system.runtime_context",
@@ -1681,6 +1683,33 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.token_budget",
 ]
+
+[[modules]]
+path = "mindroom.history.native"
+depends_on = ["mindroom.native_compaction"]
+visibility = ["mindroom.approval_execution", "mindroom.history.runtime", "mindroom.teams"]
+
+[[modules]]
+path = "mindroom.native_compaction"
+depends_on = []
+visibility = [
+    "mindroom.claude_native_compaction",
+    "mindroom.history.compaction",
+    "mindroom.history.native",
+    "mindroom.openai_models",
+    "mindroom.openai_response_replay",
+    "mindroom.vertex_claude_compat",
+]
+
+[[modules]]
+path = "mindroom.openai_response_replay"
+depends_on = ["mindroom.native_compaction"]
+visibility = ["mindroom.openai_models"]
+
+[[modules]]
+path = "mindroom.claude_native_compaction"
+depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
+visibility = ["mindroom.claude_compat"]
 
 [[modules]]
 path = "mindroom.history.storage"
@@ -1730,6 +1759,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.history.agno_team_patch",
     "mindroom.history.compaction",
+    "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
     "mindroom.history.storage",
@@ -2097,6 +2127,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
+    "mindroom.history.native",
     "mindroom.knowledge.utils",
     "mindroom.agent_run_context",
     "mindroom.agent_storage",

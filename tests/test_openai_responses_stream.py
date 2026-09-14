@@ -233,7 +233,11 @@ async def test_completed_text_publishes_response_id_only_at_completion(*, sync: 
 
     assert "".join(chunk.content or "" for chunk in chunks) == "Ready"
     assert all(not chunk.provider_data or "response_id" not in chunk.provider_data for chunk in chunks[:-1])
-    assert chunks[-1].provider_data == {"response_id": "resp_answer"}
+    assert chunks[-1].provider_data == {
+        "response_id": "resp_answer",
+        "mindroom_response_stored": store,
+        "mindroom_native_compaction": None,
+    }
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
@@ -242,7 +246,11 @@ async def test_completed_tool_stream_does_not_complete_the_next_invocation(*, sy
     async with _model(_tool_stream(), _created()) as model:
         chunks = [chunk async for chunk in _invoke(model, sync=sync)]
         assert [call["function"]["name"] for chunk in chunks for call in chunk.tool_calls] == ["get_status"]
-        assert chunks[-1].provider_data == {"response_id": "resp_tools"}
+        assert chunks[-1].provider_data == {
+            "response_id": "resp_tools",
+            "mindroom_response_stored": True,
+            "mindroom_native_compaction": None,
+        }
 
         with pytest.raises(ModelProviderError, match=r"response\.completed"):
             _ = [chunk async for chunk in _invoke(model, sync=sync)]
