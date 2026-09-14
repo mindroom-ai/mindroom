@@ -72,6 +72,7 @@ uv run python scripts/testing/fuzz_live_matrix.py --profile restart-regression
 uv run python scripts/testing/fuzz_live_matrix.py --profile short-stream-correctness
 uv run python scripts/testing/fuzz_live_matrix.py --profile sustained-stream-capacity --threads 200 --reply-timeout 180
 uv run python scripts/testing/fuzz_live_matrix.py --profile chaos --seed 42 --steps 200 --clients 4 --rooms 2
+uv run python scripts/testing/fuzz_live_matrix.py --trace tests/fixtures/matrix_fuzz/limited_sync_concurrent_branch_replay.json
 ```
 
 The `chaos` profile adds concurrent clients across multiple rooms, hot-thread traffic, in-flight edits and redactions, MindRoom restarts, Tuwunel restarts, and downtime followed by recovery.
@@ -84,6 +85,9 @@ Probe operations are additional to `--steps` and appear in the saved trace.
 
 Use `--save-trace scenario.json` to save the logical workload and `--trace scenario.json` to replay it against a fresh disposable server.
 Replay preserves batches and inputs; concurrent scheduling and runtime output can differ.
+`tests/fixtures/matrix_fuzz/limited_sync_concurrent_branch.json` preserves the original captured failure trace from the retired cache recovery harness.
+Its `_replay.json` companion keeps all 57 operations, ten concurrent batches, six clients, and twelve threads, converts the logical root references, and makes the original outage and restart explicit with current chaos lifecycle operations.
+This replays the captured backlog against the event journal; it does not require a limited sync timeline or reproduce the retired cache state machine.
 Failure bundles retain the scenario, realized operation order, logs, runtime provenance, and audit evidence under `--artifact-root`.
 The `saturation` profile retains the original short-stream scenario; use `sustained-stream-capacity` for the long-running capacity gate.
 

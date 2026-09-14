@@ -679,6 +679,35 @@ def test_live_scenario_is_deterministic_and_json_replayable() -> None:
         assert len(reply_threads) == len(set(reply_threads))
 
 
+def test_captured_limited_sync_workload_replays_with_current_oracle() -> None:
+    """The captured concurrent backlog stays replayable after retiring the cache runner."""
+    fixture_dir = Path(__file__).parent / "fixtures" / "matrix_fuzz"
+    scenario = LiveFuzzScenario.from_json((fixture_dir / "limited_sync_concurrent_branch_replay.json").read_text())
+    original = json.loads((fixture_dir / "limited_sync_concurrent_branch.json").read_text())
+
+    assert (scenario.profile, scenario.thread_count, scenario.client_count, scenario.room_count) == (
+        "chaos",
+        12,
+        6,
+        1,
+    )
+    assert scenario.batches[0][0].kind is LiveOperationKind.STOP_MINDROOM
+    assert [batch[0].kind for batch in scenario.batches[-4:]] == [
+        LiveOperationKind.START_MINDROOM,
+        LiveOperationKind.CHECKPOINT,
+        LiveOperationKind.RESTART_MINDROOM,
+        LiveOperationKind.CHECKPOINT,
+    ]
+    replayed_batches = scenario.batches[1:-4]
+    assert len(replayed_batches) == len(original["batches"]) == 10
+    for replayed, captured in zip(replayed_batches, original["batches"], strict=True):
+        assert [(op.operation_id, op.kind, op.thread, op.client, op.target) for op in replayed] == [
+            (op["operation_id"], op["kind"], op["thread"], op["client"], op["target"].replace("root:0:", "root:"))
+            for op in captured
+        ]
+    assert LiveFuzzScenario.from_json(scenario.to_json()) == scenario
+
+
 def test_live_scenario_schedules_every_interruption_inside_unfinished_work() -> None:
     """An interruption in a batch of its own can only ever hit an idle process.
 
