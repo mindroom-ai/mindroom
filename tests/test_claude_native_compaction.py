@@ -11,6 +11,7 @@ import httpx
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.exceptions import ModelProviderError
 from agno.metrics import ModelMetrics, RunMetrics
 from agno.models.message import Message
 from agno.run.agent import RunOutput
@@ -217,6 +218,47 @@ def test_pause_after_compaction_is_rejected() -> None:
     )
     with pytest.raises(ValueError, match="pause_after_compaction"):
         model.get_request_params()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vertex", [False, True])
+@pytest.mark.parametrize("pause", [False, True])
+async def test_raw_context_management_owns_effective_claude_policy(*, vertex: bool, pause: bool) -> None:
+    """SDK body overrides must disable automatic edits and cannot bypass pause validation."""
+    requests: list[dict[str, Any]] = []
+    policy = {"edits": [{"type": "compact_20260112", "pause_after_compaction": pause}]}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_response([_TEXT]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        client = (
+            AsyncAnthropicVertex(
+                project_id="test-project",
+                region="global",
+                credentials=Credentials(token="test-token"),
+                http_client=http_client,
+            )
+            if vertex
+            else AsyncAnthropic(api_key="test-key", http_client=http_client)
+        )
+        model_type = MindroomVertexAIClaude if vertex else MindRoomAnthropicClaude
+        model = model_type(
+            id="claude-sonnet-5",
+            async_client=client,
+            betas=["compact-2026-01-12"],
+            request_params={"extra_body": {"context_management": policy}},
+        )
+        model.configure_native_compaction(threshold=60000)
+        if pause:
+            with pytest.raises(ModelProviderError, match="pause_after_compaction"):
+                await model.ainvoke([Message(role="user", content="Continue.")], Message(role="assistant"))
+            assert requests == []
+        else:
+            await model.ainvoke([Message(role="user", content="Continue.")], Message(role="assistant"))
+            assert requests[0]["context_management"] == policy
+        assert model.native_compaction is None
 
 
 @pytest.mark.asyncio

@@ -43,11 +43,13 @@ class ClaudeNativeCompaction(NativeCompactionModel):
 
     def native_compaction_supported(self) -> bool:
         """Respect explicit context-management settings and supported Claude models."""
+        request_params = self.request_params or {}
         return (
             self.provider in {"Anthropic", "VertexAI"}
             and self.id.startswith(CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
             and self.context_management is None
-            and "context_management" not in (self.request_params or {})
+            and "context_management" not in request_params
+            and "context_management" not in (request_params.get("extra_body") or {})
             and (self.provider == "VertexAI" or self.native_compaction_endpoint() == "https://api.anthropic.com")
         )
 
@@ -103,7 +105,10 @@ class ClaudeNativeCompaction(NativeCompactionModel):
                 ],
             }
             params["betas"] = list(dict.fromkeys([*(params.get("betas") or []), _COMPACTION_BETA]))
-        context_management = params.get("context_management") or {}
+        context_management = (params.get("extra_body") or {}).get(
+            "context_management",
+            params.get("context_management"),
+        ) or {}
         for edit in context_management.get("edits", []):
             if edit.get("type") == "compact_20260112" and edit.get("pause_after_compaction"):
                 msg = "pause_after_compaction=True is unsupported; MindRoom requires automatic continuation."

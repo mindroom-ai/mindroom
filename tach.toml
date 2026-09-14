@@ -1685,8 +1685,14 @@ visibility = [
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.openai_models",
+    "mindroom.openai_response_replay",
     "mindroom.vertex_claude_compat",
 ]
+
+[[modules]]
+path = "mindroom.openai_response_replay"
+depends_on = ["mindroom.native_compaction"]
+visibility = ["mindroom.openai_models"]
 
 [[modules]]
 path = "mindroom.claude_native_compaction"
