@@ -28,6 +28,7 @@ COPY src /app/src
 COPY avatars /app/avatars
 COPY skills /app/skills
 COPY frontend /app/frontend
+COPY assets/logo/logo-mark-animated.svgz /app/assets/logo/logo-mark-animated.svgz
 
 # Install the project itself.
 # Opt into the editable-install frontend build so the final image has

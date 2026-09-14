@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
+import { svgzPlugin } from "./svgz.config";
 
 // Get ports from environment variables or use defaults
 const mindroomPort = process.env.MINDROOM_PORT || "8765";
@@ -21,7 +22,7 @@ const apiKey =
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), svgzPlugin],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
