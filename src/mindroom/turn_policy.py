@@ -93,6 +93,7 @@ class PreparedDispatch:
     envelope: MessageEnvelope
     current_prompt_is_structured: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
+    scheduled_model: str | None = None
 
     def __post_init__(self) -> None:
         """Require the prepared envelope and dispatch target to describe the same delivery."""

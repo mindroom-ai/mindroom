@@ -147,6 +147,7 @@ class ScheduledWorkflow(BaseModel):
         ge=0,
         description="Max recent thread messages the responding agent sees when the task fires; 0 means no history",
     )
+    model: str | None = Field(default=None, description="Configured model alias for this scheduled run only")
     created_by: str | None = None
     thread_id: str | None = None
     room_id: str | None = None
@@ -348,6 +349,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
         message=message_value,
         description=description_value or message_value,
         history_limit=existing_workflow.history_limit,
+        model=existing_workflow.model,
         created_by=existing_workflow.created_by,
         thread_id=existing_workflow.thread_id,
         room_id=room_id,
@@ -1481,6 +1483,8 @@ def _scheduled_task_response_text(
 
     response_text += f"\n**Task:** {workflow.description}\n"
     response_text += f"**Will post:** {workflow.message}\n"
+    if workflow.model is not None:
+        response_text += f"**Model:** {workflow.model}\n"
     if workflow.history_limit is not None:
         response_text += f"**History:** {_history_limit_display(workflow.history_limit)}\n"
     mode = "Silent (hidden trigger; no-report final omitted)" if workflow.silent else "Visible"
@@ -1493,7 +1497,7 @@ def _scheduled_task_response_text(
     return response_text + f"\n**Task ID:** `{task_id}`"
 
 
-async def schedule_task(  # noqa: C901, PLR0912, PLR0915
+async def schedule_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
     runtime: SchedulingRuntime,
     room_id: str,
     thread_id: str | None,
@@ -1505,6 +1509,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     existing_task: ScheduledTaskRecord | None = None,
     history_limit: int | None = None,
     silent: bool | None = None,
+    model: str | None = None,
 ) -> tuple[str | None, str]:
     """Schedule a workflow from natural language request.
 
@@ -1518,6 +1523,13 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         isinstance(history_limit, bool) or not isinstance(history_limit, int) or history_limit < 0
     ):
         return (None, "❌ history_limit must be a non-negative integer.")
+
+    selected_model = existing_task.workflow.model if existing_task else None
+    if model is not None:
+        selected_model = model.strip() or None
+    if selected_model is not None and selected_model not in runtime.config.models:
+        available = ", ".join(sorted(runtime.config.models))
+        return (None, f"❌ Unknown model: {selected_model}. Available models: {available}")
 
     client = runtime.client
     config = runtime.config
@@ -1607,6 +1619,9 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
 
         return (None, error_msg)
 
+    # The explicit tool choice or saved choice is authoritative, not the parser.
+    workflow_result.model = selected_model
+
     # Add metadata to workflow
     workflow_result.created_by = scheduled_by
     workflow_result.thread_id = None if new_thread else thread_id
@@ -1672,6 +1687,7 @@ async def edit_scheduled_task(
     thread_id: str | None = None,
     history_limit: int | None = None,
     silent: bool | None = None,
+    model: str | None = None,
 ) -> str:
     """Edit an existing scheduled task by replacing its workflow details."""
     client = runtime.client
@@ -1695,6 +1711,7 @@ async def edit_scheduled_task(
         existing_task=existing_task,
         history_limit=history_limit,
         silent=silent,
+        model=model,
     )
 
     if edited_task_id is None:
@@ -1760,6 +1777,8 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
                 "..." if len(workflow.message) > _MESSAGE_PREVIEW_LENGTH else ""
             )
             task_line = f'• `{record.task_id}` - {time_str}\n  {workflow.description}\n  Message: "{msg_preview}"'
+            if workflow.model is not None:
+                task_line += f"\n  Model: {workflow.model}"
             if workflow.history_limit is not None:
                 task_line += f"\n  History: {_history_limit_display(workflow.history_limit)}"
             task_line += f"\n  Mode: {'Silent' if workflow.silent else 'Visible'}"

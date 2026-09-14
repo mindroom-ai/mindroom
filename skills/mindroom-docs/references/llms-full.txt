@@ -2795,6 +2795,29 @@ If you previously relied on automatic Astra routing through a proxy, add `api: r
 Explicit Chat Completions disables native deferred-tool search and keeps MindRoom's dynamic-tool discovery.
 Selecting Responses on a custom endpoint does not enable OpenAI's hosted tool search; only supported first-party OpenAI and Codex routes use it.
 
+## OrcaRouter via the OpenAI-Compatible Endpoint
+
+[OrcaRouter](https://docs.orcarouter.ai/introduction) works through MindRoom's existing `openai` provider; no dedicated provider or plugin is required.
+Configure its endpoint and an OrcaRouter API key on the model:
+
+```yaml
+models:
+  orcarouter:
+    provider: openai
+    id: orcarouter/auto
+    api: chat_completions
+    extra_kwargs:
+      base_url: https://api.orcarouter.ai/v1
+      api_key: your-orcarouter-api-key
+```
+
+The `orcarouter/auto` ID lets OrcaRouter choose a model per request; you can replace it with a model ID from its [catalog](https://docs.orcarouter.ai/getting-started/models).
+Set an agent's `model: orcarouter`, or select it for a thread with `!model orcarouter`.
+
+To keep the key out of YAML, omit `extra_kwargs.api_key` and save the OrcaRouter key in the dashboard's **Models** editor, in this model's **API Key** field.
+That model-specific credential takes precedence over `extra_kwargs.api_key` and the shared OpenAI key, so OrcaRouter and direct OpenAI models can use separate keys.
+MindRoom does not automatically read `ORCAROUTER_API_KEY` for `provider: openai`.
+
 ## Codex Models with ChatGPT Login
 
 Use `provider: codex` when you want MindRoom to call models exposed through an authenticated local Codex CLI session instead of the regular OpenAI API.
@@ -9536,6 +9559,8 @@ get_upcoming_bookings(email="alex@example.com")
 `scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
 Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
+Pass `model="cheap"` to run a task with a model alias configured under `models:`, including all team members.
+The choice applies only to scheduled runs and takes precedence over room and thread model settings.
 The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
 Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
 Pass `silent=True` to hide the scheduled trigger and omit successful final responses that are empty or contain only `NO_REPLY`.
@@ -9560,7 +9585,7 @@ agents:
 ```python
 schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
-schedule("every hour @ops check deployment health", new_thread=False, history_limit=0)
+schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
 schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
 list_schedules()
 edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
@@ -9571,6 +9596,7 @@ cancel_schedule("a1b2c3d4")
 
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
+- Editing preserves the chosen model when `model` is omitted; pass `model=""` to restore normal model selection.
 - Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
 - Editing preserves the current silent-delivery mode unless the natural-language request or `silent` argument changes it.
 - Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.
@@ -16305,6 +16331,24 @@ Use `restore full history` or `use unlimited history` in an edit to remove a his
 !edit_schedule task42 keep the same schedule but restore full history
 !edit_schedule task42 every weekday at 8am check build status with no history
 ```
+
+## Model Selection
+
+Use the `model` argument on `schedule()` to choose a configured model alias for each run, for example a cheaper model for simple recurring checks.
+The alias must exist under `models:` in `config.yaml`.
+
+```python
+schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
+edit_schedule("task42", "keep the same schedule and task", model="cheap")
+edit_schedule("task42", "keep the same schedule and task", model="")
+```
+
+The override applies only to the scheduled response, including both the coordinator and members of a team.
+It takes precedence over room and thread model settings without changing them for later messages.
+Omitting `model` on creation uses normal model selection; omitting it on an edit preserves the saved choice.
+Pass an empty string on an edit to remove the override and restore normal model selection.
+Schedule confirmations and listings show the selected alias.
+The option controls task execution; parsing the scheduling request still uses the default model.
 
 ## Timezone
 

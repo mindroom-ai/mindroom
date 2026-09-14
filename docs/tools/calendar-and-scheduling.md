@@ -140,6 +140,8 @@ get_upcoming_bookings(email="alex@example.com")
 `scheduler` exposes `schedule()`, `edit_schedule()`, `list_schedules()`, and `cancel_schedule()`.
 It reuses the same backend as `!schedule`, `!edit_schedule`, `!list_schedules`, and `!cancel_schedule`.
 Pass `new_thread=False` to post back into the current room or thread scope, or `new_thread=True` to schedule a future room-level root message.
+Pass `model="cheap"` to run a task with a model alias configured under `models:`, including all team members.
+The choice applies only to scheduled runs and takes precedence over room and thread model settings.
 The optional `history_limit` argument caps how many recent messages the scheduled responder sees each time the task fires.
 Use `history_limit=0` for no prior conversation context, or a positive integer to keep that many recent messages.
 Pass `silent=True` to hide the scheduled trigger and omit successful final responses that are empty or contain only `NO_REPLY`.
@@ -164,7 +166,7 @@ agents:
 ```python
 schedule("tomorrow at 9am @ops check the deployment", new_thread=False)
 schedule("every weekday at 8am post the on-call handoff summary", new_thread=True)
-schedule("every hour @ops check deployment health", new_thread=False, history_limit=0)
+schedule("every hour @ops check deployment health", new_thread=False, history_limit=0, model="cheap")
 schedule("every 5 minutes check the inbox for urgent mail", new_thread=False, history_limit=0, silent=True)
 list_schedules()
 edit_schedule("a1b2c3d4", "tomorrow at 10am @ops check the deployment", history_limit=5, silent=False)
@@ -175,6 +177,7 @@ cancel_schedule("a1b2c3d4")
 
 - `scheduler` needs no dashboard setup and is included in `defaults.tools` by default unless you explicitly disable that inheritance.
 - Editing preserves the original schedule type, so switching between one-time and recurring schedules requires cancelling the old task and creating a new one.
+- Editing preserves the chosen model when `model` is omitted; pass `model=""` to restore normal model selection.
 - Editing preserves an existing history limit unless the edit request or explicit tool argument changes it.
 - Editing preserves the current silent-delivery mode unless the natural-language request or `silent` argument changes it.
 - Use natural-language edit phrases such as `restore full history` to remove a history limit through chat, or pass `history_limit` through the tool when the agent should set a concrete cap.

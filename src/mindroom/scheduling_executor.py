@@ -10,6 +10,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
+    SCHEDULED_MODEL_KEY,
     SILENT_SCHEDULE_EVENT_TYPE,
     SOURCE_KIND_KEY,
 )
@@ -234,6 +235,8 @@ async def _prepare_scheduled_trigger(
         content[PER_FIRE_THREAD_ROOT_KEY] = True
     if workflow.history_limit is not None:
         content[SCHEDULED_HISTORY_LIMIT_KEY] = workflow.history_limit
+    if workflow.model is not None:
+        content[SCHEDULED_MODEL_KEY] = workflow.model
     return content
 
 

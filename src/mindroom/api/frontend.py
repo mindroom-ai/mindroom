@@ -72,4 +72,6 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
     if asset_path is None:
         raise HTTPException(status_code=404, detail="Frontend asset not found")
 
+    if asset_path.suffix == ".svgz":
+        return FileResponse(asset_path, media_type="image/svg+xml", headers={"Content-Encoding": "gzip"})
     return FileResponse(asset_path)

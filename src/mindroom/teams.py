@@ -2350,8 +2350,14 @@ def resolve_team_turn_models(
     runtime_paths: RuntimePaths,
     *,
     thread_id: str | None = None,
+    active_model_name: str | None = None,
 ) -> TeamTurnModelSelection:
     """Freeze the coordinator and member model aliases in one synchronous snapshot."""
+    if active_model_name is not None:
+        return TeamTurnModelSelection(
+            team_model_name=active_model_name,
+            member_model_names=dict.fromkeys(member_names, active_model_name),
+        )
     return TeamTurnModelSelection(
         team_model_name=select_model_for_team(
             team_name,

@@ -13,6 +13,7 @@ from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SCHEDULED_HISTORY_LIMIT_KEY,
+    SCHEDULED_MODEL_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
@@ -326,6 +327,8 @@ def _attachment_parts(
         extra_content[ORIGINAL_SENDER_KEY] = requester_user_id
     if prepared.dispatch.scheduled_history_budget is not None:
         extra_content[SCHEDULED_HISTORY_LIMIT_KEY] = prepared.dispatch.scheduled_history_budget.limit
+    if prepared.dispatch.scheduled_model is not None:
+        extra_content[SCHEDULED_MODEL_KEY] = prepared.dispatch.scheduled_model
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 

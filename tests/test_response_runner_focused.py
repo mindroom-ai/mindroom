@@ -6507,19 +6507,25 @@ async def test_process_shutdown_blocks_stream_finalization_after_generation_cons
 
 
 @pytest.mark.asyncio
-async def test_streaming_response_reuses_prepared_room_model_after_override_change(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("scheduled_model", "expected_model"), [(None, "large"), ("cheap", "cheap")])
+async def test_streaming_response_reuses_prepared_room_model_after_override_change(
+    tmp_path: Path,
+    scheduled_model: str | None,
+    expected_model: str,
+) -> None:
     """A streaming agent turn must not re-read a changed room default during execution."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     config = coordinator.deps.runtime.config
     config.models["large"] = ModelConfig(provider="test", id="large-model")
+    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
     set_room_model_override(
         coordinator.deps.runtime_paths,
         room_id="!room:localhost",
         model_name="large",
         set_by="@admin:localhost",
     )
-    request = _plain_request(_target())
+    request = replace(_plain_request(_target()), scheduled_model=scheduled_model)
     runtime = await coordinator.prepare_response_runtime(request)
     set_room_model_override(
         coordinator.deps.runtime_paths,
@@ -6558,7 +6564,7 @@ async def test_streaming_response_reuses_prepared_room_model_after_override_chan
     ):
         await coordinator._process_and_respond_streaming(request, runtime=runtime)
 
-    assert active_models == ["large"]
+    assert active_models == [expected_model]
 
 
 @pytest.mark.asyncio
@@ -8380,3 +8386,43 @@ async def test_overlapping_drains_keep_snapshot_ownership() -> None:
     assert await second_drain
     assert runner.pending_inbox_response_count == 0
     await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path: Path) -> None:
+    """A schedule uses its model even with a room override, without changing later turns."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    config = coordinator.deps.runtime.config
+    config.models["large"] = ModelConfig(provider="test", id="large-model")
+    config.models["cheap"] = ModelConfig(provider="test", id="cheap-model")
+    set_room_model_override(
+        coordinator.deps.runtime_paths,
+        room_id="!room:localhost",
+        model_name="large",
+        set_by="@admin:localhost",
+    )
+    active_models: list[str | None] = []
+
+    async def fake_ai_response(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+        active_models.append(ctx.active_model_name)
+        return "final text"
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(
+            DeliveryGateway,
+            "deliver_final",
+            new=AsyncMock(return_value=_completed_outcome("$response", body="final text")),
+        ),
+        patch_response_runner_module(
+            ai_response=fake_ai_response,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        await coordinator.generate_response(replace(_plain_request(_target()), scheduled_model="cheap"))
+
+    assert active_models == ["cheap"]
+    runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
+    assert runtime.active_model_name == "large"
