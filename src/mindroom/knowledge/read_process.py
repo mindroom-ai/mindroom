@@ -6,7 +6,7 @@ import asyncio
 import os
 import subprocess
 import sys
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from threading import BoundedSemaphore
 from typing import TYPE_CHECKING
 
@@ -19,7 +19,7 @@ from mindroom.knowledge.read_protocol import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
 # TODO: Remove this read subprocess workaround after pinning a Chroma release containing
 # https://github.com/chroma-core/chroma/pull/7692 and verifying lock waits no longer stall the application.
@@ -96,33 +96,67 @@ def read_chroma(request: ReadRequest, *, timeout: float = 30.0) -> ReadResult:
         return _decode_result(completed.stdout)
 
 
+@asynccontextmanager
+async def _read_slot_async() -> AsyncIterator[None]:
+    # Share sync capacity without parking an executor worker or binding to one loop.
+    while not _read_slots.acquire(blocking=False):  # noqa: ASYNC110 - Capacity is shared across threads/loops.
+        await asyncio.sleep(0.01)
+    try:
+        yield
+    finally:
+        _read_slots.release()
+
+
 async def read_chroma_async(
     prepare_request: Callable[[], Awaitable[ReadRequest]],
     *,
     timeout: float = 30.0,  # noqa: ASYNC109 - The transport owns the child's bounded lifetime.
 ) -> ReadResult:
     """Overlap child imports with parent preparation under one request deadline."""
-    with _read_slot():
-        process = await asyncio.create_subprocess_exec(
+    try:
+        async with asyncio.timeout(timeout), _read_slot_async():
+            process = await _start_read_process()
+            try:
+                request = await prepare_request()
+                output, _ = await process.communicate(_encode_request(request))
+                if process.returncode:
+                    raise subprocess.CalledProcessError(process.returncode, "knowledge read worker", output=output)
+                return _decode_result(output)
+            finally:
+                await _cleanup_read_process(process)
+    except TimeoutError as exc:
+        message = "Knowledge read timed out"
+        raise TimeoutError(message) from exc
+
+
+async def _start_read_process() -> asyncio.subprocess.Process:
+    """Keep interrupted startup owned until its child can be killed and reaped."""
+    startup = asyncio.create_task(
+        asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "mindroom.knowledge.read_worker",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             env=_child_environment(),
-        )
+        ),
+    )
+    cancelled = False
+    while not startup.done():
         try:
-            async with asyncio.timeout(timeout):
-                request = await prepare_request()
-                output, _ = await process.communicate(_encode_request(request))
-            if process.returncode:
-                raise subprocess.CalledProcessError(process.returncode, "knowledge read worker", output=output)
-            return _decode_result(output)
-        except TimeoutError as exc:
-            message = "Knowledge read timed out"
-            raise TimeoutError(message) from exc
+            await asyncio.shield(startup)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            if not cancelled:
+                raise
+    if cancelled:
+        try:
+            if not startup.cancelled() and startup.exception() is None:
+                await _cleanup_read_process(startup.result())
         finally:
-            await _cleanup_read_process(process)
+            raise asyncio.CancelledError
+    return startup.result()
 
 
 async def _cleanup_read_process(process: asyncio.subprocess.Process) -> None:
