@@ -583,6 +583,7 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         "tool_search_items": expected_items,
         "response_id": "resp_1",
         "mindroom_response_stored": False,
+        "mindroom_portable_replay": False,
     }
     assert client.responses.captured_kwargs[1]["input"] == [
         {"role": "user", "content": "What is the weather?"},

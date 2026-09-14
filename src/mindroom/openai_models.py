@@ -27,6 +27,7 @@ from mindroom.native_compaction import (
     common_native_endpoint,
     native_replay_messages,
     record_native_checkpoint,
+    recorded_native_settings,
 )
 from mindroom.openai_prompt_cache import formatted_input_with_shared_system_prefix, supports_openai_cache_breakpoints
 from mindroom.openai_response_replay import (
@@ -163,6 +164,32 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
     def configure_portable_replay(self, *, enabled: bool = True) -> None:
         """Replay the locally budgeted history without hidden server-side context."""
         self._portable_replay = enabled
+
+    def restore_portable_replay(self, message: Message | None) -> None:
+        """Restore exact saved policy, using canonical provenance for legacy responses."""
+        data = (message.provider_data or {}) if message is not None else {}
+        saved = data.get("mindroom_portable_replay")
+        if isinstance(saved, bool):
+            self.configure_portable_replay(enabled=saved)
+            return
+        items = data.get("mindroom_response_output")
+        has_ordered_reasoning = (
+            isinstance(items, list)
+            and all(isinstance(item, dict) for item in items)
+            and any(
+                item.get("type") == "reasoning"
+                and isinstance(encrypted := item.get("encrypted_content"), str)
+                and bool(encrypted.strip())
+                for item in items
+            )
+        )
+        # Legacy records cannot always reveal the original budget. Preserve
+        # stored continuation unless canonical replay has its own provenance.
+        self.configure_portable_replay(
+            enabled=data.get("mindroom_response_stored") is False
+            or (message is not None and recorded_native_settings(message) is not None)
+            or has_ordered_reasoning,
+        )
 
     def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
         """Count the explicit Responses payload used by portable history planning."""
@@ -326,6 +353,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         }
         record_tool_search_items(model_response, response.output)
         if response.status == "completed":
+            model_response.provider_data["mindroom_portable_replay"] = self._portable_replay
             items = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
             record_native_checkpoint(model_response, items, self.native_compaction)
             if self.store is False or self._portable_replay:
@@ -451,6 +479,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
                 **(model_response.provider_data or {}),
                 "response_id": stream_event.response.id,
                 "mindroom_response_stored": self.store is not False,
+                "mindroom_portable_replay": self._portable_replay,
             }
             items = [item.model_dump(mode="json", exclude_none=True) for item in stream_event.response.output]
             if not items:

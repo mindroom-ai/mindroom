@@ -432,3 +432,18 @@ def test_nested_openai_body_policy_disables_native_compaction(key: str) -> None:
     model = MindRoomOpenAIResponses(id="gpt-6-astra", request_params={"extra_body": {key: None}})
     model.configure_native_compaction(threshold=1024)
     assert model.native_compaction is None
+
+
+@pytest.mark.parametrize("portable", [False, True])
+@pytest.mark.parametrize("completed", [False, True])
+def test_response_records_replay_policy_only_when_completed(*, portable: bool, completed: bool) -> None:
+    """Only complete responses provide authoritative approval replay provenance."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model.configure_portable_replay(enabled=portable)
+    response = Response.model_validate({**_response([_ANSWER]), "status": "completed" if completed else "incomplete"})
+    parsed = model._parse_provider_response(response)
+    assert parsed.provider_data is not None
+    if completed:
+        assert parsed.provider_data["mindroom_portable_replay"] is portable
+    else:
+        assert "mindroom_portable_replay" not in parsed.provider_data

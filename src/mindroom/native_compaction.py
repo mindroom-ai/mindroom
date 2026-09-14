@@ -38,6 +38,9 @@ class NativeCompactionModel:
     def configure_portable_replay(self, *, enabled: bool = True) -> None:
         """Let adapters keep local history budgets authoritative over stored state."""
 
+    def restore_portable_replay(self, message: Message | None) -> None:
+        """Restore adapter-owned replay policy from the latest completed response."""
+
     def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
         """Return a provider-aware estimate, or use the shared history estimator."""
         return None
