@@ -59,6 +59,7 @@ from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
+from mindroom.history.native import restore_native_history
 from mindroom.history.prompt_tokens import team_tool_definition_payloads_for_logging
 from mindroom.history.runtime import (
     ScopeSessionContext,
@@ -2568,6 +2569,7 @@ async def continue_paused_team_run(
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
             msg = f"Paused team run {run_id!r} is no longer available"
             raise RuntimeError(msg)
+        restore_native_history(team.model, persisted_run=persisted, session=session)
         requirements = apply_exact_approval_decisions(
             persisted.requirements or (),
             decisions=decisions,

@@ -67,19 +67,47 @@ def record_native_checkpoint(
     items: Sequence[dict[str, Any]],
     settings: _NativeCompactionSettings | None,
 ) -> None:
-    """Retain only the latest usable checkpoint and the native output after it."""
-    if settings is None:
-        return
-    last = next(
-        (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
-        None,
-    )
-    if last is None:
-        return
+    """Record effective replay settings and, when present, the latest checkpoint.
+
+    Every completed response records its route, including explicit native-off
+    state. Approval rebuilds and signed-thinking replay need this even when the
+    provider did not compact on this request.
+    """
+    state: dict[str, Any] | None = None
+    if settings is not None:
+        state = {"route": settings.route, "threshold": settings.threshold}
+        last = next(
+            (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
+            None,
+        )
+        if last is not None:
+            state["items"] = list(items[last:])
     response.provider_data = {
         **(response.provider_data or {}),
-        _NATIVE_CHECKPOINT_KEY: {"route": settings.route, "items": list(items[last:])},
+        _NATIVE_CHECKPOINT_KEY: state,
     }
+
+
+def recorded_native_settings(message: Message) -> _NativeCompactionSettings | None:
+    """Read the effective native policy from one completed assistant response."""
+    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    if message.role != "assistant" or not isinstance(state, dict):
+        return None
+    route, threshold = state.get("route"), state.get("threshold")
+    if not isinstance(route, str) or not route or type(threshold) is not int or threshold <= 0:
+        return None
+    return _NativeCompactionSettings(route=route, threshold=threshold)
+
+
+def native_replay_route_matches(message: Message, route: str | None) -> bool | None:
+    """Compare recorded prefix provenance; None means legacy history without it."""
+    data = message.provider_data or {}
+    if _NATIVE_CHECKPOINT_KEY not in data:
+        return None
+    state = data[_NATIVE_CHECKPOINT_KEY]
+    if state is None:
+        return route is None
+    return isinstance(state, dict) and isinstance(state.get("route"), str) and state["route"] == route
 
 
 def _is_checkpoint(item: dict[str, Any]) -> bool:

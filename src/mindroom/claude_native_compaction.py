@@ -14,6 +14,7 @@ from mindroom.native_compaction import (
     checkpoint_items,
     common_native_endpoint,
     native_replay_messages,
+    native_replay_route_matches,
     record_native_checkpoint,
 )
 
@@ -132,11 +133,19 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             }
             if items:
                 stale_thinking = False
-            elif any(block.get("type") == "compaction" for blocks in block_lists.values() for block in blocks):
+            elif any(
+                block.get("type") == "compaction" and block.get("content")
+                for blocks in block_lists.values()
+                for block in blocks
+            ):
                 # Thinking after a removed checkpoint is signed against a different
                 # prefix. Its later thinking chain is invalid too, including fields
                 # Agno can use to rebuild blocks when content_blocks is empty.
                 stale_thinking = True
+            elif (matches := native_replay_route_matches(message, route)) is not None:
+                # A response produced after fallback starts a new valid chain on
+                # that route. Keep it only while replaying the same prefix kind.
+                stale_thinking = not matches
             dropped_types = {"compaction"}
             if stale_thinking:
                 dropped_types.update({"thinking", "redacted_thinking", "redacted_reasoning_content"})

@@ -18,6 +18,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
 from agno.run.team import TeamRunOutput
+from agno.utils.models.claude import format_messages
 from anthropic import Anthropic, AnthropicVertex, AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
@@ -191,6 +192,73 @@ def test_null_compaction_keeps_canonical_history(content: str | None) -> None:
         Message(role="assistant", content=parsed.content, provider_data=parsed.provider_data),
     ]
     assert model.native_replay_messages(messages)[0].content == "Original facts."
+
+
+def test_null_compaction_preserves_thinking_during_tool_continuation() -> None:
+    """A no-op summary leaves the thinking prefix unchanged and must preserve its tool-turn signature."""
+    model = MindRoomAnthropicClaude(id="claude-sonnet-5", thinking={"type": "adaptive"})
+    model.configure_native_compaction(threshold=60000)
+    thinking = {"type": "thinking", "thinking": "Need a lookup.", "signature": "unchanged-prefix"}
+    tool_use = {"type": "tool_use", "id": "toolu_lookup", "name": "lookup", "input": {}}
+    parsed = model._parse_provider_response(
+        BetaMessage.model_validate(
+            _response([{**_CHECKPOINT, "content": None}, thinking, tool_use], stop_reason="tool_use"),
+        ),
+    )
+    messages = [
+        Message(role="user", content="Look up the status."),
+        Message(
+            role="assistant",
+            content=parsed.content,
+            provider_data=parsed.provider_data,
+            tool_calls=parsed.tool_calls,
+            reasoning_content=parsed.reasoning_content,
+        ),
+        Message(role="tool", tool_call_id="toolu_lookup", content="Found it"),
+    ]
+    wire, _ = format_messages(model.native_replay_messages(messages))
+    assert wire[1]["content"] == [thinking, tool_use]
+
+
+def test_native_reactivation_discards_only_mismatched_thinking() -> None:
+    """Restoring an old checkpoint must drop canonical-prefix thinking and retain new valid reasoning."""
+    model = MindRoomAnthropicClaude(id="claude-fable-5-1")
+    model.configure_native_compaction(threshold=60000)
+    native_thinking = {"type": "thinking", "thinking": "", "signature": "native-prefix"}
+    anchor = model._parse_provider_response(
+        BetaMessage.model_validate(_response([_CHECKPOINT, native_thinking, _TEXT])),
+    )
+    messages = [
+        Message(role="user", content="Original facts."),
+        Message(role="assistant", content=anchor.content, provider_data=anchor.provider_data),
+        Message(role="user", content="Continue."),
+    ]
+    model.configure_native_compaction(threshold=None)
+    canonical_thinking = {"type": "thinking", "thinking": "", "signature": "canonical-prefix"}
+    canonical = model._parse_provider_response(BetaMessage.model_validate(_response([canonical_thinking, _TEXT])))
+    messages.extend(
+        [
+            Message(role="assistant", content=canonical.content, provider_data=canonical.provider_data),
+            Message(role="user", content="Continue again."),
+        ],
+    )
+    canonical_wire, _ = format_messages(model.native_replay_messages(messages))
+    assert canonical_thinking in canonical_wire[3]["content"]
+    model.configure_native_compaction(threshold=60000)
+    native_wire, _ = format_messages(model.native_replay_messages(messages))
+    assert native_thinking in native_wire[0]["content"]
+    assert canonical_thinking not in native_wire[2]["content"]
+    resumed_thinking = {"type": "thinking", "thinking": "", "signature": "resumed-native-prefix"}
+    resumed = model._parse_provider_response(BetaMessage.model_validate(_response([resumed_thinking, _TEXT])))
+    messages.extend(
+        [
+            Message(role="assistant", content=resumed.content, provider_data=resumed.provider_data),
+            Message(role="user", content="Finish."),
+        ],
+    )
+    resumed_wire, _ = format_messages(model.native_replay_messages(messages))
+    assert resumed_thinking in resumed_wire[4]["content"]
+    assert canonical_thinking in canonical.provider_data["content_blocks"]
 
 
 def test_switching_claude_model_restores_canonical_history() -> None:

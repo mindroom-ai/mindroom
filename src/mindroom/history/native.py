@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.native_compaction import NativeCompactionModel
+from mindroom.native_compaction import NativeCompactionModel, recorded_native_settings
 
 if TYPE_CHECKING:
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
@@ -44,6 +46,26 @@ def configure_native_history(
         history_generation=summary,
     )
     return model
+
+
+def restore_native_history(
+    model: object,
+    *,
+    persisted_run: RunOutput | TeamRunOutput,
+    session: AgentSession | TeamSession | None,
+) -> None:
+    """Restore the paused request's policy only when its rebuilt route still matches."""
+    if not isinstance(model, NativeCompactionModel):
+        return
+    latest = next((message for message in reversed(persisted_run.messages or []) if message.role == "assistant"), None)
+    saved = recorded_native_settings(latest) if latest is not None else None
+    summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
+    model.configure_native_compaction(
+        threshold=saved.threshold if saved is not None else None,
+        history_generation=summary,
+    )
+    if model.native_compaction is not None and saved is not None and model.native_compaction.route != saved.route:
+        model.configure_native_compaction(threshold=None)
 
 
 def native_history_route(model: NativeCompactionModel | None) -> str | None:

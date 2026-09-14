@@ -14,6 +14,7 @@ from agno.team import Team
 
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
+from mindroom.history.native import restore_native_history
 from mindroom.history.runtime import (
     ScopeSessionContext,
     finalize_history_preparation,
@@ -30,6 +31,50 @@ from tests.history_helpers import _agent, _completed_run, _completed_team_run, _
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.parametrize("change", ["none", "model", "endpoint", "summary", "disabled", "missing", "invalid_threshold"])
+def test_restore_native_policy_requires_latest_compatible_response(change: str) -> None:
+    """A rebuild must not recover stale policy from an older checkpoint or foreign route."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    model.configure_native_compaction(threshold=1024)
+    checkpoint = ModelResponse(content="Ready")
+    record_native_checkpoint(
+        checkpoint,
+        [{"type": "compaction", "id": "cmp", "encrypted_content": "small-checkpoint"}],
+        model.native_compaction,
+    )
+    latest = ModelResponse(content="Waiting for approval")
+    record_native_checkpoint(latest, [], None if change == "disabled" else model.native_compaction)
+    if change == "missing":
+        latest.provider_data = None
+    elif change == "invalid_threshold":
+        latest.provider_data["mindroom_native_compaction"]["threshold"] = True
+    messages = [
+        Message(role="user", content="Canonical facts"),
+        Message(role="assistant", content=checkpoint.content, provider_data=checkpoint.provider_data),
+        Message(role="user", content="Continue"),
+        Message(role="assistant", content=latest.content, provider_data=latest.provider_data),
+    ]
+    run = _completed_run("paused", messages=messages)
+    session = _session("session", runs=[run])
+    rebuilt = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    rebuilt.configure_native_compaction(threshold=2048)
+    if change == "model":
+        rebuilt.id = "unsupported-route"
+    elif change == "endpoint":
+        rebuilt.base_url = "https://other.example/v1"
+    elif change == "summary":
+        session.summary = SessionSummary(summary="New portable summary")
+    restore_native_history(rebuilt, persisted_run=run, session=session)
+    replay = rebuilt._format_messages(messages)
+    if change == "none":
+        assert rebuilt.native_compaction is not None
+        assert rebuilt.native_compaction.threshold == 1024
+        assert replay[0]["type"] == "compaction"
+    else:
+        assert rebuilt.native_compaction is None
+        assert replay[0] == {"role": "user", "content": "Canonical facts"}
 
 
 @pytest.mark.asyncio
