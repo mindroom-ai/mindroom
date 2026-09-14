@@ -174,6 +174,11 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
+def _context_provider_key(provider: str | None) -> str:
+    key = (provider or "").strip().lower().replace("-", "_")
+    return {"vertexai_claude": "vertexai", "bedrock_claude": "awsbedrock"}.get(key, key)
+
+
 def _native_context_counts(
     metrics: RunMetrics | None,
     model_id: str | None,
@@ -182,7 +187,7 @@ def _native_context_counts(
     """Read final-iteration context separately from accumulated billing."""
     if isinstance(metrics, RunMetrics):
         for detail in (metrics.details or {}).get("model", []):
-            if detail.id == model_id and detail.provider == provider:
+            if detail.id == model_id and _context_provider_key(detail.provider) == _context_provider_key(provider):
                 usage = (detail.provider_metrics or {}).get("context_usage")
                 if isinstance(usage, dict):
                     return (

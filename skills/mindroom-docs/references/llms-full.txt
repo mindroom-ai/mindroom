@@ -1899,8 +1899,8 @@ agents:
     max_tool_calls_from_history: null
 
     # Required compaction is enabled by default.
-    # Supported providers compact natively at the configured threshold.
-    # Set enabled: false to disable automatic pre-reply compaction for this agent.
+    # Eligible models and history policies use native compaction at the threshold.
+    # Set enabled: false to disable automatic native and pre-reply text compaction.
     compaction:
       enabled: true
       threshold_percent: 0.8

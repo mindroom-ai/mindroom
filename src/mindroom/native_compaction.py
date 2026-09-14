@@ -48,9 +48,18 @@ class NativeCompactionModel:
         self.native_compaction = None
         if threshold is None or not self.native_compaction_supported():
             return
-        identity = [self.provider, self.id, self.native_compaction_endpoint(), history_generation]
+        endpoint = self.native_compaction_endpoint()
+        if not endpoint:
+            return
+        identity = [self.provider, self.id, endpoint, history_generation]
         route = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         self.native_compaction = _NativeCompactionSettings(route=route, threshold=threshold)
+
+
+def common_native_endpoint(identities: Sequence[str]) -> str:
+    """Return one compatible client route, or disable ambiguous native replay."""
+    routes = set(identities)
+    return next(iter(routes)) if len(routes) == 1 else ""
 
 
 def record_native_checkpoint(

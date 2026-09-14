@@ -12,6 +12,7 @@ from mindroom.model_defaults import CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES
 from mindroom.native_compaction import (
     NativeCompactionModel,
     checkpoint_items,
+    common_native_endpoint,
     native_replay_messages,
     record_native_checkpoint,
 )
@@ -52,9 +53,9 @@ class ClaudeNativeCompaction(NativeCompactionModel):
 
     def native_compaction_endpoint(self) -> str:
         """Bind checkpoints to the concrete model's client route."""
-        client = self.async_client or self.client
-        if client is not None:
-            return str(client.base_url).rstrip("/")
+        clients = [client for client in (self.async_client, self.client) if client is not None]
+        if clients:
+            return common_native_endpoint([str(client.base_url).rstrip("/") for client in clients])
         return str(
             (self.client_params or {}).get("base_url")
             or os.getenv("ANTHROPIC_BASE_URL")

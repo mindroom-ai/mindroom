@@ -1685,6 +1685,7 @@ visibility = [
     "mindroom.history.compaction",
     "mindroom.history.native",
     "mindroom.openai_models",
+    "mindroom.vertex_claude_compat",
 ]
 
 [[modules]]

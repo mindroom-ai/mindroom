@@ -17,9 +17,10 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import RunCompletedEvent as TeamRunCompletedEvent
 from agno.run.team import TeamRunOutput
-from anthropic import AsyncAnthropic, AsyncAnthropicVertex
+from anthropic import Anthropic, AnthropicVertex, AsyncAnthropic, AsyncAnthropicVertex
 from anthropic.types.beta import BetaMessage
 from google.oauth2.credentials import Credentials
+from openai import AsyncOpenAI, OpenAI
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
@@ -27,6 +28,7 @@ from mindroom.claude_prompt_cache import install_claude_prompt_cache_hook
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.history.types import PreparedHistoryState
+from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.teams import (
     _build_streamed_team_run_metadata_content,
     _build_team_run_metadata_content,
@@ -269,12 +271,23 @@ async def test_vertex_guard_counts_checkpoint_replay_with_beta() -> None:
     assert "compact-2026-01-12" in headers[-1] or "compact-2026-01-12" in requests[-1].get("anthropic_beta", [])
 
 
-def test_native_usage_metadata_separates_billing_from_context(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("configured_provider", "reported_provider"),
+    [("anthropic", "Anthropic"), ("vertexai_claude", "VertexAI")],
+)
+@pytest.mark.parametrize("reported", [False, True])
+def test_native_usage_metadata_separates_billing_from_context(
+    tmp_path: Path,
+    configured_provider: str,
+    reported_provider: str,
+    *,
+    reported: bool,
+) -> None:
     """Billed summary iterations must not inflate displayed context occupancy."""
     config, _ = _make_config(
         tmp_path,
         models={
-            "default": ModelConfig(provider="anthropic", id="claude-sonnet-5", context_window=200000),
+            "default": ModelConfig(provider=configured_provider, id="claude-sonnet-5", context_window=200000),
         },
     )
     model = MindRoomAnthropicClaude(id="claude-sonnet-5")
@@ -289,7 +302,7 @@ def test_native_usage_metadata_separates_billing_from_context(tmp_path: Path) ->
             "model": [
                 ModelMetrics(
                     id="claude-sonnet-5",
-                    provider="Anthropic",
+                    provider=reported_provider,
                     provider_metrics=parsed.response_usage.provider_metrics,
                 ),
             ],
@@ -302,7 +315,7 @@ def test_native_usage_metadata_separates_billing_from_context(tmp_path: Path) ->
         session_id="session",
         status="COMPLETED",
         model="claude-sonnet-5",
-        model_provider="Anthropic",
+        model_provider=reported_provider if reported else None,
         metrics=metrics,
         context_metrics=metrics,
         context_raw_input_tokens=62000,
@@ -446,3 +459,49 @@ def test_team_context_uses_leader_metrics_for_shared_model(tmp_path: Path, *, st
         )
     assert metadata[AI_RUN_METADATA_KEY]["usage"]["input_tokens"] == 91000
     assert metadata[AI_RUN_METADATA_KEY]["context"]["input_tokens"] == 90000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "mismatch"),
+    [
+        ("openai", "endpoint"),
+        ("anthropic", "endpoint"),
+        ("vertex", "endpoint"),
+        ("vertex", "project"),
+        ("vertex", "region"),
+    ],
+)
+async def test_native_compaction_rejects_conflicting_client_routes(provider: str, mismatch: str) -> None:
+    """One model cannot label checkpoints from different SDK routes as interchangeable."""
+    if provider == "openai":
+        model = MindRoomOpenAIResponses(
+            id="gpt-6-astra",
+            store=False,
+            async_client=AsyncOpenAI(api_key="test-key"),
+            client=OpenAI(api_key="test-key", base_url="https://other.test/v1"),
+        )
+    elif provider == "anthropic":
+        model = MindRoomAnthropicClaude(
+            id="claude-sonnet-5",
+            async_client=AsyncAnthropic(api_key="test-key"),
+            client=Anthropic(api_key="test-key", base_url="https://other.test"),
+        )
+    else:
+        credentials = Credentials(token="test-token")
+        model = MindroomVertexAIClaude(
+            id="claude-sonnet-5",
+            async_client=AsyncAnthropicVertex(project_id="project-one", region="global", credentials=credentials),
+            client=AnthropicVertex(
+                project_id="project-two" if mismatch == "project" else "project-one",
+                region="us" if mismatch == "region" else "global",
+                base_url="https://other.test/v1" if mismatch == "endpoint" else None,
+                credentials=credentials,
+            ),
+        )
+    try:
+        model.configure_native_compaction(threshold=60000)
+        assert model.native_compaction is None
+    finally:
+        model.client.close()
+        await model.async_client.close()

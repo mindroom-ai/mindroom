@@ -19,6 +19,7 @@ from mindroom.claude_prompt_cache import (
     prepare_claude_request_kwargs,
 )
 from mindroom.logging_config import get_logger
+from mindroom.native_compaction import common_native_endpoint
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -244,18 +245,19 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
 
     def native_compaction_endpoint(self) -> str:
         """Keep Vertex checkpoint replay inside its project and endpoint."""
-        client = self.async_client or self.client
-        if client is not None:
-            endpoint, project, region = str(client.base_url), client.project_id, client.region
-        else:
-            params = self._get_client_params()
-            project, region = params["project_id"], params["region"]
-            default_endpoint = {
-                "global": "https://aiplatform.googleapis.com/v1",
-                "us": "https://aiplatform.us.rep.googleapis.com/v1",
-                "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
-            }.get(region, f"https://{region}-aiplatform.googleapis.com/v1")
-            endpoint = str(params["base_url"] or default_endpoint)
+        clients = [client for client in (self.async_client, self.client) if client is not None]
+        if clients:
+            return common_native_endpoint(
+                [f"{str(client.base_url).rstrip('/')}|{client.project_id}|{client.region}" for client in clients],
+            )
+        params = self._get_client_params()
+        project, region = params["project_id"], params["region"]
+        default_endpoint = {
+            "global": "https://aiplatform.googleapis.com/v1",
+            "us": "https://aiplatform.us.rep.googleapis.com/v1",
+            "eu": "https://aiplatform.eu.rep.googleapis.com/v1",
+        }.get(region, f"https://{region}-aiplatform.googleapis.com/v1")
+        endpoint = str(params["base_url"] or default_endpoint)
         return f"{endpoint.rstrip('/')}|{project}|{region}"
 
     def _request_input_kwargs(
