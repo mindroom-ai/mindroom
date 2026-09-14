@@ -80,8 +80,7 @@ def estimate_prompt_visible_history_tokens(
 def _without_image_transport(message: Message) -> Message:
     """Project canonical images for estimation without changing saved messages."""
     updates: dict[str, object] = {}
-    for field_name in ("content", "compressed_content"):
-        content = getattr(message, field_name)
+    for field_name, content in (("content", message.content), ("compressed_content", message.compressed_content)):
         if isinstance(content, list):
             updates[field_name] = [image_content_for_token_estimation(block) for block in content]
     if message.images:

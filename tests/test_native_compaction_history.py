@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from base64 import b64encode
 from dataclasses import replace
 from io import BytesIO
@@ -119,6 +120,68 @@ def test_responses_image_budget_preserves_visual_cost_and_ignores_png_encoding_s
     assert estimates[0] == estimates[1]
     assert 77 <= estimates[0] < 500
     assert estimates[0] > model.estimate_portable_replay_tokens([Message(role="user", content="Describe.")])
+
+
+def test_responses_image_budget_reads_only_bounded_header_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Estimating a large image must not allocate another full decoded image."""
+    buffer = BytesIO()
+    PillowImage.new("RGB", (256, 256), "blue").save(buffer, format="PNG", compress_level=0)
+    payload = "data:image/png;base64," + b64encode(buffer.getvalue()).decode()
+    decoded_sizes = []
+    decode = base64.b64decode
+
+    def record_decode(value: str, *, validate: bool = False) -> bytes:
+        result = decode(value, validate=validate)
+        decoded_sizes.append(len(result))
+        return result
+
+    monkeypatch.setattr(base64, "b64decode", record_decode)
+    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
+        [
+            Message(role="user", content=[{"type": "input_image", "image_url": payload}]),
+        ],
+    )
+    assert 77 <= tokens < 200
+    assert decoded_sizes
+    assert max(decoded_sizes) <= 64 * 1024
+
+
+def test_responses_jpeg_header_beyond_scan_budget_uses_conservative_allowance() -> None:
+    """Valid JPEG metadata can push dimensions beyond the bounded header scan."""
+    buffer = BytesIO()
+    PillowImage.new("RGB", (1024, 1024), "blue").save(buffer, format="JPEG")
+    image = buffer.getvalue()
+    metadata = b"metadata" * 8000
+    segment = b"\xff\xef" + (len(metadata) + 2).to_bytes(2, "big") + metadata
+    image = image[:2] + segment + image[2:]
+    with PillowImage.open(BytesIO(image)) as decoded:
+        decoded.load()
+        assert decoded.size == (1024, 1024)
+    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
+        [
+            Message(role="user", content="Describe.", images=[Image(content=image, format="jpeg")]),
+        ],
+    )
+    assert 36_000 <= tokens < 36_100
+
+
+def test_responses_unrecognized_webp_header_uses_conservative_allowance() -> None:
+    """Agno's silent default dimensions must not become measured dimensions."""
+    header = b"RIFF\x10\x00\x00\x00WEBPJUNK\x04\x00\x00\x00test"
+    tokens = MindRoomOpenAIResponses(id="gpt-6-astra").estimate_portable_replay_tokens(
+        [
+            Message(
+                role="user",
+                content=[
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/webp;base64," + b64encode(header).decode(),
+                    },
+                ],
+            ),
+        ],
+    )
+    assert 36_000 <= tokens < 36_100
 
 
 def test_native_checkpoint_tail_images_keep_visual_cost_without_transport_bytes(tmp_path: Path) -> None:

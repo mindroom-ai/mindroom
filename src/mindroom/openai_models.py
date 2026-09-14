@@ -27,6 +27,7 @@ from openai.types.responses import (
 
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
+from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
 from mindroom.native_compaction import (
     NativeCompactionModel,
     common_native_endpoint,
@@ -121,10 +122,15 @@ def _embedded_image_dimensions(source: object) -> tuple[int, int] | None:
     if not isinstance(source, str) or not source.startswith("data:image/") or ";base64," not in source:
         return None
     try:
-        data = base64.b64decode(source.split(",", 1)[1], validate=True)
+        # Bound allocations and JPEG marker scanning; longer metadata uses the fallback.
+        offset = source.index(",") + 1
+        data = base64.b64decode(source[offset : offset + 64 * 1024], validate=True)
+        image_type = get_image_type(data)
+        if image_type == "webp" and data[12:16] not in {b"VP8X", b"VP8 ", b"VP8L"}:
+            return None
         # Agno's higher-level image helper can fetch URLs; use only its header parser.
-        if get_image_type(data) in {"png", "gif", "jpeg", "webp"}:
-            width, height = _parse_image_dimensions_from_bytes(data)
+        if image_type in {"png", "gif", "jpeg", "webp"}:
+            width, height = _parse_image_dimensions_from_bytes(data, image_type)
             if width > 0 and height > 0:
                 return width, height
     except (ValueError, TypeError, struct.error):
@@ -139,10 +145,10 @@ def _responses_image_tokens(block: dict[str, Any], model_id: str) -> int:
     Unknown models retain the existing transport estimate until their visual
     accounting is known. Unknown dimensions use the model/detail image ceiling.
     """
-    if not model_id.startswith(("gpt-6", "gpt-5.6", "gpt-5.5", "gpt-5.4")):
+    if not model_id.startswith(OPENAI_IMAGE_PATCH_MODEL_PREFIXES):
         return approximate_o200k_tokens(stable_serialize(block))
     detail = block.get("detail", "auto")
-    recent = model_id.startswith(("gpt-6", "gpt-5.6"))
+    recent = model_id.startswith(OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES)
     if detail == "auto":
         detail = "high" if model_id.startswith("gpt-5.4") else "original"
     max_dimension, patch_limit = 65_535, 30_000
