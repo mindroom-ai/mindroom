@@ -1061,6 +1061,31 @@ def test_load_revalidates_after_concurrent_session_mutation(tmp_path: Path) -> N
     ]
 
 
+def test_deferred_scope_validation_builds_authored_tools_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope validation must not rebuild the whole tool list for every deferred entry."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {name: {"defer": True}} for name in ["homeassistant", "shell", "file", "calculator", "sleep"]
+    ]
+    config = _validated_config(tmp_path, raw)
+    config.agents["code"].worker_scope = "user"
+    original = Config._agent_authored_deferred_tool_configs
+    builds = 0
+
+    def count_builds(self: Config, agent_name: str) -> list[EffectiveToolConfig]:
+        nonlocal builds
+        builds += 1
+        return original(self, agent_name)
+
+    monkeypatch.setattr(Config, "_agent_authored_deferred_tool_configs", count_builds)
+
+    assert config._agent_scope_incompatible_deferred_tools("code") == {"homeassistant": ["homeassistant"]}
+    assert builds == 1
+
+
 def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path: Path) -> None:
     """Scope-incompatible deferred tools should be rejected before schema exposure."""
     raw = _base_config_data()
