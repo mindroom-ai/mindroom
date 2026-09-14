@@ -45,7 +45,6 @@ _CACHE_DIAGNOSTICS_LOCK = threading.Lock()
 _CACHE_DIAGNOSTICS_NEXT_REPORT = 0.0
 _CACHE_DIAGNOSTICS: weakref.WeakKeyDictionary[_ConversationSqliteDb, tuple[int, int]] = weakref.WeakKeyDictionary()
 
-agno_session_persistence_patch.install_patch()
 
 __all__ = [
     "configure_state_engine_pragmas",
@@ -116,6 +115,7 @@ def _create_sqlite_state_storage(
     prompt_roles: frozenset[str] | None = None,
 ) -> SqliteDb:
     """Create a persistent SQLite database from an already-resolved state root."""
+    agno_session_persistence_patch.install_patch()
     preflight = (
         session_storage_preflight(
             state_root,

@@ -56,16 +56,17 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
+from mindroom.history.agno_message_builder_patch import apply_patch as install_message_builder_patch
 from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,
 )
 from mindroom.history.native import restore_native_history
 from mindroom.history.prompt_tokens import team_tool_definition_payloads_for_logging
-from mindroom.history.runtime import (
+from mindroom.history.runtime import note_prepared_history_timing
+from mindroom.history.session_context import (
     ScopeSessionContext,
     close_team_runtime_state_dbs,
-    note_prepared_history_timing,
     open_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
@@ -2280,6 +2281,7 @@ def _create_team_instance(
         agent.add_history_to_context = False
         agent.add_session_summary_to_context = False
 
+    install_message_builder_patch()
     team_members: list[Agent | Team] = [*agents]
     team = Team(
         members=team_members,

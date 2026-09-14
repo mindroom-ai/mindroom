@@ -24,7 +24,7 @@ from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     MINDROOM_COMPACTION_METADATA_KEY,
 )
-from mindroom.history.compaction import scope_visible_runs
+from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
     invalidate_compacted_replay,
     prune_reintroduced_runs,

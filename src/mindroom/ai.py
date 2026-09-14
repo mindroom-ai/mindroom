@@ -45,11 +45,11 @@ from mindroom.history.interrupted_replay import (
     tool_execution_call_id,
 )
 from mindroom.history.prompt_tokens import agent_tool_definition_payloads_for_logging
-from mindroom.history.runtime import (
+from mindroom.history.replay import apply_replay_plan
+from mindroom.history.runtime import note_prepared_history_timing
+from mindroom.history.session_context import (
     ScopeSessionContext,
-    apply_replay_plan,
     close_agent_runtime_state_dbs,
-    note_prepared_history_timing,
     open_resolved_scope_session_context,
 )
 from mindroom.history.types import HistoryScope, PreparedHistoryState

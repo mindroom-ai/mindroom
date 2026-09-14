@@ -17,12 +17,12 @@ from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history.native import restore_native_history
 from mindroom.history.runtime import (
-    ScopeSessionContext,
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import write_scope_state
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.native_compaction import record_native_checkpoint

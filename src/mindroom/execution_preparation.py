@@ -26,10 +26,9 @@ from mindroom.constants import (
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.prompt_tokens import agent_static_token_estimator, team_static_token_estimator
+from mindroom.history.replay import apply_replay_plan
 from mindroom.history.runtime import (
     PreparedScopeHistory,
-    ScopeSessionContext,
-    apply_replay_plan,
     finalize_history_preparation,
     prepare_bound_scope_history,
     prepare_scope_history,
@@ -53,6 +52,7 @@ if TYPE_CHECKING:
 
     from mindroom.attachments import AttachmentRecord
     from mindroom.config.main import Config, ResolvedRuntimeModel
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import ResponseTurnContext

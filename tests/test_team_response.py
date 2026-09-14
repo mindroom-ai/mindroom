@@ -56,10 +56,10 @@ from mindroom.execution_preparation import (
     _PreparedExecutionContext,
     prepare_bound_team_run_context,
 )
-from mindroom.history.compaction import _compaction_replay_messages
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
-from mindroom.history.runtime import open_bound_scope_session_context
+from mindroom.history.session_context import open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
+from mindroom.history.summary_input import _compaction_replay_messages
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, HistoryScope, PreparedHistoryState
 from mindroom.hooks import EnrichmentItem

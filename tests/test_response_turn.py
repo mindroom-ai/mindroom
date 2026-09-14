@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
 
-    from mindroom.history.runtime import ScopeSessionContext
+    from mindroom.history.session_context import ScopeSessionContext
 
 
 @dataclass

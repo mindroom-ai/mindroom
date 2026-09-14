@@ -17,7 +17,7 @@ from mindroom.commands.parsing import Command, CommandType, command_parser, get_
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.history.runtime import close_team_runtime_state_dbs
+from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.message_target import MessageTarget
 from mindroom.room_model_overrides import (
     _store_path,

@@ -34,7 +34,7 @@ from mindroom.delegation_state import DELEGATION_STATE_KEY, DelegationChild, Del
 from mindroom.delegation_storage import delegation_storage_config, freeze_delegation_storage
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.history.native import restore_native_history
-from mindroom.history.runtime import close_agent_runtime_state_dbs, create_scope_session_storage
+from mindroom.history.session_context import close_agent_runtime_state_dbs, create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
