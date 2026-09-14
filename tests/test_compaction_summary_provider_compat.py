@@ -13,7 +13,12 @@ from google.oauth2.credentials import Credentials
 
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.bedrock_claude import MindRoomBedrockClaude
-from mindroom.history.summary_call import CompactionSummaryOutputLimitError, generate_compaction_summary
+from mindroom.error_handling import ModelSafeguardRefusalError
+from mindroom.history.summary_call import (
+    CompactionSummaryIncompleteError,
+    CompactionSummaryOutputLimitError,
+    generate_compaction_summary,
+)
 from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 
 if TYPE_CHECKING:
@@ -220,7 +225,7 @@ async def test_summary_preserves_lazy_transport_phase_timeouts(transport_field: 
 
 
 @pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
-@pytest.mark.parametrize("stop_reason", ["end_turn", "model_context_window_exceeded"])
+@pytest.mark.parametrize("stop_reason", ["end_turn", "stop_sequence", "model_context_window_exceeded"])
 async def test_summary_uses_stop_reason_and_raw_body_precedence(provider: str, stop_reason: str) -> None:
     """A normal stop at the cap is complete; a context stop below it is incomplete."""
     requests = []
@@ -228,11 +233,14 @@ async def test_summary_uses_stop_reason_and_raw_body_precedence(provider: str, s
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(json.loads(request.content))
-        return _response(output_tokens=1024 if stop_reason == "end_turn" else 100, stop_reason=stop_reason)
+        return _response(
+            output_tokens=1024 if stop_reason in {"end_turn", "stop_sequence"} else 100,
+            stop_reason=stop_reason,
+        )
 
     model = _model(provider, httpx.MockTransport(respond), params)
     try:
-        if stop_reason == "end_turn":
+        if stop_reason in {"end_turn", "stop_sequence"}:
             result = await generate_compaction_summary(
                 model=model,
                 summary_input="Conversation",
@@ -252,3 +260,39 @@ async def test_summary_uses_stop_reason_and_raw_body_precedence(provider: str, s
         await model.async_client.close()
     assert requests[0]["max_tokens"] == 1024
     assert params == {"max_tokens": 4096, "extra_body": {"max_tokens": 1024}}
+
+
+@pytest.mark.parametrize("provider", ["direct", "vertex", "mantle"])
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_error"),
+    [
+        ("pause_turn", CompactionSummaryIncompleteError),
+        ("tool_use", CompactionSummaryIncompleteError),
+        ("unexpected", CompactionSummaryIncompleteError),
+        ("refusal", ModelSafeguardRefusalError),
+    ],
+)
+async def test_summary_rejects_unfinished_or_refused_text(
+    provider: str,
+    stop_reason: str,
+    expected_error: type[Exception],
+) -> None:
+    """Partial text is not a complete summary; provider refusals retain their own error."""
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(output_tokens=100, stop_reason=stop_reason)
+
+    model = _model(provider, httpx.MockTransport(respond), {})
+    try:
+        with pytest.raises(expected_error):
+            await generate_compaction_summary(
+                model=model,
+                summary_input="Conversation",
+                summary_prompt="Summarize",
+                timeout_seconds=10,
+            )
+    finally:
+        await model.async_client.close()
+    assert len(requests) == 1
