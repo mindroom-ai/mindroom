@@ -98,7 +98,7 @@ class ParticipationGate:
             else:
                 self.decision = ParticipationDecision.model_validate_json(response.content)
         except Exception as error:
-            logger.warning("Participation decision failed", error_type=type(error).__name__)
+            logger.exception("Participation decision failed", error_type=type(error).__name__)
             self.decline("decision_failed")
         self.decided.set()
         assert self.decision is not None

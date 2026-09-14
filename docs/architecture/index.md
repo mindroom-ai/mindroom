@@ -73,9 +73,11 @@ MindRoom's architecture consists of several key components working together.
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
 | `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
-| `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
+| `coalescing.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `participation.py` | Same-model participation decision at the prepared provider-request boundary, with quiet decline and scoped model restoration |
+| `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |

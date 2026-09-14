@@ -64,3 +64,14 @@ def test_room_participation_resolves_persisted_alias(tmp_path: Path, key: str) -
         },
     )
     assert config.get_room_participation("!room:localhost", runtime_paths).agent == "helper"
+
+
+def test_room_participation_rejects_unknown_settings() -> None:
+    """A misspelled pause must fail config loading instead of silently using the default."""
+    with pytest.raises(ValidationError, match="debounce_second"):
+        Config.model_validate(
+            {
+                "agents": {"helper": {"display_name": "Helper"}},
+                "room_participation": {"lobby": {"agent": "helper", "debounce_second": 10}},
+            },
+        )

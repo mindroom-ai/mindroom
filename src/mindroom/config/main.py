@@ -87,6 +87,7 @@ from mindroom.constants import (
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
+from mindroom.entity_resolution import resolve_room_scoped_override
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
@@ -1876,8 +1877,6 @@ class Config(BaseModel):
 
     def get_room_participation(self, room_id: str, runtime_paths: RuntimePaths) -> RoomParticipationConfig | None:
         """Resolve participation by concrete room ID or persisted room alias."""
-        from mindroom.entity_resolution import resolve_room_scoped_override  # noqa: PLC0415
-
         return resolve_room_scoped_override(self.room_participation, room_id, runtime_paths, allow_raw_room_id=True)
 
     def _entity_model_name(self, entity_name: str) -> str:

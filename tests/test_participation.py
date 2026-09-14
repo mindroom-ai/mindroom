@@ -149,7 +149,12 @@ async def test_agent_turn_applies_decision_before_model_answer(
     monkeypatch.setattr(
         model,
         "_get_cached_model_response",
-        Mock(return_value={"result": {"content": "Cached answer"}, "streaming_responses": [{"content": "Cached answer"}]}),
+        Mock(
+            return_value={
+                "result": {"content": "Cached answer"},
+                "streaming_responses": [{"content": "Cached answer"}],
+            },
+        ),
     )
     agent = Agent(model=model, name="general", telemetry=False)
     monkeypatch.setattr("mindroom.ai._prepare_agent_and_prompt", AsyncMock(return_value=_prepared_prompt_result(agent)))
