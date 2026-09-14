@@ -197,13 +197,15 @@ def _harness(
     resolver.canonical_source_requester.return_value = USER_ID
     resolver.extract_message_context.return_value = context
     resolver.build_message_envelope = MagicMock(
-        return_value=request_envelope(
-            room_id=ROOM_ID,
-            reply_to_event_id=ORIGINAL_EVENT_ID,
-            thread_id=THREAD_ID,
-            user_id=USER_ID,
-            agent_name=AGENT_NAME,
-            source_kind=EDIT_SOURCE_KIND,
+        side_effect=lambda *, event, target, body, requester_user_id, source_kind, **_kwargs: replace(
+            request_envelope(
+                target=target,
+                prompt=body,
+                user_id=requester_user_id,
+                agent_name=AGENT_NAME,
+                source_kind=source_kind,
+            ),
+            source_event_id=event.event_id,
         ),
     )
 
@@ -615,7 +617,10 @@ async def test_coalesced_approval_owns_only_active_edit_revisions(tmp_path: Path
 
     assert request is not None
     assert prepared is not None
-    assert request.journal_source_event_ids == ("$edit-2", "$edit-1")
+    assert request.sources.pending_event_ids == ("$edit-2", "$edit-1")
+    assert request.sources.logical_source_event_ids == sources
+    assert request.sources.discovery_event_ids == ()
+    assert request.sources.edit_receipt_order == 2
     assert request.matrix_run_metadata == metadata
     assert prepared.source_event_ids == sources
 
@@ -645,7 +650,7 @@ async def test_coalesced_approval_handoff_defers_each_waiting_participant(tmp_pa
         return False
 
     async def suspend(request: ResponseRequest) -> str:
-        owned_sources.append(request.journal_source_event_ids)
+        owned_sources.append(request.sources.pending_event_ids)
         assert request.source_handoff is not None
         request.source_handoff.set()
         return RESPONSE_EVENT_ID

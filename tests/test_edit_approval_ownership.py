@@ -25,6 +25,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
 from mindroom.turn_record import canonicalize_turn_record
@@ -370,6 +371,12 @@ async def _paused_case(  # noqa: PLR0915
                     _plain_request(target, source_event_id=source_id),
                     existing_event_id=answer_id,
                     source_handoff=asyncio.Event(),
+                    sources=ResponseSources(
+                        pending_event_ids=tuple(
+                            dict.fromkeys((source_id, *original_sources)),
+                        ),
+                        logical_source_event_ids=original_sources,
+                    ),
                     matrix_run_metadata={MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: list(original_sources)},
                 )
                 assert await runner.generate_response(original_request) is None

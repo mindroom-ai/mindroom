@@ -25,6 +25,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
@@ -1350,6 +1351,10 @@ async def test_source_redaction_at_second_preparation_gate_suppresses_visible_in
 
     gateway.deps.redact_message_event.side_effect = redact
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(SOURCE,),
+            logical_source_event_ids=(SOURCE,),
+        ),
         thread_history=[],
         prompt="deleted prompt",
         user_id=USER_ID,

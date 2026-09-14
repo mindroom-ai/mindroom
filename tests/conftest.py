@@ -125,6 +125,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparer,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_sources import ResponseSources
 from mindroom.thread_utils import decide_agent_response
 from mindroom.turn_controller import TurnController, _DispatchPreparation, _ReplayGuardContext
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -2298,6 +2299,10 @@ async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, 
     payload_inputs = cast("DispatchPayloadInputs", execute_args[4])
     await bot._request_payload_preparer.prepare(
         ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=(dispatch.envelope.source_event_id,),
+                logical_source_event_ids=(dispatch.envelope.source_event_id,),
+            ),
             thread_history=dispatch.context.thread_history,
             prompt=event.body,
             response_envelope=dispatch.envelope,

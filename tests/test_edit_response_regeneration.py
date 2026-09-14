@@ -51,6 +51,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
+from mindroom.response_sources import ResponseSources
 from mindroom.session_ids import create_session_id
 from mindroom.turn_store import TurnStore
 from tests.access_schema_support import with_current_room_member_access
@@ -3321,6 +3322,10 @@ async def test_handle_message_edit_recovers_missing_ledger_row_from_persisted_ru
     ):
         resolution = await bot._response_runner.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$primary:example.com",),
+                    logical_source_event_ids=("$primary:example.com",),
+                ),
                 prompt="primary",
                 thread_history=[],
                 user_id="@user:example.com",
@@ -3819,6 +3824,10 @@ async def test_handle_message_edit_uses_journal_response_event_id_after_restart(
     ):
         resolution = await bot._response_runner.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$original:example.com",),
+                    logical_source_event_ids=("$original:example.com",),
+                ),
                 prompt="original",
                 thread_history=[],
                 user_id="@user:example.com",

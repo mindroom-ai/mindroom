@@ -49,6 +49,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_team_bot
 from tests.conftest import (
@@ -402,6 +403,10 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
     ):
         outcome = await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="   ",
                 user_id="@user:localhost",

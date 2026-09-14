@@ -54,6 +54,7 @@ from mindroom.hooks import (
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner, _DeliveryProgress
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
@@ -283,6 +284,10 @@ async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.Room
 
 def _direct_response_request(target: MessageTarget, prompt: str, source_event_id: str) -> ResponseRequest:
     return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(source_event_id,),
+            logical_source_event_ids=(source_event_id,),
+        ),
         prompt=prompt,
         thread_history=[],
         user_id="@user:localhost",

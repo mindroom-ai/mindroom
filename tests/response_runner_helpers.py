@@ -13,6 +13,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -92,6 +93,10 @@ def _plain_request(target: MessageTarget, *, source_event_id: str = "$event") ->
         prompt="hello",
         user_id="@user:localhost",
         response_envelope=_envelope(target, source_event_id=source_event_id),
+        sources=ResponseSources(
+            pending_event_ids=(source_event_id,),
+            logical_source_event_ids=(source_event_id,),
+        ),
     )
 
 

@@ -52,6 +52,7 @@ from mindroom.response_runner import (
     ResponseRunner,
     _NonStreamingGeneration,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import StreamingDeliveryError, strip_visible_tool_markers
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
@@ -239,6 +240,10 @@ async def test_process_and_respond_propagates_before_response_cancellation_to_ru
         with pytest.raises(asyncio.CancelledError, match=USER_STOP_CANCEL_MSG):
             await coordinator._process_and_respond(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$user_msg",),
+                        logical_source_event_ids=("$user_msg",),
+                    ),
                     thread_history=(),
                     prompt="Hello",
                     response_envelope=request_envelope(

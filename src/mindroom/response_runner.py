@@ -31,7 +31,6 @@ from mindroom.background_tasks import create_background_task, run_coroutine_unti
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
-    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -88,6 +87,7 @@ from mindroom.response_shutdown_diagnostics import (
     context_with_response_shutdown_trace,
     response_shutdown_phase,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     TerminalFailureStatus,
@@ -468,12 +468,11 @@ class ResponseRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
+    sources: ResponseSources
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
     prepared_edit_record: TurnRecord | None = None
-    # Exact pending revisions can differ from logical sources in run metadata.
-    journal_source_event_ids: tuple[str, ...] = ()
     existing_event_is_placeholder: bool = False
     user_id: str | None = None
     media: MediaInputs | None = None
@@ -504,6 +503,15 @@ class ResponseRequest:
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
     # Set only after another durable owner can finish the source.
     source_handoff: asyncio.Event | None = None
+
+    def __post_init__(self) -> None:
+        """Require the envelope to name the source driving this response."""
+        if not isinstance(self.sources, ResponseSources):
+            message = "ResponseRequest requires ResponseSources"
+            raise TypeError(message)
+        if self.sources.pending_event_ids[0] != self.response_envelope.source_event_id:
+            message = "ResponseRequest first pending event must equal the envelope source event"
+            raise ValueError(message)
 
     @property
     def room_id(self) -> str:
@@ -1207,23 +1215,6 @@ class ResponseRunner:
             default_agent_name=self.deps.agent_name,
         )
         approval_id = uuid4().hex
-        raw_source_event_ids = (
-            request.matrix_run_metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-            if request.matrix_run_metadata is not None
-            else None
-        )
-        source_event_ids = request.journal_source_event_ids or (
-            tuple(
-                dict.fromkeys(
-                    (
-                        request.response_envelope.source_event_id,
-                        *(value for value in raw_source_event_ids if isinstance(value, str)),
-                    ),
-                ),
-            )
-            if isinstance(raw_source_event_ids, list)
-            else (request.response_envelope.source_event_id,)
-        )
         try:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
             response_event_id = progress.tracked_event_id
@@ -1283,7 +1274,7 @@ class ResponseRunner:
                     thread_id=target.resolved_thread_id,
                     requester_id=requester_id,
                     response_event_id=response_event_id,
-                    source_event_ids=source_event_ids,
+                    source_event_ids=request.sources.pending_event_ids,
                     prepared_edit_record=request.prepared_edit_record,
                     calls=plan.calls,
                     state=continuation_state,
@@ -1728,6 +1719,24 @@ class ResponseRunner:
             thread_history=self._approval_memory_history(continuation),
             prompt=envelope.body,
             response_envelope=envelope,
+            sources=ResponseSources(
+                pending_event_ids=continuation.source_event_ids,
+                logical_source_event_ids=(
+                    continuation.prepared_edit_record.source_event_ids
+                    if continuation.prepared_edit_record is not None
+                    else continuation.source_event_ids
+                ),
+                discovery_event_ids=(
+                    continuation.prepared_edit_record.discovery_event_ids
+                    if continuation.prepared_edit_record is not None
+                    else ()
+                ),
+                edit_receipt_order=(
+                    continuation.prepared_edit_record.latest_edit_receipt_order
+                    if continuation.prepared_edit_record is not None
+                    else None
+                ),
+            ),
             existing_event_id=continuation.response_event_id,
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,

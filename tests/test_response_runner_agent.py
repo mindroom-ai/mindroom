@@ -73,6 +73,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     _with_matrix_message_target,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
@@ -217,6 +218,10 @@ class TestAgentBot(AgentBotTestBase):
         bot._response_runner.deps = replace(bot._response_runner.deps, request_preparer=preparer)
         prepared = await bot._response_runner._prepare_request_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=(envelope.source_event_id,),
+                    logical_source_event_ids=(envelope.source_event_id,),
+                ),
                 thread_history=[],
                 prompt="Check for updates",
                 user_id="@user:localhost",
@@ -2063,6 +2068,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="What time is it?",
                     thread_history=thread_history,
                     user_id="@alice:localhost",
@@ -2184,6 +2193,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="What time is it?",
                     thread_history=thread_history,
                     user_id="@alice:localhost",
@@ -2280,6 +2293,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2354,6 +2371,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2428,6 +2449,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             response_event_id = await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2510,6 +2535,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2554,6 +2583,10 @@ class TestAgentBot(AgentBotTestBase):
 
         event_id = await bot._response_runner.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$terminal-event",),
+                    logical_source_event_ids=("$terminal-event",),
+                ),
                 prompt="Check for updates",
                 thread_history=[],
                 user_id="@alice:localhost",
@@ -2669,6 +2702,10 @@ class TestAgentBot(AgentBotTestBase):
             async with bot._conversation_resolver.turn_lookup_scope():
                 resolution = await bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=("$event",),
+                            logical_source_event_ids=("$event",),
+                        ),
                         prompt="Continue",
                         thread_history=stale_history,
                         user_id="@alice:localhost",
@@ -2774,6 +2811,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(envelope.source_event_id,),
+                        logical_source_event_ids=(envelope.source_event_id,),
+                    ),
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2868,6 +2909,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Summarize this thread",
                     thread_history=thread_history,
                     user_id="@alice:localhost",
@@ -2998,6 +3043,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(response_envelope.source_event_id,),
+                        logical_source_event_ids=(response_envelope.source_event_id,),
+                    ),
                     prompt="Start a thread here",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -3057,6 +3106,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Please answer",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -3116,6 +3169,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Please answer",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -3185,6 +3242,10 @@ class TestAgentBot(AgentBotTestBase):
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=("$event",),
+                            logical_source_event_ids=("$event",),
+                        ),
                         prompt="Summarize this thread",
                         thread_history=[],
                         user_id="@alice:localhost",
@@ -3223,6 +3284,10 @@ class TestAgentBot(AgentBotTestBase):
             events.append("source_settled")
 
         request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=("$event",),
+                logical_source_event_ids=("$event",),
+            ),
             prompt="Check for updates",
             thread_history=[],
             user_id="@alice:localhost",
@@ -3289,6 +3354,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_name=bot.agent_name,
         )
         request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=(target.source_event_id,),
+                logical_source_event_ids=(target.source_event_id,),
+            ),
             prompt="Run it",
             thread_history=[],
             user_id="@alice:localhost",

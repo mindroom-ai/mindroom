@@ -1579,6 +1579,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
     "mindroom.response_runner",
+    "mindroom.response_sources",
     "mindroom.runtime_protocols",
     "mindroom.timestamp_formatting",
     "mindroom.turn_record",
@@ -2028,6 +2029,7 @@ depends_on = [
     "mindroom.response_admission",
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
+    "mindroom.response_sources",
     "mindroom.response_terminal",
     "mindroom.response_turn",
     "mindroom.streaming",
@@ -2040,6 +2042,15 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
     "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.response_sources"
+depends_on = []
+visibility = [
+    "mindroom.edit_regenerator",
+    "mindroom.response_runner",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -4104,6 +4115,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
+    "mindroom.response_sources",
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.text_ingress_dispatch",

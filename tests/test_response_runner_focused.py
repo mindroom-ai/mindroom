@@ -97,6 +97,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     prepare_memory_and_model_context,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, ResponseTurnContext
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -1107,6 +1108,10 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
         target = _target(thread_id="$thread", reply_to_event_id=f"$event{turn}")
         envelope = _envelope(target, source_event_id=f"$event{turn}")
         return ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=(envelope.source_event_id,),
+                logical_source_event_ids=(envelope.source_event_id,),
+            ),
             thread_history=[],
             prompt="hello",
             user_id="@user:localhost",
@@ -1305,6 +1310,10 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
         return True
 
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(envelope.source_event_id,),
+            logical_source_event_ids=(envelope.source_event_id,),
+        ),
         thread_history=[],
         prompt="REDACTED_SECRET",
         user_id="@user:localhost",
@@ -1351,6 +1360,10 @@ async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecy
     acquired = MagicMock()
     suppressed = AsyncMock()
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$event",),
+            logical_source_event_ids=("$event",),
+        ),
         thread_history=[],
         prompt="hello",
         user_id="@user:localhost",
@@ -1390,6 +1403,10 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         return False
 
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$event",),
+            logical_source_event_ids=("$event",),
+        ),
         thread_history=[],
         prompt="prompt",
         user_id="@user:localhost",
@@ -2674,6 +2691,10 @@ async def test_begin_locked_turn_settles_external_placeholder_when_source_is_red
     )
     on_source_turn_suppressed = AsyncMock()
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(envelope.source_event_id,),
+            logical_source_event_ids=(envelope.source_event_id,),
+        ),
         thread_history=[],
         prompt="REDACTED_SECRET",
         user_id="@user:localhost",
@@ -2737,6 +2758,10 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
         ),
     )
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(envelope.source_event_id,),
+            logical_source_event_ids=(envelope.source_event_id,),
+        ),
         thread_history=[],
         prompt="hello",
         user_id="@user:localhost",
@@ -5422,6 +5447,10 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
         target=_target(thread_id="$thread", reply_to_event_id="$source"),
     )
 
+    assert restored.sources == ResponseSources(
+        pending_event_ids=("$source",),
+        logical_source_event_ids=("$source",),
+    )
     assert restored.correlation_id == "correlation-original"
     assert restored.response_envelope.mentioned_agents == ("research", "general")
     assert restored.response_envelope.hook_source == "plugin:message_received"
@@ -5642,6 +5671,10 @@ async def test_scheduled_history_limit_keeps_refreshed_history_for_payload_and_s
     target = _target(thread_id="$thread", reply_to_event_id="$event1")
     envelope = _envelope(target, source_event_id="$event1")
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(envelope.source_event_id,),
+            logical_source_event_ids=(envelope.source_event_id,),
+        ),
         thread_history=[],
         prompt="poll the queue",
         user_id="@user:localhost",

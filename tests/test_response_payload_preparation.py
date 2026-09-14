@@ -25,6 +25,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -141,6 +142,10 @@ def _request(
     thread_history: Sequence[ResolvedVisibleMessage],
 ) -> ResponseRequest:
     return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$event",),
+            logical_source_event_ids=("$event",),
+        ),
         thread_history=thread_history,
         prompt=preparation.prompt,
         user_id="@user:localhost",
