@@ -85,7 +85,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.tool_schema_cache"
-depends_on = []
+depends_on = ["mindroom.tool_system.output_files"]
 visibility = [
     "mindroom.mcp_gateway.tools",
     "mindroom.history.prompt_tokens",
