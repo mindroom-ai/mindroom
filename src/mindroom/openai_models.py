@@ -163,11 +163,21 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
             or "https://api.openai.com/v1",
         ).rstrip("/")
 
-    def configure_native_compaction(self, *, threshold: int | None, history_generation: str = "") -> None:
+    def configure_native_compaction(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str = "",
+        allow_authored: bool = False,
+    ) -> None:
         """Use self-contained replay when native compaction is enabled."""
         if self.native_compaction is not None:
             self.store = self._store_before_native_compaction
-        super().configure_native_compaction(threshold=threshold, history_generation=history_generation)
+        super().configure_native_compaction(
+            threshold=threshold,
+            history_generation=history_generation,
+            allow_authored=allow_authored,
+        )
         if self.native_compaction is not None:
             self._store_before_native_compaction = self.store
             self.store = False

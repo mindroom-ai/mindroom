@@ -12,6 +12,7 @@ from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
 
 from mindroom.claude_compat import ClaudeProviderCompat
+from mindroom.claude_native_compaction import effective_context_management
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
@@ -291,7 +292,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
             request_kwargs["thinking"] = self.thinking
         if self.native_compaction is not None:
             params = self.get_request_params()
-            request_kwargs["context_management"] = params["context_management"]
+            request_kwargs["context_management"] = effective_context_management(params)
             request_kwargs["betas"] = params["betas"]
         return prepare_claude_request_kwargs(self, request_kwargs)
 

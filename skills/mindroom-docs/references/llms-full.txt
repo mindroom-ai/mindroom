@@ -3038,6 +3038,7 @@ When native mode is disabled, the authored storage setting is restored; canonica
 Automatic enablement covers GPT-5.3 Codex, GPT-5.4, and GPT-6 model families; other models retain the portable path.
 An explicitly configured `store: true`, background mode, alternate OpenAI endpoint, or custom context-management request stays on the portable path.
 Claude native compaction supports direct Anthropic and Vertex Claude on the supported Sonnet, Opus, Fable, and Mythos models; it is a provider beta and requires a trigger of at least 50,000 tokens.
+An authored Claude `compact_20260112` policy keeps its own trigger and instructions; compatible checkpoints use the same replay and portable-fallback rules.
 Gemini, Chat Completions, and other provider adapters retain text compaction.
 
 Native compaction requires automatic compaction to be enabled, all-history replay, no historical tool-call limit, and a trigger above the current prompt size and below the hard request limit.

@@ -22,10 +22,10 @@ _NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
 
 @dataclass(frozen=True)
 class _NativeCompactionSettings:
-    """One request route and its provider-owned automatic trigger."""
+    """One replay route; a null trigger leaves the authored provider policy intact."""
 
     route: str
-    threshold: int
+    threshold: int | None
 
 
 class NativeCompactionModel:
@@ -43,11 +43,23 @@ class NativeCompactionModel:
         """Return the endpoint identity used to bind opaque replay state."""
         raise NotImplementedError
 
-    def configure_native_compaction(self, *, threshold: int | None, history_generation: str = "") -> None:
+    def authored_native_compaction_supported(self) -> bool:
+        """Return whether this adapter can replay its caller-authored native policy."""
+        return False
+
+    def configure_native_compaction(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str = "",
+        allow_authored: bool = False,
+    ) -> None:
         """Enable replay for this route and portable-history generation."""
         self.native_compaction = None
         if threshold is None or not self.native_compaction_supported():
-            return
+            if not allow_authored or not self.authored_native_compaction_supported():
+                return
+            threshold = None
         endpoint = self.native_compaction_endpoint()
         if not endpoint:
             return
@@ -80,6 +92,7 @@ def record_native_checkpoint(
             (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
             None,
         )
+        state["checkpoint_prefix"] = last is not None
         if last is not None:
             state["items"] = list(items[last:])
     response.provider_data = {
@@ -88,26 +101,39 @@ def record_native_checkpoint(
     }
 
 
+def record_native_request_prefix(response: ModelResponse, *, checkpoint_prefix: bool) -> None:
+    """Mark completed output that inherited a checkpoint from its actual request."""
+    state = (response.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    if checkpoint_prefix and isinstance(state, dict):
+        state["checkpoint_prefix"] = True
+
+
 def recorded_native_settings(message: Message) -> _NativeCompactionSettings | None:
     """Read the effective native policy from one completed assistant response."""
     state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
     if message.role != "assistant" or not isinstance(state, dict):
         return None
     route, threshold = state.get("route"), state.get("threshold")
-    if not isinstance(route, str) or not route or type(threshold) is not int or threshold <= 0:
+    if not isinstance(route, str) or not route or "threshold" not in state:
+        return None
+    if threshold is not None and (type(threshold) is not int or threshold <= 0):
         return None
     return _NativeCompactionSettings(route=route, threshold=threshold)
 
 
 def native_replay_route_matches(message: Message, route: str | None) -> bool | None:
-    """Compare recorded prefix provenance; None means legacy history without it."""
+    """Compare effective prefix provenance; None means legacy history without it."""
     data = message.provider_data or {}
     if _NATIVE_CHECKPOINT_KEY not in data:
         return None
     state = data[_NATIVE_CHECKPOINT_KEY]
     if state is None:
         return route is None
-    return isinstance(state, dict) and isinstance(state.get("route"), str) and state["route"] == route
+    if not isinstance(state, dict) or not isinstance(state.get("route"), str):
+        return False
+    # Missing provenance cannot prove that legacy thinking used canonical input.
+    prefix_route = state["route"] if state.get("checkpoint_prefix", True) else None
+    return prefix_route == route
 
 
 def _is_checkpoint(item: dict[str, Any]) -> bool:

@@ -44,6 +44,7 @@ def configure_native_history(
     model.configure_native_compaction(
         threshold=threshold if enabled else None,
         history_generation=summary,
+        allow_authored=enabled,
     )
     return model
 
@@ -63,6 +64,7 @@ def restore_native_history(
     model.configure_native_compaction(
         threshold=saved.threshold if saved is not None else None,
         history_generation=summary,
+        allow_authored=saved is not None and saved.threshold is None,
     )
     if model.native_compaction is not None and saved is not None and model.native_compaction.route != saved.route:
         model.configure_native_compaction(threshold=None)

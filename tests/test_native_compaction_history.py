@@ -12,6 +12,7 @@ from agno.models.response import ModelResponse
 from agno.session.summary import SessionSummary
 from agno.team import Team
 
+from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history.native import restore_native_history
@@ -140,10 +141,13 @@ async def test_native_budget_keeps_large_canonical_history(tmp_path: Path, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["normal", "manual", "bounded", "custom_summary", "disabled", "scheduled"])
+@pytest.mark.parametrize("authored_claude", [False, True])
 async def test_native_activation_respects_history_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     case: str,
+    *,
+    authored_claude: bool,
 ) -> None:
     """Manual, bounded, custom-model, disabled, and scheduled policies keep portable semantics."""
     compaction = CompactionConfig(threshold_tokens=120000, enabled=case != "disabled")
@@ -158,7 +162,11 @@ async def test_native_activation_respects_history_policy(
             "summary": ModelConfig(provider="openai", id="gpt-6-astra", context_window=200000),
         },
     )
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    model = (
+        MindRoomAnthropicClaude(id="claude-sonnet-5", context_management={"edits": [{"type": "compact_20260112"}]})
+        if authored_claude
+        else MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    )
     session = _session("session", runs=[_completed_run("old")])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
     if case == "manual":

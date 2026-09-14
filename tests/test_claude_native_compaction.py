@@ -87,33 +87,47 @@ def _event(kind: str, **fields: object) -> str:
     return f"event: {kind}\ndata: {json.dumps({'type': kind, **fields})}\n\n"
 
 
+def _stream_response(blocks: list[dict[str, Any]]) -> httpx.Response:
+    events = _event("message_start", message={**_response([]), "stop_reason": None})
+    for index, block in enumerate(blocks):
+        field = {"compaction": "content", "thinking": "thinking", "text": "text"}[block["type"]]
+        empty = {**block, field: ""}
+        if block["type"] == "thinking":
+            empty["signature"] = ""
+        events += _event("content_block_start", index=index, content_block=empty)
+        events += _event(
+            "content_block_delta",
+            index=index,
+            delta={"type": f"{block['type']}_delta", field: block[field]},
+        )
+        if block["type"] == "thinking":
+            events += _event(
+                "content_block_delta",
+                index=index,
+                delta={"type": "signature_delta", "signature": block["signature"]},
+            )
+        events += _event("content_block_stop", index=index)
+    events += _event("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None}, usage=_USAGE)
+    events += _event("message_stop")
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=events)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("vertex", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-async def test_native_claude_replay_after_restart(tmp_path: Path, *, vertex: bool, stream: bool) -> None:
+@pytest.mark.parametrize("bounded", [False, True])
+async def test_native_claude_replay_after_restart(tmp_path: Path, *, vertex: bool, stream: bool, bounded: bool) -> None:
     """A lost beta edit, checkpoint, or replay boundary fails the actual outgoing request."""
     requests: list[dict[str, Any]] = []
+    thinking = {"type": "thinking", "thinking": "Recall the port", "signature": "checkpoint-bound"}
 
     def respond(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         requests.append(payload)
-        blocks = [_CHECKPOINT, _TEXT] if len(requests) == 1 else [_TEXT]
+        blocks = [[_CHECKPOINT, _TEXT], [thinking, _TEXT], [_TEXT]][len(requests) - 1]
         if not payload.get("stream"):
             return httpx.Response(200, json=_response(blocks))
-        events = _event("message_start", message={**_response([]), "stop_reason": None})
-        for index, block in enumerate(blocks):
-            empty = {**block, ("content" if block["type"] == "compaction" else "text"): ""}
-            events += _event("content_block_start", index=index, content_block=empty)
-            delta = (
-                {"type": "compaction_delta", "content": block["content"]}
-                if block["type"] == "compaction"
-                else {"type": "text_delta", "text": block["text"]}
-            )
-            events += _event("content_block_delta", index=index, delta=delta)
-            events += _event("content_block_stop", index=index)
-        events += _event("message_delta", delta={"stop_reason": "end_turn", "stop_sequence": None}, usage=_USAGE)
-        events += _event("message_stop")
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=events)
+        return _stream_response(blocks)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         client = (
@@ -127,9 +141,9 @@ async def test_native_claude_replay_after_restart(tmp_path: Path, *, vertex: boo
             else AsyncAnthropic(api_key="test-key", http_client=http_client)
         )
         model_type = MindroomVertexAIClaude if vertex else MindRoomAnthropicClaude
-        for prompt in ("Remember the launch port is 4321.", "What port?"):
+        for index, prompt in enumerate(("Remember the launch port is 4321.", "What port?", "Repeat the port.")):
             model = model_type(id="claude-sonnet-5", async_client=client, max_tokens=4096)
-            model.configure_native_compaction(threshold=60000)
+            model.configure_native_compaction(threshold=None if index == 2 else 60000)
             install_claude_prompt_cache_hook(model)
             db = SqliteDb(db_file=str(tmp_path / "history.db"))
             agent = Agent(
@@ -139,7 +153,7 @@ async def test_native_claude_replay_after_restart(tmp_path: Path, *, vertex: boo
                 session_id="thread",
                 instructions="Stable rules.",
                 add_history_to_context=True,
-                num_history_runs=20,
+                num_history_runs=1 if bounded and index == 2 else 20,
                 store_history_messages=False,
                 telemetry=False,
             )
@@ -160,6 +174,8 @@ async def test_native_claude_replay_after_restart(tmp_path: Path, *, vertex: boo
     assert replay[0]["content"][0]["content"] == "Launch port 4321."
     assert "Remember the launch port" not in json.dumps(replay)
     assert "What port?" in json.dumps(replay)
+    fallback_blocks = [block for message in requests[2]["messages"] for block in message["content"]]
+    assert all(block["type"] not in {"compaction", "thinking"} for block in fallback_blocks)
 
 
 def test_claude_billing_includes_compaction_iterations() -> None:
@@ -194,15 +210,18 @@ def test_null_compaction_keeps_canonical_history(content: str | None) -> None:
     assert model.native_replay_messages(messages)[0].content == "Original facts."
 
 
-def test_null_compaction_preserves_thinking_during_tool_continuation() -> None:
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("no_op", [False, True])
+def test_null_compaction_preserves_thinking_during_tool_continuation(*, native: bool, no_op: bool) -> None:
     """A no-op summary leaves the thinking prefix unchanged and must preserve its tool-turn signature."""
     model = MindRoomAnthropicClaude(id="claude-sonnet-5", thinking={"type": "adaptive"})
     model.configure_native_compaction(threshold=60000)
     thinking = {"type": "thinking", "thinking": "Need a lookup.", "signature": "unchanged-prefix"}
     tool_use = {"type": "tool_use", "id": "toolu_lookup", "name": "lookup", "input": {}}
+    blocks = ([{**_CHECKPOINT, "content": None}] if no_op else []) + [thinking, tool_use]
     parsed = model._parse_provider_response(
         BetaMessage.model_validate(
-            _response([{**_CHECKPOINT, "content": None}, thinking, tool_use], stop_reason="tool_use"),
+            _response(blocks, stop_reason="tool_use"),
         ),
     )
     messages = [
@@ -216,49 +235,61 @@ def test_null_compaction_preserves_thinking_during_tool_continuation() -> None:
         ),
         Message(role="tool", tool_call_id="toolu_lookup", content="Found it"),
     ]
+    if not native:
+        model.configure_native_compaction(threshold=None)
     wire, _ = format_messages(model.native_replay_messages(messages))
     assert wire[1]["content"] == [thinking, tool_use]
 
 
-def test_native_reactivation_discards_only_mismatched_thinking() -> None:
+@pytest.mark.asyncio
+async def test_native_reactivation_discards_only_mismatched_thinking() -> None:
     """Restoring an old checkpoint must drop canonical-prefix thinking and retain new valid reasoning."""
-    model = MindRoomAnthropicClaude(id="claude-fable-5-1")
-    model.configure_native_compaction(threshold=60000)
     native_thinking = {"type": "thinking", "thinking": "", "signature": "native-prefix"}
-    anchor = model._parse_provider_response(
-        BetaMessage.model_validate(_response([_CHECKPOINT, native_thinking, _TEXT])),
-    )
-    messages = [
-        Message(role="user", content="Original facts."),
-        Message(role="assistant", content=anchor.content, provider_data=anchor.provider_data),
-        Message(role="user", content="Continue."),
-    ]
-    model.configure_native_compaction(threshold=None)
     canonical_thinking = {"type": "thinking", "thinking": "", "signature": "canonical-prefix"}
-    canonical = model._parse_provider_response(BetaMessage.model_validate(_response([canonical_thinking, _TEXT])))
-    messages.extend(
-        [
-            Message(role="assistant", content=canonical.content, provider_data=canonical.provider_data),
-            Message(role="user", content="Continue again."),
-        ],
-    )
-    canonical_wire, _ = format_messages(model.native_replay_messages(messages))
-    assert canonical_thinking in canonical_wire[3]["content"]
-    model.configure_native_compaction(threshold=60000)
-    native_wire, _ = format_messages(model.native_replay_messages(messages))
-    assert native_thinking in native_wire[0]["content"]
-    assert canonical_thinking not in native_wire[2]["content"]
     resumed_thinking = {"type": "thinking", "thinking": "", "signature": "resumed-native-prefix"}
-    resumed = model._parse_provider_response(BetaMessage.model_validate(_response([resumed_thinking, _TEXT])))
-    messages.extend(
-        [
-            Message(role="assistant", content=resumed.content, provider_data=resumed.provider_data),
-            Message(role="user", content="Finish."),
-        ],
-    )
-    resumed_wire, _ = format_messages(model.native_replay_messages(messages))
-    assert resumed_thinking in resumed_wire[4]["content"]
-    assert canonical_thinking in canonical.provider_data["content_blocks"]
+    outputs = iter([[_CHECKPOINT, native_thinking, _TEXT], [canonical_thinking, _TEXT], [resumed_thinking, _TEXT]])
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_response(next(outputs)))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        model = MindRoomAnthropicClaude(
+            id="claude-fable-5-1",
+            async_client=AsyncAnthropic(api_key="test-key", http_client=http_client),
+        )
+        model.configure_native_compaction(threshold=60000)
+        messages = [Message(role="user", content="Original facts.")]
+        anchor = await model.ainvoke(messages, Message(role="assistant"))
+        messages.extend(
+            [
+                Message(role="assistant", content=anchor.content, provider_data=anchor.provider_data),
+                Message(role="user", content="Continue."),
+            ],
+        )
+        model.configure_native_compaction(threshold=None)
+        canonical = await model.ainvoke(messages, Message(role="assistant"))
+        messages.extend(
+            [
+                Message(role="assistant", content=canonical.content, provider_data=canonical.provider_data),
+                Message(role="user", content="Continue again."),
+            ],
+        )
+        canonical_wire, _ = format_messages(model.native_replay_messages(messages))
+        assert canonical_thinking in canonical_wire[3]["content"]
+        model.configure_native_compaction(threshold=60000)
+        native_wire, _ = format_messages(model.native_replay_messages(messages))
+        assert native_thinking in native_wire[0]["content"]
+        assert canonical_thinking not in native_wire[2]["content"]
+        resumed = await model.ainvoke(messages, Message(role="assistant"))
+        messages.extend(
+            [
+                Message(role="assistant", content=resumed.content, provider_data=resumed.provider_data),
+                Message(role="user", content="Finish."),
+            ],
+        )
+        resumed_wire, _ = format_messages(model.native_replay_messages(messages))
+        assert resumed_thinking in resumed_wire[4]["content"]
+        assert canonical_thinking in canonical.provider_data["content_blocks"]
 
 
 def test_switching_claude_model_restores_canonical_history() -> None:
@@ -306,7 +337,6 @@ async def test_canonical_fallback_removes_thinking_bound_to_checkpoint(*, vertex
         thinking = {"type": "thinking", "thinking": "Internal reasoning.", "signature": "checkpoint-bound"}
         redacted = {"type": "redacted_thinking", "data": "opaque-thinking"}
         anchor = model._parse_provider_response(BetaMessage.model_validate(_response([_CHECKPOINT, thinking, _TEXT])))
-        later = model._parse_provider_response(BetaMessage.model_validate(_response([redacted, _TEXT])))
         messages = [
             Message(role="user", content="Original facts."),
             Message(
@@ -318,9 +348,9 @@ async def test_canonical_fallback_removes_thinking_bound_to_checkpoint(*, vertex
             Message(role="user", content="Continue."),
             Message(
                 role="assistant",
-                content=later.content,
-                provider_data=later.provider_data,
-                redacted_reasoning_content=later.redacted_reasoning_content,
+                content="Ready",
+                provider_data={"content_blocks": [redacted, _TEXT]},
+                redacted_reasoning_content="opaque-thinking",
             ),
             Message(role="user", content="Continue again."),
             Message(

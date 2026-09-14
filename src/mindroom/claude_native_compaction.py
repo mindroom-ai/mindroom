@@ -16,6 +16,7 @@ from mindroom.native_compaction import (
     native_replay_messages,
     native_replay_route_matches,
     record_native_checkpoint,
+    record_native_request_prefix,
 )
 
 if TYPE_CHECKING:
@@ -33,6 +34,11 @@ if TYPE_CHECKING:
 _COMPACTION_BETA = "compact-2026-01-12"
 
 
+def effective_context_management(params: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the SDK's raw-body override before its top-level policy."""
+    return (params.get("extra_body") or {}).get("context_management", params.get("context_management")) or {}
+
+
 class ClaudeNativeCompaction(NativeCompactionModel):
     """Adapt native checkpoints without changing the stored conversation."""
 
@@ -41,6 +47,20 @@ class ClaudeNativeCompaction(NativeCompactionModel):
     client_params: dict[str, Any] | None
     client: Anthropic | None
     async_client: AsyncAnthropic | None
+
+    def __post_init__(self) -> None:
+        """Preserve authored compaction replay for standalone adapter callers."""
+        super().__post_init__()  # ty: ignore[unresolved-attribute]
+        self.configure_native_compaction(threshold=None, allow_authored=True)
+
+    def authored_native_compaction_supported(self) -> bool:
+        """Keep explicit Claude edits independent of MindRoom's automatic trigger."""
+        if self.provider not in {"Anthropic", "VertexAI"}:
+            return False
+        params = {"context_management": self.context_management, **(self.request_params or {})}
+        return any(
+            edit.get("type") == "compact_20260112" for edit in effective_context_management(params).get("edits", [])
+        )
 
     def native_compaction_supported(self) -> bool:
         """Respect explicit context-management settings and supported Claude models."""
@@ -65,11 +85,21 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             or "https://api.anthropic.com",
         ).rstrip("/")
 
-    def configure_native_compaction(self, *, threshold: int | None, history_generation: str = "") -> None:
+    def configure_native_compaction(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str = "",
+        allow_authored: bool = False,
+    ) -> None:
         """Claude requires at least 50,000 input tokens before compaction."""
         if threshold is not None and threshold < 50000:
             threshold = None
-        super().configure_native_compaction(threshold=threshold, history_generation=history_generation)
+        super().configure_native_compaction(
+            threshold=threshold,
+            history_generation=history_generation,
+            allow_authored=allow_authored,
+        )
 
     def _has_beta_features(
         self,
@@ -90,7 +120,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
         params = super().get_request_params(response_format=response_format, tools=tools)  # ty: ignore[unresolved-attribute]
         if self.context_management is not None:
             params.setdefault("context_management", self.context_management)
-        if self.native_compaction is not None:
+        if self.native_compaction is not None and self.native_compaction.threshold is not None:
             params["context_management"] = {
                 "edits": [
                     {
@@ -105,21 +135,25 @@ class ClaudeNativeCompaction(NativeCompactionModel):
                     },
                 ],
             }
+        if self.native_compaction is not None:
             params["betas"] = list(dict.fromkeys([*(params.get("betas") or []), _COMPACTION_BETA]))
-        context_management = (params.get("extra_body") or {}).get(
-            "context_management",
-            params.get("context_management"),
-        ) or {}
+        context_management = effective_context_management(params)
         for edit in context_management.get("edits", []):
             if edit.get("type") == "compact_20260112" and edit.get("pause_after_compaction"):
                 msg = "pause_after_compaction=True is unsupported; MindRoom requires automatic continuation."
                 raise ValueError(msg)
         return params
 
+    def _uses_native_checkpoint(self, messages: list[Message]) -> bool:
+        return self.native_compaction is not None and any(
+            checkpoint_items(message, self.native_compaction.route) for message in messages
+        )
+
     def native_replay_messages(self, messages: list[Message]) -> list[Message]:
         """Restore canonical blocks on foreign routes, or select checkpoint plus tail."""
         route = self.native_compaction.route if self.native_compaction is not None else None
         prepared = native_replay_messages(messages, route)
+        thinking_route = route if self._uses_native_checkpoint(prepared) else None
         result: list[Message] = []
         stale_thinking = False
         for message in prepared:
@@ -142,7 +176,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
                 # prefix. Its later thinking chain is invalid too, including fields
                 # Agno can use to rebuild blocks when content_blocks is empty.
                 stale_thinking = True
-            elif (matches := native_replay_route_matches(message, route)) is not None:
+            elif (matches := native_replay_route_matches(message, thinking_route)) is not None:
                 # A response produced after fallback starts a new valid chain on
                 # that route. Keep it only while replaying the same prefix kind.
                 stale_thinking = not matches
@@ -233,8 +267,10 @@ class ClaudeNativeCompaction(NativeCompactionModel):
         compress_tool_results: bool = False,
     ) -> ModelResponse:
         """Project a request-local history before synchronous invocation."""
-        return super().invoke(  # ty: ignore[unresolved-attribute]
-            self.native_replay_messages(messages),
+        prepared = self.native_replay_messages(messages)
+        checkpoint_prefix = self._uses_native_checkpoint(prepared)
+        result = super().invoke(  # ty: ignore[unresolved-attribute]
+            prepared,
             assistant_message,
             response_format=response_format,
             tools=tools,
@@ -242,6 +278,8 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             run_response=run_response,
             compress_tool_results=compress_tool_results,
         )
+        record_native_request_prefix(result, checkpoint_prefix=checkpoint_prefix)
+        return result
 
     async def ainvoke(
         self,
@@ -254,8 +292,10 @@ class ClaudeNativeCompaction(NativeCompactionModel):
         compress_tool_results: bool = False,
     ) -> ModelResponse:
         """Project a request-local history before asynchronous invocation."""
-        return await super().ainvoke(  # ty: ignore[unresolved-attribute]
-            self.native_replay_messages(messages),
+        prepared = self.native_replay_messages(messages)
+        checkpoint_prefix = self._uses_native_checkpoint(prepared)
+        result = await super().ainvoke(  # ty: ignore[unresolved-attribute]
+            prepared,
             assistant_message,
             response_format=response_format,
             tools=tools,
@@ -263,6 +303,8 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             run_response=run_response,
             compress_tool_results=compress_tool_results,
         )
+        record_native_request_prefix(result, checkpoint_prefix=checkpoint_prefix)
+        return result
 
     def invoke_stream(
         self,
@@ -275,15 +317,19 @@ class ClaudeNativeCompaction(NativeCompactionModel):
         compress_tool_results: bool = False,
     ) -> Iterator[ModelResponse]:
         """Stream a projected history without changing canonical messages."""
-        yield from super().invoke_stream(  # ty: ignore[unresolved-attribute]
-            self.native_replay_messages(messages),
+        prepared = self.native_replay_messages(messages)
+        checkpoint_prefix = self._uses_native_checkpoint(prepared)
+        for chunk in super().invoke_stream(  # ty: ignore[unresolved-attribute]
+            prepared,
             assistant_message,
             response_format=response_format,
             tools=tools,
             tool_choice=tool_choice,
             run_response=run_response,
             compress_tool_results=compress_tool_results,
-        )
+        ):
+            record_native_request_prefix(chunk, checkpoint_prefix=checkpoint_prefix)
+            yield chunk
 
     async def ainvoke_stream(
         self,
@@ -296,8 +342,10 @@ class ClaudeNativeCompaction(NativeCompactionModel):
         compress_tool_results: bool = False,
     ) -> AsyncIterator[ModelResponse]:
         """Stream a projected history asynchronously."""
+        prepared = self.native_replay_messages(messages)
+        checkpoint_prefix = self._uses_native_checkpoint(prepared)
         async for chunk in super().ainvoke_stream(  # ty: ignore[unresolved-attribute]
-            self.native_replay_messages(messages),
+            prepared,
             assistant_message,
             response_format=response_format,
             tools=tools,
@@ -305,4 +353,5 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             run_response=run_response,
             compress_tool_results=compress_tool_results,
         ):
+            record_native_request_prefix(chunk, checkpoint_prefix=checkpoint_prefix)
             yield chunk

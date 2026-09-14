@@ -1698,7 +1698,7 @@ visibility = ["mindroom.openai_models"]
 [[modules]]
 path = "mindroom.claude_native_compaction"
 depends_on = ["mindroom.model_defaults", "mindroom.native_compaction"]
-visibility = ["mindroom.claude_compat"]
+visibility = ["mindroom.claude_compat", "mindroom.vertex_claude_compat"]
 
 [[modules]]
 path = "mindroom.history.storage"
