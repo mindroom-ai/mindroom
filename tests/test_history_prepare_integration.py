@@ -25,16 +25,14 @@ from mindroom.execution_preparation import (
     _build_matrix_prompt_with_history,
     _PreparedExecutionContext,
 )
-from mindroom.history.compaction import _build_summary_input
 from mindroom.history.prompt_tokens import (
     estimate_agent_static_tokens,
 )
-from mindroom.history.runtime import (
-    open_scope_session_context,
-)
+from mindroom.history.session_context import open_scope_session_context
 from mindroom.history.storage import (
     update_scope_seen_event_ids,
 )
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.memory import MemoryPromptParts
@@ -920,7 +918,7 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
     persisted_contents = [str(message.content) for run in persisted.runs or [] for message in run.messages or []]
     assert persisted_contents == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok"]
 
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary=None,
         compacted_runs=persisted.runs or [],
         max_input_tokens=10_000,

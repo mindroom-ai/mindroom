@@ -32,7 +32,7 @@ from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, Resp
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import PrincipalStore
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history.runtime import ScopeSessionContext
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
     HookContextSupport,

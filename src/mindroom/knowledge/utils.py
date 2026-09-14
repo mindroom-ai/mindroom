@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from mindroom.embedding_errors import extract_classified_embedder_detail
@@ -50,6 +53,10 @@ logger = get_logger(__name__)
 _MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
 _MAX_MERGED_SOURCE_COVERAGE_RESULTS = 20
 _refresh_scheduled_at: dict[RefreshCooldownKey, float] = {}
+# Metadata may wait on a writer. Keep those waits out of the default executor,
+# which also serves unrelated filesystem and credential work. Threads start
+# lazily and remain bounded for the process lifetime, including after cancellation.
+_KNOWLEDGE_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mindroom_knowledge_lookup")
 
 
 @dataclass(frozen=True)
@@ -245,12 +252,16 @@ async def _resolve_base_knowledge_async(
     execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[Knowledge | None, KnowledgeAvailability, str | None]:
     """Resolve one knowledge base without blocking the event loop on storage I/O."""
-    lookup = await asyncio.to_thread(
-        _lookup_knowledge_for_base,
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
+    lookup = await asyncio.get_running_loop().run_in_executor(
+        _KNOWLEDGE_LOOKUP_EXECUTOR,
+        contextvars.copy_context().run,
+        partial(
+            _lookup_knowledge_for_base,
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        ),
     )
     return _finish_base_knowledge_resolution(
         base_id,

@@ -26,14 +26,16 @@ def collection_exists(path: str, collection: str) -> bool:
 
     This is Chroma's persisted sysdb schema (tenants/databases migration 4),
     not its vector index. Keep reads scoped to the default tenant/database used
-    by our published handles. Call off-loop, like native reads; a lock has a
-    short deadline and never turns a busy or corrupt database into a missing one.
+    by our published handles. Call off-loop, like native reads: rollback-journal
+    writers can temporarily block readers while refreshing the index. Let SQLite
+    retry those locks for up to five seconds, without treating a busy or corrupt
+    database as a missing collection.
     """
     database_path = Path(path).resolve() / "chroma.sqlite3"
     if not database_path.is_file():
         return False
     try:
-        with closing(sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=0.1)) as connection:
+        with closing(sqlite3.connect(f"{database_path.as_uri()}?mode=ro", uri=True, timeout=5.0)) as connection:
             return (
                 connection.execute(
                     "SELECT 1 FROM collections AS c JOIN databases AS d ON c.database_id = d.id "

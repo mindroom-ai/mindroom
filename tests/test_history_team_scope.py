@@ -19,11 +19,13 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.history.runtime import (
-    ScopeSessionContext,
     _estimate_preparation_static_tokens_for_team,
     finalize_history_preparation,
-    open_bound_scope_session_context,
     prepare_bound_scope_history,
+)
+from mindroom.history.session_context import (
+    ScopeSessionContext,
+    open_bound_scope_session_context,
     resolve_bound_team_scope_context,
 )
 from mindroom.history.types import (

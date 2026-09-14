@@ -19,7 +19,12 @@ from agno.session.team import TeamSession
 from agno.team import Team, _messages
 from pydantic import BaseModel
 
-from mindroom.history import agno_team_patch
+from mindroom.history import agno_message_builder_patch
+
+
+@pytest.fixture(autouse=True)
+def _install_message_builder_patch() -> None:
+    agno_message_builder_patch.apply_patch()
 
 
 @dataclass
@@ -243,8 +248,8 @@ def test_team_list_message_patch_is_idempotent() -> None:
     patched_sync = _messages._get_run_messages
     patched_async = _messages._aget_run_messages
 
-    agno_team_patch.apply_patch()
-    agno_team_patch.apply_patch()
+    agno_message_builder_patch.apply_patch()
+    agno_message_builder_patch.apply_patch()
 
     assert _messages._get_run_messages is patched_sync
     assert _messages._aget_run_messages is patched_async
@@ -286,7 +291,7 @@ def test_inline_media_cleanup_strips_every_kind_only_from_history() -> None:
     )
     run_messages = RunMessages(messages=[history_message, current_message], user_message=current_message)
 
-    agno_team_patch._strip_history_inline_media(run_messages)
+    agno_message_builder_patch._strip_history_inline_media(run_messages)
 
     assert history_message.audio is None
     assert history_message.images is None
@@ -304,8 +309,8 @@ def test_apply_patch_is_idempotent() -> None:
     patched_agent_sync = agent_messages.get_run_messages
     patched_agent_async = agent_messages.aget_run_messages
 
-    agno_team_patch.apply_patch()
-    agno_team_patch.apply_patch()
+    agno_message_builder_patch.apply_patch()
+    agno_message_builder_patch.apply_patch()
 
     assert _messages._get_run_messages is patched_team_sync
     assert _messages._aget_run_messages is patched_team_async

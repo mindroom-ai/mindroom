@@ -79,11 +79,15 @@ class ClaudeProviderCompat(ClaudeNativeCompaction):
         **kwargs: object,
     ) -> ModelResponse:
         self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response(
+        parsed = super()._parse_provider_response(
             response,
             response_format=response_format,
             **kwargs,
         )
+        # Agno omits the provider stop reason; summary validation needs it to
+        # reject provider-capped output even below the configured token limit.
+        parsed.provider_data = {**(parsed.provider_data or {}), "stop_reason": response.stop_reason}
+        return parsed
 
     def _parse_provider_response_delta(
         self,

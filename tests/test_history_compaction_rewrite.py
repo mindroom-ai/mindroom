@@ -25,21 +25,21 @@ from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
 )
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
+from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
 from mindroom.history.compaction import (
-    _build_summary_input,
+    SummaryModel,
     _emit_compaction_hook,
-    _messages_for_runs,
     _rewrite_working_session_for_compaction,
-    _strip_stale_anthropic_replay_fields,
     compact_scope_history,
-    estimate_prompt_visible_history_tokens,
 )
+from mindroom.history.replay import estimate_prompt_visible_history_tokens
 from mindroom.history.storage import (
     read_scope_state,
     record_compaction_chunk,
     write_scope_state,
 )
 from mindroom.history.summary_call import DEFAULT_SUMMARY_RETRY_POLICY, CompactionSummaryOutputLimitError
+from mindroom.history.summary_input import build_summary_input, messages_for_runs
 from mindroom.history.types import (
     CompactionLifecycleProgress,
     HistoryPolicy,
@@ -111,14 +111,17 @@ async def _rewrite_single_run(
         storage=storage,
         persisted_session=working_session,
         working_session=working_session,
-        summary_model=summary_model or FakeModel(id="summary-model", provider="fake"),
-        summary_model_name="summary-model",
-        fallback_summary_model=fallback_summary_model,
-        fallback_summary_model_name=fallback_summary_model_name,
-        fallback_summary_input_budget=(
-            fallback_summary_input_budget
-            if fallback_summary_input_budget is not None
-            else summary_input_budget
+        summary_model=SummaryModel(
+            summary_model or FakeModel(id="summary-model", provider="fake"),
+            "summary-model",
+            summary_input_budget,
+        ),
+        fallback_summary_model=(
+            SummaryModel(
+                fallback_summary_model,
+                fallback_summary_model_name or "fallback-model",
+                fallback_summary_input_budget if fallback_summary_input_budget is not None else summary_input_budget,
+            )
             if fallback_summary_model is not None
             else None
         ),
@@ -128,7 +131,6 @@ async def _rewrite_single_run(
         history_settings=_ALL_HISTORY_SETTINGS,
         available_history_budget=None,
         selected_run_ids=selected_run_ids,
-        summary_input_budget=summary_input_budget,
         before_tokens=0,
         runs_before=len(working_session.runs or []),
         threshold_tokens=None,
@@ -172,8 +174,8 @@ async def test_rewrite_passes_full_summary_input_budget_into_chunk_construction(
             new=AsyncMock(side_effect=fake_summary),
         ),
         patch(
-            "mindroom.history.compaction._build_summary_input",
-            wraps=_build_summary_input,
+            "mindroom.history.compaction.build_summary_input",
+            wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
         rewrite_result = await _rewrite_single_run(
@@ -200,7 +202,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
         )
         for index in range(300)
     ]
-    full_input, full_runs = _build_summary_input(
+    full_input, full_runs = build_summary_input(
         previous_summary="existing summary",
         compacted_runs=runs,
         max_input_tokens=1_000_000,
@@ -209,7 +211,7 @@ def test_build_summary_input_accounts_for_wrappers_separators_and_run_indexes() 
     assert len(full_runs) == len(runs)
 
     tight_budget = estimate_compaction_input_tokens(full_input) - 50
-    summary_input, included_runs = _build_summary_input(
+    summary_input, included_runs = build_summary_input(
         previous_summary="existing summary",
         compacted_runs=runs,
         max_input_tokens=tight_budget,
@@ -339,8 +341,8 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
             wraps=record_compaction_chunk,
         ) as persist_spy,
         patch(
-            "mindroom.history.compaction._build_summary_input",
-            wraps=_build_summary_input,
+            "mindroom.history.compaction.build_summary_input",
+            wraps=build_summary_input,
         ) as build_summary_input_spy,
     ):
         rewrite_result = await _rewrite_single_run(
@@ -371,8 +373,8 @@ async def test_rewrite_switches_to_fallback_and_uses_it_for_later_chunks(tmp_pat
         ("run-2",),
     ]
     assert rewrite_result.compacted_run_ids == ("run-1", "run-2")
-    assert rewrite_result.summary_model is fallback
-    assert rewrite_result.summary_model_name == "fallback-model"
+    assert rewrite_result.served_by.model is fallback
+    assert rewrite_result.served_by.name == "fallback-model"
     assert [event.summary_model for event in progress_events] == ["fallback-model"]
     persisted = get_agent_session(storage, "session-1")
     assert persisted is not None
@@ -762,7 +764,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         budget
         for budget in range(1, 5_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
@@ -771,7 +773,7 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
         )
         == 1
         and len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
@@ -828,9 +830,11 @@ async def test_compact_scope_history_emits_before_hook_for_each_persisted_chunk(
             state=HistoryScopeState(),
             history_settings=history_settings,
             available_history_budget=1,
-            summary_input_budget=summary_input_budget,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(
+                FakeModel(id="summary-model", provider="fake"),
+                "summary-model",
+                summary_input_budget,
+            ),
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -921,7 +925,7 @@ async def test_prepare_history_for_run_does_not_collect_compaction_messages_with
             new=AsyncMock(return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC))),
         ),
         patch(
-            "mindroom.history.compaction._messages_for_runs",
+            "mindroom.history.compaction.messages_for_runs",
             side_effect=AssertionError("compaction messages should not be collected without hooks"),
         ),
     ):
@@ -1251,7 +1255,7 @@ def test_private_strip_stale_anthropic_replay_fields_returns_zero_without_user_m
         redacted_reasoning_content="redacted",
     )
 
-    assert _strip_stale_anthropic_replay_fields([assistant]) == 0
+    assert strip_stale_anthropic_replay_fields([assistant]) == 0
     assert assistant.provider_data == {"signature": "sig-1", "keep": "yes"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
@@ -1270,7 +1274,7 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_single_turn_after
         assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert assistant.provider_data == {"signature": "sig-1"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
@@ -1298,7 +1302,7 @@ def test_private_strip_stale_anthropic_replay_fields_strips_old_assistants_and_p
         current_assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 1
+    assert strip_stale_anthropic_replay_fields(messages) == 1
     assert old_assistant.provider_data == {"keep": "yes"}
     assert old_assistant.reasoning_content is None
     assert old_assistant.redacted_reasoning_content is None
@@ -1364,7 +1368,7 @@ def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
 
     if split_runs:
         original_messages = deepcopy(messages)
-        replay_messages = _messages_for_runs(
+        replay_messages = messages_for_runs(
             [
                 _completed_run("old-run", messages=messages[:3]),
                 _completed_run("current-run", messages=messages[3:]),
@@ -1376,7 +1380,7 @@ def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
         old_assistant = messages[1]
         current_assistant = messages[4]
     else:
-        assert _strip_stale_anthropic_replay_fields(messages) == 1
+        assert strip_stale_anthropic_replay_fields(messages) == 1
     assert old_assistant.provider_data == {"keep": "yes", "content_blocks": replay_blocks}
     assert old_assistant.reasoning_content is None
     assert old_assistant.redacted_reasoning_content is None
@@ -1385,7 +1389,7 @@ def test_strip_stale_anthropic_content_blocks_preserves_provider_replay(
     assert assistant_turns == [replay_blocks, current_blocks]
     assert current_assistant.provider_data == {"signature": "sig-current", "content_blocks": current_blocks}
     assert current_assistant.reasoning_content == "current thinking"
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
 
 
 def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_last_user() -> None:
@@ -1413,7 +1417,7 @@ def test_private_strip_stale_anthropic_replay_fields_preserves_tool_chain_after_
         final_assistant,
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert tool_assistant.provider_data == {"signature": "sig-tool"}
     assert tool_assistant.reasoning_content == "thinking"
     assert tool_assistant.redacted_reasoning_content == "redacted"
@@ -1448,7 +1452,7 @@ def test_private_strip_stale_anthropic_replay_fields_ignores_queued_notice(marke
         ),
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert interrupted_assistant.provider_data == {"signature": "sig-tool"}
     assert interrupted_assistant.reasoning_content == "thinking"
     assert interrupted_assistant.redacted_reasoning_content == "redacted"
@@ -1468,7 +1472,7 @@ def test_private_strip_stale_anthropic_replay_fields_ignores_reasoning_without_s
         Message(role="user", content="current user"),
     ]
 
-    assert _strip_stale_anthropic_replay_fields(messages) == 0
+    assert strip_stale_anthropic_replay_fields(messages) == 0
     assert assistant.provider_data == {"keep": "yes"}
     assert assistant.reasoning_content == "thinking"
     assert assistant.redacted_reasoning_content == "redacted"
@@ -1520,7 +1524,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=list(working_session.runs or []),
                 max_input_tokens=budget,
@@ -1528,7 +1532,7 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             )[1],
         )
         == 1
-        and _build_summary_input(
+        and build_summary_input(
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
@@ -1545,8 +1549,11 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             storage=storage,
             persisted_session=working_session,
             working_session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(
+                FakeModel(id="summary-model", provider="fake"),
+                "summary-model",
+                summary_input_budget,
+            ),
             session_id="session-1",
             scope=scope,
             state=HistoryScopeState(),
@@ -1556,7 +1563,6 @@ async def test_rewrite_working_session_for_compaction_strips_stale_replay_fields
             ),
             available_history_budget=1,
             selected_run_ids=("run-1", "run-2"),
-            summary_input_budget=summary_input_budget,
             before_tokens=0,
             runs_before=2,
             threshold_tokens=None,
@@ -1603,8 +1609,7 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
         outcome = await compact_scope_history(
             storage=storage,
             session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(FakeModel(id="summary-model", provider="fake"), "summary-model", 16_000),
             scope=scope,
             state=HistoryScopeState(force_compact_before_next_run=True),
             history_settings=ResolvedHistorySettings(
@@ -1612,7 +1617,6 @@ async def test_compact_scope_history_ignores_runs_without_stable_ids(
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=1,
-            summary_input_budget=16_000,
             replay_window_tokens=64_000,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1679,7 +1683,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=list(session.runs or []),
                 max_input_tokens=budget,
@@ -1687,7 +1691,7 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
             )[1],
         )
         == 1
-        and _build_summary_input(
+        and build_summary_input(
             previous_summary=summary_text,
             compacted_runs=[remaining_run],
             max_input_tokens=budget,
@@ -1710,9 +1714,11 @@ async def test_compact_scope_history_persists_sanitized_remaining_runs(tmp_path:
                 max_tool_calls_from_history=None,
             ),
             available_history_budget=1,
-            summary_input_budget=summary_input_budget,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(
+                FakeModel(id="summary-model", provider="fake"),
+                "summary-model",
+                summary_input_budget,
+            ),
             replay_window_tokens=16_000,
             threshold_tokens=1,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,
@@ -1768,7 +1774,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         budget
         for budget in range(1, 5_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=[first_run, second_run],
                 max_input_tokens=budget,
@@ -1777,7 +1783,7 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         )
         == 1
         and len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary="merged summary",
                 compacted_runs=[second_run],
                 max_input_tokens=budget,
@@ -1803,13 +1809,15 @@ async def test_rewrite_working_session_emits_progress_after_persisted_chunks(tmp
         outcome = await compact_scope_history(
             storage=storage,
             session=working_session,
-            summary_model=FakeModel(id="summary-model", provider="fake"),
-            summary_model_name="summary-model",
+            summary_model=SummaryModel(
+                FakeModel(id="summary-model", provider="fake"),
+                "summary-model",
+                summary_input_budget,
+            ),
             scope=scope,
             state=HistoryScopeState(),
             history_settings=history_settings,
             available_history_budget=1,
-            summary_input_budget=summary_input_budget,
             replay_window_tokens=None,
             threshold_tokens=None,
             summary_prompt=COMPACTION_SUMMARY_PROMPT,

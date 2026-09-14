@@ -1,42 +1,8 @@
-"""One compaction summary call: model tuning, request build, timeout, and retry policy.
+"""One portable summary call and its bounded retry policy.
 
-This module is the only path for issuing a compaction summary model call.
-It enforces the call-side half of the compaction invariants
-(see ``tests/test_compaction_invariants.py``):
-
-3. Summary calls get exactly one model configuration path.
-   ``configure_summary_model`` applies all compaction-specific provider tuning in
-   one place: prompt-cache writes off, Claude thinking cleared (a thinking budget
-   at or above max_tokens is a 400 from Anthropic), SDK retries disabled, and
-   one SDK timeout coordinated with the caller's resolved chunk timeout
-   (``compaction.timeout_seconds``) instead of two uncoordinated timeouts in two
-   modules. ``effective_summary_timeout_seconds`` is the only place that combines
-   the resolved timeout with an authored provider timeout, so callers can log the
-   enforced value without re-deriving the rule. Claude summary output uses the
-   loaded model's own max_tokens as the truncation guard. Unknown providers pass
-   through untouched and rely on the outer chunk timeout alone.
-
-4. Retry on provider failure is deterministic.
-   ``SummaryRetryPolicy`` decides which error classes warrant a smaller retry
-   (timeouts, typed context-window errors, empty results, output limits, and
-   named legacy context-length fragments), the shrink schedule
-   (halving, clamped to the caller's smallest progress-preserving rebuild), and the
-   give-up floor — no inline string matching at call sites. Selected typed
-   transient provider errors get one delayed same-budget retry. Safeguard
-   refusals are deliberately not shrinkable: the retry wrapper in
-   ``history.compaction`` switches once to the configured fallback model,
-   keeping the summary prompt and summary input bytes, included runs, and
-   budget unchanged (only the target model differs) instead of shrinking a
-   request the model refused on content grounds.
-
-5. Output-capped summaries use an explicit retry signal.
-   ``generate_compaction_summary`` refuses to return a likely truncated summary,
-   and the retry wrapper can shrink input through ``SummaryRetryPolicy`` without
-   depending on owned error-message text.
-
-``build_summary_request_messages`` is the single replaceable request builder; a
-future cache-friendly builder that reuses the active provider prefix (PR #861)
-plugs in behind it without another cross-cutting diff.
+Provider request normalization and legacy error interpretation have explicit
+compatibility owners. This module owns only call lifecycle, cancellation,
+complete-output validation, and the retry decision used by chunk execution.
 """
 
 from __future__ import annotations
@@ -47,14 +13,19 @@ from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
-import httpx
-from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.exceptions import ContextWindowExceededError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
-from mindroom.claude_prompt_cache import as_anthropic_claude
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
+from mindroom.history.provider_error_compat import is_legacy_summary_size_error, is_transient_summary_error
+from mindroom.history.summary_provider_compat import (
+    configure_summary_model,
+    effective_summary_timeout_seconds,
+    response_output_tokens,
+    summary_output_token_limit,
+    summary_response_was_truncated,
+)
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
@@ -67,57 +38,9 @@ logger = get_logger(__name__)
 
 _COMPACTION_CANCEL_DRAIN_TIMEOUT_SECONDS = 1.0
 
-# Status 502 is excluded because ``ModelProviderError`` uses it for unclassified
-# errors. Default-502 errors retry only when their cause chain proves a typed
-# network failure.
-_TRANSIENT_SUMMARY_STATUS_CODES = TRANSIENT_PROVIDER_STATUS_CODES - {502}
 
-_SHRINKABLE_PROVIDER_ERROR_FRAGMENTS = (
-    "context length",
-    "context_length_exceeded",
-    "too many tokens",
-    "max tokens",
-    "too large",
-    "too long",
-    "input size",
-    "input too large",
-    "maximum length",
-    "max length",
-    "request too large",
-    "reduce the length",
-)
-_TIMEOUT_PROVIDER_ERROR_FRAGMENT = "timed out"
-
-
-def _has_typed_network_cause(error: ModelProviderError) -> bool:
-    """Return whether visible explicit or implicit causes contain a typed network failure."""
-    from anthropic import APIConnectionError as AnthropicAPIConnectionError  # noqa: PLC0415
-    from openai import APIConnectionError as OpenAIAPIConnectionError  # noqa: PLC0415
-
-    cause = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
-    seen: set[int] = set()
-    while cause is not None and id(cause) not in seen:
-        seen.add(id(cause))
-        if isinstance(
-            cause,
-            ConnectionError
-            | TimeoutError
-            | httpx.TransportError
-            | AnthropicAPIConnectionError
-            | OpenAIAPIConnectionError,
-        ):
-            return True
-        cause = cause.__cause__ or (None if cause.__suppress_context__ else cause.__context__)
-    return False
-
-
-def _is_same_budget_transient(error: Exception) -> bool:
-    """Return whether a provider failure warrants one unchanged retry."""
-    if not isinstance(error, ModelProviderError):
-        return False
-    if error.status_code in _TRANSIENT_SUMMARY_STATUS_CODES:
-        return True
-    return error.status_code == 502 and _has_typed_network_cause(error)
+class _CompactionSummaryTimeoutError(TimeoutError):
+    """The compaction-owned wall deadline expired; independent of provider wording."""
 
 
 class CompactionSummaryOutputLimitError(RuntimeError):
@@ -164,10 +87,7 @@ class SummaryRetryPolicy:
         """Return whether rebuilding a smaller summary input may resolve the failure."""
         if isinstance(error, _TYPED_SHRINKABLE_ERRORS):
             return True
-        message = str(error).lower()
-        if any(fragment in message for fragment in _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS):
-            return True
-        return _TIMEOUT_PROVIDER_ERROR_FRAGMENT in message and not _is_same_budget_transient(error)
+        return is_legacy_summary_size_error(error)
 
     def retry_budget(
         self,
@@ -200,7 +120,7 @@ class SummaryRetryPolicy:
             )
             if smaller_budget < input_tokens:
                 return SummaryRetryDecision(budget=smaller_budget, kind="shrink")
-        if _is_same_budget_transient(error):
+        if is_transient_summary_error(error):
             return SummaryRetryDecision(budget=budget, kind="same-budget-transient")
         return None
 
@@ -208,58 +128,12 @@ class SummaryRetryPolicy:
 DEFAULT_SUMMARY_RETRY_POLICY = SummaryRetryPolicy()
 
 
-def effective_summary_timeout_seconds(model: Model, *, timeout_seconds: float) -> float:
-    """Return the timeout one summary request enforces after provider tuning (invariant 3).
-
-    An authored provider timeout shorter than the resolved compaction timeout stays
-    the stricter cap; every other model relies on the resolved timeout alone.
-    """
-    claude_model = as_anthropic_claude(model)
-    if claude_model is None or not claude_model.timeout:
-        return timeout_seconds
-    return min(claude_model.timeout, timeout_seconds)
-
-
-def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
-    """Apply all compaction-specific provider tuning to one loaded model (invariant 3).
-
-    ``isinstance(model, Claude)`` covers the anthropic, vertexai_claude, and
-    bedrock_claude providers because both forks subclass the Anthropic model.
-    Mutating the instance is safe: ``get_model_instance`` builds a fresh model per
-    call and compaction loads its own instance per run.
-    """
-    claude_model = as_anthropic_claude(model)
-    if claude_model is None:
-        logger.debug(
-            "Compaction summary model tuning skipped",
-            model_type=type(model).__name__,
-            reason="provider_specific_tuning_only_defined_for_claude",
-        )
-        return model
-    claude_model.cache_system_prompt = False
-    claude_model.extended_cache_time = False
-    claude_model.thinking = None
-    claude_model.timeout = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
-    client_params = dict(claude_model.client_params or {})
-    client_params["max_retries"] = 0
-    claude_model.client_params = client_params
-    return model
-
-
 def build_summary_request_messages(*, summary_prompt: str, summary_input: str) -> list[Message]:
-    """Build the model request for one summary call (single replaceable seam for #861)."""
+    """Keep summary instructions separate from the serialized conversation."""
     return [
         Message(role="system", content=summary_prompt),
         Message(role="user", content=summary_input),
     ]
-
-
-class _CompactionProviderTimeoutError(Exception):
-    """Internal wrapper so provider TimeoutError does not look like our wait_for timeout."""
-
-    def __init__(self, original: TimeoutError) -> None:
-        super().__init__(str(original))
-        self.original = original
 
 
 def _consume_detached_compaction_request_result(
@@ -322,19 +196,14 @@ async def generate_compaction_summary(
     timeout_seconds: float,
 ) -> SessionSummary:
     """Issue one compaction summary call with tuned provider config and one timeout."""
+    timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
     configured_model = configure_summary_model(model, timeout_seconds=timeout_seconds)
-    summary_output_limit = _summary_output_token_limit(configured_model)
+    summary_output_limit = summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
-        try:
-            return await model.aresponse(
-                messages=build_summary_request_messages(
-                    summary_prompt=summary_prompt,
-                    summary_input=summary_input,
-                ),
-            )
-        except TimeoutError as exc:
-            raise _CompactionProviderTimeoutError(exc) from exc
+        return await model.aresponse(
+            messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
+        )
 
     response_task = asyncio.create_task(
         _request_summary(),
@@ -360,22 +229,19 @@ async def generate_compaction_summary(
             reason="timeout",
         )
         msg = f"compaction summary timed out after {timeout_seconds}s"
-        raise RuntimeError(msg)
+        raise _CompactionSummaryTimeoutError(msg)
 
-    try:
-        response = response_task.result()
-    except _CompactionProviderTimeoutError as exc:
-        raise exc.original from exc
+    response = response_task.result()
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:
         msg = (
             "summary generation returned no result "
-            f"(output_tokens={_response_output_tokens(response)}, "
+            f"(output_tokens={response_output_tokens(response)}, "
             f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
-    if _summary_response_likely_truncated(response, output_token_limit=summary_output_limit):
+    if summary_response_was_truncated(response, output_token_limit=summary_output_limit):
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
@@ -390,23 +256,3 @@ def _normalize_compaction_summary_text(raw_text: str) -> str:
         if first_newline != -1:
             normalized = normalized[first_newline + 1 : -3].strip()
     return normalized
-
-
-def _summary_output_token_limit(model: Model) -> int | None:
-    claude_model = as_anthropic_claude(model)
-    return claude_model.max_tokens if claude_model is not None else None
-
-
-def _summary_response_likely_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:
-    if output_token_limit is None:
-        return False
-    output_tokens = _response_output_tokens(response)
-    return output_tokens is not None and output_tokens >= output_token_limit
-
-
-def _response_output_tokens(response: ModelResponse) -> int | None:
-    if response.output_tokens is not None:
-        return response.output_tokens
-    if response.response_usage is None:
-        return None
-    return response.response_usage.output_tokens
