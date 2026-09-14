@@ -466,6 +466,10 @@ class ResponseLifecycleCoordinator:
             signal_queued_message=signal_queued_message,
             reservation=reservation,
         )
+        if reservation is not None:
+            # This response now owns the reservation locally. Descendant tasks
+            # must acquire their own lifecycle instead of inheriting this one-shot claim.
+            _current_response_lifecycle_reservation.set(None)
         lock_acquired = False
         try:
             if pipeline_timing is not None:

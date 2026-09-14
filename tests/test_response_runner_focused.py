@@ -6979,7 +6979,8 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
 
 
 @pytest.mark.asyncio
-async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_lock() -> None:
+@pytest.mark.parametrize("consumed", [False, True])
+async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_lock(*, consumed: bool) -> None:
     """Cancelling a queued reservation removes it without stealing the released lock."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
@@ -6989,6 +6990,22 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
     assert queued_signal.pending_human_message_event_ids == {envelope.source_event_id}
     assert queued_signal.has_active_response_turn()
+
+    if consumed:
+        with response_lifecycle_reservation_context(reservation):
+            response = asyncio.create_task(
+                coordinator.run_locked_response(
+                    target=envelope.target,
+                    response_envelope=envelope,
+                    pipeline_timing=None,
+                    locked_operation=lambda _target: asyncio.sleep(0, result="cancelled"),
+                ),
+            )
+        await asyncio.sleep(0)
+        assert reservation._consumed
+        response.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await response
 
     await reservation.release()
     await reservation.release()
@@ -7043,10 +7060,37 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
     reservation = await coordinator.reserve_response_lifecycle(envelope)
 
     try:
-        with pytest.raises(ValueError, match="different coordinator"):
-            reservation.consume(other_coordinator, envelope.target)
-        with pytest.raises(ValueError, match="target does not match"):
-            reservation.consume(coordinator, other_target)
+        with response_lifecycle_reservation_context(reservation):
+            with pytest.raises(ValueError, match="different coordinator"):
+                await other_coordinator.run_locked_response(
+                    target=envelope.target,
+                    response_envelope=envelope,
+                    pipeline_timing=None,
+                    locked_operation=lambda _target: asyncio.sleep(0),
+                )
+            with pytest.raises(ValueError, match="target does not match"):
+                await coordinator.run_locked_response(
+                    target=other_target,
+                    response_envelope=replace(envelope, target=other_target),
+                    pipeline_timing=None,
+                    locked_operation=lambda _target: asyncio.sleep(0),
+                )
+            assert (
+                await coordinator.run_locked_response(
+                    target=envelope.target,
+                    response_envelope=envelope,
+                    pipeline_timing=None,
+                    locked_operation=lambda _target: asyncio.sleep(0, result="owned"),
+                )
+                == "owned"
+            )
+        with response_lifecycle_reservation_context(reservation), pytest.raises(RuntimeError, match="already consumed"):
+            await coordinator.run_locked_response(
+                target=envelope.target,
+                response_envelope=envelope,
+                pipeline_timing=None,
+                locked_operation=lambda _target: asyncio.sleep(0),
+            )
     finally:
         await reservation.release()
 
