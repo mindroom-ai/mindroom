@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 # Handling: Adopt stable identities once under the backend schema transaction; preserve pending and frozen debt.
 # Coverage: tests/test_response_attempts_migration.py::test_literal_owners_survive_migration_and_reopen.
 
+_PAGE_SIZE = 128
+
 
 def _identity_error() -> ValueError:
     """Fail required ownership instead of fabricating or settling a live continuation."""
@@ -65,47 +67,67 @@ def _prepared_sources(pending: tuple[str, ...], raw: object) -> tuple[ResponseSo
 
 def _adopt_continuations(transaction: Transaction) -> None:
     """Live continuation ownership is required, including all pending children."""
-    rows = transaction.fetchall(
-        "SELECT principal_id, approval_id, entity_name, context_json FROM approval_continuations",
-    )
-    for row in rows:
-        principal = str(row["principal_id"])
-        context = json.loads(str(row["context_json"]))
-        if not isinstance(context, dict):
-            raise _identity_error()
-        room = _required_text(context.get("room_id"))
-        response = _required_text(context.get("response_event_id"))
-        entity = _required_text(row["entity_name"])
-        children = transaction.fetchall(
-            """SELECT sources.event_id, sources.source_ordinal, events.membership_epoch FROM approval_continuation_sources AS sources
-            LEFT JOIN journal_events AS events ON events.principal_id = sources.principal_id AND events.event_id = sources.event_id
-            WHERE sources.principal_id = ? AND sources.approval_id = ? ORDER BY sources.source_ordinal""",
-            (principal, str(row["approval_id"])),
+    cursor: tuple[str, str] | None = None
+    while True:
+        rows = (
+            transaction.fetchall(
+                """SELECT principal_id, approval_id, entity_name, context_json FROM approval_continuations
+                ORDER BY principal_id, approval_id LIMIT ?""",
+                (_PAGE_SIZE,),
+            )
+            if cursor is None
+            else transaction.fetchall(
+                """SELECT principal_id, approval_id, entity_name, context_json FROM approval_continuations
+                WHERE (principal_id, approval_id) > (?, ?)
+                ORDER BY principal_id, approval_id LIMIT ?""",
+                (*cursor, _PAGE_SIZE),
+            )
         )
-        if not children or any(
-            child["membership_epoch"] is None or int(child["source_ordinal"]) != ordinal
-            for ordinal, child in enumerate(children)
-        ):
-            raise _identity_error()
-        sources, prepared = _prepared_sources(
-            tuple(str(child["event_id"]) for child in children),
-            context.get("prepared_edit_record"),
-        )
-        if prepared is not None and (
-            prepared.response_owner != entity
-            or prepared.response_event_id != response
-            or prepared.conversation_target is None
-            or prepared.conversation_target.room_id != room
-        ):
-            raise _identity_error()
-        register_response_attempt(
-            transaction,
-            principal,
-            attempt=ResponseAttempt(entity, sources),
-            room_id=room,
-            membership_epoch=int(children[0]["membership_epoch"]),
-            response_event_id=response,
-        )
+        if not rows:
+            return
+        for row in rows:
+            principal = str(row["principal_id"])
+            context = json.loads(str(row["context_json"]))
+            if not isinstance(context, dict):
+                raise _identity_error()
+            room = _required_text(context.get("room_id"))
+            response = _required_text(context.get("response_event_id"))
+            entity = _required_text(row["entity_name"])
+            children = transaction.fetchall(
+                """SELECT sources.event_id, sources.source_ordinal, events.membership_epoch FROM approval_continuation_sources AS sources
+                LEFT JOIN journal_events AS events ON events.principal_id = sources.principal_id AND events.event_id = sources.event_id
+                WHERE sources.principal_id = ? AND sources.approval_id = ? ORDER BY sources.source_ordinal""",
+                (principal, str(row["approval_id"])),
+            )
+            if not children or any(
+                child["membership_epoch"] is None or int(child["source_ordinal"]) != ordinal
+                for ordinal, child in enumerate(children)
+            ):
+                raise _identity_error()
+            sources, prepared = _prepared_sources(
+                tuple(str(child["event_id"]) for child in children),
+                context.get("prepared_edit_record"),
+            )
+            if prepared is not None and (
+                prepared.response_owner != entity
+                or prepared.response_event_id != response
+                or prepared.conversation_target is None
+                or prepared.conversation_target.room_id != room
+            ):
+                raise _identity_error()
+            register_response_attempt(
+                transaction,
+                principal,
+                attempt=ResponseAttempt(entity, sources),
+                room_id=room,
+                membership_epoch=int(children[0]["membership_epoch"]),
+                response_event_id=response,
+            )
+        cursor = str(rows[-1]["principal_id"]), str(rows[-1]["approval_id"])
+        final_page = len(rows) < _PAGE_SIZE
+        rows = ()
+        if final_page:
+            return
 
 
 def _final_record(transaction: Transaction, row: Row, result: dict[str, object] | None) -> TurnRecord | None:
@@ -136,58 +158,91 @@ def _decode_final_result(row: Row, driving: str) -> dict[str, object] | None:
     return decode_delivery_result(payload, cast("str | None", row["result_json"]), delivery_id=driving)
 
 
-def _adopt_finals(transaction: Transaction) -> None:
-    """Keep unrelated malformed deliveries outside the response ownership relation."""
-    rows = transaction.fetchall("SELECT * FROM matrix_delivery_outbox WHERE stage = 'final'")
-    for row in rows:
-        principal, driving = str(row["principal_id"]), str(row["delivery_id"])
-        existing = load_response_attempt(transaction, principal, driving)
-        try:
-            result = _decode_final_result(row, driving)
-        except (ValueError, TypeError, KeyError):
-            if existing is not None:
-                raise _identity_error() from None
-            continue
+def _adopt_final(transaction: Transaction, row: Row) -> None:
+    """Adopt one optional FINAL unless it conflicts with required live ownership."""
+    principal, driving = str(row["principal_id"]), str(row["delivery_id"])
+    existing = load_response_attempt(transaction, principal, driving)
+    response = row["edits_event_id"] or row["acknowledged_event_id"]
+    try:
+        result = _decode_final_result(row, driving)
+    except (ValueError, TypeError, KeyError):
         if existing is not None:
-            if result is not None and row["result_json"] is None:
-                _store_inline_result(transaction, principal, driving, result)
-            continue
-        try:
-            record = _final_record(transaction, row, result)
-        except (ValueError, TypeError, KeyError):
-            continue
-        response = row["edits_event_id"] or row["acknowledged_event_id"]
+            raise _identity_error() from None
+        return
+    if existing is not None:
         if (
-            record is None
-            or record.response_owner is None
-            or record.conversation_target is None
-            or record.conversation_target.room_id != row["room_id"]
-            or record.response_event_id != response
+            existing.room_id != row["room_id"]
+            or existing.membership_epoch != row["membership_epoch"]
+            or existing.response_event_id != response
         ):
-            continue
-        pending = (
-            (driving,)
-            if record.latest_edit_receipt_order is not None
-            else (driving, *(event_id for event_id in record.source_event_ids if event_id != driving))
-        )
-        if not _sources_are_admitted(transaction, row, pending):
-            continue
-        sources = ResponseSources(
-            pending,
-            record.source_event_ids,
-            record.discovery_event_ids,
-            record.latest_edit_receipt_order,
-        )
-        register_response_attempt(
-            transaction,
-            principal,
-            attempt=ResponseAttempt(record.response_owner, sources),
-            room_id=str(row["room_id"]),
-            membership_epoch=int(row["membership_epoch"]),
-            response_event_id=None if response is None else str(response),
-        )
+            raise _identity_error()
         if result is not None and row["result_json"] is None:
             _store_inline_result(transaction, principal, driving, result)
+        return
+    try:
+        record = _final_record(transaction, row, result)
+    except (ValueError, TypeError, KeyError):
+        return
+    if (
+        record is None
+        or record.response_owner is None
+        or record.conversation_target is None
+        or record.conversation_target.room_id != row["room_id"]
+        or record.response_event_id != response
+    ):
+        return
+    pending = (
+        (driving,)
+        if record.latest_edit_receipt_order is not None
+        else (driving, *(event_id for event_id in record.source_event_ids if event_id != driving))
+    )
+    if not _sources_are_admitted(transaction, row, pending):
+        return
+    sources = ResponseSources(
+        pending,
+        record.source_event_ids,
+        record.discovery_event_ids,
+        record.latest_edit_receipt_order,
+    )
+    register_response_attempt(
+        transaction,
+        principal,
+        attempt=ResponseAttempt(record.response_owner, sources),
+        room_id=str(row["room_id"]),
+        membership_epoch=int(row["membership_epoch"]),
+        response_event_id=None if response is None else str(response),
+    )
+    if result is not None and row["result_json"] is None:
+        _store_inline_result(transaction, principal, driving, result)
+
+
+def _adopt_finals(transaction: Transaction) -> None:
+    """Keep unrelated malformed deliveries outside the response ownership relation."""
+    cursor: tuple[str, str] | None = None
+    while True:
+        rows = (
+            transaction.fetchall(
+                """SELECT * FROM matrix_delivery_outbox WHERE stage = 'final'
+                ORDER BY principal_id, delivery_id LIMIT ?""",
+                (_PAGE_SIZE,),
+            )
+            if cursor is None
+            else transaction.fetchall(
+                """SELECT * FROM matrix_delivery_outbox WHERE stage = 'final'
+                AND (principal_id, delivery_id) > (?, ?)
+                ORDER BY principal_id, delivery_id LIMIT ?""",
+                (*cursor, _PAGE_SIZE),
+            )
+        )
+        if not rows:
+            return
+        for row in rows:
+            _adopt_final(transaction, row)
+        cursor = str(rows[-1]["principal_id"]), str(rows[-1]["delivery_id"])
+        final_page = len(rows) < _PAGE_SIZE
+        rows = ()
+        if final_page:
+            return
 
 
 def _sources_are_admitted(transaction: Transaction, row: Row, pending: tuple[str, ...]) -> bool:
@@ -237,4 +292,6 @@ def migrate_response_attempts(transaction: Transaction, existing_tables: frozens
     ):
         return
     _adopt_continuations(transaction)
+    transaction.execute("CREATE INDEX legacy_response_attempts_turn_lookup ON turn_records (index_event_id)")
     _adopt_finals(transaction)
+    transaction.execute("DROP INDEX legacy_response_attempts_turn_lookup")

@@ -24,6 +24,7 @@ The journal registers `ResponseAttempt` identity atomically with approval creati
 Normalized attempt rows survive approval deletion; `approval_continuation_sources` alone owns pending approval settlement.
 Current `TurnRecord` selection and STOP watermarks govern edits selected before execution, while the outbox alone owns frozen payloads, results, acknowledgement, and retirement.
 STOP and stale approval failure decisions query exact durable identity; prepared turn snapshots remain solely for terminal commit and recovery.
+`response_sources.py` owns the immutable runtime values, `event_journal/response_attempts.py` owns normalized durable registration and lookup, and `event_journal/legacy_response_attempts.py` owns one-time transactional adoption from released snapshots.
 
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.

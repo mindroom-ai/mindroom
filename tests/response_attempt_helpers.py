@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord
+from tests.conftest import unwrap_extracted_collaborator
 
 
 def approval_sources(pending: tuple[str, ...], prepared: TurnRecord | None) -> ResponseSources:
@@ -59,8 +60,6 @@ def install_direct_response_admission(bot: "AgentBot | TeamBot") -> None:
     Existing admissions remain untouched, including conflicting room/epoch facts.
     Real ingress and ownership validation tests must keep their original outbox.
     """
-    from tests.conftest import unwrap_extracted_collaborator  # noqa: PLC0415
-
     gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
     if not isinstance(gateway.deps.outbox, _DirectResponseOutbox):
         outbox = _DirectResponseOutbox(gateway.deps.outbox, bot.journal_principal())
