@@ -2279,14 +2279,25 @@ class ResponseRunner:
             cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
 
         async def finalize_locked() -> bool:
-            approval_settled = await self._settle_user_stopped_approval(
+            edited_sources = await self.deps.approval_store.edited_approval_sources_for_user_stop(
+                room_id=target.room_id,
                 response_event_id=message_id,
                 source_event_id=source_event_id,
-                target=target,
+                stop_receipt_order=stop_receipt_order,
             )
-            if approval_settled is None:
-                return False
-            return await finalize(approval_settled)
+            approval_settled = False
+            unresolved_final = False
+            for approval_source in dict.fromkeys((*edited_sources, source_event_id)):
+                settled = await self._settle_user_stopped_approval(
+                    response_event_id=message_id,
+                    source_event_id=approval_source,
+                    target=target,
+                )
+                if settled is None:
+                    unresolved_final = True
+                else:
+                    approval_settled |= settled
+            return False if unresolved_final else await finalize(approval_settled)
 
         try:
             return await self._lifecycle_coordinator.run_locked_target_operation(

@@ -1382,6 +1382,26 @@ class PrincipalStore:
             ),
         )
 
+    async def edited_approval_sources_for_user_stop(
+        self,
+        *,
+        room_id: str,
+        response_event_id: str,
+        source_event_id: str,
+        stop_receipt_order: int,
+    ) -> tuple[str, ...]:
+        """Resolve edit-owned approvals and finished FINALs within one STOP cutoff."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.edited_sources_for_user_stop(
+                transaction,
+                self._principal_id,
+                room_id=room_id,
+                response_event_id=response_event_id,
+                source_event_id=source_event_id,
+                stop_receipt_order=stop_receipt_order,
+            ),
+        )
+
     async def claim_approval_continuation(
         self,
         approval_id: str,
