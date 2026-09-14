@@ -57,7 +57,7 @@ The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are 
 The limits are captured with each run.
 `max_concurrent_runs` defaults to `3` for one requester and agent.
 `max_tool_calls_per_minute` defaults to `30` and counts newly claimed logical calls rather than receipt polling or an identical retry.
-`max_runtime_hours` defaults to `24`, must be positive and finite, and is enforced by lifecycle reconciliation.
+`max_runtime_hours` defaults to `24`, must be positive and finite, and is enforced by lifecycle reconciliation and an independent worker-supervisor deadline that remains active while the primary is offline.
 
 ## Control Functions
 
@@ -190,7 +190,8 @@ Cancellation, expiry, agent removal, and orphan recovery settle pending cards wi
 ## Worker And Network Requirements
 
 The supported safe deployment uses a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](../deployment/sandbox-proxy.md).
-The worker must run the same MindRoom revision as the primary runtime and must be able to read the staged script snapshot from its configured worker-state root.
+New workers should use the primary's MindRoom revision and must be able to read the staged script snapshot from their configured worker-state root.
+Existing Kubernetes script workers can keep their launch image across primary upgrades when the script protocol version and worker authority remain compatible.
 The worker must also reach the primary script gateway over an authenticated network path.
 Kubernetes background scripts are disabled by default because a general primary API listener exposes more authority than the capability-gated script gateway.
 They are admitted only when `MINDROOM_SCRIPT_GATEWAY_URL` names a gateway-only listener and the operator sets `MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` to attest that workers cannot reach other primary API routes through that listener.
@@ -256,13 +257,25 @@ Call states are `pending`, `completed`, `failed`, and `indeterminate`.
 Call receipts are durable so a script can poll one accepted call without replaying it.
 Calls are serialized within one run to keep approval and side-effect order predictable.
 
-MindRoom never adopts, resumes, or automatically relaunches Python source after a primary-runtime restart, upgrade, worker loss, or worker replacement.
-Startup fences new launches, durably revokes every inherited nonterminal run, terminates processes reachable through the exact currently configured backend, removes private snapshots, and retires exact dedicated workers before reopening.
+New Kubernetes script runs survive primary-runtime restarts and compatible image upgrades in their existing dedicated workers.
+Shutdown keeps those processes and capabilities alive while draining accepted tool calls within its deadline.
+Startup fences launches and gateway calls until it verifies the exact worker and supervisor handle, the current requester authorization, and the persisted recovery contract.
+The contract includes the script protocol version, worker ownership and configuration, authentication material, private scope, and gateway URL; it permits a changed image or image pull policy while keeping the active worker on its launch image.
+Fresh runs use the newly configured worker image.
+Keep the isolated gateway address stable across upgrades.
+Missing runtime dependencies or a temporary worker-status outage leave recovery pending; gateway calls return retryable HTTP 503 responses until admission reopens.
+The SDK retries transport failures and these responses using the same logical call ID.
+Accepted calls whose outcome cannot be proven become `indeterminate` and are never automatically replayed.
+
+Worker or supervisor loss interrupts the run; MindRoom never automatically relaunches Python source or reconstructs its memory.
+Removing authorization, changing the recovery contract, or removing the isolated gateway attestation also interrupts the run.
+Docker, unsafe-local, and older runs created without a recovery contract retain interruption-on-restart behavior.
+For those runs, startup durably revokes inherited ownership, terminates reachable processes, removes private snapshots, and retires exact dedicated workers before reopening.
 Routine Docker launch changes such as an image or worker-token rotation retain cleanup ownership of existing workers.
 If the Docker daemon, worker storage root, or worker name prefix changed while MindRoom was offline, startup leaves the run revoked and nonterminal and keeps script admission closed instead of reconstructing the historical backend; restore the prior ownership configuration, restart once to retire the run, then apply the new configuration.
 MindRoom durably revokes every affected run before process reconciliation, and publishes `interrupted` only after process exit is confirmed.
 If the shutdown deadline expires before exit is confirmed, the capability remains revoked and the run stays nonterminal for startup reconciliation.
-Design watchers to checkpoint their observed state and deliberately relaunch from that known state rather than assuming an immortal process.
+Design watchers to checkpoint their observed state so an operator can deliberately relaunch them after worker or node loss.
 
 Terminal process output is retained durably with a 64 KiB bound and remains available from `get_script(run_id)` after maintenance observes the exit.
 Cancellation cannot guarantee that an external side effect already started by a tool was rolled back.

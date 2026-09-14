@@ -37,6 +37,7 @@ from mindroom.script_runs.reasons import (
     PROCESS_EXIT_OBSERVED,
     SUPERVISOR_UNAVAILABLE,
 )
+from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient, WorkerScriptCancel, WorkerScriptStatus
 from mindroom.shell_supervisor import (
@@ -240,7 +241,7 @@ class ScriptRunManager:
         await self._launches_drained.wait()
 
     async def begin_startup_reconciliation(self) -> None:
-        """Fence all launches until inherited durable ownership is revoked and retired."""
+        """Fence launches until inherited durable ownership is recovered or retired."""
         async with self._launch_admission_lock:
             self._startup_reconciliation_owners += 1
             if self._launches_in_progress == 0:
@@ -426,6 +427,12 @@ class ScriptRunManager:
             replace(
                 run,
                 worker_backend_locator=backend.cleanup_locator,
+                recovery_signature=script_recovery_signature(
+                    backend=self.worker_backend,
+                    config=context.config,
+                    agent_name=context.agent_name,
+                    gateway_url=self.gateway_url,
+                ),
                 resource_profile=profile,
                 resource_requests=requests,
                 resource_limits=limits,
@@ -753,6 +760,7 @@ class ScriptRunManager:
                 run_id=run.run_id,
                 source_digest=run.source_digest,
                 gateway_url=self.gateway_url,
+                max_runtime_seconds=run.max_runtime_seconds,
                 state_scope_worker_key=worker_spec.state_scope_worker_key,
                 private_agent_names=(
                     tuple(sorted(worker_spec.private_agent_names))
@@ -872,6 +880,7 @@ class ScriptRunManager:
                 tail=200,
                 timeout=0,
                 handle=supervisor_handle,
+                max_runtime_seconds=run.max_runtime_seconds,
             )
             _validate_local_launch_message(message, expected_handle=supervisor_handle)
         except BaseException as exc:
@@ -935,6 +944,8 @@ class ScriptRunManager:
             backend = self._worker_backend_for(run)
             if run.worker_key is not None and backend is not None:
                 await asyncio.to_thread(backend.touch_worker, run.worker_key)
+            if run.state is ScriptRunState.STARTING:
+                return await asyncio.to_thread(self.store.transition_run, run.run_id, state=ScriptRunState.RUNNING)
             return run
         bounded_output = _bounded_output(status.output)
         if status.state == "unknown":

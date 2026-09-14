@@ -68,12 +68,16 @@ def test_supervisor_status_parser_is_canonical(
 
 
 @contextlib.asynccontextmanager
-async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[str]:
+async def _running_server(
+    registry: dict[str, ProcessRecord],
+    deadline_tasks: set[asyncio.Task[None]] | None = None,
+) -> AsyncIterator[str]:
     runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-test-"))
     socket_path = str(runtime_dir / "s.sock")
     handle_reservations: set[str] = set()
+    tracked_deadline_tasks = deadline_tasks if deadline_tasks is not None else set()
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations),
+        partial(_handle_connection, registry, handle_reservations, tracked_deadline_tasks),
         path=socket_path,
     )
     try:
@@ -81,6 +85,9 @@ async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[s
     finally:
         server.close()
         await server.wait_closed()
+        for task in tracked_deadline_tasks:
+            task.cancel()
+        await asyncio.gather(*tracked_deadline_tasks, return_exceptions=True)
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
@@ -91,6 +98,7 @@ async def _run(
     namespace: str = "ns",
     timeout: float = 30,  # noqa: ASYNC109
     handle: str | None = None,
+    max_runtime_seconds: float | None = None,
 ) -> str:
     return await run_command_via_supervisor(
         socket_path,
@@ -101,6 +109,7 @@ async def _run(
         tail=100,
         timeout=timeout,
         handle=handle,
+        max_runtime_seconds=max_runtime_seconds,
     )
 
 
@@ -242,6 +251,78 @@ async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
         assert "Force-killed" in kill_result
 
         assert "FINISHED" in await _wait_for_finished(socket_path, handle)
+
+
+@pytest.mark.asyncio
+async def test_process_deadlines_are_independent_and_leave_ordinary_background_calls_running(tmp_path: Path) -> None:
+    """Each maximum runtime kills only its original process group and drains its timer."""
+    registry: dict[str, ProcessRecord] = {}
+    deadline_tasks: set[asyncio.Task[None]] = set()
+    resistant_handle = f"shell:{'a' * 32}"
+    completed_handle = f"shell:{'b' * 32}"
+    cancelled_handle = f"shell:{'c' * 32}"
+    ready_path = tmp_path / "deadline-ready"
+    resistant_script = (
+        "import pathlib, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "pathlib.Path(sys.argv[1]).write_text('ready', encoding='utf-8'); "
+        "time.sleep(300)"
+    )
+
+    async with _running_server(registry, deadline_tasks) as socket_path:
+        resistant = await _run(
+            socket_path,
+            [sys.executable, "-c", resistant_script, str(ready_path)],
+            timeout=0,
+            handle=resistant_handle,
+            max_runtime_seconds=0.8,
+        )
+        ordinary, completed, cancelled = await asyncio.gather(
+            _run(socket_path, ["sleep", "300"], timeout=0),
+            _run(
+                socket_path,
+                [sys.executable, "-c", "pass"],
+                timeout=0,
+                handle=completed_handle,
+                max_runtime_seconds=0.3,
+            ),
+            _run(
+                socket_path,
+                ["sleep", "300"],
+                timeout=0,
+                handle=cancelled_handle,
+                max_runtime_seconds=0.4,
+            ),
+        )
+        ordinary_handle = _extract_handle(ordinary)
+
+        try:
+            assert _extract_handle(resistant) == resistant_handle
+            assert _extract_handle(completed) == completed_handle
+            assert _extract_handle(cancelled) == cancelled_handle
+            assert "Force-killed" in await _kill(socket_path, cancelled_handle, force=True)
+            assert "FINISHED" in await _wait_for_finished(socket_path, cancelled_handle)
+            for _ in range(20):
+                if ready_path.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert ready_path.exists()
+            assert "Terminated" in await _kill(socket_path, resistant_handle)
+            await asyncio.sleep(0.1)
+            assert "RUNNING" in await _check(socket_path, resistant_handle)
+            assert "FINISHED" in await _wait_for_finished(socket_path, completed_handle)
+            assert "FINISHED" in await _wait_for_finished(socket_path, resistant_handle)
+            assert "exit code -9" in await _check(socket_path, resistant_handle)
+            assert "RUNNING" in await _check(socket_path, ordinary_handle)
+            for _ in range(20):
+                if not deadline_tasks:
+                    break
+                await asyncio.sleep(0.05)
+            assert deadline_tasks == set()
+        finally:
+            await _kill(socket_path, resistant_handle, force=True)
+            await _kill(socket_path, cancelled_handle, force=True)
+            await _kill(socket_path, ordinary_handle, force=True)
 
 
 @pytest.mark.asyncio

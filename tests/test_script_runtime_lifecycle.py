@@ -9,7 +9,7 @@ import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration import script_runtime as script_runtime_module
 from mindroom.orchestration.config_updates import ConfigUpdatePlan, build_config_update_plan
 from mindroom.orchestration.script_runtime import (
     ScriptRuntimeLifecycle,
@@ -38,6 +39,7 @@ from mindroom.orchestration.script_runtime import (
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import (
+    ScriptCallState,
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
@@ -289,10 +291,12 @@ class _BlockingLaunchWorkerClient(_TerminatingWorkerClient):
         run_id: str,
         source_digest: str,
         gateway_url: str,
+        max_runtime_seconds: int,
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
     ) -> None:
         del run_id, source_digest, gateway_url, state_scope_worker_key, private_agent_names
+        assert max_runtime_seconds > 0
         self.launch_entered.set()
         await self.release_launch.wait()
 
@@ -411,10 +415,11 @@ class _StartupAdmissionResolver:
     """Expose any inherited call that reaches execution during startup cleanup."""
 
     execution_attempts: int = 0
+    authorized: bool | None = True
 
-    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool:
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
         del run, config
-        return True
+        return self.authorized
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> None:
         del run, correlation_id
@@ -472,6 +477,9 @@ def _stored_run_pinned_to_worker(
     *,
     run_id: str,
     worker_backend_locator: str = "locator-a",
+    recovery_signature: str | None = None,
+    state: ScriptRunState = ScriptRunState.RUNNING,
+    started_at: str | None = None,
 ) -> ScriptRunRecord:
     run = _run(runtime_paths, run_id=run_id, state=ScriptRunState.STARTING)
     assert run.worker_key is not None
@@ -480,11 +488,13 @@ def _stored_run_pinned_to_worker(
             run,
             worker_key=script_worker_key_for_run(run.worker_key, run_id),
             worker_backend_locator=worker_backend_locator,
+            recovery_signature=recovery_signature,
+            started_at=started_at,
         ),
     )
     return store.transition_run(
         created.run_id,
-        state=ScriptRunState.RUNNING,
+        state=state,
         worker_id="worker-1",
     )
 
@@ -837,9 +847,249 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
     assert bound_managers == [manager, None]
 
 
+@dataclass
+class _RecoveringBackend(_Backend):
+    backend_name: str = "kubernetes"
+    signature: str = "worker-authority-v1"
+
+    def script_recovery_signature(self) -> str:
+        return self.signature
+
+
+def _recovery_scenario(
+    tmp_path: Path,
+    *,
+    state: ScriptRunState = ScriptRunState.RUNNING,
+    started_at: str | None = None,
+) -> tuple[ScriptRuntimeLifecycle, ScriptRunRecord, _RecoveringBackend, _TerminatingWorkerClient]:
+    paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+            "MINDROOM_SCRIPT_GATEWAY_URL": "http://primary.test/api/script-gateway",
+        },
+    )
+    config = _config()
+    store = ScriptRunStore(paths)
+    backend = _RecoveringBackend([])
+    gateway_url = "http://primary.test/api/script-gateway"
+    signature = script_runtime_module.script_recovery_signature(
+        backend=backend,
+        config=config,
+        agent_name="watcher",
+        gateway_url=gateway_url,
+    )
+    assert signature is not None
+    run = _stored_run_pinned_to_worker(
+        store,
+        paths,
+        run_id=f"script-{'a' * 32}",
+        recovery_signature=signature,
+        state=state,
+        started_at=started_at,
+    )
+    backend.handles = [_worker(run)]
+    resolver = _StartupAdmissionResolver()
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    client = _TerminatingWorkerClient()
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=client,
+        worker_backend=backend,
+        gateway_url=gateway_url,
+        cancellation_grace_seconds=0,
+    )
+    runtime = ScriptRuntimeLifecycle(
+        runtime_paths=paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=resolver,
+        config_provider=lambda: config,
+        worker_lease_provider=lambda locator: _Lease(backend) if locator in {None, "locator-a"} else None,
+    )
+    runtime.bind_api(gateway_url)
+    return runtime, run, backend, client
+
+
 @pytest.mark.asyncio
-async def test_startup_revokes_and_retires_inherited_running_process(tmp_path: Path) -> None:
-    """A new application process never adopts an inherited running script."""
+@pytest.mark.parametrize("state", [ScriptRunState.STARTING, ScriptRunState.RUNNING])
+async def test_startup_adopts_compatible_script_without_recreating_worker(
+    tmp_path: Path,
+    state: ScriptRunState,
+) -> None:
+    """A live worker keeps its process and authority when the primary is reconstructed."""
+    runtime, run, backend, client = _recovery_scenario(tmp_path, state=state)
+    try:
+        await runtime.start()
+        durable = runtime.store.get_run(run.run_id)
+        assert durable.state is ScriptRunState.RUNNING
+        assert durable.cancel_requested_at is None
+        assert durable.worker_id == run.worker_id
+        assert client.exited is False
+        assert runtime.broker._call_admission_open.is_set()
+        assert set(backend.actions) == {f"touch:{run.worker_key}"}
+    finally:
+        await runtime.shutdown()
+    assert client.exited is False
+    assert runtime.store.get_run(run.run_id).cancel_requested_at is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_preserves_worker_and_settles_orphaned_calls(tmp_path: Path) -> None:
+    """Detaching the primary does not revoke the run or replay accepted calls."""
+    runtime, run, backend, client = _recovery_scenario(tmp_path)
+    runtime._current_worker_lease = _Lease(backend)
+    runtime.store.claim_call(
+        run_id=run.run_id,
+        call_id="accepted-before-restart",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments_digest="arguments-digest",
+    )
+
+    await runtime.shutdown()
+
+    durable = runtime.store.get_run(run.run_id)
+    assert durable.state is ScriptRunState.RUNNING
+    assert durable.cancel_requested_at is None
+    assert client.exited is False
+    assert backend.handles == [_worker(run)]
+    assert runtime.store.get_call(run.run_id, "accepted-before-restart").state is ScriptCallState.INDETERMINATE
+
+
+@pytest.mark.asyncio
+async def test_startup_interrupts_recovery_contract_mismatch(tmp_path: Path) -> None:
+    """An offline worker authority change cannot preserve the old process grant."""
+    runtime, run, backend, client = _recovery_scenario(tmp_path)
+    backend.signature = "changed-worker-authority"
+    try:
+        await runtime.start()
+        assert runtime.store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
+        assert client.exited is True
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_records_missing_recoverable_worker_as_interrupted(tmp_path: Path) -> None:
+    """Worker loss never causes script source to be automatically relaunched."""
+    runtime, run, backend, _client = _recovery_scenario(tmp_path)
+    backend.handles.clear()
+    try:
+        await runtime.start()
+        assert runtime.store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
+        assert backend.handles == []
+        assert runtime.broker._call_admission_open.is_set()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["private_scope", "script_tool", "gateway", "gateway_isolation", "explicit_gateway"])
+async def test_startup_rejects_changed_script_recovery_scope(tmp_path: Path, change: str) -> None:
+    """A surviving process cannot retain authority across incompatible offline changes."""
+    runtime, run, _backend, client = _recovery_scenario(tmp_path)
+    if change == "private_scope":
+        runtime.config_provider = lambda: _config(private=True)
+    elif change == "script_tool":
+        config = _config()
+        config.agents["watcher"].tools = ["calculator"]
+        runtime.config_provider = lambda: config
+    elif change == "gateway_isolation":
+        runtime.runtime_paths = replace(runtime.runtime_paths, process_env={"MINDROOM_SANDBOX_EXECUTION_MODE": "all"})
+    elif change == "explicit_gateway":
+        runtime.runtime_paths = replace(
+            runtime.runtime_paths,
+            process_env={
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+                "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+                "MINDROOM_PUBLIC_URL": "http://primary.test",
+            },
+        )
+    else:
+        runtime.bind_api("http://different-primary.test/api/script-gateway")
+    try:
+        await runtime.start()
+        assert runtime.store.get_run(run.run_id).state is ScriptRunState.INTERRUPTED
+        assert client.exited is True
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_startup_keeps_unreachable_recoverable_worker_pending(tmp_path: Path) -> None:
+    """A temporary status outage must not revoke a surviving process or open the gateway."""
+    runtime, run, backend, client = _recovery_scenario(tmp_path)
+    runtime.manager.worker_client = _FailingStatusWorkerClient()
+    try:
+        await runtime.start()
+        assert runtime.store.get_run(run.run_id).cancel_requested_at is None
+        assert len(backend.handles) == 1
+        assert runtime.broker._call_admission_open.is_set() is False
+        runtime.manager.worker_client = client
+        await runtime._complete_pass()
+        assert runtime.broker._call_admission_open.is_set()
+        assert runtime.store.get_run(run.run_id).state is ScriptRunState.RUNNING
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [False, None])
+async def test_recovery_requires_live_owner_authorization(tmp_path: Path, authorized: bool | None) -> None:
+    """Unresolved membership waits for a live bot; confirmed removal interrupts the process."""
+    runtime, run, _backend, client = _recovery_scenario(tmp_path)
+    resolver = _StartupAdmissionResolver(authorized=authorized)
+    runtime.resolver = resolver
+    try:
+        await runtime.start()
+        durable = runtime.store.get_run(run.run_id)
+        if authorized is False:
+            assert durable.state is ScriptRunState.INTERRUPTED
+            assert client.exited is True
+        else:
+            assert durable.cancel_requested_at is None
+            assert runtime.broker._call_admission_open.is_set() is False
+            resolver.authorized = True
+            await runtime._complete_pass()
+            assert runtime.broker._call_admission_open.is_set()
+            assert client.exited is False
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True])
+async def test_startup_never_preserves_cancelled_or_expired_script(tmp_path: Path, expired: bool) -> None:
+    """A recovery marker cannot override durable cancellation or the original runtime budget."""
+    started_at = (datetime.now(UTC) - timedelta(days=2)).isoformat() if expired else None
+    runtime, run, _backend, client = _recovery_scenario(tmp_path, started_at=started_at)
+    if not expired:
+        runtime.store.request_cancel(run.run_id, reason="Cancelled by owner.")
+    try:
+        await runtime.start()
+        durable = runtime.store.get_run(run.run_id)
+        assert durable.cancel_requested_at is not None
+        assert durable.finished_at is not None
+        assert client.exited is True
+    finally:
+        await runtime.shutdown()
+
+
+def test_keepalive_failure_aborts_cleanup_for_active_scripts(tmp_path: Path) -> None:
+    """Worker maintenance cannot proceed with stale idle timestamps after keepalive fails."""
+    runtime, _run_record, backend, _client = _recovery_scenario(tmp_path)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(backend, "touch_worker", MagicMock(side_effect=WorkerBackendError("temporary API failure")))
+        with pytest.raises(WorkerBackendError, match="temporary API failure"):
+            runtime.touch_live_workers(backend)
+
+
+@pytest.mark.asyncio
+async def test_startup_revokes_and_retires_legacy_running_process(tmp_path: Path) -> None:
+    """A legacy run without a recovery contract retains interruption semantics."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
     run = _stored_run_pinned_to_worker(store, runtime_paths, run_id=f"script-{'9' * 32}")

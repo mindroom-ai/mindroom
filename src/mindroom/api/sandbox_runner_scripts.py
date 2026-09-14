@@ -23,6 +23,7 @@ from mindroom.api.sandbox_runner import (
     validate_runner_token,
 )
 from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.models import (
     script_run_id_from_worker_key,
     script_worker_key_for_run,
@@ -138,6 +139,16 @@ def _validate_run_id(value: str) -> str:
 _RunId = Annotated[str, AfterValidator(_validate_run_id)]
 
 
+def _validate_protocol_version(value: int) -> int:
+    if value != SCRIPT_PROTOCOL_VERSION:
+        message = f"Input should be {SCRIPT_PROTOCOL_VERSION}"
+        raise ValueError(message)
+    return value
+
+
+_ProtocolVersion = Annotated[int, Field(strict=True), AfterValidator(_validate_protocol_version)]
+
+
 router = APIRouter(
     prefix="/api/sandbox-runner/scripts",
     tags=["sandbox-runner"],
@@ -151,11 +162,13 @@ class SandboxScriptRunRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    protocol_version: _ProtocolVersion
     run_id: _RunId
     worker_key: str = Field(min_length=1, max_length=1024)
     state_scope_worker_key: str | None = Field(default=None, min_length=1, max_length=1024)
     source_digest: str = Field(min_length=64, max_length=64, pattern=r"[0-9a-f]{64}")
     gateway_url: str = Field(min_length=1, max_length=2048)
+    max_runtime_seconds: int = Field(gt=0, strict=True)
     private_agent_names: list[str] | None = Field(default=None, max_length=128)
 
 
@@ -430,6 +443,7 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         tail=200,
         timeout=0,
         handle=supervisor_handle_for_run(payload.run_id),
+        max_runtime_seconds=payload.max_runtime_seconds,
     )
     return _parse_launch_message(message, expected_handle=supervisor_handle_for_run(payload.run_id))
 

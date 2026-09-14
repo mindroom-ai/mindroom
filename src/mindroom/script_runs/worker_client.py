@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import httpx
 
+from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
@@ -66,6 +67,7 @@ class ScriptWorkerClient:
         run_id: str,
         source_digest: str,
         gateway_url: str,
+        max_runtime_seconds: int,
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
     ) -> None:
@@ -75,11 +77,13 @@ class ScriptWorkerClient:
             method="POST",
             url=worker_api_endpoint(worker, "script-run"),
             json={
+                "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": run_id,
                 "worker_key": worker.worker_key,
                 "state_scope_worker_key": state_scope_worker_key,
                 "source_digest": source_digest,
                 "gateway_url": gateway_url,
+                "max_runtime_seconds": max_runtime_seconds,
                 "private_agent_names": list(private_agent_names) if private_agent_names is not None else None,
             },
         )

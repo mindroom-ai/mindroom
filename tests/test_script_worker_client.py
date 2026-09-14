@@ -58,6 +58,7 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
         run_id=f"script-{'a' * 32}",
         source_digest="a" * 64,
         gateway_url="http://primary.test/api/script-gateway",
+        max_runtime_seconds=3600,
         state_scope_worker_key="v1:test:user_agent:alice:private-agent",
         private_agent_names=("private-agent",),
     )
@@ -71,7 +72,9 @@ async def test_script_worker_client_sends_a_narrow_derived_launch_request() -> N
         "state_scope_worker_key": "v1:test:user_agent:alice:private-agent",
         "source_digest": "a" * 64,
         "gateway_url": "http://primary.test/api/script-gateway",
+        "max_runtime_seconds": 3600,
         "private_agent_names": ["private-agent"],
+        "protocol_version": 1,
     }
 
 
@@ -166,6 +169,7 @@ async def test_script_worker_client_classifies_request_and_worker_failures(
             run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             source_digest="a" * 64,
             gateway_url="http://primary.test/api/script-gateway",
+            max_runtime_seconds=3600,
         )
 
     assert exc_info.value.failure_kind == expected_kind
