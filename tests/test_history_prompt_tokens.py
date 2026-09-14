@@ -18,11 +18,6 @@ from agno.session.summary import SessionSummary
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.history.compaction import (
-    _estimate_history_messages_tokens,
-    estimate_prompt_visible_history_tokens,
-    estimate_session_summary_tokens,
-)
 from mindroom.history.prompt_tokens import (
     _TOOL_SURFACE_CACHE,
     _prompt_tool_surface_for_tools,
@@ -30,6 +25,11 @@ from mindroom.history.prompt_tokens import (
     agent_static_token_estimator,
     agent_tool_definition_payloads_for_logging,
     estimate_agent_static_tokens,
+)
+from mindroom.history.replay import (
+    _estimate_history_messages_tokens,
+    _estimate_session_summary_tokens,
+    estimate_prompt_visible_history_tokens,
 )
 from mindroom.history.types import (
     HistoryPolicy,
@@ -361,18 +361,18 @@ def test_estimate_prompt_visible_history_tokens_counts_summary_after_compaction_
         "You should ALWAYS prefer information from this conversation over the past summary.\n\n"
     )
 
-    assert estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
+    assert _estimate_session_summary_tokens("merged summary") == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens == estimate_text_tokens(expected_wrapper)
     assert estimated_tokens > 0
 
 
-def test_estimate_session_summary_tokens_none() -> None:
-    assert estimate_session_summary_tokens(None) == 0
+def test__estimate_session_summary_tokens_none() -> None:
+    assert _estimate_session_summary_tokens(None) == 0
 
 
-def test_estimate_session_summary_tokens_empty() -> None:
-    assert estimate_session_summary_tokens("") == 0
-    assert estimate_session_summary_tokens("   ") == 0
+def test__estimate_session_summary_tokens_empty() -> None:
+    assert _estimate_session_summary_tokens("") == 0
+    assert _estimate_session_summary_tokens("   ") == 0
 
 
 def _docs_toolkit() -> Toolkit:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import manual_compaction_unavailable_message, resolve_history_execution_plan
-from mindroom.history.runtime import open_scope_session_context
+from mindroom.history.session_context import open_scope_session_context
 from mindroom.history.storage import add_pending_force_compaction_scope, read_scope_state, set_force_compaction_state
 from mindroom.logging_config import get_logger
 

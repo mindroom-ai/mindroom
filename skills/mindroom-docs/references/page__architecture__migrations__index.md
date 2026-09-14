@@ -118,7 +118,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S7 | Removed/superseded | [`memory/functions.py`][memory-functions] no longer contains or exports the monolithic memory-prompt wrapper. |
 | S8 | Current behavior | [`ai_runtime.py`][ai-runtime] supports string input and deep-copies canonical message sequences for retries. |
 | S9 | Isolated | [`legacy_openai_tool_replay.py`][legacy-openai] repairs old stored calls; current sparse-stream filtering stays in the adapters. |
-| S10 | Current behavior | [`agent_storage.py`][agent-storage] and [`history/compaction.py`][history-compaction] own the current prompt persistence and replay boundary. |
+| S10 | Current behavior | [`agent_storage.py`][agent-storage] and [`history/replay.py`][history-replay] own the current prompt persistence and replay boundary. |
 | S11 | Removed/superseded | [`thread_export/storage.py`][thread-export] refuses populated markerless roots and marks only empty roots. |
 | S12 | Tiny retained default | [`report_publishing/store.py`][report-store] treats missing `artifact_kind` as `html_file`. |
 | S13 | Tiny retained default | [`scheduling.py`][scheduling] treats missing `history_limit` as the current `None` default. |
@@ -235,7 +235,7 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [egress-policy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/egress/policy.py
 [event-info]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/event_info.py
 [handled]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/handled_turns.py
-[history-compaction]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/compaction.py
+[history-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/replay.py
 [history-storage]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/history/storage.py
 [invited-rooms]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/matrix/invited_rooms_store.py
 [journal-open]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal_open.py

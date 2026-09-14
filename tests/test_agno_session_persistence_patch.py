@@ -51,6 +51,12 @@ type _Surface = Literal["agent", "team"]
 _CHILD_PROCESS_TIMEOUT_SECONDS = 30.0
 
 
+@pytest.fixture(autouse=True)
+def _install_patch_for_sdk_contracts() -> None:
+    """Exercise passthrough paths with the compatibility layer explicitly installed."""
+    persistence_patch.install_patch()
+
+
 def _storage(tmp_path: Path, name: str = "sessions") -> BaseDb:
     return create_state_storage(
         name,
@@ -163,8 +169,10 @@ from importlib import import_module
 
 patch = import_module("mindroom.agno_session_persistence_patch")
 patch.version = lambda _distribution: "0.0.0"
+storage_module = import_module("mindroom.agent_storage")
+from pathlib import Path
 try:
-    import_module("mindroom.agent_storage")
+    storage_module.create_state_storage("version-check", Path("unused-state-root"), subdir="sessions", session_table="sessions")
 except RuntimeError as error:
     assert "session persistence" in str(error).lower()
 else:

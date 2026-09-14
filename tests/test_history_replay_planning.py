@@ -15,19 +15,13 @@ from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.history.compaction import (
-    estimate_prompt_visible_history_tokens,
-)
 from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
     resolve_history_execution_plan,
 )
-from mindroom.history.runtime import (
-    _compaction_fallback_is_distinct,
-    _plan_replay_that_fits,
-    apply_replay_plan,
-)
+from mindroom.history.replay import apply_replay_plan, estimate_prompt_visible_history_tokens, plan_replay_that_fits
+from mindroom.history.runtime import _compaction_fallback_is_distinct
 from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
@@ -1154,7 +1148,7 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
         policy=HistoryPolicy(mode="runs", limit=2),
         max_tool_calls_from_history=None,
     )
-    replay_plan = _plan_replay_that_fits(
+    replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,
         history_settings=history_settings,
@@ -1401,7 +1395,7 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         policy=HistoryPolicy(mode="all"),
         max_tool_calls_from_history=None,
     )
-    replay_plan = _plan_replay_that_fits(
+    replay_plan = plan_replay_that_fits(
         session=session,
         scope=scope,
         history_settings=history_settings,

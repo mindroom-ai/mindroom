@@ -44,7 +44,7 @@ from mindroom.claude_prompt_cache import (
     arefresh_session_backed_bedrock_async_client,
 )
 from mindroom.history.interrupted_replay import persist_interrupted_replay
-from mindroom.history.runtime import (
+from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
     create_scope_session_storage,
     open_resolved_scope_session_context,

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.models.base import Model
 
-    from mindroom.history.runtime import ScopeSessionContext
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.timing import DispatchPipelineTiming
 
 __all__ = [
