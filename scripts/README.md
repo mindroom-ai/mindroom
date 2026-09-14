@@ -176,8 +176,12 @@ Nothing in `.github/`, the `justfile`, or pre-commit used to run this harness, s
 The gate is now a single named command:
 
 ```bash
+docker pull ghcr.io/mindroom-ai/mindroom-tuwunel:latest
 just test-live-journal-gate
 ```
+
+Refresh the homeserver image before the gate: a cached Tuwunel older than 1.9.1 can omit quiet joined rooms from full-state sync and make the client infer false departures.
+The harness records the actual image digest in its run provenance.
 
 It runs the fuzz profile with restarts turned up and then the restart-recovery profile, and it is the check to run before merging anything that touches those paths.
 `tests/test_live_matrix_fuzz.py` is what CI runs, and it is a unit test of this harness against fakes: it proves the oracle and the invariants behave, and it boots no Docker, no homeserver, and no MindRoom.
