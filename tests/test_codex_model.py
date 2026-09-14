@@ -618,7 +618,6 @@ def test_codex_tool_search_items_replay_ahead_of_the_discovered_function_call() 
         dict(_TOOL_SEARCH_OUTPUT_ITEM),
         {
             "type": "function_call",
-            "id": "fc_1",
             "call_id": "call_1",
             "name": "get_weather",
             "arguments": "{}",

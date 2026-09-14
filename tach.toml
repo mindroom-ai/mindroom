@@ -545,7 +545,7 @@ visibility = [
 [[modules]]
 path = "mindroom.legacy_openai_tool_replay"
 depends_on = []
-visibility = ["mindroom.openai_models"]
+visibility = ["mindroom.openai_models", "mindroom.openai_response_replay"]
 
 [[modules]]
 path = "mindroom.legacy_revision_replay"
@@ -1696,7 +1696,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.openai_response_replay"
-depends_on = ["mindroom.native_compaction"]
+depends_on = ["mindroom.legacy_openai_tool_replay", "mindroom.native_compaction"]
 visibility = ["mindroom.openai_models"]
 
 [[modules]]

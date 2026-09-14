@@ -14,6 +14,7 @@ from agno.models.response import ModelResponse
 from agno.session.summary import SessionSummary
 from agno.team import Team
 
+from mindroom.agent_storage import get_agent_session
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.agent import TeamConfig
 from mindroom.config.models import CompactionConfig, ModelConfig
@@ -34,6 +35,96 @@ from tests.history_helpers import _agent, _completed_run, _completed_team_run, _
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+async def test_bounded_legacy_replay_after_sqlite_restart_preserves_stored_history(tmp_path: Path) -> None:
+    """Budget fitting must use safe explicit tool input without rewriting durable legacy records."""
+    config, paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=1000, replay_window_tokens=1000),
+        models={"default": ModelConfig(provider="openai", id="gpt-6-astra", context_window=5000)},
+    )
+    legacy = [
+        Message(role="user", content="Check the service."),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {
+                    "id": "fc_status",
+                    "call_id": "call_status",
+                    "type": "function",
+                    "function": {"name": "get_status", "arguments": "{}"},
+                },
+            ],
+            provider_data={
+                "response_id": "resp_legacy",
+                "reasoning_output": {"type": "reasoning", "id": "rs_last", "summary": []},
+            },
+        ),
+        Message(role="tool", tool_call_id="fc_status", content="ready"),
+    ]
+    db_path = str(tmp_path / "history.db")
+    db = SqliteDb(db_file=db_path)
+    seed_session(
+        db,
+        _session(
+            "session",
+            runs=[
+                _completed_run("old", messages=[Message(role="user", content="0123456789" * 1800)]),
+                _completed_run("recent", messages=legacy),
+            ],
+        ),
+    )
+    db.close()
+    db = SqliteDb(db_file=db_path)
+    session = get_agent_session(db, "session")
+    assert session is not None
+    original = [run.to_dict() for run in session.runs or []]
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    agent = _agent(model=model, db=db)
+    resolved = resolve_agent_preparation_inputs(
+        agent=agent,
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+
+    prepared = await prepare_scope_history(
+        agent=agent,
+        agent_name="test_agent",
+        resolved_inputs=resolved,
+        runtime_paths=paths,
+        config=config,
+        scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), db, session),
+    )
+    final = finalize_history_preparation(prepared_scope_history=prepared, config=config)
+
+    assert final.replay_plan is not None
+    assert final.replay_plan.mode == "limited"
+    assert final.replay_plan.num_history_runs == 1
+    messages = session.get_messages(agent_id="test_agent", last_n_runs=final.replay_plan.num_history_runs)
+    assert model.estimate_portable_replay_tokens(messages) <= final.replay_plan.estimated_tokens <= 1000
+    messages.append(Message(role="user", content="Continue"))
+    assert "previous_response_id" not in model.get_request_params(messages=messages)
+    assert model._format_messages(messages) == [
+        {"role": "user", "content": "Check the service."},
+        {
+            "type": "function_call",
+            "call_id": "call_status",
+            "name": "get_status",
+            "arguments": "{}",
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call_status", "output": "ready"},
+        {"role": "user", "content": "Continue"},
+    ]
+    persisted = get_agent_session(db, "session")
+    assert persisted is not None
+    assert [run.to_dict() for run in persisted.runs or []] == original
+    assert [run.to_dict() for run in session.runs or []] == original
+    db.close()
 
 
 def test_reused_responses_model_uses_current_replay_budget(tmp_path: Path) -> None:
