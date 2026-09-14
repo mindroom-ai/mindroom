@@ -8,10 +8,7 @@ from typing import TYPE_CHECKING
 import nio
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.authorization import (
-    responder_candidate_entities_from_cached_room,
-    responder_candidate_entities_with_membership_refresh,
-)
+from mindroom.authorization import responder_candidate_entities_with_membership_refresh
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.responder_availability import (
     filter_materializable_responders,
@@ -43,18 +40,10 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
             target_room or nio.MatrixRoom(room_id, own_user_id=""),
             context.requester_id,
         )
-    elif target_room is not None:
+    else:
         candidates = await responder_candidate_entities_with_membership_refresh(
             context.client,
-            target_room,
-            context.requester_id,
-            context.config,
-            context.runtime_paths,
-            context.require_agent_reply_memberships(),
-        )
-    else:
-        candidates = responder_candidate_entities_from_cached_room(
-            nio.MatrixRoom(room_id, own_user_id=""),
+            target_room or nio.MatrixRoom(room_id, own_user_id=""),
             context.requester_id,
             context.config,
             context.runtime_paths,
@@ -71,7 +60,7 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
     agents: dict[str, _MatrixRoomAgent] = {}
     for candidate in candidates:
         name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
-        if name in context.config.agents:
+        if name in context.config.agents or name in context.config.teams:
             agents[name] = _MatrixRoomAgent(
                 name=name,
                 matrix_user_id=candidate.full_id,

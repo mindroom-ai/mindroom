@@ -12,7 +12,7 @@ import pytest
 
 from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.message_target import MessageTarget
@@ -135,13 +135,20 @@ async def test_agent_discovery_reports_only_available_authorized_targets(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("authorized", [True, False])
-async def test_agent_discovery_in_another_room(context: ToolRuntimeContext, authorized: bool) -> None:
+@pytest.mark.parametrize("cached", [True, False])
+async def test_agent_discovery_in_another_room(context: ToolRuntimeContext, authorized: bool, cached: bool) -> None:
     """The room access gate runs before discovery and target membership controls the result."""
     MatrixRoomTools._recent_actions.clear()
     other = nio.MatrixRoom("!other:localhost", "@actual_general:localhost")
     other.add_member("@actual_code:localhost", "Code", None)
     other.members_synced = True
-    context.client.rooms[other.room_id] = other
+    if cached:
+        context.client.rooms[other.room_id] = other
+    else:
+        cast("AsyncMock", context.client.joined_members).return_value = nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id="@actual_code:localhost", display_name="Code", avatar_url=None)],
+            room_id=other.room_id,
+        )
     if not authorized:
         current = context.config.model_copy(deep=True)
         access = current.agents["general"].access
@@ -158,4 +165,25 @@ async def test_agent_discovery_in_another_room(context: ToolRuntimeContext, auth
     else:
         assert payload["status"] == "error"
         assert "Not authorized" in payload["message"]
-    cast("AsyncMock", context.client.joined_members).assert_not_awaited()
+    assert cast("AsyncMock", context.client.joined_members).await_count == int(authorized and not cached)
+
+
+@pytest.mark.asyncio
+async def test_agent_discovery_includes_authorized_teams(context: ToolRuntimeContext) -> None:
+    """Matrix conversations can address a team using its exact registered Matrix ID."""
+    MatrixRoomTools._recent_actions.clear()
+    context.config.teams["helpers"] = TeamConfig(
+        display_name="Helpers",
+        role="Coordinate helpers",
+        agents=["general", "code"],
+        access=ResponderAccessConfig(current_room_members=False, users=["@alice:localhost"]),
+    )
+    ids = entity_ids(context.config, context.runtime_paths, usernames=actual_entity_usernames(context.config))
+    assert context.room is not None
+    context.room.add_member(ids["helpers"].full_id, "Helpers", None)
+    with tool_runtime_context(context):
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="agents"))
+    team = next(row for row in payload["agents"] if row["name"] == "helpers")
+    assert team["matrix_user_id"] == ids["helpers"].full_id
+    assert team["thread_mode"] == "thread"
+    assert "Team of agents: general, code" in team["description"]

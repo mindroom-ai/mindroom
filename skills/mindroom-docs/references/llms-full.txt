@@ -10052,7 +10052,7 @@ Common codes are `authorization_error` and `context_unavailable`.
 
 Use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to start and continue conversations with agents in Matrix.
 Enable `matrix_message` on the caller; it also enables `matrix_room` for discovering available agents and their exact mention IDs.
-`matrix_room(action="agents")` lists agents eligible to answer this requester in the selected room, including the caller when eligible.
+`matrix_room(action="agents")` lists agents and teams eligible to answer this requester in the selected room, including the caller when eligible.
 Send a room-level message mentioning the target's `matrix_user_id` with `ignore_mentions=False` to start a conversation.
 The returned `event_id` is the conversation root: keep it as `thread_id` for later reads and replies.
 Thread-mode agents reply in that thread; room-mode agents reply in the room timeline.

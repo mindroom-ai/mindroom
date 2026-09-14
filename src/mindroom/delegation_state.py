@@ -30,11 +30,23 @@ class DelegationChild:
 
 
 @dataclass
+class DelegationHookState:
+    """Durable before/after phases for one external parent tool call."""
+
+    execution_identity: dict[str, object]
+    arguments: dict[str, Any]
+    started_at: float
+    blocked_result: str | None = None
+    after_called: bool = False
+
+
+@dataclass
 class DelegationState:
     """Persisted parent waits; workspace exports never own this state."""
 
     children: list[DelegationChild] = field(default_factory=list)
     gates: dict[str, bool] = field(default_factory=dict)
+    hooks: dict[str, DelegationHookState] = field(default_factory=dict)
     pending_tools: list[dict[str, Any]] = field(default_factory=list)
     pending_requirements: list[dict[str, Any]] = field(default_factory=list)
     pending_agent_name: str | None = None
@@ -58,6 +70,7 @@ class DelegationState:
         return cls(
             children=[DelegationChild(**child) for child in snapshot.get("children", [])],
             gates=dict(snapshot.get("gates", {})),
+            hooks={key: DelegationHookState(**value) for key, value in snapshot.get("hooks", {}).items()},
             pending_tools=list(snapshot.get("pending_tools", [])),
             pending_requirements=list(snapshot.get("pending_requirements", [])),
             pending_agent_name=snapshot.get("pending_agent_name"),

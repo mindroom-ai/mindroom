@@ -477,7 +477,7 @@ class MatrixRoomTools(Toolkit):
         Actions:
         - room-info: Room metadata (name, topic, encryption, member count, power levels, join rule).
         - members: List joined members with display names and power levels.
-        - agents: List agents available to answer this requester in the room, including yourself.
+        - agents: List agents and teams available to answer this requester in the room, including yourself.
           Each row has name, matrix_user_id, description, and thread_mode (thread or room).
           To start a conversation, send a matrix_message mentioning matrix_user_id with ignore_mentions=False.
           This lists conversation targets; run_subagent separately lists your allowed subagents.

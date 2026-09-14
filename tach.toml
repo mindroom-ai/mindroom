@@ -432,7 +432,7 @@ visibility = ["mindroom.response_turn"]
 [[modules]]
 path = "mindroom.dynamic_tool_continuation"
 depends_on = []
-visibility = ["mindroom.response_turn"]
+visibility = ["mindroom.response_turn", "mindroom.delegation_execution"]
 
 [[modules]]
 path = "mindroom.file_memory_knowledge"
@@ -1687,7 +1687,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.native"
 depends_on = ["mindroom.native_compaction"]
-visibility = ["mindroom.approval_execution", "mindroom.history.runtime", "mindroom.teams"]
+visibility = ["mindroom.approval_execution", "mindroom.history.runtime", "mindroom.teams", "mindroom.delegation_execution"]
 
 [[modules]]
 path = "mindroom.native_compaction"
@@ -5279,7 +5279,7 @@ expose = [
 from = ["mindroom.tool_system.events"]
 
 [[interfaces]]
-expose = ["build_tool_hook_bridge", "prepend_tool_hook_bridge", "SyncToolCompletionTracker", "track_sync_tool_completion"]
+expose = ["build_tool_hook_bridge", "dispatch_external_tool_hooks", "prepend_tool_hook_bridge", "SyncToolCompletionTracker", "track_sync_tool_completion"]
 from = ["mindroom.tool_system.tool_hooks"]
 
 [[modules]]
@@ -5649,6 +5649,9 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation_execution"
 depends_on = [
+    "mindroom.delegation_hooks",
+    "mindroom.dynamic_tool_continuation",
+    "mindroom.history.native",
     "mindroom.delegation_storage",
     "mindroom.agent_storage",
     "mindroom.agents",
@@ -5668,6 +5671,17 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation_state"
 depends_on = []
+
+[[modules]]
+path = "mindroom.delegation_hooks"
+depends_on = [
+    "mindroom.delegation_state",
+    "mindroom.hooks",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_hooks",
+    "mindroom.tool_system.worker_routing",
+]
 
 [[modules]]
 path = "mindroom.delegation_records"

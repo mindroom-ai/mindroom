@@ -1785,6 +1785,7 @@ async def _stream_agent_attempt_chunks(
                 run_id=attempt.attempt_run_id,
                 stream=True,
                 stream_events=True,
+                yield_run_output=True,
                 metadata=run_context.metadata,
             )
         stream_generator = stream_with_llm_request_log_context(

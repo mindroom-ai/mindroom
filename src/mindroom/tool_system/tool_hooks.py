@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import reduce, wraps
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     )
     from mindroom.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 _DECLINED_RESULT_TEMPLATE = (
     "[TOOL CALL DECLINED]\n"
     "Tool: {tool_name}\n"
@@ -1028,6 +1029,62 @@ async def _execute_bridge(
         outcome="success",
     )
     return result
+
+
+async def dispatch_external_tool_hooks(
+    *,
+    hook_registry: HookRegistry,
+    execution_identity: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    tool_name: str,
+    arguments: dict[str, Any],
+    before: bool,
+    result: object = None,
+    error: BaseException | None = None,
+    blocked: bool = False,
+    duration_ms: float = 0,
+) -> str | None:
+    """Dispatch one phase of a durable external tool through the ordinary hook policy."""
+    dispatch = _explicit_bridge_dispatch_context(ToolDispatchContext(execution_identity=execution_identity))
+    runtime_context = get_tool_runtime_context()
+    if runtime_context is not None and execution_identity_matches_tool_runtime_context(
+        replace(execution_identity, agent_name=runtime_context.agent_name),
+        runtime_context,
+    ):
+        # Team members share the live turn's bindings but retain their own hook identity.
+        dispatch = LiveToolDispatchContext.from_runtime_context(runtime_context)
+    resolved = _resolve_tool_context(
+        bridge_context=_ToolHookBridgeContext(
+            agent_name=execution_identity.agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            dispatch_context=dispatch,
+            origin=None,
+        ),
+    )
+    if before:
+        return await _maybe_block_for_before_hooks(
+            hook_registry=hook_registry,
+            resolved_context=resolved,
+            hook_arguments=None,
+            args=arguments,
+            tool_name=tool_name,
+            has_before_hooks=hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL),
+        )
+    if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
+        await _emit_after_call(
+            hook_registry=hook_registry,
+            resolved_context=resolved,
+            hook_arguments=None,
+            args=arguments,
+            tool_name=tool_name,
+            result=result,
+            error=error,
+            blocked=blocked,
+            duration_ms=duration_ms,
+        )
+    return None
 
 
 def build_tool_hook_bridge(
