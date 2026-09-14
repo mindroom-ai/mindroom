@@ -3875,13 +3875,22 @@ class ManagedTuwunelStack:
         deadline = time.monotonic() + timeout
         self.attestation_path.unlink(missing_ok=True)
         self._mindroom_start_log_offset = self.log_path.stat().st_size if self.log_path.exists() else 0
-        command = [
+        # Resolve the locked environment first, then own the Python process
+        # directly. With non-TTY stdin, uv can forward a group SIGINT a second
+        # time during Python's shutdown even though Python already received it.
+        python_executable = _run_command(
             "uv",
             "run",
             "--locked",
             "--python",
             "3.13",
             "python",
+            "-c",
+            "import sys; print(sys.executable)",
+            timeout_seconds=timeout,
+        ).strip()
+        command = [
+            python_executable,
             str(Path(__file__).resolve()),
             "__mindroom_runtime_child__",
             str(self.attestation_path),

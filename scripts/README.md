@@ -105,6 +105,7 @@ uv run python scripts/testing/fuzz_live_matrix.py --trace tests/fixtures/matrix_
 The `chaos` profile adds concurrent clients across multiple rooms, hot-thread traffic, in-flight edits and redactions, MindRoom restarts, Tuwunel restarts, and downtime followed by recovery.
 It settles at generated checkpoints and audits the final Matrix view against exact source events, response bodies, redaction provenance, and durable turn records in the current event journal.
 It uses the installed `mindroom-nio` dependency from `uv.lock`; no separate source checkout is required.
+The harness selects the locked Python environment with `uv`, then starts Python directly so a graceful group interrupt is delivered once, without a wrapper forwarding a second signal during shutdown.
 
 Generated fuzz and chaos traces append explicit follow-up probes for conversations with source redactions.
 The probes wait for durable tombstones, require deferred session cleanup, and check that redacted source markers are absent from the complete model request.
