@@ -43,7 +43,7 @@ async def test_manual_thinking_survives_checkpoint_fallback(
         if "count-tokens" in request.url.path:
             assert payload["thinking"] == manual
             blocks = [block for message in payload["messages"] for block in message["content"]]
-            tokens = 20000 if any(block["type"] == "compaction" for block in blocks) else 1000
+            tokens = 1000 if "Original launch facts." in json.dumps(blocks) else 20000
             counts.append(tokens)
             return httpx.Response(200, json={"input_tokens": tokens})
         requests.append(payload)

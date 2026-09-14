@@ -502,6 +502,7 @@ Checkpoints and their following native output are persisted through the existing
 The system instructions keep their shared prompt-cache prefix.
 OpenAI checkpoints remain opaque; local budgeting conservatively estimates their serialized size rather than treating billed pre-compaction input as active context.
 Claude usage includes every compaction iteration while context occupancy uses the final iteration.
+Vertex token counting represents checkpoint contents as text and omits the compaction policy and beta header, which its counting endpoint rejects; generation still receives the native blocks and policy.
 Canonical fallback discards thinking bound to a removed checkpoint on adaptive-thinking routes, while preserving the unchanged thinking required by legacy manual-thinking tool turns.
 Claude `pause_after_compaction: true` is rejected because MindRoom's automatic path requires the provider to continue its response.
 

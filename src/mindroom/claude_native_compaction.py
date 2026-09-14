@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 _COMPACTION_BETA = "compact-2026-01-12"
 
 
-def effective_context_management(params: dict[str, Any]) -> dict[str, Any]:
+def _effective_context_management(params: dict[str, Any]) -> dict[str, Any]:
     """Resolve the SDK's raw-body override before its top-level policy."""
     return (params.get("extra_body") or {}).get("context_management", params.get("context_management")) or {}
 
@@ -60,7 +60,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             return False
         params = {"context_management": self.context_management, **(self.request_params or {})}
         return any(
-            edit.get("type") == "compact_20260112" for edit in effective_context_management(params).get("edits", [])
+            edit.get("type") == "compact_20260112" for edit in _effective_context_management(params).get("edits", [])
         )
 
     def native_compaction_supported(self) -> bool:
@@ -138,7 +138,7 @@ class ClaudeNativeCompaction(NativeCompactionModel):
             }
         if self.native_compaction is not None:
             params["betas"] = list(dict.fromkeys([*(params.get("betas") or []), _COMPACTION_BETA]))
-        context_management = effective_context_management(params)
+        context_management = _effective_context_management(params)
         for edit in context_management.get("edits", []):
             if edit.get("type") == "compact_20260112" and edit.get("pause_after_compaction"):
                 msg = "pause_after_compaction=True is unsupported; MindRoom requires automatic continuation."

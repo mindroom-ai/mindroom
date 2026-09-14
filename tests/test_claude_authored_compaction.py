@@ -83,11 +83,14 @@ async def test_authored_checkpoint_replays_after_rebuild_without_foreign_checkpo
 
     assert requests[0]["context_management"] == _POLICY
     assert "Foreign model summary" not in json.dumps(requests[0]["messages"])
-    for payload in requests[1:]:
-        assert payload["context_management"] == _POLICY
-        blocks = [block for message in payload["messages"] for block in message["content"]]
-        assert _CHECKPOINT in blocks
-        assert foreign_block not in blocks
+    assert requests[1]["context_management"] == _POLICY
+    blocks = [block for message in requests[1]["messages"] for block in message["content"]]
+    assert _CHECKPOINT in blocks
+    assert foreign_block not in blocks
+    if vertex:
+        assert "context_management" not in requests[2]
+        assert "Launch port 4321." in json.dumps(requests[2]["messages"])
+        assert "Foreign model summary" not in json.dumps(requests[2]["messages"])
     assert rebuilt.native_compaction is not None
     assert rebuilt.native_compaction.threshold is None
 

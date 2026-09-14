@@ -432,7 +432,7 @@ async def test_raw_context_management_owns_effective_claude_policy(*, vertex: bo
 
 
 @pytest.mark.asyncio
-async def test_vertex_guard_counts_checkpoint_replay_with_beta() -> None:
+async def test_vertex_guard_counts_checkpoint_replay_as_text() -> None:
     """Vertex must not trim a checkpoint because it counted the replaced transcript."""
     requests: list[dict[str, Any]] = []
     headers: list[str] = []
@@ -478,9 +478,12 @@ async def test_vertex_guard_counts_checkpoint_replay_with_beta() -> None:
         )
         assert count == 100
 
-    assert requests[-1]["messages"][0]["content"][0]["type"] == "compaction"
-    assert requests[-1]["context_management"]["edits"][0]["type"] == "compact_20260112"
-    assert "compact-2026-01-12" in headers[-1] or "compact-2026-01-12" in requests[-1].get("anthropic_beta", [])
+    counted_block = requests[-1]["messages"][0]["content"][0]
+    assert counted_block["type"] == "text"
+    assert "Launch port 4321." in counted_block["text"]
+    assert "context_management" not in requests[-1]
+    assert "compact-2026-01-12" not in headers[-1]
+    assert "compact-2026-01-12" not in requests[-1].get("anthropic_beta", [])
 
 
 @pytest.mark.parametrize(

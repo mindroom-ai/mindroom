@@ -12,7 +12,6 @@ from agno.utils.models.claude import format_messages, format_tools_for_model
 from agno.utils.tokens import count_schema_tokens
 
 from mindroom.claude_compat import ClaudeProviderCompat
-from mindroom.claude_native_compaction import effective_context_management
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
@@ -35,8 +34,8 @@ logger = get_logger(__name__)
 
 _EXACT_COUNT_THRESHOLD_RATIO = 0.5
 _EXACT_COUNT_BLOCK_TYPES = frozenset({"document", "image"})
-_VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES = frozenset(
-    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE},
+_VERTEX_COUNT_AS_TEXT_BLOCK_TYPES = frozenset(
+    {SERVER_TOOL_USE_BLOCK_TYPE, TOOL_SEARCH_RESULT_BLOCK_TYPE, "compaction"},
 )
 # Before any tools are discovered, Vertex generation reports 213 input tokens
 # for the native regex search tool on both Claude Haiku 4.5 and Sonnet 4.6.
@@ -147,7 +146,7 @@ def _referenced_tool_names(search_result_block: object) -> set[str]:
 
 
 def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None, set[str]]:
-    """Convert native search history to text and collect selected tool names."""
+    """Convert unsupported blocks to countable text and collect selected tool names."""
     referenced_tool_names: set[str] = set()
     count_messages: list[Any] | None = None
     if not isinstance(messages, list):
@@ -163,7 +162,7 @@ def _messages_for_vertex_token_count(messages: object) -> tuple[list[Any] | None
             referenced_tool_names.update(_referenced_tool_names(block))
         count_content = [
             {"type": "text", "text": stable_serialize(block)}
-            if isinstance(block, dict) and block.get("type") in _VERTEX_TOOL_SEARCH_HISTORY_BLOCK_TYPES
+            if isinstance(block, dict) and block.get("type") in _VERTEX_COUNT_AS_TEXT_BLOCK_TYPES
             else block
             for block in content
         ]
@@ -207,7 +206,7 @@ def _tools_for_vertex_token_count(
 
 
 def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dict[str, Any], int]:
-    """Build a countable equivalent of a native tool-search request.
+    """Build a countable equivalent of native provider output.
 
     Vertex generation accepts Anthropic's native tool-search schema, but its
     count-tokens endpoint rejects the search tool, ``defer_loading``, and the
@@ -216,6 +215,8 @@ def _request_for_vertex_token_count(request_kwargs: dict[str, Any]) -> tuple[dic
     server-side search prefix separately. Definitions selected by a new search
     are generated inside the server-tool loop and cannot be known by any
     preflight count; they become countable on the following request.
+    Compaction blocks are also unsupported, so count their serialized contents
+    as text while generation keeps the actual checkpoint blocks unchanged.
     """
     count_messages, referenced_tool_names = _messages_for_vertex_token_count(request_kwargs.get("messages"))
     count_tools, has_native_search = _tools_for_vertex_token_count(
@@ -290,10 +291,6 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
             request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
         if thinking := self.effective_thinking():
             request_kwargs["thinking"] = thinking
-        if self.native_compaction is not None:
-            params = self.get_request_params()
-            request_kwargs["context_management"] = effective_context_management(params)
-            request_kwargs["betas"] = params["betas"]
         return prepare_claude_request_kwargs(self, request_kwargs)
 
     def _estimate_request_input_tokens(
@@ -330,7 +327,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         response_format: dict[str, Any] | type[Any] | None,
         compress_tool_results: bool,
     ) -> int:
-        """Count the provider-shaped payload using Vertex's exact tokenizer."""
+        """Count the supported payload representation with Vertex's tokenizer."""
         request_kwargs = await asyncio.to_thread(
             self._request_input_kwargs,
             messages,
@@ -340,10 +337,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         )
         count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
         client = self.get_async_client()
-        if self.native_compaction is not None:
-            response = await client.beta.messages.count_tokens(**count_kwargs)
-        else:
-            response = await client.messages.count_tokens(**count_kwargs)
+        response = await client.messages.count_tokens(**count_kwargs)
         return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
