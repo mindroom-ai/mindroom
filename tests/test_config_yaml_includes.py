@@ -14,6 +14,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 from typer.testing import CliRunner
+from yaml.constructor import ConstructorError
+from yaml.scanner import Scanner
 
 from mindroom import file_watcher
 from mindroom.cli.main import app
@@ -91,6 +93,25 @@ def _write_split_config(config_dir: Path) -> Path:
 
 class TestIncludeTags:
     """Happy-path semantics of each include tag."""
+
+    def test_config_load_avoids_python_scanner_when_libyaml_is_available(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Repeated config loads must not pay for the Python scanner when libyaml is installed."""
+        if not yaml.__with_libyaml__:
+            pytest.skip("PyYAML built without libyaml")
+        config_path = _write_split_config(tmp_path)
+
+        def reject_python_scanner(_self: object) -> None:
+            pytest.fail("Config parsing used the slow Python YAML scanner")
+
+        monkeypatch.setattr(Scanner, "fetch_more_tokens", reject_python_scanner)
+
+        data, _files = load_yaml_config_source(config_path)
+
+        assert data == MONOLITH_CONFIG
 
     def test_include_resolves_nested_files_relative_to_including_file(self, tmp_path: Path) -> None:
         """!include nests recursively and resolves relative to the including file."""
@@ -466,6 +487,17 @@ class TestIncludeErrors:
 
         with pytest.raises(yaml.YAMLError, match=r"bad\.yaml"):
             load_yaml_config_source(tmp_path / "config.yaml")
+
+    def test_unsafe_tag_inside_included_file_reports_file_and_line(self, tmp_path: Path) -> None:
+        """The fast loader must reject Python tags and retain the included file's error mark."""
+        _write(tmp_path / "config.yaml", "nested: !include sub/unsafe.yaml\n")
+        included = _write(tmp_path / "sub" / "unsafe.yaml", "safe: true\nunsafe: !!python/tuple [1, 2]\n")
+
+        with pytest.raises(ConstructorError) as exc_info:
+            load_yaml_config_source(tmp_path / "config.yaml")
+
+        assert exc_info.value.problem_mark.name == str(included)
+        assert exc_info.value.problem_mark.line == 1
 
     def test_hidden_file_component_is_rejected(self, tmp_path: Path) -> None:
         """!include_text of a dotfile is rejected with the including file and line."""

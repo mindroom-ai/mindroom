@@ -5,10 +5,8 @@ dumper, even when PyYAML was built with libyaml. The C classes parse and
 serialize 10-20x faster with identical semantics for the safe tag set, so
 every safe load/dump in this codebase should go through this module.
 
-The config ``!include`` loader (``mindroom.config.yaml_includes``) deliberately
-stays on the pure-Python ``SafeLoader``: it renames the stream so error marks
-point at the offending config file, which the C parser does not support, and
-config parsing is cold.
+``SafeLoader`` is also the base for custom safe loaders, so they share the
+same libyaml preference and pure-Python fallback.
 """
 
 from __future__ import annotations
@@ -21,15 +19,14 @@ from typing import IO, Any, TypedDict, Unpack, overload
 import yaml
 
 try:
-    from yaml import CSafeDumper, CSafeLoader
+    from yaml import CSafeDumper
+    from yaml import CSafeLoader as SafeLoader
 except ImportError:
     from yaml import SafeDumper, SafeLoader
 
     _SAFE_DUMPER = SafeDumper
-    _SAFE_LOADER = SafeLoader
 else:
     _SAFE_DUMPER = CSafeDumper
-    _SAFE_LOADER = CSafeLoader
 
 
 class _DumpOptions(TypedDict, total=False):
@@ -49,7 +46,7 @@ class _DumpOptions(TypedDict, total=False):
 
 def safe_load(stream: str | bytes | IO[str] | IO[bytes]) -> Any:  # noqa: ANN401
     """Parse one YAML document like ``yaml.safe_load``, preferring libyaml."""
-    return yaml.load(stream, Loader=_SAFE_LOADER)  # noqa: S506 - safe loader variant
+    return yaml.load(stream, Loader=SafeLoader)
 
 
 @overload

@@ -28,10 +28,13 @@ includes.
 from __future__ import annotations
 
 import hashlib
+from io import StringIO
 from pathlib import Path
 from typing import Any, Never, cast
 
 import yaml
+
+from mindroom.yaml_io import SafeLoader
 
 _YAML_SUFFIXES = (".yaml", ".yml")
 
@@ -40,10 +43,7 @@ class ConfigIncludeError(yaml.YAMLError):
     """User-facing error raised when resolving config ``!include`` tags fails."""
 
 
-# Deliberately built on the pure-Python SafeLoader rather than mindroom.yaml_io:
-# the loader renames its stream so error marks point at the offending config
-# file, which the libyaml parser does not support, and config parsing is cold.
-class _IncludeLoader(yaml.SafeLoader):
+class _IncludeLoader(SafeLoader):  # ty: ignore[unsupported-base] - both safe loader variants have the same interface
     """SafeLoader that resolves include tags relative to the file being parsed."""
 
     def __init__(
@@ -56,10 +56,11 @@ class _IncludeLoader(yaml.SafeLoader):
         file_texts: dict[Path, str],
         include_chain: tuple[Path, ...],
     ) -> None:
-        super().__init__(stream)
-        # PyYAML names string streams '<unicode string>'; use the file path so
-        # error marks report the offending file.
-        self.name = str(source_path)
+        # Both parsers read the stream name at initialization. Set it on the
+        # already-read text so include errors retain their file and line.
+        named_stream = StringIO(stream)
+        named_stream.name = str(source_path)
+        super().__init__(named_stream)
         self.source_path = source_path
         self.root_dir = root_dir
         self.files_read = files_read

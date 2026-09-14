@@ -108,5 +108,5 @@ def test_prefers_libyaml_classes_when_available() -> None:
     """When PyYAML was built with libyaml, the C classes must be selected."""
     if not getattr(yaml, "__with_libyaml__", False):
         pytest.skip("PyYAML built without libyaml")
-    assert yaml_io._SAFE_LOADER is yaml.CSafeLoader
+    assert yaml_io.SafeLoader is yaml.CSafeLoader
     assert yaml_io._SAFE_DUMPER is yaml.CSafeDumper
