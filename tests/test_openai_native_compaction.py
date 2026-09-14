@@ -11,6 +11,7 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
+from agno.utils.message import filter_tool_calls
 from openai import AsyncOpenAI, OpenAI
 from openai.types.responses import Response
 
@@ -424,6 +425,101 @@ def test_ordered_output_does_not_restore_rewritten_text() -> None:
     )
     assert replay[0] == {"role": "assistant", "content": "Rewritten answer."}
     assert "Ready" not in json.dumps([item if isinstance(item, dict) else item.model_dump() for item in replay])
+
+
+@pytest.mark.parametrize("reasoning", [None, _REASONING, {"type": "reasoning", "id": "rs_last", "summary": []}])
+@pytest.mark.parametrize("retained_calls", [0, 1, 2])
+@pytest.mark.parametrize("portable", [False, True])
+def test_legacy_replay_reconstructs_calls_without_inventing_reasoning(
+    reasoning: dict[str, Any] | None,
+    retained_calls: int,
+    *,
+    portable: bool,
+) -> None:
+    """A legacy reasoning tail cannot authorize replay of any original provider call ID."""
+    data: dict[str, Any] = {"response_id": "resp_legacy"}
+    if reasoning is not None:
+        data["reasoning_output"] = reasoning
+    messages = [
+        Message(role="user", content="Check both services."),
+        Message(
+            role="assistant",
+            content="Current answer.",
+            tool_calls=[
+                {
+                    "id": f"fc_{name}",
+                    "call_id": f"call_{name}",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": json.dumps({"service": name})},
+                }
+                for name in ("first", "second")
+            ],
+            provider_data=data,
+        ),
+        Message(role="tool", tool_call_id="fc_first", content="First ready"),
+        Message(role="tool", tool_call_id="fc_second", content="Second ready"),
+        Message(role="user", content="Continue."),
+    ]
+    original = [message.model_dump() for message in messages]
+    replay_messages = list(messages)
+    filter_tool_calls(replay_messages, retained_calls)
+    filtered = [message.model_dump() for message in replay_messages]
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=portable)
+    model.configure_portable_replay(enabled=portable)
+
+    request = model.get_request_params(messages=replay_messages)
+    replay = model._format_messages(replay_messages)
+
+    assert "previous_response_id" not in request
+    assert replay[:2] == [
+        {"role": "user", "content": "Check both services."},
+        {"role": "assistant", "content": "Current answer."},
+    ]
+    expected_names = {0: [], 1: ["second"], 2: ["first", "second"]}[retained_calls]
+    assert replay[2:-1] == [
+        *[
+            {
+                "type": "function_call",
+                "call_id": f"call_{name}",
+                "name": "lookup",
+                "arguments": json.dumps({"service": name}),
+                "status": "completed",
+            }
+            for name in expected_names
+        ],
+        *[
+            {"type": "function_call_output", "call_id": f"call_{name}", "output": f"{name.title()} ready"}
+            for name in expected_names
+        ],
+    ]
+    assert replay[-1] == {"role": "user", "content": "Continue."}
+    assert [message.model_dump() for message in replay_messages] == filtered
+    assert [message.model_dump() for message in messages] == original
+
+
+def test_rewritten_ordered_tool_output_uses_canonical_input() -> None:
+    """A rewritten answer must retain calls without reusing an incomplete provider span."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    parsed = model._parse_provider_response(Response.model_validate(_response([_REASONING, _ANSWER, _CALL])))
+    messages = [
+        Message(
+            role="assistant",
+            content="Rewritten answer.",
+            tool_calls=parsed.tool_calls,
+            provider_data=parsed.provider_data,
+        ),
+        Message(role="tool", tool_call_id="fc_lookup", content="Found it"),
+    ]
+    original = [message.model_dump() for message in messages]
+
+    replay = model._format_messages(messages)
+
+    assert replay == [
+        {"role": "assistant", "content": "Rewritten answer."},
+        {"type": "function_call", "call_id": "call_lookup", "name": "lookup", "arguments": "{}", "status": "completed"},
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+    ]
+    assert [message.model_dump() for message in messages] == original
 
 
 @pytest.mark.parametrize("key", ["context_management", "store", "previous_response_id", "background"])

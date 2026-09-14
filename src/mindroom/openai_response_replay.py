@@ -83,9 +83,33 @@ def formatted_input_with_provider_items(
             cursor = anchor + len(replacement)
         else:
             items = data.get(_TOOL_SEARCH_ITEMS_KEY) or []
-            prepared_input[anchor:anchor] = items
-            cursor = anchor + len(items) + size
+            span = prepared_input[anchor : anchor + size]
+            if replay_reasoning:
+                span = _reconstructed_response_input(message, span)
+            prepared_input[anchor : anchor + size] = [*items, *span]
+            cursor = anchor + len(items) + len(span)
     return prepared_input
+
+
+def _reconstructed_response_input(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]]:
+    """Build fresh input when the original provider output cannot be replayed.
+
+    Legacy Agno records retain only the last reasoning item, which cannot
+    establish the dependencies of even a single remaining call after filtering.
+    Omit that tail and the optional provider item IDs; call_id still pairs each
+    reconstructed function call with its already-normalized result. Canonical
+    text and arguments remain authoritative, including request-local rewrites.
+    """
+    if not message.tool_calls:
+        return formatted_span[:1]
+    calls = [
+        {key: value for key, value in item.items() if key != "id"}
+        for item in formatted_span
+        if isinstance(item, dict) and item.get("type") == "function_call"
+    ]
+    if message.content:
+        calls.insert(0, {"role": "assistant", "content": message.content})
+    return calls
 
 
 def _canonical_response_output(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]] | None:
