@@ -1,139 +1,102 @@
-"""Cached schema preparation for prompt-only tool descriptions."""
+"""Cached JSON schemas for prompt-only tool descriptions."""
 
 from __future__ import annotations
 
 import json
-from copy import deepcopy
+from collections import OrderedDict
 from dataclasses import dataclass
-from functools import lru_cache
-from inspect import isfunction, ismethod
-from types import MethodType
-from typing import TYPE_CHECKING, Any
+from inspect import isfunction
+from threading import Lock
+from types import FunctionType, MethodType
+from typing import Any
+from weakref import ref
 
-from agno.tools.function import Function, UserInputField
+from agno.tools.function import Function
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from mindroom.tool_system.declarations import tool_schema_source
+
+type _SchemaCacheKey = tuple[ref[FunctionType], bool, bool, str]
+
+_CACHE_SIZE = 4096
+_SCHEMA_CACHE: OrderedDict[_SchemaCacheKey, str] = OrderedDict()
+_SCHEMA_CACHE_LOCK = Lock()
 
 
 @dataclass(frozen=True, slots=True)
 class _ProcessedFunctionSchema:
-    """Processed prompt schema snapshot for one Function."""
+    """Detached model-facing fields; no execution state or annotation objects."""
 
     parameters: dict[str, Any]
     description: str | None
-    user_input_schema: tuple[UserInputField, ...] | None
 
 
 def cached_processed_schema(function: Function, *, strict: bool) -> _ProcessedFunctionSchema | None:
-    """Return a private copy of the cached processed prompt schema for one Function.
+    """Return a private prompt schema without extending the callable's lifetime.
 
-    Never mutates ``function``. Returns ``None`` when the entrypoint or
-    parameters cannot form a stable cache key, in which case callers must fall
-    back to full entrypoint processing on a private copy.
+    Unsupported processors, callables, or non-JSON schemas use the caller's
+    existing uncached preparation path.
     """
-    from mindroom.tool_system.output_files import (  # noqa: PLC0415 - Keep workspace imports out of this leaf module's startup.
-        output_file_schema_source,
+    from mindroom.tool_system.output_files import (  # noqa: PLC0415 - Preserve the slim startup import boundary.
+        uses_output_file_schema,
     )
 
     if function.entrypoint is None:
         return None
 
-    output_source = output_file_schema_source(function)
+    output_file_schema = uses_output_file_schema(function)
     processor = function.process_entrypoint
-    if (
-        isinstance(processor, MethodType)
-        and processor.__func__ is not Function.process_entrypoint
-        and output_source is None
+    if not isinstance(processor, MethodType) or (
+        processor.__func__ is not Function.process_entrypoint and not output_file_schema
     ):
         return None
 
-    source_callable = output_source or getattr(function.entrypoint, "__wrapped__", function.entrypoint)
-    bound_method = False
-    if isinstance(source_callable, MethodType) or ismethod(source_callable):
-        source_callable = source_callable.__func__
-        bound_method = True
-    if not isfunction(source_callable):
+    source = tool_schema_source(function.entrypoint)
+    bound_method = isinstance(source, MethodType)
+    if isinstance(source, MethodType):
+        source = source.__func__
+    if not isfunction(source):
         return None
-
-    if output_source is not None:
-        # Factory functions can retain request state in defaults as well as closures.
-        if (
-            source_callable.__closure__
-            or "<locals>" in source_callable.__qualname__
-            or getattr(source_callable, "__wrapped__", None) is not None
-        ):
-            return None
-        strict = False if function.strict is False else strict
 
     try:
-        parameters_json = json.dumps(function.parameters, sort_keys=True, separators=(",", ":"))
+        inputs = json.dumps(
+            (
+                function.name,
+                function.description,
+                function.parameters,
+                function.skip_entrypoint_processing,
+                function.requires_user_input,
+                function.user_input_fields,
+                function.strict,
+                strict,
+            ),
+            sort_keys=True,
+        )
     except TypeError:
         return None
+    key = (ref(source), bound_method, output_file_schema, inputs)
+    with _SCHEMA_CACHE_LOCK:
+        payload = _SCHEMA_CACHE.get(key)
+        if payload is not None:
+            _SCHEMA_CACHE.move_to_end(key)
 
-    snapshot = _cached_processed_function_schema(
-        source_callable,
-        function.name,
-        function.description,
-        parameters_json,
-        function.skip_entrypoint_processing,
-        function.requires_user_input,
-        tuple(function.user_input_fields) if function.user_input_fields is not None else None,
-        function.strict,
-        strict,
-        output_source is not None,
-        bound_method if output_source is not None else False,
-    )
-    # Copy at the boundary so callers can never corrupt the shared LRU entry.
-    return _ProcessedFunctionSchema(
-        parameters=deepcopy(snapshot.parameters),
-        description=snapshot.description,
-        user_input_schema=deepcopy(snapshot.user_input_schema) if snapshot.user_input_schema is not None else None,
-    )
+    if payload is None:
+        prepared = function.model_copy(deep=True)
+        prepared.process_entrypoint(strict=strict)
+        try:
+            # JSON values cannot keep owners alive through annotations or container attributes.
+            payload = json.dumps({"parameters": prepared.parameters, "description": prepared.description})
+        except TypeError:
+            return None
+        with _SCHEMA_CACHE_LOCK:
+            _SCHEMA_CACHE[key] = payload
+            _SCHEMA_CACHE.move_to_end(key)
+            if len(_SCHEMA_CACHE) > _CACHE_SIZE:
+                _SCHEMA_CACHE.popitem(last=False)
+
+    return _ProcessedFunctionSchema(**json.loads(payload))
 
 
 def clear_tool_schema_cache() -> None:
     """Clear cached schemas after plugin or tool code changes."""
-    _cached_processed_function_schema.cache_clear()
-
-
-@lru_cache(maxsize=4096)
-def _cached_processed_function_schema(
-    source_callable: Callable[..., object],
-    name: str,
-    description: str | None,
-    parameters_json: str,
-    skip_entrypoint_processing: bool,
-    requires_user_input: bool | None,
-    user_input_fields: tuple[str, ...] | None,
-    function_strict: bool | None,
-    strict: bool,
-    output_file: bool = False,
-    output_file_bound_method: bool = False,
-) -> _ProcessedFunctionSchema:
-    if output_file:
-        from mindroom.tool_system.output_files import output_file_schema_entrypoint  # noqa: PLC0415
-
-        source_callable = output_file_schema_entrypoint(source_callable, bound_method=output_file_bound_method)
-    function = Function(
-        name=name,
-        description=description,
-        parameters=json.loads(parameters_json),
-        entrypoint=source_callable,
-        skip_entrypoint_processing=skip_entrypoint_processing,
-        requires_user_input=requires_user_input,
-        user_input_fields=list(user_input_fields) if user_input_fields is not None else None,
-        strict=function_strict,
-    )
-    function.process_entrypoint(strict=strict)
-    if output_file:
-        from mindroom.tool_system.output_files import ensure_output_path_schema_optional  # noqa: PLC0415
-
-        ensure_output_path_schema_optional(function)
-    return _ProcessedFunctionSchema(
-        parameters=deepcopy(function.parameters),
-        description=function.description,
-        user_input_schema=tuple(deepcopy(function.user_input_schema))
-        if function.user_input_schema is not None
-        else None,
-    )
+    with _SCHEMA_CACHE_LOCK:
+        _SCHEMA_CACHE.clear()

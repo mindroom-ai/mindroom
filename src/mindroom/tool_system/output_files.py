@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -39,7 +40,6 @@ _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _WRAPPED_ATTR = "__mindroom_output_file_wrapped__"
-_SCHEMA_SOURCE_ATTR = "__mindroom_output_file_schema_source__"
 _DEFAULT_PARAMETERS = {"type": "object", "properties": {}, "required": []}
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
 _TEXT_FALLBACK_HEADER = (
@@ -246,23 +246,14 @@ def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = F
     ensure_output_path_schema_optional(self)
 
 
-def output_file_schema_source(function: Function) -> Callable[..., object] | None:
-    """Expose only our known wrapper's original callable for prompt-schema preparation."""
+def uses_output_file_schema(function: Function) -> bool:
+    """Whether this Function uses our known output-path schema processor."""
     processor = function.process_entrypoint
-    if not isinstance(processor, MethodType) or processor.__func__ is not _process_entrypoint_with_output_path_schema:
-        return None
-    return cast("Callable[..., object] | None", getattr(function.entrypoint, _SCHEMA_SOURCE_ATTR, None))
-
-
-def output_file_schema_entrypoint(source: Callable[..., object], *, bound_method: bool) -> Callable[..., object]:
-    """Reproduce wrapper introspection without retaining a toolkit or workspace policy."""
-
-    def schema_only(*_args: object, **_kwargs: object) -> object:
-        msg = "A prompt-schema entrypoint cannot execute tools"
-        raise RuntimeError(msg)
-
-    entrypoint = MethodType(source, object()) if bound_method else source
-    return _set_output_file_metadata(schema_only, entrypoint)
+    return (
+        function.entrypoint is not None
+        and isinstance(processor, MethodType)
+        and processor.__func__ is _process_entrypoint_with_output_path_schema
+    )
 
 
 def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
@@ -746,19 +737,12 @@ def _wrap_entrypoint(
 
         wrapper = sync_wrapper
 
-    return _set_output_file_metadata(wrapper, entrypoint)
-
-
-def _set_output_file_metadata(
-    wrapper: Callable[..., object],
-    entrypoint: Callable[..., object],
-) -> Callable[..., object]:
-    setattr(wrapper, "__name__", getattr(entrypoint, "__name__", "tool_entrypoint"))  # noqa: B010 - Callable omits this metadata.
+    wrapper.__name__ = getattr(entrypoint, "__name__", "tool_entrypoint")
     wrapper.__doc__ = _docstring_with_output_path(getattr(entrypoint, "__doc__", None))
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)
-    setattr(wrapper, _SCHEMA_SOURCE_ATTR, entrypoint)
+    declare_tool_schema_source(wrapper, entrypoint)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper
 
