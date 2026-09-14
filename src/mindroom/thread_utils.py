@@ -180,6 +180,8 @@ def has_multiple_non_agent_users_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    current_sender_id: str | None = None,
 ) -> bool:
     """Return True when more than one non-agent user has posted in the thread.
 
@@ -187,6 +189,8 @@ def has_multiple_non_agent_users_in_thread(
     excluded from the count.
     """
     non_agent_senders: set[str] = set()
+    if current_sender_id and not _is_bot_or_agent(current_sender_id, config, runtime_paths):
+        non_agent_senders.add(current_sender_id)
     for msg in thread_history:
         sender = msg.sender
         if sender and not _is_bot_or_agent(sender, config, runtime_paths):

@@ -1858,3 +1858,31 @@ async def test_drain_all_flushes_pending_debounced_work_and_idles_gate() -> None
     assert result.completed is True
     assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$pending:localhost"]]
     assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mention", [False, True])
+async def test_adaptive_text_burst_waits_and_mention_flushes(mention: bool) -> None:
+    """Opted-in text coalesces; an ordinary explicit turn ends its pause."""
+    batches: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(dispatch_turn=dispatch_batch, debounce_seconds=lambda: 0, is_shutting_down=lambda: False)
+    key = requester_coalescing_key("!room:localhost", "$thread:localhost", "@user:localhost")
+    first = _pending(_text_event("$first:localhost", "first", 1_000_000))
+    first.text_debounce_seconds = 0.1
+    await _admit_ready(gate, key, first)
+    await asyncio.sleep(0.02)
+    assert batches == []
+    second = _pending(_text_event("$second:localhost", "@helper help" if mention else "second", 1_000_100))
+    second.text_debounce_seconds = 0 if mention else 0.1
+    await _admit_ready(gate, key, second)
+    if not mention:
+        await asyncio.sleep(0.02)
+        assert batches == []
+    await _wait_for(lambda: bool(batches), deadline_seconds=0.05 if mention else 0.3)
+    assert len(batches) == 1
+    assert batches[0].handled_turn.source_event_ids == ("$first:localhost", "$second:localhost")
+    await gate.drain_all()

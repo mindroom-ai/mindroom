@@ -929,6 +929,47 @@ class TurnController:
         )
         await dispatch_text_message(self, turn)
 
+    async def _adaptive_text_debounce_seconds(
+        self,
+        event: PreparedIngress,
+        room: nio.MatrixRoom,
+        *,
+        requester_user_id: str,
+        key: CoalescingKey,
+        source_kind: str,
+    ) -> float:
+        """Resolve adaptive eligibility before queue admission without delaying ordinary text."""
+        participation = self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths)
+        if (
+            participation is None
+            or participation.agent != self.deps.agent_name
+            or participation.debounce_seconds <= 0
+            or key.thread_id is None
+            or source_kind != MESSAGE_SOURCE_KIND
+        ):
+            return 0.0
+        target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=key.thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        envelope = self.deps.resolver.build_ingress_envelope(
+            event=event,
+            requester_user_id=requester_user_id,
+            target=target,
+            source_kind=source_kind,
+        )
+        if not envelope.origin.may_answer_interactive_prompt:
+            return 0.0
+        result = await self.deps.resolver.extract_dispatch_context(room, event)
+        selected = self.deps.turn_policy.adaptive_participation(
+            context=result.context,
+            room=room,
+            requester_user_id=requester_user_id,
+        )
+        return selected.debounce_seconds if selected is not None else 0.0
+
     async def _enqueue_for_dispatch(
         self,
         event: DispatchEvent,
@@ -989,7 +1030,15 @@ class TurnController:
         else:
             msg = f"Unsupported dispatch event: {type(event).__name__}"
             raise TypeError(msg)
+        text_debounce_seconds = await self._adaptive_text_debounce_seconds(
+            prepared_event,
+            room,
+            requester_user_id=requester_user_id,
+            key=resolved_key,
+            source_kind=source_kind,
+        )
         pending_event = PendingEvent(
+            text_debounce_seconds=text_debounce_seconds,
             event=replace(
                 prepared_event,
                 requester_user_id=requester_user_id,
@@ -2058,6 +2107,7 @@ class TurnController:
                     requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
                     scheduled_history_budget=dispatch.scheduled_history_budget,
                     scheduled_model=dispatch.scheduled_model,
+                    participation=action.participation,
                     payload_preparation=payload_preparation,
                     current_timestamp_ms=current_timestamp_ms,
                     current_prompt_is_structured=dispatch.current_prompt_is_structured,

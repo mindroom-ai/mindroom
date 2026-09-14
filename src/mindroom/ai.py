@@ -67,6 +67,7 @@ from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
+from mindroom.participation import participation_model
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
     close_unreturned_agent,
@@ -908,14 +909,17 @@ async def _run_non_streaming_agent_attempts(
     """Run one non-streaming agent response attempt."""
     agent = run_context.prepared_run.agent
     try:
-        with bind_llm_request_log_context(
-            **_attempt_request_log_context(
-                run_context.turn,
-                session_id=run_context.session_id,
-                prompt=run_context.prompt,
-                model_prompt=run_context.model_prompt,
-                attempt_prompt=attempt.attempt_prompt,
-                metadata=run_context.metadata,
+        with (
+            participation_model(agent.model, run_context.turn.participation),
+            bind_llm_request_log_context(
+                **_attempt_request_log_context(
+                    run_context.turn,
+                    session_id=run_context.session_id,
+                    prompt=run_context.prompt,
+                    model_prompt=run_context.model_prompt,
+                    attempt_prompt=attempt.attempt_prompt,
+                    metadata=run_context.metadata,
+                ),
             ),
         ):
             response = await _run_cached_agent_attempt(
@@ -946,6 +950,14 @@ async def _run_non_streaming_agent_attempts(
             session_type=SessionType.AGENT,
             entity_name=run_context.agent_name,
         )
+
+
+def _failed_agent_attempt(ctx: ResponseTurnContext, error: Exception) -> BlockingAttemptResolution:
+    """Keep pre-decision failures quiet; approved turns retain ordinary error replies."""
+    if ctx.participation is not None and not ctx.participation.approved:
+        ctx.participation.decline("preparation_failed")
+        return CompletedAttempt()
+    return ExcludedAttempt(RunStatus.error, get_user_friendly_error_message(error, ctx.entity_label))
 
 
 def _assert_agent_target(agent_name: str, config: Config) -> None:
@@ -1301,7 +1313,7 @@ async def _prepare_agent_run_context(
         )
 
 
-async def ai_response(  # noqa: C901
+async def ai_response(  # noqa: C901, PLR0915
     ctx: ResponseTurnContext,
     prompt: str,
     runtime_paths: RuntimePaths,
@@ -1485,7 +1497,7 @@ async def ai_response(  # noqa: C901
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
-            return ExcludedAttempt(RunStatus.error, get_user_friendly_error_message(e, agent_name))
+            return _failed_agent_attempt(ctx, e)
         prepared_run = run_context.prepared_run
         holder.agent = prepared_run.agent
         run.unseen_event_ids = prepared_run.unseen_event_ids
@@ -1508,9 +1520,18 @@ async def ai_response(  # noqa: C901
                 pipeline_timing=pipeline_timing,
             ),
         )
+        if (
+            ctx.participation is not None
+            and not ctx.participation.approved
+            and (
+                attempt_result.user_error is not None
+                or (attempt_result.response is not None and attempt_result.response.status is RunStatus.error)
+            )
+        ):
+            ctx.participation.decline("run_failed_before_decision")
+            return CompletedAttempt()
         if attempt_result.user_error is not None:
-            error_text = get_user_friendly_error_message(attempt_result.user_error, agent_name)
-            return ExcludedAttempt(RunStatus.error, error_text)
+            return _failed_agent_attempt(ctx, attempt_result.user_error)
         response = cast("RunOutput", attempt_result.response)
 
         response_tool_trace = _extract_tool_trace(response)
@@ -1902,7 +1923,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_streaming_attempt(  # noqa: C901, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -1940,6 +1961,10 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
         except Exception as e:
             logger.exception("Error preparing agent for streaming", agent=agent_name)
+            if ctx.participation is not None and not ctx.participation.approved:
+                ctx.participation.decline("preparation_failed")
+                yield AttemptResolved(CompletedAttempt())
+                return
             yield get_user_friendly_error_message(e, agent_name)
             yield AttemptResolved(HandledAttempt())
             return
@@ -2018,13 +2043,18 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ),
             active_model_name=prepared_run.runtime_model_name,
         )
-        async for stream_chunk in attempt_stream:
-            yield stream_chunk
+        with participation_model(prepared_run.agent.model, ctx.participation):
+            async for stream_chunk in attempt_stream:
+                yield stream_chunk
 
         run_error = state.user_error or state.stream_exception
         if run_error is not None:
-            yield get_user_friendly_error_message(run_error, agent_name)
-            yield AttemptResolved(HandledAttempt())
+            if ctx.participation is not None and not ctx.participation.approved:
+                ctx.participation.decline("run_failed_before_decision")
+                yield AttemptResolved(CompletedAttempt())
+            else:
+                yield get_user_friendly_error_message(run_error, agent_name)
+                yield AttemptResolved(HandledAttempt())
             return
 
         if state.cancelled_run_event is not None:

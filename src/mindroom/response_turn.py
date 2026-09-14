@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
+    from mindroom.participation import ParticipationGate
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
@@ -293,6 +294,7 @@ class ResponseTurnContext:
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
+    participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
@@ -975,6 +977,22 @@ def _settle_completed_attempt(
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
+    if ctx.participation is not None and ctx.participation.is_silent:
+        discard_empty_run(
+            run.scope_context,
+            EmptyRunDiscard(
+                session_id=resolution.session_id or ctx.session_id,
+                run_id=resolution.run_id,
+                output_tokens=resolution.output_tokens,
+            ),
+        )
+        return _CompletionSettle(
+            keep_going=False,
+            continuation=continuation,
+            recorded_text="",
+            recorded_tools=(),
+            response_text="",
+        )
     if resolution.is_empty and ctx.allow_no_report_response:
         return _CompletionSettle(
             keep_going=False,

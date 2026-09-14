@@ -14,11 +14,14 @@ from zoneinfo import ZoneInfo
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
+from agno.agent import Agent
+from agno.compression.manager import CompressionManager
+from agno.models.response import ModelResponse, ToolExecution
 from agno.session.agent import AgentSession
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.participation import RoomParticipationConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -78,6 +81,7 @@ from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
+from tests.ai_user_id_helpers import _prepared_prompt_result
 from tests.bot_helpers import (
     AgentBotTestBase,
     _handled_response_event_id,
@@ -107,6 +111,7 @@ from tests.conftest import (
     runtime_paths_for,
     seed_session,
 )
+from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -3319,3 +3324,88 @@ class TestAgentBot(AgentBotTestBase):
 
         suspend.assert_awaited_once()
         effects.assert_not_awaited()
+
+
+class TestAdaptiveResponse(AgentBotTestBase):
+    """Exercise quiet participation through the real agent and Matrix lifecycle."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streaming", [False, True])
+    @pytest.mark.parametrize("action", ["respond", "stay_silent", "compression_failure"])
+    async def test_participation_precedes_every_visible_effect(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        streaming: bool,
+        action: str,
+    ) -> None:
+        """A silent decision must not send placeholders, typing, or retry notices."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        bot.client.room_send.return_value = _room_send_response("$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        model = ParticipationModel(
+            ModelResponse(content=json.dumps({"action": action, "reason": "Conversation context."})),
+        )
+        model.cache_response = True
+        monkeypatch.setattr(
+            model,
+            "_get_cached_model_response",
+            MagicMock(
+                return_value={
+                    "result": {"content": "Cached answer"},
+                    "streaming_responses": [{"content": "Cached answer"}],
+                },
+            ),
+        )
+        compression = CompressionManager() if action == "compression_failure" else None
+        if compression is not None:
+            monkeypatch.setattr(
+                compression,
+                "ashould_compress",
+                AsyncMock(side_effect=RuntimeError("Compression failed")),
+            )
+        agent = Agent(model=model, name=bot.agent_name, telemetry=False, compression_manager=compression)
+        monkeypatch.setattr(
+            "mindroom.ai._prepare_agent_and_prompt",
+            AsyncMock(return_value=_prepared_prompt_result(agent)),
+        )
+        monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
+        monkeypatch.setattr(ResponseRunner, "_memory_persistence", lambda *_args, **_kwargs: None)
+        source_settled: list[str] = []
+
+        async def settled() -> None:
+            source_settled.append("quiet")
+
+        result = await bot._response_runner.generate_response(
+            ResponseRequest(
+                prompt="Any thoughts?",
+                thread_history=[],
+                user_id="@alice:localhost",
+                response_envelope=request_envelope(
+                    room_id="!test:localhost",
+                    reply_to_event_id="$event",
+                    thread_id="$thread",
+                    prompt="Any thoughts?",
+                    user_id="@alice:localhost",
+                    agent_name=bot.agent_name,
+                ),
+                participation=RoomParticipationConfig(agent=bot.agent_name),
+                on_no_response_handled=settled,
+            ),
+        )
+        bodies = [call.kwargs["content"].get("body", "") for call in bot.client.room_send.await_args_list]
+        assert all("Thinking" not in body and '"action"' not in body for body in bodies)
+        if action != "respond":
+            assert result is None
+            assert bodies == []
+            assert bot.client.room_typing.await_count == 0
+            assert source_settled == ["quiet"]
+            assert len(model.requests) == (0 if action == "compression_failure" else 1)
+        else:
+            assert result == "$response"
+            assert any("Useful answer" in body for body in bodies)
+            assert source_settled == []
+            assert len(model.requests) == 2

@@ -349,6 +349,7 @@ depends_on = ["mindroom.durable_write"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
+    "mindroom.participation",
     "mindroom.agents",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
@@ -388,6 +389,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
+    "mindroom.participation",
     "mindroom.ai_runtime",
     "mindroom.ai_turn_state",
     "mindroom.cancellation",
@@ -2000,6 +2002,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.config.participation",
+    "mindroom.participation",
     "mindroom.response_activity",
     "mindroom.agent_run_context",
     "mindroom.agents",
@@ -2173,6 +2177,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.main"
 depends_on = [
+    "mindroom.config.participation",
     "mindroom.agent_policy",
     "mindroom.config.agent",
     "mindroom.config.auth",
@@ -4157,6 +4162,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.turn_policy"
 depends_on = [
+    "mindroom.config.participation",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -5718,3 +5724,13 @@ visibility = ["mindroom.history.compaction"]
 path = "mindroom.history.summary_provider_compat"
 depends_on = ["mindroom.claude_prompt_cache"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
+
+[[modules]]
+path = "mindroom.participation"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.ai", "mindroom.response_runner", "mindroom.response_turn"]
+
+[[modules]]
+path = "mindroom.config.participation"
+depends_on = []
+visibility = ["mindroom.config.main", "mindroom.turn_policy", "mindroom.response_runner"]

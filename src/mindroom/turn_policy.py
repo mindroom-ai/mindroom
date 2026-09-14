@@ -63,6 +63,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.authorization import ResponderCandidatePermissions
+    from mindroom.config.participation import RoomParticipationConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
     from mindroom.matrix.identity import MatrixID
@@ -80,6 +81,7 @@ class ResponseAction:
     kind: Literal["skip", "team", "individual", "reject"]
     form_team: TeamResolution | None = None
     rejection_message: str | None = None
+    participation: RoomParticipationConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -308,6 +310,47 @@ class TurnPolicy:
             self.deps.agent_reply_memberships,
             require_resolved_membership=True,
         )
+
+    def _is_adaptive_thread_context(self, context: MessageContext, requester_user_id: str) -> bool:
+        """Require proven untagged context with at least two actual human participants."""
+        return (
+            context.is_thread
+            and not context.planning_thread_history_unavailable
+            and not context.mentioned_agents
+            and not context.am_i_mentioned
+            and not context.has_non_agent_mentions
+            and has_multiple_non_agent_users_in_thread(
+                context.planning_thread_history,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                current_sender_id=requester_user_id,
+            )
+        )
+
+    def adaptive_participation(
+        self,
+        *,
+        context: MessageContext,
+        room: nio.MatrixRoom,
+        requester_user_id: str,
+    ) -> RoomParticipationConfig | None:
+        """Select an authorized designated agent for a proven multi-human thread."""
+        participation = self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths)
+        if (
+            participation is None
+            or participation.agent != self.deps.agent_name
+            or not self._is_adaptive_thread_context(context, requester_user_id)
+        ):
+            return None
+        candidates = classify_responder_candidates_from_cached_room(
+            room,
+            requester_user_id,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            self.deps.agent_reply_memberships,
+        )
+        available = self._filter_materializable_responders(candidates.allowed, self.responder_availability())
+        return participation if self.deps.matrix_id in available else None
 
     def responder_availability(self) -> _ResponderAvailability:
         """Snapshot in-memory responder liveness for one decision flow.
@@ -635,7 +678,14 @@ class TurnPolicy:
                     rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE,
                 ),
             )
-        elif context.mentioned_agents or context.has_non_agent_mentions:
+        elif (
+            context.mentioned_agents
+            or context.has_non_agent_mentions
+            or (
+                self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths) is not None
+                and self._is_adaptive_thread_context(context, requester_user_id)
+            )
+        ):
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         elif context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
@@ -703,7 +753,38 @@ class TurnPolicy:
             return _DispatchPlan(kind="ignore")
         return _DispatchPlan(kind="respond", response_action=action)
 
-    async def _resolve_response_action(
+    def _adaptive_response_action(
+        self,
+        dispatch: PreparedDispatch,
+        room: nio.MatrixRoom,
+        *,
+        has_active_response_for_target: Callable[[MessageTarget], bool],
+    ) -> ResponseAction | None:
+        """Select participation for ambient turns, including coalesced active follow-ups."""
+        context = dispatch.context
+        requester_user_id = dispatch.requester_user_id
+        if dispatch.envelope.origin.may_answer_interactive_prompt:
+            participation = self.adaptive_participation(
+                context=context,
+                room=room,
+                requester_user_id=requester_user_id,
+            )
+            if participation is not None:
+                return ResponseAction(kind="individual", participation=participation)
+            if (
+                self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths) is not None
+                and self._is_adaptive_thread_context(context, requester_user_id)
+                and not self._should_queue_follow_up_in_active_response_thread(
+                    context=context,
+                    target=dispatch.target,
+                    source_envelope=dispatch.envelope,
+                    has_active_response_for_target=has_active_response_for_target,
+                )
+            ):
+                return ResponseAction(kind="skip")
+        return None
+
+    async def _resolve_response_action(  # noqa: PLR0911
         self,
         dispatch: PreparedDispatch,
         room: nio.MatrixRoom,
@@ -765,6 +846,13 @@ class TurnPolicy:
             if should_continue_active_thread or single_visible_self:
                 return ResponseAction(kind="individual")
             return ResponseAction(kind="skip")
+        participation_action = self._adaptive_response_action(
+            dispatch,
+            room,
+            has_active_response_for_target=has_active_response_for_target,
+        )
+        if participation_action is not None:
+            return participation_action
         agents_in_thread = get_agents_in_thread(
             planning_thread_history,
             self.deps.runtime.config,

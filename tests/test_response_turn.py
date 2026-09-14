@@ -17,6 +17,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.participation import ParticipationDecision, ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
@@ -1787,3 +1788,47 @@ def test_turn_adapter_callback_surfaces_stay_within_baselines() -> None:
     """The turn adapters must not grow beyond the reviewed callback baselines."""
     assert len(fields(BlockingTurnAdapter)) <= 10
     assert len(fields(StreamingTurnAdapter)) <= 11
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_declined_participation_discards_empty_run_without_retry(streaming: bool) -> None:
+    """A quiet decision must settle once without saving an empty assistant turn."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    attempts = 0
+    gate = ParticipationGate(decision=ParticipationDecision(action="stay_silent", reason="Already answered."))
+
+    async def attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+        nonlocal attempts
+        attempts += 1
+        return CompletedAttempt(is_empty=True, session_id="session-live", run_id="run-quiet")
+
+    async def streamed_attempt(
+        run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> AsyncIterator[AttemptResolved]:
+        yield AttemptResolved(await attempt(run, continuation))
+
+    async def execute() -> str:
+        if streaming:
+            chunks = [
+                chunk
+                async for chunk in stream_response_turn(
+                    _ctx(participation=gate),
+                    _streaming_adapter(log, streamed_attempt),
+                    TurnSinks(turn_recorder=cast("Any", recorder)),
+                    continuation=_continuation(),
+                )
+            ]
+            return "".join(chunks)
+        return await run_blocking_response_turn(
+            _ctx(participation=gate),
+            _blocking_adapter(log, attempt),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        )
+
+    assert asyncio.run(execute()) == ""
+    assert attempts == 1
+    assert [discard.run_id for discard in log.discards] == ["run-quiet"]
+    assert recorder.outcome == "completed"

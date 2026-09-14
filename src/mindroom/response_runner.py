@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import uuid4
@@ -80,6 +80,7 @@ from mindroom.orchestration.runtime import (
     log_cancelled_response_source,
     request_task_cancel,
 )
+from mindroom.participation import ParticipationGate
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_shutdown_diagnostics import (
@@ -183,6 +184,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
+    from mindroom.config.participation import RoomParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
@@ -468,6 +470,7 @@ class ResponseRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
+    participation: RoomParticipationConfig | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
@@ -555,20 +558,42 @@ async def _response_typing_indicator(
     request: ResponseRequest,
     *,
     response_run_id: str | None,
+    participation: ParticipationGate | None = None,
 ) -> AsyncIterator[None]:
     """Expose typing only for response kinds whose progress may be visible."""
     if _is_silent_schedule_response(request):
         yield
         return
-    async with typing_indicator(
-        client,
-        request.room_id,
-        log_context=_response_typing_log_context(
-            request,
-            response_run_id=response_run_id,
-        ),
-    ):
+
+    @asynccontextmanager
+    async def show_typing() -> AsyncIterator[None]:
+        async with typing_indicator(
+            client,
+            request.room_id,
+            log_context=_response_typing_log_context(request, response_run_id=response_run_id),
+        ):
+            yield
+
+    if participation is None:
+        async with show_typing():
+            yield
+        return
+    finished = asyncio.Event()
+
+    async def approved_typing() -> None:
+        await participation.decided.wait()
+        if participation.approved:
+            async with show_typing():
+                await finished.wait()
+
+    task = asyncio.create_task(approved_typing())
+    try:
         yield
+    finally:
+        finished.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
@@ -718,6 +743,7 @@ class _PreparedResponseRuntime:
     active_model_name: str
     show_tool_calls: bool
     tool_dispatch: ToolDispatchContext
+    participation: ParticipationGate | None = None
 
 
 @dataclass
@@ -2767,7 +2793,7 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> MatrixCompactionLifecycle | None:
         """Build the ordered foreground compaction notice adapter for one response."""
-        if _is_silent_schedule_response(request):
+        if _is_silent_schedule_response(request) or request.participation is not None:
             return None
         reply_to_event_id = (
             request.existing_event_id
@@ -2964,6 +2990,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=tuple(system_enrichment_items),
+            participation=runtime.participation,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
         )
@@ -4322,6 +4349,9 @@ class ResponseRunner:
             active_model_name=active_model_name,
             show_tool_calls=self._show_tool_calls(),
             tool_dispatch=tool_dispatch,
+            participation=ParticipationGate(instructions=request.participation.instructions)
+            if request.participation is not None
+            else None,
         )
 
     @timed("non_streaming_response_generation")
@@ -4401,6 +4431,7 @@ class ResponseRunner:
                 self._client(),
                 request,
                 response_run_id=run_id,
+                participation=runtime.participation,
             ):
                 response_text = await self._run_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
@@ -4504,6 +4535,7 @@ class ResponseRunner:
                 self._client(),
                 request,
                 response_run_id=run_id,
+                participation=runtime.participation,
             ):
                 wrapped_response_stream = self._stream_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
@@ -4559,7 +4591,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(  # noqa: C901
+    async def _process_and_respond(  # noqa: C901, PLR0912
         self,
         request: ResponseRequest,
         *,
@@ -4656,6 +4688,16 @@ class ResponseRunner:
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
             raise
+
+        if runtime.participation is not None and runtime.participation.is_silent:
+            return build_outcome(
+                FinalDeliveryOutcome(
+                    terminal_status="completed",
+                    event_id=None,
+                    suppressed=True,
+                    failure_reason="participation_declined",
+                ),
+            )
 
         response_extra_content = _merge_response_extra_content(
             generation.run_metadata_content,
@@ -4867,6 +4909,16 @@ class ResponseRunner:
                 ),
             )
 
+        if runtime.participation is not None and runtime.participation.is_silent:
+            return build_outcome(
+                FinalDeliveryOutcome(
+                    terminal_status="completed",
+                    event_id=None,
+                    suppressed=True,
+                    failure_reason="participation_declined",
+                ),
+            )
+
         response_extra_content = _merge_response_extra_content(
             run_metadata_content,
             request.attachment_ids,
@@ -4942,7 +4994,9 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=history_scope,
             execution_identity=execution_identity,
-            placeholder_message=None if _is_silent_schedule_response(request) else "Thinking...",
+            placeholder_message=None
+            if _is_silent_schedule_response(request) or request.participation is not None
+            else "Thinking...",
             early_placeholder_state=placeholder_state,
         )
         if prepared_request is None:

@@ -545,7 +545,17 @@ class CoalescingGate:
     def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> bool:
         """Return whether the claimable front run is terminated by a text-like utterance."""
         count = self._front_normal_run_length(gate, coalesce_normal_events=coalesce_normal_events)
-        return count > 0 and pending_event_is_text(gate.queue[count - 1].pending_event)
+        return (
+            count > 0
+            and pending_event_is_text(gate.queue[count - 1].pending_event)
+            and gate.queue[count - 1].pending_event.text_debounce_seconds <= 0
+        )
+
+    def _front_debounce_seconds(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> float:
+        count = self._front_normal_run_length(gate, coalesce_normal_events=coalesce_normal_events)
+        if count and pending_event_is_text(gate.queue[count - 1].pending_event):
+            return max(gate.queue[count - 1].pending_event.text_debounce_seconds, 0.0)
+        return max(self._debounce_seconds(), 0.0)
 
     @staticmethod
     def _front_normal_run_latest_receipt_time(
@@ -814,8 +824,8 @@ class CoalescingGate:
         if not gate.queue:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
-        debounce_seconds = max(self._debounce_seconds(), 0.0)
         coalesce = coalesce_normal_events()
+        debounce_seconds = self._front_debounce_seconds(gate, coalesce_normal_events=coalesce)
         if (
             debounce_seconds <= 0
             or self._is_shutting_down()
@@ -841,6 +851,7 @@ class CoalescingGate:
             if not await self._wait_for_deadline(gate, deadline):
                 return _DebounceWaitResult(quiet_deadline=quiet_deadline)
             coalesce = coalesce_normal_events()
+            debounce_seconds = self._front_debounce_seconds(gate, coalesce_normal_events=coalesce)
             if not gate.queue or self._front_normal_run_ends_with_text(gate, coalesce_normal_events=coalesce):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
