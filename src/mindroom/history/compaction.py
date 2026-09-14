@@ -50,6 +50,7 @@ from mindroom.history.types import (
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE, CompactionHookContext, emit
 from mindroom.logging_config import get_logger
+from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
 from mindroom.timing import timed
 from mindroom.token_budget import (
     CompactionEstimateKind,
@@ -1071,6 +1072,7 @@ def estimate_prompt_visible_history_tokens(
     session: AgentSession | TeamSession,
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
+    native_route: str | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = estimate_session_summary_tokens(_current_summary_text(session))
@@ -1079,7 +1081,15 @@ def estimate_prompt_visible_history_tokens(
         scope=scope,
         history_settings=history_settings,
     )
-    return summary_tokens + _estimate_history_messages_tokens(history_messages)
+    if native_route is None:
+        return summary_tokens + _estimate_history_messages_tokens(history_messages)
+    projected = native_replay_messages(history_messages, native_route)
+    return summary_tokens + sum(
+        checkpoint_estimated_tokens(items)
+        if (items := checkpoint_items(message, native_route))
+        else (_estimated_message_chars(message) + 3) // 4
+        for message in projected
+    )
 
 
 def estimate_session_summary_tokens(summary_text: str | None) -> int:

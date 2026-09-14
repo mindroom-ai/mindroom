@@ -126,7 +126,7 @@ agents:
     max_tool_calls_from_history: null
 
     # Required compaction is enabled by default.
-    # Soft thresholds do not compact by themselves while history still fits.
+    # Supported providers compact natively at the configured threshold.
     # Set enabled: false to disable automatic pre-reply compaction for this agent.
     compaction:
       enabled: true
@@ -198,12 +198,16 @@ The tool waits briefly for joined membership and, if the invite remains pending,
 The router accepts and persists that internal invite when `router.accept_invites` allows the current Matrix transport account's user ID.
 For a team execution, that identity is the team's Matrix account rather than the member agent's account.
 
-MindRoom compacts in one visible lifecycle.
+MindRoom uses native provider compaction when the active model and history policy support it, with portable text compaction as the fallback.
 Per-agent compaction supports `enabled`, `threshold_tokens`, `threshold_percent`, `replay_window_tokens`, `reserve_tokens`, `model`, `fallback_model`, and `timeout_seconds`.
 When the active runtime model has a known `context_window`, MindRoom always computes a per-run replay plan that reduces or disables persisted replay before the model call if needed.
-Automatic destructive compaction is enabled by default through `defaults.compaction`, but it runs only when raw history exceeds the hard replay budget for the next reply.
-`threshold_tokens` and `threshold_percent` set a soft trigger budget for planning metadata and compaction notices.
-Crossing that soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting.
+Automatic compaction is enabled by default through `defaults.compaction`.
+`threshold_tokens` and `threshold_percent` control the native provider trigger; on text-only routes they remain soft planning thresholds.
+Native compaction runs inside ordinary provider requests and stores a provider-specific checkpoint alongside the original conversation.
+The next request replays the latest compatible checkpoint and its following messages.
+Canonical runs remain stored for model switching and portable text compaction.
+See [native compaction eligibility](models.md#native-compaction) for supported routes and fallback conditions.
+Destructive text compaction runs before the reply when history exceeds the hard replay budget or when explicitly requested.
 
 You can tune compaction behavior with these settings:
 
@@ -212,7 +216,7 @@ You can tune compaction behavior with these settings:
 - Use `model` to choose the summary model.
 - Use `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
 - Use `timeout_seconds` to bound each primary, retry, or fallback summary request; it defaults to 600 seconds, while an explicitly shorter provider timeout remains the stricter cap.
-- Set `enabled: false` to disable automatic pre-reply compaction for this agent.
+- Set `enabled: false` to disable automatic native and pre-reply text compaction for this agent.
 
 When the active runtime model window is known, replay safety uses the smaller of it and `replay_window_tokens`.
 When that model window is unknown, an explicit `replay_window_tokens` still supplies the replay-planning window.
@@ -227,7 +231,7 @@ Manual `compact_context` remains available when a compaction model and context w
 MindRoom does not run a separate background post-response compaction path.
 It always plans the replay that is safe for the current model call when the active runtime model has a known `context_window`.
 That replay planner can keep configured replay, reduce raw replay, fall back to summary-only replay, or disable persisted replay for the run.
-Compaction rewrites the persisted Agno session in SQLite.
+Portable text compaction rewrites the persisted Agno session in SQLite.
 Older compacted runs are removed from `session.runs` and replaced by the merged `session.summary`, so raw pre-compaction runs are not retained for later audit or debugging.
 
 Learning data is persisted under `agents/<name>/learning/<agent>.db`, so it survives container restarts when the storage directory is mounted.

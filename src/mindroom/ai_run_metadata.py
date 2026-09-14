@@ -174,7 +174,26 @@ def ai_run_extra_content_from_metadata(run_metadata: Mapping[str, Any] | None) -
     return {AI_RUN_METADATA_KEY: dict(ai_run_metadata)}
 
 
-def build_ai_run_metadata_content(  # noqa: C901, PLR0912
+def _native_context_counts(
+    metrics: RunMetrics | dict[str, Any] | None,
+    model_id: str | None,
+    provider: str | None,
+) -> tuple[int | None, int | None, int | None] | None:
+    """Read final-iteration context separately from accumulated billing."""
+    if isinstance(metrics, RunMetrics):
+        for detail in (metrics.details or {}).get("model", []):
+            if detail.id == model_id and detail.provider == provider:
+                usage = (detail.provider_metrics or {}).get("context_usage")
+                if isinstance(usage, dict):
+                    return (
+                        _int_usage_value(usage, "input_tokens"),
+                        _int_usage_value(usage, "cache_read_tokens"),
+                        _int_usage_value(usage, "cache_write_tokens"),
+                    )
+    return None
+
+
+def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
     *,
     config: Config,
     model_name: str,
@@ -215,6 +234,10 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912
     usage_input_tokens = usage_payload.get("input_tokens") if usage_payload else None
     if not isinstance(usage_input_tokens, int):
         usage_input_tokens = None
+    # Native compaction adds a billed sampling iteration. Its cost is included
+    # above, while the final iteration alone describes the active context.
+    if native_counts := _native_context_counts(metrics, model_id, provider):
+        context_raw_input_tokens, context_cache_read_tokens, context_cache_write_tokens = native_counts
     explicit_context_scope = any(
         value is not None
         for value in (

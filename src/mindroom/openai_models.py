@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -15,6 +16,12 @@ from openai.types.responses import ResponseCompletedEvent, ResponseCreatedEvent,
 
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
+from mindroom.native_compaction import (
+    NativeCompactionModel,
+    checkpoint_items,
+    native_replay_messages,
+    record_native_checkpoint,
+)
 from mindroom.openai_prompt_cache import formatted_input_with_shared_system_prefix, supports_openai_cache_breakpoints
 from mindroom.openai_tool_search import (
     formatted_input_with_tool_search_items,
@@ -87,12 +94,48 @@ class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
 
 
 @dataclass
-class MindRoomOpenAIResponses(OpenAIResponses):
+class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
     """OpenAI Responses model that preserves completed response and tool-search state."""
 
     approval_receipt_after_response_id: ClassVar[bool] = True
     supports_prompt_cache_breakpoints: ClassVar[bool] = True
     cache_system_prompt: bool = True
+
+    def native_compaction_supported(self) -> bool:
+        """Use explicit replay on public Responses and Codex routes."""
+        return (
+            self.store is not True
+            and not self.background
+            and self.id.startswith(("gpt-5.3-codex", "gpt-5.4", "gpt-6"))
+            and self.native_compaction_endpoint()
+            in {
+                "https://api.openai.com/v1",
+                "https://chatgpt.com/backend-api/codex",
+            }
+            and not any(
+                any(key in params for key in ("context_management", "previous_response_id", "background", "store"))
+                for params in (self.request_params or {}, self.extra_body or {})
+            )
+        )
+
+    def native_compaction_endpoint(self) -> str:
+        """Bind replay to the effective client endpoint."""
+        if self.async_client is not None:
+            return str(self.async_client.base_url).rstrip("/")
+        if self.client is not None:
+            return str(self.client.base_url).rstrip("/")
+        return str(
+            (self.client_params or {}).get("base_url")
+            or self.base_url
+            or os.getenv("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1",
+        ).rstrip("/")
+
+    def configure_native_compaction(self, *, threshold: int | None, history_generation: str = "") -> None:
+        """Use self-contained replay when native compaction is enabled."""
+        super().configure_native_compaction(threshold=threshold, history_generation=history_generation)
+        if self.native_compaction is not None:
+            self.store = False
 
     def __post_init__(self) -> None:
         """Use one storage setting for request construction and history replay."""
@@ -129,6 +172,10 @@ class MindRoomOpenAIResponses(OpenAIResponses):
             tool_choice=tool_choice,
             run_response=run_response,
         )
+        if self.native_compaction is not None:
+            request_params["context_management"] = [
+                {"type": "compaction", "compact_threshold": self.native_compaction.threshold},
+            ]
         return request_params_with_deferred_tool_search(request_params, model_deferred_tool_names(self))
 
     def _format_messages(
@@ -139,7 +186,24 @@ class MindRoomOpenAIResponses(OpenAIResponses):
     ) -> list[Any]:
         """Reinsert captured tool-search items that Agno drops from history."""
         messages = repair_legacy_openai_tool_replay(messages)
+        route = self.native_compaction.route if self.native_compaction is not None else None
+        messages = native_replay_messages(messages, route)
         formatted_input = super()._format_messages(messages, compress_tool_results, tools=tools)
+        checkpoint_index = next(
+            (index for index, message in enumerate(messages) if checkpoint_items(message, route)),
+            None,
+        )
+        if checkpoint_index is not None:
+            checkpoint = messages[checkpoint_index]
+            prefix_size = len(super()._format_messages(messages[:checkpoint_index], compress_tool_results, tools=tools))
+            replaced_size = len(super()._format_messages([checkpoint], compress_tool_results, tools=tools))
+            formatted_input = [
+                *formatted_input[:prefix_size],
+                *checkpoint_items(checkpoint, route),
+                *formatted_input[prefix_size + replaced_size :],
+            ]
+            # Native output already includes hosted tool-search items in order.
+            messages = [*messages[:checkpoint_index], *messages[checkpoint_index + 1 :]]
         if self.cache_system_prompt:
             formatted_input = formatted_input_with_shared_system_prefix(
                 formatted_input,
@@ -151,6 +215,12 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         """Capture tool-search output items that Agno's parser drops."""
         model_response = super()._parse_provider_response(response, **kwargs)
         record_tool_search_items(model_response, response.output)
+        if response.status == "completed":
+            record_native_checkpoint(
+                model_response,
+                [item.model_dump(mode="json", exclude_none=True) for item in response.output],
+                self.native_compaction,
+            )
         return model_response
 
     # Agno 3.0.9 workaround; upstream completion/response-ID fix:
@@ -255,6 +325,7 @@ class MindRoomOpenAIResponses(OpenAIResponses):
         tool_use: dict[str, Any],
     ) -> tuple[ModelResponse, dict[str, Any]]:
         """Publish only completed response IDs and capture native tool-search items."""
+        native_items = tool_use.pop("mindroom_native_items", [])
         model_response, tool_use = super()._parse_provider_response_delta(stream_event, assistant_message, tool_use)
         if isinstance(stream_event, ResponseCreatedEvent) and model_response.provider_data is not None:
             # An unfinished response may contain tool calls we never received.
@@ -265,6 +336,17 @@ class MindRoomOpenAIResponses(OpenAIResponses):
                 **(model_response.provider_data or {}),
                 "response_id": stream_event.response.id,
             }
+            items = native_items
+            if not items:
+                items = [item.model_dump(mode="json", exclude_none=True) for item in stream_event.response.output]
+            record_native_checkpoint(model_response, items, self.native_compaction)
+            native_items = []
         if isinstance(stream_event, ResponseOutputItemDoneEvent):
             record_tool_search_items(model_response, [stream_event.item])
+            if self.native_compaction is not None:
+                native_items.append(
+                    stream_event.item.model_dump(mode="json", exclude_none=True),
+                )
+        if native_items:
+            tool_use["mindroom_native_items"] = native_items
         return model_response, tool_use

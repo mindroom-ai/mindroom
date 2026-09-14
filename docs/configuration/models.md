@@ -435,13 +435,14 @@ On `vertexai_claude` models, a known `context_window` also enables a request-tim
 Before each request, including follow-up requests after tool results, MindRoom estimates the full provider payload and checks it against Vertex's exact token counter when it approaches the window.
 When a request would exceed the window, MindRoom drops the oldest replayed history turns for that request only and logs a warning.
 When the current turn alone cannot fit, the request fails with a clear provider error instead of being sent oversized.
-Automatic destructive compaction is enabled by default through `defaults.compaction`.
-Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic pre-reply compaction.
-It runs only when history exceeds the hard replay budget for the next reply.
+Automatic compaction is enabled by default through `defaults.compaction`.
+Supported routes use [native compaction](#native-compaction) during ordinary requests.
+The portable text fallback runs before the reply when history exceeds the hard replay budget.
+Set `enabled: false` in `defaults.compaction` or a per-agent/per-team `compaction` override to disable automatic native and pre-reply text compaction.
 
 You can tune compaction behavior with these settings:
 
-- Use `threshold_tokens` or `threshold_percent` to set the soft trigger budget. Crossing this soft trigger while still within the hard budget leaves the stored session unchanged and relies on replay fitting for that reply.
+- Use `threshold_tokens` or `threshold_percent` to set the native provider trigger, or the soft planning threshold on text-only routes.
 - Use `replay_window_tokens` to keep persisted replay and required-compaction planning within a smaller operational window without presenting that smaller value as the provider's request limit.
 - Use `reserve_tokens` to leave hard-budget headroom for the current prompt and output.
 - Use `model` to choose the summary model, and `fallback_model` to name a different model config retried once when the summary model refuses for safeguards; the same input is reused when it fits, otherwise it is rebuilt under the fallback model's own context budget, and after success that model serves the remaining chunks.
@@ -459,7 +460,8 @@ It still uses the active runtime window for the final replay-fit step, while an 
 If you set `compaction.model`, that summary model must also define its own `context_window` for the durable summary-generation pass.
 `compaction.fallback_model` must also name a configured model with its own `context_window`; a fallback naming the summary model's alias, or another alias resolving to the same provider and model ID, is ignored because it would resend the refused request to the same model.
 Required compaction runs before the reply with a Matrix lifecycle notice that is edited in place.
-Otherwise MindRoom leaves the session unchanged and relies on replay fitting for that reply.
+Otherwise MindRoom preserves canonical history and applies the selected replay strategy.
+
 Replay planning uses a chars/4 approximation and reserves headroom for the current prompt and output.
 Summary-input chunk sizing uses the model's tiktoken encoding when recognized.
 Direct Anthropic, Vertex AI Claude, and Bedrock Claude summary models without a recognized encoding use one token per UTF-8 byte as a conservative upper bound.
@@ -481,6 +483,27 @@ defaults:
 ```
 
 This is useful for models with smaller context windows or long-running conversations that accumulate persisted history.
+
+### Native compaction
+
+MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude compaction](https://platform.claude.com/docs/en/build-with-claude/compaction).
+OpenAI native replay uses the official Responses endpoint or the Codex login backend with `store: false`.
+Automatic enablement covers GPT-5.3 Codex, GPT-5.4, and GPT-6 model families; other models retain the portable path.
+An explicitly configured `store: true`, background mode, alternate OpenAI endpoint, or custom context-management request stays on the portable path.
+Claude native compaction supports direct Anthropic and Vertex Claude on the supported Sonnet, Opus, Fable, and Mythos models; it is a provider beta and requires a trigger of at least 50,000 tokens.
+Gemini, Chat Completions, and other provider adapters retain text compaction.
+
+Native compaction requires automatic compaction to be enabled, all-history replay, no historical tool-call limit, and a trigger above the current prompt size and below the hard request limit.
+Explicit `compaction.model`, scheduled history limits, bounded replay, unsupported models, and requests already exceeding the hard budget use the portable path.
+Manual `compact_context` always requests portable text compaction.
+Native checkpoints are tied to their provider, model, endpoint, and current portable summary, so changing that route or rewriting the summary rebuilds context from canonical history.
+Native compaction itself never deletes canonical runs; storage therefore continues to grow until portable text compaction removes older runs.
+
+Checkpoints and their following native output are persisted through the existing SQLite run storage and survive restarts.
+The system instructions keep their shared prompt-cache prefix.
+OpenAI checkpoints remain opaque; local budgeting conservatively estimates their serialized size rather than treating billed pre-compaction input as active context.
+Claude usage includes every compaction iteration while context occupancy uses the final iteration.
+Claude `pause_after_compaction: true` is rejected because MindRoom's automatic path requires the provider to continue its response.
 
 ## Extra Kwargs
 

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
+    from anthropic import AnthropicVertex, AsyncAnthropicVertex
 
 logger = get_logger(__name__)
 
@@ -238,6 +239,16 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     """Vertex Claude model with Mindroom-specific provider compatibility fixes."""
 
     context_window: int | None = None
+    client: AnthropicVertex | None = None
+    async_client: AsyncAnthropicVertex | None = None
+
+    def native_compaction_endpoint(self) -> str:
+        """Keep Vertex checkpoint replay inside its project and endpoint."""
+        client = self.async_client or self.client
+        if client is not None:
+            return f"{client.base_url}|{client.project_id}|{client.region}"
+        params = self._get_client_params()
+        return f"{params['base_url']}|{params['project_id']}|{params['region']}"
 
     def _request_input_kwargs(
         self,
@@ -248,6 +259,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         compress_tool_results: bool,
     ) -> dict[str, Any]:
         """Build the provider-shaped payload used for input token counting."""
+        messages = self.native_replay_messages(messages)
         anthropic_messages, system_prompt = format_messages(
             messages,
             compress_tool_results=compress_tool_results,
@@ -267,6 +279,10 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
             request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
         if self.thinking:
             request_kwargs["thinking"] = self.thinking
+        if self.native_compaction is not None:
+            params = self.get_request_params()
+            request_kwargs["context_management"] = params["context_management"]
+            request_kwargs["betas"] = params["betas"]
         return prepare_claude_request_kwargs(self, request_kwargs)
 
     def _estimate_request_input_tokens(
@@ -312,7 +328,11 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
             compress_tool_results=compress_tool_results,
         )
         count_kwargs, tool_search_reserve = _request_for_vertex_token_count(request_kwargs)
-        response = await self.get_async_client().messages.count_tokens(**count_kwargs)
+        client = self.get_async_client()
+        if self.native_compaction is not None:
+            response = await client.beta.messages.count_tokens(**count_kwargs)
+        else:
+            response = await client.messages.count_tokens(**count_kwargs)
         return response.input_tokens + tool_search_reserve + count_schema_tokens(response_format, self.id)
 
     @staticmethod
@@ -343,7 +363,8 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         compress_tool_results: bool,
     ) -> list[Message]:
         """Drop the oldest replay turns until the exact request fits."""
-        messages = _messages_with_replay_safe_reasoning(messages)
+        canonical_messages = messages
+        messages = _messages_with_replay_safe_reasoning(self.native_replay_messages(messages))
         if self.context_window is None:
             return messages
         output_reserve = self.max_tokens or 0
@@ -374,11 +395,18 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         if original_tokens <= input_budget:
             return messages
 
-        replay_cuts = self._replay_trim_candidates(messages)
-        if not replay_cuts:
-            msg = f"Vertex Claude request uses {original_tokens} input tokens; limit is {input_budget}."
-            raise ContextWindowExceededError(message=msg, model_name=self.name, model_id=self.id)
+        if self.native_compaction is not None:
+            # A native checkpoint represents the entire replaced prefix. The
+            # canonical guard owns any destructive request-local trimming.
+            self.configure_native_compaction(threshold=None)
+            return await self._fit_request_messages(
+                canonical_messages,
+                tools=tools,
+                response_format=response_format,
+                compress_tool_results=compress_tool_results,
+            )
 
+        replay_cuts = self._replay_trim_candidates(messages)
         best_messages: list[Message] | None = None
         best_tokens: int | None = None
         low = 0

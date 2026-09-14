@@ -1672,6 +1672,11 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.history.native"
+depends_on = ["mindroom.history.types"]
+visibility = ["mindroom.history.runtime"]
+
+[[modules]]
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.agent_storage",
@@ -1719,6 +1724,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.history.agno_team_patch",
     "mindroom.history.compaction",
+    "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
     "mindroom.history.storage",

@@ -8,6 +8,7 @@ from anthropic.lib.streaming import MessageStopEvent, ParsedBetaMessageStopEvent
 from anthropic.types import Message as AnthropicMessage
 from anthropic.types.beta import BetaMessage
 
+from mindroom.claude_native_compaction import ClaudeNativeCompaction
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
@@ -24,7 +25,7 @@ _CLAUDE_SAFEGUARD_STOP_REASON = "refusal"
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
 
-class ClaudeProviderCompat:
+class ClaudeProviderCompat(ClaudeNativeCompaction):
     """Apply current Claude request constraints and preserve typed refusals."""
 
     id: str
@@ -36,7 +37,7 @@ class ClaudeProviderCompat:
         tools: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build request parameters accepted by the selected Claude generation."""
-        request_params = super().get_request_params(  # ty: ignore[unresolved-attribute]
+        request_params = super().get_request_params(
             response_format=response_format,
             tools=tools,
         )
@@ -78,7 +79,7 @@ class ClaudeProviderCompat:
         **kwargs: object,
     ) -> ModelResponse:
         self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response(  # ty: ignore[unresolved-attribute]
+        return super()._parse_provider_response(
             response,
             response_format=response_format,
             **kwargs,
@@ -90,7 +91,7 @@ class ClaudeProviderCompat:
         response_format: dict[str, Any] | type[Any] | None = None,
     ) -> ModelResponse:
         self._raise_for_safeguard_refusal(response)
-        return super()._parse_provider_response_delta(  # ty: ignore[unresolved-attribute]
+        return super()._parse_provider_response_delta(
             response,
             response_format=response_format,
         )
