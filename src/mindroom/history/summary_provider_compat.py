@@ -113,7 +113,7 @@ def summary_output_token_limit(model: Model) -> int | None:
     return claude.max_tokens if claude is not None else None
 
 
-def summary_completion_status(
+def summary_completion_status(  # noqa: PLR0911 - explicit provider terminal states
     response: ModelResponse,
     *,
     output_token_limit: int | None,
@@ -122,7 +122,9 @@ def summary_completion_status(
     data = response.provider_data or {}
     reason = data.get("stop_reason")
     if reason is not None:
-        return "output_limit" if reason in {"max_tokens", "model_context_window_exceeded"} else "complete"
+        if reason in {"max_tokens", "model_context_window_exceeded"}:
+            return "output_limit"
+        return "complete" if reason in {"end_turn", "stop_sequence"} else "incomplete"
     finish_reason = data.get("finish_reason")
     if finish_reason is not None:
         if finish_reason == "length":
