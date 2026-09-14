@@ -293,6 +293,79 @@ async def test_supersession_uses_real_settled_journal_owner(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("live_poll", [False, True])
+@pytest.mark.parametrize("defect", [None, "pending_cleanup", "missing_guard", "incomplete_anchor"])
+async def test_supersession_survives_later_source_redaction(
+    tmp_path: Path,
+    live_poll: bool,
+    defect: str | None,
+) -> None:
+    """A later tombstone cannot erase proven supersession or excuse missing proof and cleanup debt."""
+    case = await _supersession_case(tmp_path, visible_old=False, old_record=False, plain_reply=True)
+    try:
+        case.oracle.refresh_ledger_attributions(min_interval=0)
+        assert case.oracle.unsettled_required_sources() == []
+        old = case.events["$old"]
+        sent = live_fuzz._SentRecord(
+            "$old",
+            "!room:example",
+            "m.room.message",
+            sender=old["sender"],
+            content=old["content"],
+        )
+        old["content"] = {}
+        old["unsigned"] = {"redacted_because": {"event_id": "$redaction"}}
+        tombstone = TurnRecord.create(
+            ("$old",),
+            completed=False,
+            redacted_source_event_ids=("$old",),
+            pending_redaction_cleanup_event_ids=("$old",) if defect == "pending_cleanup" else (),
+        )
+        await case.journal.turn_records("general").upsert(
+            index_event_ids=tombstone.indexed_event_ids,
+            anchor_event_id=tombstone.anchor_event_id,
+            record_json=json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(tombstone)),
+        )
+        if defect == "missing_guard":
+            assert case.oracle.log_path is not None
+            case.oracle.log_path.write_text("")
+        elif defect == "incomplete_anchor":
+            record = TurnRecord.create(("$new",), response_event_id="$new-reply", completed=False)
+            # Normal upserts preserve completion; deliberately corrupt the
+            # stored proof to verify that the oracle rejects missing completion.
+            await case.journal.backend.write(
+                lambda tx: tx.execute(
+                    "UPDATE turn_records SET record_json = ? WHERE index_event_id = ?",
+                    (json.dumps(live_fuzz.TurnRecordCodec._to_ledger_record(record)), "$new"),
+                ),
+            )
+        case.oracle.sent_records = [sent]
+        case.oracle.canonical_events = {event_id: dict(event) for event_id, event in case.events.items()}
+        if live_poll:
+            case.oracle.refresh_ledger_attributions(min_interval=0)
+            assert ("$old" in case.oracle.supersession_proofs) is (defect is None)
+            assert ("$old" in case.oracle.unsettled_required_sources()) is (defect is not None)
+        elif defect is None:
+            result = await case.auditor.audit(
+                room_ids=("!room:example",),
+                sent_records=[sent],
+                redacted_targets={"$old": "$redaction"},
+            )
+            assert result["ledger_superseded_sources"] == 1
+            assert result["completed_final_bodies"] == 1
+        else:
+            with pytest.raises(AssertionError):
+                await case.auditor.audit(
+                    room_ids=("!room:example",),
+                    sent_records=[sent],
+                    redacted_targets={"$old": "$redaction"},
+                )
+        assert "$old" not in case.oracle.optional_sources
+    finally:
+        await case.journal.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "defect",
     [

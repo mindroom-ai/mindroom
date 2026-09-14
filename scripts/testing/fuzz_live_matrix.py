@@ -6142,7 +6142,9 @@ class FinalStateAuditor:
         if root is None:
             return None
         old_record = snapshot.records.get(source)
-        if old_record is not None and (old_record.completed or source not in old_record.replay_source_event_ids):
+        # Redaction removes replayable content, not original source ownership
+        # or the independently proven decision to supersede that source.
+        if old_record is not None and (old_record.completed or source not in old_record.source_event_ids):
             return None
         old_response = old_record.response_event_id if old_record is not None else None
         old_view = _canonical_response_view(events, old_response, self.agent_id) if old_response is not None else None
