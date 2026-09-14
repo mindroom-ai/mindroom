@@ -947,6 +947,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.history.turn_recorder",
     "mindroom.delegation_audit",
     "mindroom.delegation_state",
     "mindroom.delegation_records",
@@ -1746,6 +1747,7 @@ visibility = [
 path = "mindroom.history.turn_recorder"
 depends_on = ["mindroom.history.interrupted_replay"]
 visibility = [
+    "mindroom.custom_tools.delegate",
     "mindroom.ai",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",

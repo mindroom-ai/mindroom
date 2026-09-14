@@ -41,6 +41,14 @@ class DelegationHookState:
 
 
 @dataclass
+class DelegationPendingTool:
+    """Exact child attempt and local call behind one projected approval."""
+
+    child: DelegationChild
+    tool_call_id: str
+
+
+@dataclass
 class DelegationState:
     """Persisted parent waits; workspace exports never own this state."""
 
@@ -48,6 +56,7 @@ class DelegationState:
     gates: dict[str, bool] = field(default_factory=dict)
     hooks: dict[str, DelegationHookState] = field(default_factory=dict)
     pending_tools: list[dict[str, Any]] = field(default_factory=list)
+    pending_tool_sources: dict[str, DelegationPendingTool] = field(default_factory=dict)
     pending_requirements: list[dict[str, Any]] = field(default_factory=list)
     pending_agent_name: str | None = None
     pending_child_id: str | None = None
@@ -72,6 +81,13 @@ class DelegationState:
             gates=dict(snapshot.get("gates", {})),
             hooks={key: DelegationHookState(**value) for key, value in snapshot.get("hooks", {}).items()},
             pending_tools=list(snapshot.get("pending_tools", [])),
+            pending_tool_sources={
+                call_id: DelegationPendingTool(
+                    child=DelegationChild(**source["child"]),
+                    tool_call_id=source["tool_call_id"],
+                )
+                for call_id, source in snapshot.get("pending_tool_sources", {}).items()
+            },
             pending_requirements=list(snapshot.get("pending_requirements", [])),
             pending_agent_name=snapshot.get("pending_agent_name"),
             pending_child_id=snapshot.get("pending_child_id"),
@@ -81,6 +97,7 @@ class DelegationState:
     def clear_pending(self) -> None:
         """Clear only the presented approval generation, retaining sibling results."""
         self.pending_tools = []
+        self.pending_tool_sources = {}
         self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None

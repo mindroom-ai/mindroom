@@ -235,7 +235,7 @@ class MatrixMessageTools(Toolkit):
 
         Threading: `send` is room-level even inside a thread unless given a thread. `reply` and `thread-reply` inherit the current thread. `thread_id="room"` forces room scope.
 
-        To start an agent conversation, use matrix_room(action="agents"), then `send` mentioning matrix_user_id with ignore_mentions=False. Keep returned event_id as thread_id for `read`/`reply`. Sending returns immediately; run_subagent waits for a result.
+        To start an agent conversation, use matrix_room(action="agents"), then `send` mentioning matrix_user_id with ignore_mentions=False. Check the target's thread_mode: for `thread`, keep returned event_id as thread_id for `read`/`reply`; for `room`, use `read`/`send` with thread_id="room". Sending returns immediately; run_subagent waits for a result.
 
         Mention safety for text send/reply/thread-reply: default `ignore_mentions=True` sets `com.mindroom.skip_mentions` and suppresses dispatch to prevent loops. Set `False` ONLY for an intentional handoff or self-trigger; then human requesters use `com.mindroom.original_sender` for authorization.
 

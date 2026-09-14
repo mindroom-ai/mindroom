@@ -30,7 +30,7 @@ from mindroom.delegation_audit import (
     start_child_record,
 )
 from mindroom.delegation_hooks import after_delegation, before_delegation
-from mindroom.delegation_state import DELEGATION_STATE_KEY, DelegationChild, DelegationState
+from mindroom.delegation_state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.delegation_storage import delegation_storage_config, freeze_delegation_storage
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.history.native import restore_native_history
@@ -134,7 +134,13 @@ def _child_identity(child: DelegationChild) -> ToolExecutionIdentity:
     return identity
 
 
-async def _read_child(child: DelegationChild, config: Config, paths: RuntimePaths) -> RunOutput | None:
+async def _read_child(
+    child: DelegationChild,
+    config: Config,
+    paths: RuntimePaths,
+    *,
+    run_id: str | None = None,
+) -> RunOutput | None:
     config = delegation_storage_config(config, child.storage_bindings)
 
     def read() -> RunOutput | None:
@@ -148,7 +154,8 @@ async def _read_child(child: DelegationChild, config: Config, paths: RuntimePath
             session = storage.get_session(child.session_id, session_type=SessionType.AGENT)
             # The fresh session belongs exclusively to this delegation. Empty-run
             # retries and dynamic-tool continuations replace its active run ID.
-            response = next(reversed(session.runs or ()), None) if isinstance(session, AgentSession) else None
+            runs = reversed(session.runs or ()) if isinstance(session, AgentSession) else ()
+            response = next((run for run in runs if run_id is None or run.run_id == run_id), None)
             return deepcopy(response) if isinstance(response, RunOutput) else None
         finally:
             storage.close()
@@ -162,7 +169,8 @@ async def _read_child(child: DelegationChild, config: Config, paths: RuntimePath
         ):
             msg = "Delegation session contains an outcome outside its requester identity"
             raise RuntimeError(msg)
-        child.run_id = response.run_id
+        if run_id is None:
+            child.run_id = response.run_id
     return response
 
 
@@ -173,9 +181,10 @@ async def _settle_interrupted_child(
     runtime_paths: RuntimePaths,
     reason: str,
     status: Literal["cancelled", "failed"] = "cancelled",
+    run_id: str | None = None,
 ) -> None:
     config = delegation_storage_config(config, child.storage_bindings)
-    response = await _read_child(child, config, runtime_paths)
+    response = await _read_child(child, config, runtime_paths, run_id=run_id)
     if response is not None and response.status == RunStatus.completed:
         await record_child_response(child, response, config=config, runtime_paths=runtime_paths)
         return
@@ -437,8 +446,9 @@ async def _start_child_envelope(
     def note_child_run_id(run_id: str) -> None:
         child.run_id = run_id
 
+    result = None
     with suppress(ResponsePausedForApproval):
-        await toolkit.run_delegated_task(
+        result = await toolkit.run_delegated_task(
             child.child_agent_name,
             prompt,
             session_id=child.session_id,
@@ -447,9 +457,9 @@ async def _start_child_envelope(
             supports_native_tool_approval=True,
             run_id_callback=note_child_run_id,
         )
-    response = await _read_child(child, config, runtime_paths)
+    response = await _read_child(child, config, runtime_paths, run_id=child.run_id)
     if response is None:
-        msg = "Delegated execution did not retain its exact run outcome"
+        msg = result or "Delegated execution did not retain its exact run outcome"
         raise RuntimeError(msg)
     return response
 
@@ -534,46 +544,35 @@ def _pending_child(state: DelegationState, child: DelegationChild, response: Run
         raise RuntimeError(msg)
     state.pending_child_id = child.delegation_id
     state.pending_agent_name = paused.approval_agent_name or child.child_agent_name
+    child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
         projected = deepcopy(tool)
         projected.tool_call_id = f"{child.delegation_id}:{tool.tool_call_id}"
         state.pending_tools.append(projected.to_dict())
+        state.pending_tool_sources[projected.tool_call_id] = deepcopy(
+            child_state.pending_tool_sources.get(str(tool.tool_call_id))
+            or DelegationPendingTool(child=child, tool_call_id=str(tool.tool_call_id)),
+        )
         requirement = RunRequirement(projected)
         state.pending_requirements.append(requirement.to_dict())
 
 
 async def _resolved_child_tool(
-    child: DelegationChild,
-    response: RunOutput,
+    source: DelegationPendingTool,
     call_id: str,
     *,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> ToolExecution | None:
-    """Find an executed leaf by its complete delegation path, never its ID alone."""
-    prefix = f"{child.delegation_id}:"
-    if not call_id.startswith(prefix):
+    """Read the exact approved attempt, even after the child starts another run."""
+    response = await _read_child(source.child, config, runtime_paths, run_id=source.child.run_id)
+    if response is None:
         return None
-    local_id = call_id[len(prefix) :]
     for tool in response.tools or ():
-        if tool.tool_call_id == local_id and not tool.is_paused:
+        if tool.tool_call_id == source.tool_call_id and not tool.is_paused:
             projected = deepcopy(tool)
             projected.tool_call_id = call_id
             return projected
-    for descendant in DelegationState.from_metadata(response.metadata).children:
-        if local_id.startswith(f"{descendant.delegation_id}:"):
-            nested = await _read_child(descendant, config, runtime_paths)
-            if nested is not None:
-                tool = await _resolved_child_tool(
-                    descendant,
-                    nested,
-                    local_id,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                )
-                if tool is not None:
-                    tool.tool_call_id = call_id
-                return tool
     return None
 
 
@@ -632,6 +631,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
         state.storage_bindings = freeze_delegation_storage(config, (agent_name,))
     pending_id = state.pending_child_id
     prior_pending_tools = state.pending_tools
+    prior_tool_sources = state.pending_tool_sources
     if decisions is not None:
         # Validate every presented identity before touching any child or gate.
         apply_exact_approval_decisions(
@@ -822,8 +822,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     if child_decisions is not None and on_event is not None:
                         for pending_tool in prior_pending_tools:
                             completed_tool = await _resolved_child_tool(
-                                child,
-                                child_response,
+                                prior_tool_sources[str(pending_tool["tool_call_id"])],
                                 str(pending_tool["tool_call_id"]),
                                 config=config,
                                 runtime_paths=runtime_paths,
@@ -841,6 +840,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                         config=config,
                         runtime_paths=runtime_paths,
                         reason="Delegation cancelled.",
+                        run_id=child.run_id,
                     )
                     await after_delegation(
                         hook_state,
@@ -858,6 +858,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                         runtime_paths=runtime_paths,
                         reason=str(error),
                         status="failed",
+                        run_id=child.run_id,
                     )
                     if child_decisions is not None and on_event is not None:
                         _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))

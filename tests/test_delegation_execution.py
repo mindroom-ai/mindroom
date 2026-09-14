@@ -49,7 +49,7 @@ from tests.history_helpers import RecordingModel
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from agno.db.base import BaseDb
@@ -227,7 +227,14 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
             model=DelegationModel(id="test", responses=child_responses),
         )
 
-    async def start_child(self: DelegateTools, agent_name: str, task: str, **kwargs: object) -> str:
+    async def start_child(
+        self: DelegateTools,
+        agent_name: str,
+        task: str,
+        *,
+        run_id_callback: Callable[[str], None],
+        **kwargs: object,
+    ) -> str:
         session_id = cast("str", kwargs["session_id"])
         run_id = cast("str", kwargs["run_id"])
         child_identity = replace(identity, agent_name=agent_name, session_id=session_id)
@@ -240,6 +247,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
             )
             await empty_attempt.arun(task, session_id=session_id, run_id=run_id, user_id=identity.requester_id)
             run_id = uuid4().hex
+        run_id_callback(run_id)
         context = _delegate_runtime_context(config, paths, execution_identity=child_identity)
         with tool_runtime_context(replace(context, agent_name=agent_name)):
             response = await child.arun(

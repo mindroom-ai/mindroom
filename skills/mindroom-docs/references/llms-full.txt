@@ -7855,6 +7855,8 @@ Send, reply, react to, read, edit, or inspect Matrix messages using current room
 `matrix_message` is sufficient to start and continue Matrix conversations with other agents or yourself.
 Discover available targets with `matrix_room(action="agents")`, which is automatically enabled alongside `matrix_message`.
 Use the returned `matrix_user_id` to mention the agent and deliberately enable dispatch with `ignore_mentions=False`.
+Check its `thread_mode` to choose where to read replies and send follow-ups.
+For a target with `thread_mode="thread"`:
 
 ```python
 matrix_room(action="agents")
@@ -7868,6 +7870,24 @@ matrix_message(action="read", thread_id="$returned-root")
 matrix_message(
     action="reply",
     thread_id="$returned-root",
+    message="@ops:example.org Include the first three commands to run.",
+    ignore_mentions=False,
+)
+```
+
+For a target with `thread_mode="room"`, use the room timeline for both the initial message and follow-ups:
+
+```python
+matrix_message(
+    action="send",
+    thread_id="room",
+    message="@ops:example.org Investigate the failed deployment and propose a rollback plan.",
+    ignore_mentions=False,
+)
+matrix_message(action="read", thread_id="room")
+matrix_message(
+    action="send",
+    thread_id="room",
     message="@ops:example.org Include the first three commands to run.",
     ignore_mentions=False,
 )

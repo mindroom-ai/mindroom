@@ -206,6 +206,10 @@ async def record_child_response(
 ) -> None:
     """Record one retained child snapshot and settle only its explicit status."""
     _validate_response_identity(child, response)
+    binding = _CHILD_AUDIT.get()
+    if binding is not None and binding.child is child:
+        binding.terminal_response = response
+        binding.terminal_event = None
     run_id = child.run_id
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
     usage, pending_approval = await _append_response_events(

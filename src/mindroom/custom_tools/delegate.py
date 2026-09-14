@@ -26,6 +26,7 @@ from mindroom.delegation_audit import (
     start_child_record,
 )
 from mindroom.delegation_state import DelegationChild
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
@@ -383,6 +384,9 @@ class DelegateTools(Toolkit):
                         attempt_model_runtime=ToolRuntimeModelBinding(),
                         supports_native_tool_approval=supports_native_tool_approval,
                         collect_streamed_response=True,
+                        # The delegation owner needs the actual Agno outcome;
+                        # standalone replay normalization replaces failed runs.
+                        turn_recorder=TurnRecorder(user_message=task),
                     )
         except asyncio.CancelledError:
             if record_child is not None:

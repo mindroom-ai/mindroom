@@ -978,7 +978,7 @@ async def test_team_continuation_executes_real_agno_confirmation(  # noqa: PLR09
         patch.object(team, "acontinue_run", new=continue_run),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
         patch("mindroom.teams.ai_runtime.register_queued_notice_storage") as register_notice,
-        patch("mindroom.teams.has_delegation_state", return_value=delegated, create=True),
+        patch("mindroom.teams.has_delegation_state", return_value=delegated),
         patch("mindroom.teams.drive_delegation_stream", new=drive_resumed),
         approval_receipt_context("trusted approval receipt"),
     ):

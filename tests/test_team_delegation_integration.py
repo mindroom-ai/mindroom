@@ -102,7 +102,7 @@ async def test_team_envelope_drives_delegation_before_rendering(streaming: bool)
     with (
         patch("mindroom.teams._materialize_team_members", return_value=members),
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
-        patch(f"mindroom.teams.{driver_name}", new=driver, create=True),
+        patch(f"mindroom.teams.{driver_name}", new=driver),
     ):
         if streaming:
             chunks = [
