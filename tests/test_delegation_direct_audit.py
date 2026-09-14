@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
+    from mindroom.response_turn import ResponseTurnContext
+
 
 @dataclass
 class _ToolThenErrorModel(RecordingModel):
@@ -342,6 +344,48 @@ async def test_direct_delegation_records_cancellation_before_propagating(tmp_pat
     run = _only_run(tmp_path)
     assert run["status"] == "cancelled"
     assert run["error"] == "Delegation cancelled."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [asyncio.CancelledError, RuntimeError])
+async def test_direct_delegation_preserves_completed_outcome_after_envelope_error(
+    tmp_path: Path,
+    error_type: type[BaseException],
+) -> None:
+    """Cleanup must retain the child outcome and preserve the envelope's cancellation."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+    error = error_type("Envelope interrupted after child completion")
+
+    async def complete_then_interrupt(ctx: ResponseTurnContext, **kwargs: object) -> str:
+        callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+        callback("completed-child-run")
+        await observe_child_event(
+            RunOutput(
+                run_id="completed-child-run",
+                session_id=ctx.session_id,
+                status=RunStatus.completed,
+                content="Child completed.",
+            ),
+        )
+        raise error
+
+    with (
+        tool_runtime_context(context),
+        patch("mindroom.custom_tools.delegate.ai_response", side_effect=complete_then_interrupt),
+    ):
+        if error_type is asyncio.CancelledError:
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await tools.run_subagent("child", "Do the work")
+            assert caught.value is error
+        else:
+            result = await tools.run_subagent("child", "Do the work")
+            assert str(error) in result
+
+    run = _only_run(tmp_path)
+    assert run["status"] == "completed"
+    assert run["output"] == "Child completed."
+    assert run["error"] is None
 
 
 @pytest.mark.asyncio

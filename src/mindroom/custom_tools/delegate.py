@@ -220,7 +220,7 @@ class DelegateTools(Toolkit):
             return "Cannot delegate: the maximum delegation depth was reached."
         return active_config
 
-    async def run_delegated_task(  # noqa: C901, PLR0915
+    async def run_delegated_task(  # noqa: C901, PLR0912, PLR0915
         self,
         agent_name: str,
         task: str,
@@ -390,8 +390,9 @@ class DelegateTools(Toolkit):
                     )
         except asyncio.CancelledError:
             if record_child is not None:
-                record_child.status = "cancelled"
-                record_child.result = "Delegation cancelled."
+                if record_child.status not in {"completed", "failed", "cancelled", "denied"}:
+                    record_child.status = "cancelled"
+                    record_child.result = "Delegation cancelled."
                 await finish_child_record(
                     record_child,
                     config=active_config,
@@ -409,8 +410,9 @@ class DelegateTools(Toolkit):
             )
             message = f"Delegation to '{agent_name}' failed: {e}"
             if record_child is not None:
-                record_child.status = "failed"
-                record_child.result = str(e)
+                if record_child.status not in {"completed", "failed", "cancelled", "denied"}:
+                    record_child.status = "failed"
+                    record_child.result = str(e)
                 receipt = await finish_child_record(
                     record_child,
                     config=active_config,

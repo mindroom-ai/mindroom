@@ -606,6 +606,26 @@ def _child_completion_event(
     return event_type(tool=tool, run_id=response.run_id, session_id=response.session_id)
 
 
+def _resolve_delegation_requirement(
+    requirement: RunRequirement,
+    result: str,
+    response: RunOutput | TeamRunOutput,
+    agent_name: str,
+    on_event: Callable[[object], None] | None,
+) -> None:
+    """Resolve one external call and close its live tool trace, including rejections."""
+    requirement.set_external_execution_result(result)
+    if on_event is not None:
+        on_event(
+            ToolCallCompletedEvent(
+                tool=deepcopy(requirement.tool_execution),
+                run_id=response.run_id,
+                session_id=response.session_id,
+                agent_id=requirement.member_agent_id or agent_name,
+            ),
+        )
+
+
 async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
     entity: Agent | Team,
     response: RunOutput | TeamRunOutput,
@@ -691,7 +711,13 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             args = tool.tool_args or {}
             child_name, task = args.get("agent_name"), args.get("task")
             if not isinstance(child_name, str) or not isinstance(task, str):
-                requirement.set_external_execution_result("Cannot delegate: agent_name and task must be strings.")
+                _resolve_delegation_requirement(
+                    requirement,
+                    "Cannot delegate: agent_name and task must be strings.",
+                    response,
+                    agent_name,
+                    on_event,
+                )
                 continue
             authorization = toolkit.authorize(child_name, task)
             if isinstance(authorization, str):
@@ -705,7 +731,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     )
                     if pending_id == retained.delegation_id and on_event is not None:
                         _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=authorization)
-                requirement.set_external_execution_result(authorization)
+                _resolve_delegation_requirement(requirement, authorization, response, agent_name, on_event)
                 if requirement.id in state.hooks:
                     await after_delegation(
                         state.hooks[requirement.id],
@@ -726,7 +752,13 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 await _persist(entity, response, state)
                 return response
             if state.gates.get(requirement_key) is False:
-                requirement.set_external_execution_result("Delegation denied by requester; child was not executed.")
+                _resolve_delegation_requirement(
+                    requirement,
+                    "Delegation denied by requester; child was not executed.",
+                    response,
+                    agent_name,
+                    on_event,
+                )
                 continue
             if requirement.id not in state.hooks:
                 state.hooks[requirement.id] = await before_delegation(
@@ -738,7 +770,13 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 await _persist(entity, response, state)
             hook_state = state.hooks[requirement.id]
             if hook_state.blocked_result is not None:
-                requirement.set_external_execution_result(hook_state.blocked_result)
+                _resolve_delegation_requirement(
+                    requirement,
+                    hook_state.blocked_result,
+                    response,
+                    agent_name,
+                    on_event,
+                )
                 await after_delegation(
                     hook_state,
                     config=config,
@@ -870,22 +908,13 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             result = child.result or "Agent completed the task but returned no content."
             if child.status != "completed":
                 result = f"Delegation to '{child_name}' {child.status}: {result}"
-            requirement.set_external_execution_result(f"{result}\n\n{receipt}")
+            _resolve_delegation_requirement(requirement, f"{result}\n\n{receipt}", response, agent_name, on_event)
             await after_delegation(
                 hook_state,
                 config=config,
                 runtime_paths=runtime_paths,
                 result=f"{result}\n\n{receipt}",
             )
-            if on_event is not None:
-                on_event(
-                    ToolCallCompletedEvent(
-                        tool=deepcopy(requirement.tool_execution),
-                        run_id=response.run_id,
-                        session_id=response.session_id,
-                        agent_id=requirement.member_agent_id or agent_name,
-                    ),
-                )
         await _persist(entity, response, state)
         if isinstance(response, RunOutput):
             continuation_stream = cast("Agent", entity).acontinue_run(
