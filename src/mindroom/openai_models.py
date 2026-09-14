@@ -47,12 +47,13 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.tools.function import Function
+    from openai.types.chat import ChatCompletion
     from openai.types.responses import Response, ResponseStreamEvent
     from pydantic import BaseModel
 
 
-class ChatToolArgumentsCompat:
-    """Repair replayed tool calls before OpenAI Chat Completions formatting.
+class OpenAIChatProviderCompat:
+    """Repair tool replay and preserve OpenAI Chat Completions finish reasons.
 
     Mix in ahead of an ``OpenAIChat`` subclass; ``_format_all_messages`` is the
     single choke point for all four request paths.  Deliberately not a
@@ -60,6 +61,12 @@ class ChatToolArgumentsCompat:
     ``OpenAIChat`` field defaults over provider-specific ones (base URL, name)
     during dataclass field collection.
     """
+
+    def _parse_provider_response(self, response: ChatCompletion, **kwargs: object) -> ModelResponse:
+        """Retain the terminal reason Agno drops when parsing Chat Completions."""
+        parsed = super()._parse_provider_response(response, **kwargs)  # ty: ignore[unresolved-attribute]
+        parsed.provider_data = {**(parsed.provider_data or {}), "finish_reason": response.choices[0].finish_reason}
+        return parsed
 
     def parse_tool_calls(self, tool_calls_data: list[Any]) -> list[dict[str, Any]]:
         """Drop empty slots created when a streamed tool-call index starts above zero."""
@@ -79,27 +86,27 @@ class ChatToolArgumentsCompat:
 
 
 @dataclass
-class MindRoomOpenAIChat(ChatToolArgumentsCompat, OpenAIChat):
+class MindRoomOpenAIChat(OpenAIChatProviderCompat, OpenAIChat):
     """OpenAI Chat model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomOpenAILike(ChatToolArgumentsCompat, OpenAILike):
+class MindRoomOpenAILike(OpenAIChatProviderCompat, OpenAILike):
     """OpenAI-compatible endpoint model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomOpenRouter(ChatToolArgumentsCompat, OpenRouter):
+class MindRoomOpenRouter(OpenAIChatProviderCompat, OpenRouter):
     """OpenRouter model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomDeepSeek(ChatToolArgumentsCompat, DeepSeek):
+class MindRoomDeepSeek(OpenAIChatProviderCompat, DeepSeek):
     """DeepSeek model that can replay tool calls from other providers."""
 
 
 @dataclass
-class MindRoomLlamaCpp(ChatToolArgumentsCompat, LlamaCpp):
+class MindRoomLlamaCpp(OpenAIChatProviderCompat, LlamaCpp):
     """llama.cpp server model that can replay tool calls from other providers."""
 
 
@@ -312,6 +319,10 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         model_response.provider_data = {
             **(model_response.provider_data or {}),
             "mindroom_response_stored": self.store is not False,
+            "response_status": response.status,
+            "incomplete_reason": response.incomplete_details.reason
+            if response.incomplete_details is not None
+            else None,
         }
         record_tool_search_items(model_response, response.output)
         if response.status == "completed":
