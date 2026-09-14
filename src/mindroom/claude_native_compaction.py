@@ -120,20 +120,36 @@ class ClaudeNativeCompaction(NativeCompactionModel):
         route = self.native_compaction.route if self.native_compaction is not None else None
         prepared = native_replay_messages(messages, route)
         result: list[Message] = []
+        stale_thinking = False
         for message in prepared:
-            data = message.provider_data
-            if not data:
+            data = message.provider_data or {}
+            if not data and not stale_thinking:
                 result.append(message)
                 continue
             items = checkpoint_items(message, route)
+            block_lists = {
+                key: data[key] for key in ("content_blocks", "server_tool_blocks") if isinstance(data.get(key), list)
+            }
+            if items:
+                stale_thinking = False
+            elif any(block.get("type") == "compaction" for blocks in block_lists.values() for block in blocks):
+                # Thinking after a removed checkpoint is signed against a different
+                # prefix. Its later thinking chain is invalid too, including fields
+                # Agno can use to rebuild blocks when content_blocks is empty.
+                stale_thinking = True
+            dropped_types = {"compaction"}
+            if stale_thinking:
+                dropped_types.update({"thinking", "redacted_thinking", "redacted_reasoning_content"})
             next_data = dict(data)
-            for key in ("content_blocks", "server_tool_blocks"):
-                blocks = data.get(key)
-                if isinstance(blocks, list):
-                    next_data[key] = [block for block in blocks if block.get("type") != "compaction"]
+            for key, blocks in block_lists.items():
+                next_data[key] = [block for block in blocks if block.get("type") not in dropped_types]
             if items:
                 next_data["content_blocks"] = items
-            result.append(message.model_copy(update={"provider_data": next_data}))
+            updates: dict[str, Any] = {"provider_data": next_data}
+            if stale_thinking:
+                next_data.pop("signature", None)
+                updates.update(reasoning_content=None, redacted_reasoning_content=None)
+            result.append(message.model_copy(update=updates))
         return result
 
     def _parse_provider_response(

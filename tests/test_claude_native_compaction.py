@@ -210,6 +210,78 @@ def test_switching_claude_model_restores_canonical_history() -> None:
     assert messages[1].provider_data["content_blocks"][0]["type"] == "compaction"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vertex", [False, True])
+@pytest.mark.parametrize("native", [False, True])
+async def test_canonical_fallback_removes_thinking_bound_to_checkpoint(*, vertex: bool, native: bool) -> None:
+    """Discarding a checkpoint must not send its signed thinking against the restored prefix."""
+    requests: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_response([_TEXT]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        client = (
+            AsyncAnthropicVertex(
+                project_id="test-project",
+                region="global",
+                credentials=Credentials(token="test-token"),
+                http_client=http_client,
+            )
+            if vertex
+            else AsyncAnthropic(api_key="test-key", http_client=http_client)
+        )
+        model_type = MindroomVertexAIClaude if vertex else MindRoomAnthropicClaude
+        model = model_type(id="claude-fable-5-1", async_client=client)
+        model.configure_native_compaction(threshold=60000)
+        thinking = {"type": "thinking", "thinking": "Internal reasoning.", "signature": "checkpoint-bound"}
+        redacted = {"type": "redacted_thinking", "data": "opaque-thinking"}
+        anchor = model._parse_provider_response(BetaMessage.model_validate(_response([_CHECKPOINT, thinking, _TEXT])))
+        later = model._parse_provider_response(BetaMessage.model_validate(_response([redacted, _TEXT])))
+        messages = [
+            Message(role="user", content="Original facts."),
+            Message(
+                role="assistant",
+                content=anchor.content,
+                provider_data=anchor.provider_data,
+                reasoning_content=anchor.reasoning_content,
+            ),
+            Message(role="user", content="Continue."),
+            Message(
+                role="assistant",
+                content=later.content,
+                provider_data=later.provider_data,
+                redacted_reasoning_content=later.redacted_reasoning_content,
+            ),
+            Message(role="user", content="Continue again."),
+            Message(
+                role="assistant",
+                content="Later reply.",
+                reasoning_content="Later reasoning.",
+                redacted_reasoning_content="later-opaque",
+                provider_data={"signature": "later-bound"},
+            ),
+            Message(role="user", content="Finish."),
+        ]
+        original = [message.model_dump() for message in messages]
+        if not native:
+            model.configure_native_compaction(threshold=None)
+        await model.ainvoke(messages, Message(role="assistant"))
+        assert [message.model_dump() for message in messages] == original
+
+    blocks = [block for message in requests[0]["messages"] for block in message["content"]]
+    if native:
+        assert _CHECKPOINT in blocks
+        assert thinking in blocks
+        assert redacted in blocks
+    else:
+        assert all(block["type"] not in {"compaction", "thinking", "redacted_thinking"} for block in blocks)
+        assert {"type": "text", "text": "Original facts."} in blocks
+        assert _TEXT in blocks
+        assert {"type": "text", "text": "Later reply."} in blocks
+
+
 def test_pause_after_compaction_is_rejected() -> None:
     """The automatic path must not silently discard a checkpoint-only paused run."""
     model = MindRoomAnthropicClaude(
