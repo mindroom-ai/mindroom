@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from agno.run.team import TeamRunOutput
 
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.history.runtime import ScopeSessionContext
+    from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
     from mindroom.tool_system.events import ToolTraceEntry

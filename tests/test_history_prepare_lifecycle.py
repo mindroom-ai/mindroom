@@ -23,20 +23,14 @@ from mindroom.execution_preparation import (
     prepare_agent_execution_context,
     prepare_bound_team_run_context,
 )
-from mindroom.history.compaction import (
-    _build_summary_input,
-    estimate_prompt_visible_history_tokens,
-    estimate_session_summary_tokens,
-)
-from mindroom.history.runtime import (
-    open_scope_session_context,
-    prepare_bound_scope_history,
-    prepare_scope_history,
-)
+from mindroom.history.replay import _estimate_session_summary_tokens, estimate_prompt_visible_history_tokens
+from mindroom.history.runtime import prepare_bound_scope_history, prepare_scope_history
+from mindroom.history.session_context import open_scope_session_context
 from mindroom.history.storage import (
     read_scope_state,
     write_scope_state,
 )
+from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
     CompactionLifecycleFailure,
     CompactionLifecycleProgress,
@@ -397,7 +391,7 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
     session = _session("session-1", runs=[_completed_run("run-1")])
     seed_session(storage, session)
 
-    with patch("mindroom.history.runtime.open_scope_session_context") as mock_open_scope_context:
+    with patch("mindroom.history.session_context.create_scope_session_storage") as mock_create_scope_storage:
         prepared = await prepare_history_for_run_for_test(
             agent=_agent(db=storage),
             agent_name="test_agent",
@@ -410,7 +404,7 @@ async def test_prepare_history_for_run_uses_provided_storage_without_reopening_s
             session=session,
         )
 
-    mock_open_scope_context.assert_not_called()
+    mock_create_scope_storage.assert_not_called()
     assert prepared.replay_plan is not None
 
 
@@ -544,7 +538,7 @@ async def test_prepare_history_for_run_forced_compaction_finishes_selected_runs_
         budget: int,
     ) -> int:
         return len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
@@ -688,7 +682,7 @@ async def test_prepare_history_for_run_auto_compaction_runs_to_completion_before
         budget: int,
     ) -> int:
         return len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
@@ -799,7 +793,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
         budget
         for budget in range(1, 20_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=visible_runs,
                 history_settings=history_settings,
@@ -885,7 +879,7 @@ async def test_prepare_history_for_run_auto_required_compaction_finishes_origina
     outcome = prepared.compaction_outcomes[0]
     assert outcome.compacted_run_count == 23
     assert outcome.runs_after == 0
-    summary_only_tokens = estimate_session_summary_tokens(persisted.summary.summary)
+    summary_only_tokens = _estimate_session_summary_tokens(persisted.summary.summary)
     assert outcome.after_tokens == summary_only_tokens
     assert outcome.after_tokens < replay_budget
     state = read_scope_state(persisted, scope)
@@ -976,7 +970,7 @@ async def test_prepare_history_for_run_persists_successful_compaction_chunks_bef
         budget: int,
     ) -> int:
         return len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=previous_summary,
                 compacted_runs=compacted_runs,
                 max_input_tokens=budget,
@@ -1097,7 +1091,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         budget
         for budget in range(1, 10_000)
         if len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=None,
                 compacted_runs=visible_runs,
                 max_input_tokens=budget,
@@ -1106,7 +1100,7 @@ async def test_prepare_history_for_run_failure_notice_reports_serving_fallback_m
         )
         == 1
         and len(
-            _build_summary_input(
+            build_summary_input(
                 previous_summary=first_summary_text,
                 compacted_runs=visible_runs[1:],
                 max_input_tokens=budget,

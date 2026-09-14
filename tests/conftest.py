@@ -90,13 +90,11 @@ from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import _reset_handled_turn_ledger_runtime
 from mindroom.history.runtime import (
-    ScopeSessionContext,
-    _resolve_history_scope,
     finalize_history_preparation,
-    open_scope_session_context,
     prepare_scope_history,
     resolve_agent_preparation_inputs,
 )
+from mindroom.history.session_context import ScopeSessionContext, open_scope_session_context, resolve_history_scope
 from mindroom.history.types import (
     CompactionLifecycle,
     HistoryScope,
@@ -488,7 +486,7 @@ async def prepare_history_for_run_for_test(
     compaction_lifecycle: CompactionLifecycle | None = None,
 ) -> PreparedHistoryState:
     """Compose the production history-preparation seams for one test run."""
-    resolved_scope = scope or _resolve_history_scope(agent)
+    resolved_scope = scope or resolve_history_scope(agent)
     resolved_inputs = resolve_agent_preparation_inputs(
         agent=agent,
         agent_name=agent_name,

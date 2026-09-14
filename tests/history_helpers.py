@@ -32,6 +32,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.history.agno_message_builder_patch import apply_patch
 from mindroom.history.storage import (
     write_scope_state,
 )
@@ -295,6 +296,7 @@ def _agent(
     num_history_runs: int | None = None,
     num_history_messages: int | None = None,
 ) -> Agent:
+    apply_patch()
     return Agent(
         id=agent_id,
         name=name,

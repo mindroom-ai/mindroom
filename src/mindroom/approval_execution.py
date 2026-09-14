@@ -23,7 +23,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.history.native import restore_native_history
-from mindroom.history.runtime import close_agent_runtime_state_dbs
+from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
     CompletedApprovalRun,

@@ -16,7 +16,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.policy import resolve_history_execution_plan
-from mindroom.history.runtime import close_team_runtime_state_dbs, resolve_agent_preparation_inputs
+from mindroom.history.runtime import resolve_agent_preparation_inputs
+from mindroom.history.session_context import close_team_runtime_state_dbs
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.model_loading import get_model_instance
 from mindroom.orchestrator import _MultiAgentOrchestrator

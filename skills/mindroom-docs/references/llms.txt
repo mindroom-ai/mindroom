@@ -59,6 +59,7 @@
 - [Matrix Integration](https://docs.mindroom.chat/architecture/matrix/)
 - [Agent Orchestration](https://docs.mindroom.chat/architecture/orchestration/)
 - [Migration Boundaries](https://docs.mindroom.chat/architecture/migrations/)
+- [History Compaction](https://docs.mindroom.chat/architecture/compaction/)
 - [Overview](https://docs.mindroom.chat/deployment/)
 - [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/)
 - [Private Storage Migration](https://docs.mindroom.chat/deployment/private-storage-upgrade/)

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client, prewarm_anthropic_async_client
-from mindroom.history.runtime import close_agent_runtime_state_dbs
+from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.logging_config import get_logger
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
 
