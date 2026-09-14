@@ -831,7 +831,7 @@ def finish(
     if (
         delivered is None
         and not deleted_delivery_is_terminal(transaction, principal_id, continuation)
-        and not _settle_superseded_user_stop_delivery(transaction, principal_id, continuation)
+        and not _settle_superseded_failure_delivery(transaction, principal_id, continuation)
     ):
         return False
     journal.settle_many(transaction, principal_id, continuation.source_event_ids)
@@ -842,14 +842,86 @@ def finish(
     return True
 
 
-def _settle_superseded_user_stop_delivery(
+def retire_superseded_failure_for_source(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    event_id: str,
+) -> bool:
+    """Fence obsolete approval failure debt before a generic outbox retry can send it."""
+    observed = for_source(transaction, principal_id, event_id=event_id)
+    if observed is None or observed.state != "failing" or observed.source_event_ids[0] != event_id:
+        return False
+    continuation = _get_locked(transaction, principal_id, approval_id=observed.approval_id)
+    return continuation is not None and _settle_superseded_failure_delivery(transaction, principal_id, continuation)
+
+
+def _owns_approval_response(record: TurnRecord, continuation: ApprovalContinuation) -> bool:
+    """Match the complete source set and exact visible response owner."""
+    prepared = continuation.prepared_edit_record
+    return (
+        (
+            set(record.source_event_ids) == set(continuation.source_event_ids)
+            if prepared is None
+            else record.source_event_ids == prepared.source_event_ids
+        )
+        and record.response_owner == continuation.entity_name
+        and record.conversation_target is not None
+        and record.conversation_target.room_id == continuation.room_id
+        and record.response_event_id == continuation.response_event_id
+    )
+
+
+def _newer_answer_is_acknowledged(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+    selected_order: int,
+) -> bool:
+    """Prove a later selected edit delivered a result to this same response and membership."""
+    rows = transaction.fetchall(
+        """
+        SELECT delivery.delivery_id, delivery.result_json FROM matrix_delivery_outbox AS delivery
+        JOIN journal_events AS source
+          ON source.principal_id = delivery.principal_id AND source.event_id = ?
+         AND source.room_id = delivery.room_id AND source.membership_epoch = delivery.membership_epoch
+        WHERE delivery.principal_id = ? AND delivery.room_id = ? AND delivery.edits_event_id = ?
+          AND delivery.stage = 'final' AND delivery.acknowledged_event_id IS NOT NULL
+          AND delivery.result_json IS NOT NULL AND delivery.retired = 0
+          AND delivery.permanent_failure_reason IS NULL
+        """,
+        (continuation.source_event_ids[0], principal_id, continuation.room_id, continuation.response_event_id),
+    )
+    for row in rows:
+        result = json.loads(str(row["result_json"]))
+        prepared_result = result.get("prepared_edit_record")
+        if prepared_result is None:
+            continue
+        source_ids = (
+            continuation.source_event_ids
+            if continuation.prepared_edit_record is None
+            else continuation.prepared_edit_record.source_event_ids
+        )
+        prepared = TurnRecordCodec._from_ledger_record(source_ids[0], prepared_result)
+        if (
+            prepared is not None
+            and _owns_approval_response(prepared, continuation)
+            and (prepared.latest_edit_receipt_order or 0) > selected_order
+            and str(row["delivery_id"])
+            in {revision[1] for revision in (prepared.source_event_revisions or {}).values()}
+        ):
+            return True
+    return False
+
+
+def _settle_superseded_failure_delivery(  # noqa: PLR0911
     transaction: Transaction,
     principal_id: str,
     continuation: ApprovalContinuation,
 ) -> bool:
-    """Settle an older stopped approval without overwriting a later edit's response."""
+    """Settle obsolete failures while preserving every result-bearing frozen FINAL."""
     prepared = continuation.prepared_edit_record
-    if continuation.state != "failing" or continuation.failure_reason != "cancelled_by_user":
+    if continuation.state != "failing":
         return False
     source_ids = continuation.source_event_ids if prepared is None else prepared.source_event_ids
     if prepared is None:
@@ -886,21 +958,19 @@ def _settle_superseded_user_stop_delivery(
     current = (
         None if row is None else TurnRecordCodec._from_ledger_record(source_ids[0], json.loads(str(row["record_json"])))
     )
-    superseded = (
-        current is not None
-        and (
-            set(current.source_event_ids) == set(source_ids)
-            if prepared is None
-            else current.source_event_ids == source_ids
-        )
-        and current.response_owner == continuation.entity_name
-        and current.conversation_target is not None
-        and current.conversation_target.room_id == continuation.room_id
-        and current.response_event_id == continuation.response_event_id
+    if current is None or not _owns_approval_response(current, continuation):
+        return False
+    stopped_before_newer_edit = (
+        continuation.failure_reason == "cancelled_by_user"
         and selected_order <= (current.user_stop_receipt_order or 0)
         and (current.latest_edit_receipt_order or 0) > (current.user_stop_receipt_order or 0)
     )
-    if not superseded:
+    if not stopped_before_newer_edit and not _newer_answer_is_acknowledged(
+        transaction,
+        principal_id,
+        continuation,
+        selected_order,
+    ):
         return False
     if final is not None:
         retired = outbox.retire(

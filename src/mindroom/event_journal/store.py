@@ -785,15 +785,23 @@ class PrincipalStore:
         sending_device_id: str | None = None,
     ) -> MatrixDelivery | None:
         """Freeze one delivery before network I/O and return the row as it stood."""
-        return await self._backend.write(
-            lambda transaction: outbox.claim(
+
+        def claim(transaction: Transaction) -> MatrixDelivery | None:
+            if stage is DeliveryStage.FINAL and approval_continuations.retire_superseded_failure_for_source(
+                transaction,
+                self._principal_id,
+                event_id=delivery_id,
+            ):
+                return None
+            return outbox.claim(
                 transaction,
                 self._principal_id,
                 delivery_id=delivery_id,
                 stage=stage,
                 sending_device_id=sending_device_id,
-            ),
-        )
+            )
+
+        return await self._backend.write(claim)
 
     async def record_matrix_delivery_device(
         self,
