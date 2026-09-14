@@ -447,7 +447,7 @@ async def _start_child_envelope(
         child.run_id = run_id
 
     result = None
-    with suppress(ResponsePausedForApproval):
+    try:
         result = await toolkit.run_delegated_task(
             child.child_agent_name,
             prompt,
@@ -457,6 +457,9 @@ async def _start_child_envelope(
             supports_native_tool_approval=True,
             run_id_callback=note_child_run_id,
         )
+    except ResponsePausedForApproval as suspension:
+        if suspension.paused.runtime_model_name is not None:
+            child.model_name = suspension.paused.runtime_model_name
     response = await _read_child(child, config, runtime_paths, run_id=child.run_id)
     if response is None:
         msg = result or "Delegated execution did not retain its exact run outcome"

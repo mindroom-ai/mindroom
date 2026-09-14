@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING
 import pytest
 from agno.agent import Agent
 from agno.models.response import ModelResponse
-from agno.run.agent import ToolCallCompletedEvent
+from agno.run.agent import RunOutput, ToolCallCompletedEvent
 from agno.run.base import RunStatus
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation_execution import drive_delegations
 from mindroom.delegation_state import DelegationState
@@ -84,6 +84,15 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
 def _continuation_responses(continuation: str) -> list[ModelResponse]:
     """Plan provider events for approval, nested work, deferred tools, and failures."""
     responses = [ModelResponse(tool_calls=[_call("add", "approved-add", a=1, b=2)])]
+    if continuation == "model_switch":
+        responses.insert(
+            0,
+            ModelResponse(
+                tool_calls=[
+                    _call("switch_thread_model", "switch-model", model_name="alternate", when="after-toolcall"),
+                ],
+            ),
+        )
     if continuation == "nested_deferred_tool":
         responses.insert(
             0,
@@ -119,12 +128,13 @@ def _continuation_responses(continuation: str) -> list[ModelResponse]:
         ("deferred_tool", True),
         ("nested_subagent", True),
         ("nested_deferred_tool", True),
+        ("model_switch", True),
         ("provider_error", True),
         ("provider_error", False),
         ("preparation_error", True),
     ],
 )
-async def test_native_child_finishes_through_its_normal_envelope(
+async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     continuation: str,
@@ -136,7 +146,7 @@ async def test_native_child_finishes_through_its_normal_envelope(
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(
                 display_name="Child",
-                tools=["calculator", {"file": {"defer": True}}],
+                tools=["calculator", {"file": {"defer": True}}, "thread_model"],
                 delegate_to=["child"],
             ),
         },
@@ -144,12 +154,19 @@ async def test_native_child_finishes_through_its_normal_envelope(
         memory={"backend": "none"},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         prompts={"INTERACTIVE_QUESTION_PROMPT": "UNSUPPORTED_INTERACTIVE_MARKER"},
+        models={
+            "default": ModelConfig(provider="test", id="default-model"),
+            "alternate": ModelConfig(provider="test", id="alternate-model"),
+        },
     )
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     model = _InstructionRecordingModel(id="test", responses=_continuation_responses(continuation))
+    models_loaded: list[str] = []
 
     def load_model(*_args: object) -> _InstructionRecordingModel:
+        assert isinstance(_args[2], str)
+        models_loaded.append(_args[2])
         if continuation == "preparation_error" and len(model.system_prompts) >= 2:
             msg = "Child model preparation failed."
             raise RuntimeError(msg)
@@ -190,10 +207,12 @@ async def test_native_child_finishes_through_its_normal_envelope(
             completed = paused
             if approval:
                 assert paused.status == RunStatus.paused
+                persisted = storage.get_run(paused.run_id)
+                assert isinstance(persisted, RunOutput)
                 decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
                 completed = await drive_delegations(
                     parent,
-                    paused,
+                    persisted,
                     agent_name="leader",
                     config=config,
                     runtime_paths=paths,
@@ -204,6 +223,9 @@ async def test_native_child_finishes_through_its_normal_envelope(
                 )
 
         assert completed.status == RunStatus.completed
+        if continuation == "model_switch":
+            assert state.children[0].model_name == "alternate"
+            assert models_loaded == ["default", "alternate", "alternate"]
         child_id = state.children[0].delegation_id
         run_path = next(tmp_path.glob(f"agents/child/workspace/.mindroom/delegations/*/{child_id}/run.json"))
         if continuation in {"provider_error", "preparation_error"}:

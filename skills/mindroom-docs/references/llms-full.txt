@@ -2496,7 +2496,7 @@ agents:
 - Targets must reference existing agent names in the config
 - An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
-- Each parent runs one child at a time
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
 
 ## Naming Rules
 
