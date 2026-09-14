@@ -1,5 +1,6 @@
 """Signed identity and static boundaries for the connections portal."""
 
+import gzip
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
@@ -302,6 +303,35 @@ def test_connections_static_routes_use_only_dedicated_bundle(
     response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
     assert response.status_code == 200
     assert response.text == content
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_connections_static_serves_compressed_svg(
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connections_auth_client: Callable[..., TestClient],
+    signed_connections_headers: Callable[[str], dict[str, str]],
+) -> None:
+    """Browsers receive gzip metadata and decode the original SVG without corruption."""
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="48" height="48"/></svg>'
+    compressed = gzip.compress(svg, mtime=0)
+    assets = tmp_path / "connections" / "assets"
+    assets.mkdir(parents=True)
+    (assets / "logo.svgz").write_bytes(compressed)
+    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
+
+    response = connections_auth_client().request(
+        method,
+        "/connections/assets/logo.svgz",
+        headers=signed_connections_headers("alice"),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/svg+xml"
+    assert response.headers["content-encoding"] == "gzip"
+    assert int(response.headers["content-length"]) == len(compressed)
+    assert response.content == (svg if method == "GET" else b"")
 
 
 @pytest.mark.parametrize(

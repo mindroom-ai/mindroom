@@ -97,7 +97,8 @@ Their regression tests check that the crop removes no painted pixels and that re
 
 Regeneration also updates the dashboard and documentation SVGs, portal branding, PNG fallbacks, both web favicons, the macOS app icon source, and the bundled Matrix root-space avatar.
 The portal's public logo aliases resolve within its own public directory so container builds retain them.
-Application assets use the static version except for the connections page, which bundles the animated transparent mark from `frontend/src/assets/logo-mark-animated.svg`.
+Application assets use the static version except for the connections page, which imports the existing `assets/logo/logo-mark-animated.svgz` directly.
+The frontend build bundles that compressed asset, and the backend and Vite servers send it with SVG and gzip response headers.
 The generated root-space avatar is a default asset; existing uploaded or custom Matrix avatars follow the existing avatar management behavior.
 
 ## Animated version

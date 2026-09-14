@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import mindroomLogo from "@/assets/logo-mark-animated.svg";
+import mindroomLogo from "../../../assets/logo/logo-mark-animated.svgz?url";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectedClients } from "./ConnectedClients";
