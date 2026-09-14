@@ -1,13 +1,13 @@
 """Provider/SDK workarounds for one dedicated portable-summary model.
 
-Keep raw-body precedence, cached SDK clients, and Claude stop semantics here.
+Keep raw-body precedence, cached SDK clients, and provider completion semantics here.
 The summary engine consumes the resulting request settings without knowing the
 provider's configuration layers or transport internals.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 
@@ -56,9 +56,18 @@ def _http_timeout(model: Claude, timeout_seconds: float) -> httpx.Timeout:
 
 def configure_summary_model(model: Model, *, timeout_seconds: float) -> Model:
     """Normalize the effective request on a fresh summary model, preserving caller mappings."""
+    from agno.models.openai import OpenAIChat, OpenAIResponses  # noqa: PLC0415 - defer optional provider imports
+
     # Agno-level retries belong to the outer summary retry policy.
-    # The supported Claude SDK layer is normalized below.
     model.retries = 0
+    if isinstance(model, OpenAIChat | OpenAIResponses):
+        model.max_retries = 0
+        model.client_params = {**(model.client_params or {}), "max_retries": 0}
+        if model.client is not None:
+            model.client = model.client.with_options(max_retries=0)
+        if model.async_client is not None:
+            model.async_client = model.async_client.with_options(max_retries=0)
+        return model
     claude = as_anthropic_claude(model)
     if claude is None:
         return model
@@ -104,13 +113,32 @@ def summary_output_token_limit(model: Model) -> int | None:
     return claude.max_tokens if claude is not None else None
 
 
-def summary_response_was_truncated(response: ModelResponse, *, output_token_limit: int | None) -> bool:
-    """Prefer the provider's stop reason; retain a conservative legacy usage fallback."""
-    reason = (response.provider_data or {}).get("stop_reason")
+def summary_completion_status(
+    response: ModelResponse,
+    *,
+    output_token_limit: int | None,
+) -> Literal["complete", "output_limit", "incomplete"]:
+    """Normalize provider completion signals, with a conservative legacy usage fallback."""
+    data = response.provider_data or {}
+    reason = data.get("stop_reason")
     if reason is not None:
-        return reason in {"max_tokens", "model_context_window_exceeded"}
+        return "output_limit" if reason in {"max_tokens", "model_context_window_exceeded"} else "complete"
+    finish_reason = data.get("finish_reason")
+    if finish_reason is not None:
+        if finish_reason == "length":
+            return "output_limit"
+        return "complete" if finish_reason == "stop" else "incomplete"
+    status = data.get("response_status")
+    if status is not None:
+        if status == "completed":
+            return "complete"
+        return "output_limit" if data.get("incomplete_reason") == "max_output_tokens" else "incomplete"
     output_tokens = response_output_tokens(response)
-    return output_token_limit is not None and output_tokens is not None and output_tokens >= output_token_limit
+    return (
+        "output_limit"
+        if output_token_limit is not None and output_tokens is not None and output_tokens >= output_token_limit
+        else "complete"
+    )
 
 
 def response_output_tokens(response: ModelResponse) -> int | None:

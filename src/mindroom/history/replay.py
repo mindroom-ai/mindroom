@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class _HistorySummaryBudgetError(RuntimeError):
+    """The saved summary cannot fit in the current run's history budget."""
+
+
 def estimate_prompt_visible_history_tokens(
     *,
     session: AgentSession | TeamSession,
@@ -210,6 +214,14 @@ def plan_replay_that_fits(
     current_history_tokens: int,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
+    summary_tokens = _session_summary_replay_tokens(session)
+    if summary_tokens > available_history_budget:
+        msg = (
+            "Saved conversation summary exceeds the available history budget "
+            f"({summary_tokens} estimated tokens; {available_history_budget} available). "
+            "Choose a model with a larger context window or reduce the current prompt."
+        )
+        raise _HistorySummaryBudgetError(msg)
     if current_history_tokens <= available_history_budget:
         return configured_replay_plan(
             history_settings=history_settings,

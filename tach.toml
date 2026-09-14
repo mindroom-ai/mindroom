@@ -4398,18 +4398,16 @@ expose = [
 ]
 from = ["mindroom.memory._backend"]
 
-# Public seam for compaction summary calls: one model-configuration path, one
-# replaceable request builder (future warm-prefix builder, PR #861), the single
-# resolved-timeout rule callers log, and the explicit budget-shrink retry policy.
+# Public seam for compaction summary calls, completion errors, and retry policy.
+# Provider configuration and completion classification belong to summary_provider_compat.
 # Tested in tests/test_compaction_invariants.py.
 [[interfaces]]
 expose = [
+    "CompactionSummaryIncompleteError",
     "CompactionSummaryOutputLimitError",
     "DEFAULT_SUMMARY_RETRY_POLICY",
     "SummaryRetryPolicy",
     "build_summary_request_messages",
-    "configure_summary_model",
-    "effective_summary_timeout_seconds",
     "generate_compaction_summary",
 ]
 from = ["mindroom.history.summary_call"]

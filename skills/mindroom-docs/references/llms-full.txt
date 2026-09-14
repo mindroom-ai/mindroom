@@ -18319,7 +18319,7 @@ Persisted replay fitting and the Vertex full-request guard remain separate becau
 | `agno_session_persistence_patch.py` | Guards and adapts Agno's asynchronous persistence against the owned session store; installed by `agent_storage._create_sqlite_state_storage` before filesystem work. |
 | `history/agno_prompt_compat.py` | Calls the private Agno Team tool preparer and temporarily supplies tool instructions, restoring the original list even on failure. |
 | `history/claude_replay_compat.py` | Removes stale signed reasoning from completed portable turns after rewriting; native checkpoint replay retains its separate provider policy. |
-| `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested retries, and detects truncated output. |
+| `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested Claude/OpenAI SDK retries, and classifies provider completion signals. |
 | `history/provider_error_compat.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
 
 Importing the history engine does not install either global Agno patch.
@@ -18331,14 +18331,19 @@ Mantle currently needs its existing HTTP transport passed explicitly when copyin
 
 - Summary instructions occupy their own system message; serialized conversation and prior summary occupy the user message.
 - System/developer prompt roles and bulky request metadata are excluded from the portable conversation input.
-- Claude summaries stopped by an output or context limit cannot be committed as complete summaries.
+- Claude summaries stopped by an output or context limit, and incomplete OpenAI Chat/Responses summaries, cannot be committed as complete summaries.
 - Summary overrides preserve effective output-cap precedence while removing thinking from typed fields, request parameters, and raw body parameters.
-- The outer retry policy disables Agno-level retries; Claude summary adapters also disable SDK retries.
+- The outer retry policy disables Agno-level retries; Claude and OpenAI summary adapters also disable SDK retries while preserving caller-owned clients and transports.
+- If the saved summary alone exceeds the final history budget, replay preparation raises an explicit budget error before a reply model call; the durable summary and already committed compaction progress remain intact.
 - A chunk commits its summary and compacted-run tombstones before source-run deletion, and merges against the latest durable row.
 - Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
 - Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
 
 The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts.
+
+An oversized saved summary requires a model with a larger context window or a smaller current prompt.
+This can happen after switching models or when system instructions and the current message leave too little room for history.
+Preparation does not silently omit or truncate the saved summary.
 
 # Deployment
 
