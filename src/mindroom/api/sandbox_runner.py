@@ -18,10 +18,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
+import yaml
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from mindroom import constants, shell_supervisor
+from mindroom import constants, shell_supervisor, yaml_io
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
@@ -46,6 +47,7 @@ from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
+    ToolManagedInitArg,
     ToolValidationInfo,
     deserialize_tool_validation_snapshot,
     ensure_tool_registry_loaded,
@@ -62,6 +64,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -529,6 +532,7 @@ class _SandboxRunnerContext:
 class _PreparedSandboxRequestContext:
     request: PreparedSandboxRunnerExecuteRequest
     runtime_paths: RuntimePaths
+    config: Config
     execution_env: dict[str, str]
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None
 
@@ -602,10 +606,6 @@ def resolve_script_state_workspace(
         raise ValueError(msg)
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
-
-
-def _app_tool_metadata(app: FastAPI) -> dict[str, Any]:
-    return _app_context(app).tool_metadata
 
 
 def app_runner_token(app: FastAPI) -> str | None:
@@ -1050,6 +1050,7 @@ def _prepare_execute_request(
     return _PreparedSandboxRequestContext(
         request=prepared_request,
         runtime_paths=effective_runtime_paths,
+        config=config,
         execution_env=execution_env,
         prepared_worker=prepared,
     )
@@ -1279,6 +1280,31 @@ def _shell_subprocess_dispatch_context(
     return replace(subprocess_context, subprocess_env=subprocess_env), timeout_seconds
 
 
+def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
+    """Serialize the validated config needed by one subprocess tool call."""
+    builtin_metadata = BUILTIN_TOOL_METADATA.get(tool_name)
+    needs_runtime_config = (
+        builtin_metadata is None or ToolManagedInitArg.RUNTIME_CONFIG in builtin_metadata.managed_init_args
+    )
+    include = (
+        None
+        if needs_runtime_config
+        else {
+            "plugins": True,
+            "mcp_servers": True,
+            "defaults": {
+                "worker_grantable_credentials",
+                "tool_output_auto_save_threshold_bytes",
+            },
+        }
+    )
+    payload = config.model_dump(
+        include=include,
+        exclude_unset=include is None,
+    )
+    return yaml_io.safe_dump(payload, sort_keys=False)
+
+
 def _execute_request_subprocess_sync(
     request: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -1304,6 +1330,7 @@ def _execute_request_subprocess_sync(
     envelope = sandbox_protocol.serialize_subprocess_envelope(
         request=prepared_request.request.model_dump(mode="json"),
         runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
+        config_yaml=_subprocess_config_yaml(prepared_request.config, prepared_request.request.tool_name),
     )
     timeout_seconds = sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)
     if prepared_request.request.tool_name == "shell":
@@ -1354,6 +1381,7 @@ async def _execute_request_subprocess(
     runtime_paths: RuntimePaths,
     prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None,
     *,
+    config: Config | None = None,
     runner_token: str | None = None,
     apply_workspace_env_hook: bool = True,
 ) -> SandboxRunnerExecuteResponse:
@@ -1361,7 +1389,7 @@ async def _execute_request_subprocess(
         _execute_request_subprocess_sync,
         request,
         runtime_paths,
-        None,
+        config,
         prepared_worker,
         runner_token=runner_token,
         apply_workspace_env_hook=apply_workspace_env_hook,
@@ -1381,15 +1409,20 @@ def _run_subprocess_worker_payload(payload: str) -> tuple[int, str, str]:
     try:
         envelope = sandbox_protocol.parse_subprocess_envelope(payload)
         request = PreparedSandboxRunnerExecuteRequest.model_validate(envelope.request)
-    except ValidationError as exc:
+        runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
+        config = Config.model_validate(
+            yaml_io.safe_load(envelope.config_yaml),
+            context={"runtime_paths": runtime_paths},
+        )
+    except (TypeError, ValidationError, yaml.YAMLError) as exc:
         response = SandboxRunnerExecuteResponse(
             ok=False,
             error=f"Sandbox subprocess payload validation failed: {exc}",
             failure_kind="worker",
         )
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
-    runtime_paths = constants.deserialize_runtime_paths(envelope.runtime_paths)
-    config = _runtime_config_or_empty(runtime_paths)
+    if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
+        config = _config_with_available_plugins(config, runtime_paths)
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker in the returned response text.
@@ -1422,6 +1455,10 @@ def _run_forkserver_template() -> int:
     from agno.agent import Agent  # noqa: F401, PLC0415
     from agno.team import Team  # noqa: F401, PLC0415
 
+    from mindroom.mcp import registry as mcp_registry  # noqa: PLC0415
+    from mindroom.tool_system import plugins as tool_system_plugins  # noqa: PLC0415
+
+    _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
     # `python -m` prepended the runner's cwd to sys.path at template startup;
@@ -1624,10 +1661,11 @@ async def execute_tool_call(
     payload: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
     """Execute a tool function locally and return the serialized result."""
-    runtime_paths = app_runtime_paths(request.app)
-    config = app_runtime_config(request.app)
-    tool_metadata = _app_tool_metadata(request.app)
-    runner_token = app_runner_token(request.app)
+    context = _app_context(request.app)
+    runtime_paths = context.runtime_paths
+    config = context.config
+    tool_metadata = context.tool_metadata
+    runner_token = context.runner_token
     payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
     _validate_execute_request_payload(payload, tool_metadata=tool_metadata)
     credential_overrides: dict[str, object] = {}
@@ -1658,6 +1696,7 @@ async def execute_tool_call(
             payload,
             runtime_paths,
             prepared_worker,
+            config=config,
             runner_token=runner_token,
         )
     if payload.tool_name == "python" and sandbox_exec.request_execution_env(
@@ -1669,6 +1708,7 @@ async def execute_tool_call(
             payload,
             runtime_paths,
             prepared_worker,
+            config=config,
             runner_token=runner_token,
         )
     # Worker-routed execution stays on the subprocess path so the per-worker
@@ -1679,6 +1719,7 @@ async def execute_tool_call(
             payload,
             runtime_paths,
             prepared_worker,
+            config=config,
             runner_token=runner_token,
         )
     return await _execute_request_inprocess(
