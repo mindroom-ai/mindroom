@@ -6,6 +6,7 @@ import hashlib
 import re
 from collections import deque
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -884,27 +885,29 @@ class Config(BaseModel):
             return self
 
         resolved_paths = [
-            (base_id, resolve_config_relative_path(base_config.path, runtime_paths).resolve())
+            (base_id, resolve_config_relative_path(base_config.path, runtime_paths))
             for base_id, base_config in self.knowledge_bases.items()
         ]
-        for index, (base_id, root) in enumerate(resolved_paths):
-            for other_base_id, other_root in resolved_paths[index + 1 :]:
-                if root == other_root:
-                    semantics = _knowledge_base_source_semantics(self.knowledge_bases[base_id])
-                    other_semantics = _knowledge_base_source_semantics(self.knowledge_bases[other_base_id])
-                    if semantics != other_semantics:
-                        msg = (
-                            "knowledge_bases exact duplicate aliases must use compatible source configuration; "
-                            f"'{base_id}' and '{other_base_id}' both resolve to '{root}'"
-                        )
-                        raise ValueError(msg)
-                    continue
-                if root.is_relative_to(other_root) or other_root.is_relative_to(root):
+        # Path ordering groups aliases and puts parents before their descendants;
+        # any overlap therefore includes a neighboring pair.
+        resolved_paths.sort(key=lambda entry: entry[1])
+        for (base_id, root), (other_base_id, other_root) in pairwise(resolved_paths):
+            if root == other_root:
+                semantics = _knowledge_base_source_semantics(self.knowledge_bases[base_id])
+                other_semantics = _knowledge_base_source_semantics(self.knowledge_bases[other_base_id])
+                if semantics != other_semantics:
                     msg = (
-                        "knowledge_bases paths must not overlap unless they are exact duplicate aliases; "
-                        f"'{base_id}' resolves to '{root}' and '{other_base_id}' resolves to '{other_root}'"
+                        "knowledge_bases exact duplicate aliases must use compatible source configuration; "
+                        f"'{base_id}' and '{other_base_id}' both resolve to '{root}'"
                     )
                     raise ValueError(msg)
+                continue
+            if other_root.is_relative_to(root):
+                msg = (
+                    "knowledge_bases paths must not overlap unless they are exact duplicate aliases; "
+                    f"'{base_id}' resolves to '{root}' and '{other_base_id}' resolves to '{other_root}'"
+                )
+                raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
@@ -1275,10 +1278,16 @@ class Config(BaseModel):
 
     def _agent_scope_incompatible_deferred_tools(self, agent_name: str) -> dict[str, list[str]]:
         """Return deferred authored tools whose expanded contents are invalid for one agent scope."""
+        execution_scope = self._agent_execution_scope(agent_name)
         return {
             entry.name: incompatible_tools
             for entry in self._agent_authored_deferred_tool_configs(agent_name)
-            if (incompatible_tools := self._deferred_tool_scope_incompatible_tools(agent_name, entry.name))
+            if (
+                incompatible_tools := unsupported_shared_only_integration_names(
+                    self.expand_tool_names([entry.name]),
+                    execution_scope,
+                )
+            )
         }
 
     def get_worker_grantable_credentials(self) -> frozenset[str]:

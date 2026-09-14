@@ -2622,17 +2622,57 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
     ]
 
 
-def test_config_rejects_parent_child_knowledge_roots(tmp_path: Path) -> None:
+def test_config_knowledge_overlap_checks_scale_with_root_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated roots must not cause quadratic path ancestry checks during validation."""
+    bases = {f"kb-{index}": tmp_path / f"kb-{index}" for index in range(55)}
+    original = Path.is_relative_to
+    comparisons = 0
+
+    def count_comparisons(self: Path, other: Path) -> bool:
+        nonlocal comparisons
+        comparisons += 1
+        return original(self, other)
+
+    monkeypatch.setattr(Path, "is_relative_to", count_comparisons)
+    config = _config(tmp_path, bases=bases, agent_bases=["kb-0"])
+
+    assert len(config.knowledge_bases) == len(bases)
+    assert comparisons <= 2 * len(bases)
+
+
+@pytest.mark.parametrize(
+    "root_names",
+    [["parent", "child"], ["child", "parent"], ["child", "sibling", "parent"], ["alias", "child", "parent"]],
+)
+def test_config_rejects_parent_child_knowledge_roots(tmp_path: Path, root_names: list[str]) -> None:
     """Configured local knowledge roots may be exact aliases, but not overlapping subtrees."""
     parent = tmp_path / "docs"
     child = parent / "nested"
+    roots = {"parent": parent, "child": child, "sibling": tmp_path / "docs-archive", "alias": parent}
 
     with pytest.raises(ValueError, match="knowledge_bases paths must not overlap"):
         _config(
             tmp_path,
-            bases={"parent": parent, "child": child},
+            bases={name: roots[name] for name in root_names},
             agent_bases=["parent"],
         )
+
+
+def test_config_rejects_knowledge_overlap_through_symlink(tmp_path: Path) -> None:
+    """Compare resolved roots so differently named symlink paths cannot conceal overlap."""
+    parent = tmp_path / "docs"
+    parent.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="knowledge_bases paths must not overlap"):
+        _config(tmp_path, bases={"child": link / "nested", "parent": parent}, agent_bases=["parent"])
 
 
 def test_config_rejects_exact_duplicate_roots_with_mixed_git_ownership(tmp_path: Path) -> None:
