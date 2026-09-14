@@ -342,6 +342,48 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
 
 
 @pytest.mark.asyncio
+async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Path) -> None:
+    """An inherited output pipe cannot keep descendants alive past the deadline."""
+    registry: dict[str, ProcessRecord] = {}
+    release_path = tmp_path / "exit-leader"
+    child_path = tmp_path / "child-pid"
+    script = (
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "while not pathlib.Path(sys.argv[2]).exists(): time.sleep(0.01)\n"
+    )
+    async with _running_server(registry) as socket_path:
+        result = await _run(
+            socket_path,
+            [sys.executable, "-c", script, str(child_path), str(release_path)],
+            timeout=0,
+            max_runtime_seconds=3,
+        )
+        handle = _extract_handle(result)
+        try:
+            for _ in range(100):
+                if child_path.exists():
+                    break
+                await asyncio.sleep(0.01)
+            assert child_path.exists()
+            child_pid = int(child_path.read_text())
+            release_path.touch()
+            for _ in range(100):
+                if registry[handle].process.returncode is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert registry[handle].process.returncode == 0
+            assert "RUNNING" in await _check(socket_path, handle)
+            assert "FINISHED" in await _wait_for_finished(socket_path, handle)
+            await _assert_pid_dead(child_pid)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(registry[handle].pid, signal.SIGKILL)
+            await _wait_for_finished(socket_path, handle)
+
+
+@pytest.mark.asyncio
 async def test_script_shim_scrubs_control_state_and_removes_capability_file(tmp_path: Path) -> None:
     """The private shim must narrow the child environment and clean its raw token."""
     workspace = tmp_path / "workspace"

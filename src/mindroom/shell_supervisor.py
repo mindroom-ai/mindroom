@@ -201,9 +201,10 @@ async def _enforce_process_deadline(record: ProcessRecord, *, deadline_at: float
         done, _pending = await asyncio.wait({process_wait}, timeout=remaining_seconds)
         if process_wait in done:
             return
-        if record.process.returncode is None:
-            with suppress(ProcessLookupError, PermissionError):
-                os.killpg(record.pid, signal.SIGKILL)
+        # The leader may have exited while descendants still hold its output
+        # pipes open, keeping process.wait() pending and the group alive.
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(record.pid, signal.SIGKILL)
         await process_wait
     finally:
         if not process_wait.done():
