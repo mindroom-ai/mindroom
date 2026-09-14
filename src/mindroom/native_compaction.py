@@ -35,6 +35,13 @@ class NativeCompactionModel:
     id: str
     provider: str
 
+    def configure_portable_replay(self) -> None:
+        """Let adapters keep local history budgets authoritative over stored state."""
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
+        """Return a provider-aware estimate, or use the shared history estimator."""
+        return None
+
     def native_compaction_supported(self) -> bool:
         """Return whether this concrete route can use automatic compaction."""
         raise NotImplementedError

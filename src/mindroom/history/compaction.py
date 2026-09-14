@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
 
     from mindroom.history.summary_call import SummaryRetryDecision
+    from mindroom.native_compaction import NativeCompactionModel
 
 logger = get_logger(__name__)
 
@@ -212,6 +213,7 @@ async def compact_scope_history(
     fallback_summary_input_budget: int | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = scope_visible_runs(session, scope)
@@ -222,6 +224,7 @@ async def compact_scope_history(
         state=state,
         history_settings=history_settings,
         available_history_budget=available_history_budget,
+        replay_model=replay_model,
     )
     if not compactable_runs:
         _persist_cleared_force_state_if_needed(
@@ -249,6 +252,7 @@ async def compact_scope_history(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     before_run_count = len(visible_runs)
     working_session = deepcopy(session)
@@ -331,6 +335,7 @@ async def compact_scope_history(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     outcome = CompactionOutcome(
         mode="manual" if state.force_compact_before_next_run else "auto",
@@ -1073,6 +1078,7 @@ def estimate_prompt_visible_history_tokens(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     native_route: str | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = estimate_session_summary_tokens(_current_summary_text(session))
@@ -1082,7 +1088,12 @@ def estimate_prompt_visible_history_tokens(
         history_settings=history_settings,
     )
     if native_route is None:
-        return summary_tokens + _estimate_history_messages_tokens(history_messages)
+        estimated = _estimate_history_messages_tokens(history_messages)
+        if replay_model is not None:
+            provider_estimate = replay_model.estimate_portable_replay_tokens(history_messages)
+            if provider_estimate is not None:
+                estimated = max(estimated, provider_estimate)
+        return summary_tokens + estimated
     projected = native_replay_messages(history_messages, native_route)
     return summary_tokens + sum(
         checkpoint_estimated_tokens(items)
@@ -1169,6 +1180,7 @@ def _select_compaction_candidates(
     state: HistoryScopeState,
     history_settings: ResolvedHistorySettings,
     available_history_budget: int | None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> list[RunOutput | TeamRunOutput]:
     if not visible_runs:
         return []
@@ -1180,6 +1192,7 @@ def _select_compaction_candidates(
         session=session,
         scope=scope,
         history_settings=history_settings,
+        replay_model=replay_model,
     )
     return visible_runs if current_tokens > available_history_budget else []
 
