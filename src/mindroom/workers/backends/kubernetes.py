@@ -322,7 +322,7 @@ class KubernetesWorkerBackend:
             "config": config,
             "owner": self.cleanup_locator,
             "auth_token": self.auth_token,
-            "encryption_key": self.runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV),
+            "encryption_key": self._current_credentials_encryption_key_hash(),
             "storage_root": str(self.storage_root),
             "config_snapshot": self._resources.config_snapshot,
             "grantable_credentials": sorted(self.worker_grantable_credentials),

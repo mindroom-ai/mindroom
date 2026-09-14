@@ -538,6 +538,31 @@ def test_script_recovery_contract_rejects_rotated_worker_authentication() -> Non
     assert "rotated-worker-auth" not in backend.script_recovery_signature()
 
 
+@pytest.mark.parametrize(
+    ("initial_key", "updated_key", "compatible"),
+    [
+        (None, " \t\n", True),
+        ("encryption-material", " encryption-material\n", True),
+        ("old-material", "new-material", False),
+    ],
+)
+def test_script_recovery_contract_compares_effective_encryption_key(
+    initial_key: str | None,
+    updated_key: str,
+    compatible: bool,
+) -> None:
+    """Equivalent key formatting preserves scripts while actual key rotation invalidates them."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    backend.runtime_paths = replace(
+        backend.runtime_paths,
+        process_env={} if initial_key is None else {CREDENTIALS_ENCRYPTION_KEY_ENV: initial_key},
+    )
+    initial = backend.script_recovery_signature()
+    backend.runtime_paths = replace(backend.runtime_paths, process_env={CREDENTIALS_ENCRYPTION_KEY_ENV: updated_key})
+
+    assert (backend.script_recovery_signature() == initial) is compatible
+
+
 def test_script_recovery_contract_rejects_changed_grantable_credentials() -> None:
     """Credential projection changes during an upgrade invalidate the old runtime authority."""
     backend, _apps, _core = _backend(config_snapshot={}, worker_grantable_credentials=frozenset())
