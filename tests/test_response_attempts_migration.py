@@ -93,6 +93,29 @@ def test_corrupt_required_live_identity_rolls_back_schema(legacy_database: _Lega
     assert legacy_database.query("SELECT state FROM journal_events WHERE event_id = '$edit'") == [("pending",)]
 
 
+def test_unreadable_final_for_surviving_continuation_rolls_back_schema(
+    legacy_database: _LegacyDatabase,
+) -> None:
+    """Unreadable success proof cannot authorize a required live owner."""
+    legacy_database.execute(_OLD_OWNERS)
+    legacy_database.execute("""
+        UPDATE matrix_delivery_outbox
+        SET delivery_id = '$edit', payload_json = '{}', result_json = '[]';
+    """)
+    with pytest.raises(ValueError, match="identity"):
+        legacy_database.open()
+    query = (
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'response_attempts'"
+        if legacy_database.postgres
+        else "SELECT name FROM sqlite_master WHERE name = 'response_attempts'"
+    )
+    assert legacy_database.query(query) == []
+    assert legacy_database.query(
+        "SELECT delivery_id, payload_json, result_json FROM matrix_delivery_outbox",
+    ) == [("$edit", "{}", "[]")]
+    assert legacy_database.query("SELECT state FROM journal_events WHERE event_id = '$edit'") == [("pending",)]
+
+
 @pytest.mark.asyncio
 async def test_inline_final_for_surviving_continuation_retains_success_proof(legacy_database: _LegacyDatabase) -> None:
     """An ACK before continuation deletion still proves newer successful ownership."""
@@ -108,6 +131,34 @@ async def test_inline_final_for_surviving_continuation_retains_success_proof(leg
     finally:
         await store.close()
     assert legacy_database.query("SELECT payload_json, transaction_id FROM matrix_delivery_outbox") == original
+
+
+@pytest.mark.asyncio
+async def test_inline_final_precedes_unreadable_local_result_for_surviving_continuation(
+    legacy_database: _LegacyDatabase,
+) -> None:
+    """A substantive frozen outcome rescues malformed local result text."""
+    legacy_database.execute(_OLD_OWNERS)
+    legacy_database.execute("""
+        UPDATE matrix_delivery_outbox
+        SET delivery_id = '$edit', payload_json = replace(payload_json, '$finished', '$edit'), result_json = '[]';
+    """)
+    original = legacy_database.query("SELECT payload_json, result_json, transaction_id FROM matrix_delivery_outbox")
+    store = legacy_database.open()
+    try:
+        delivery = await store.principal("@bot:example.org").load_matrix_delivery(
+            delivery_id="$edit",
+            stage=DeliveryStage.FINAL,
+        )
+        assert delivery is not None
+        assert delivery.result is not None
+        assert delivery.result["prepared_edit_record"]["response_owner"] == "bot"
+    finally:
+        await store.close()
+    assert (
+        legacy_database.query("SELECT payload_json, result_json, transaction_id FROM matrix_delivery_outbox")
+        == original
+    )
 
 
 @pytest.mark.asyncio
@@ -152,6 +203,39 @@ async def test_ordinary_final_does_not_inherit_current_selected_edit(
             )
             is not None
         )
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_coalesced_final_preserves_chronological_logical_sources(
+    legacy_database: _LegacyDatabase,
+) -> None:
+    """The delivery driver need not be the earliest coalesced logical source."""
+    legacy_database.execute(_OLD_OWNERS)
+    legacy_database.execute("""
+        INSERT INTO journal_events (principal_id, event_id, room_id, thread_id, kind, sender,
+            origin_server_ts, source_json, membership_epoch, state) VALUES
+            ('@bot:example.org', '$earlier', '!room:example.org', '', 'message', '@user:example.org', 3, '{}', 7, 'settled'),
+            ('@bot:example.org', '$ordinary', '!room:example.org', '', 'message', '@user:example.org', 4, '{}', 7, 'settled');
+        INSERT INTO matrix_delivery_outbox (principal_id, delivery_id, stage, event_type, room_id, membership_epoch,
+            thread_id, transaction_id, payload_json, result_json, attempted, acknowledged_event_id, created_at_ns)
+        VALUES ('@bot:example.org', '$ordinary', 'final', 'm.room.message', '!room:example.org', 7, '',
+            'coalesced-transaction', '{"body":"coalesced"}', '{"body":"coalesced"}', 1, '$coalesced-answer', 1);
+        INSERT INTO turn_records VALUES ('bot', '$ordinary', '$ordinary',
+            '{"anchor_event_id":"$earlier","source_event_ids":["$earlier","$ordinary"],"completed":true,
+              "timestamp":1,"response_owner":"bot","response_event_id":"$coalesced-answer",
+              "conversation_target":{"room_id":"!room:example.org","session_id":"session","source_thread_id":null,
+                                     "resolved_thread_id":null,"reply_to_event_id":"$earlier"}}');
+    """)
+    store = legacy_database.open()
+    try:
+        ordinary = await store.backend.read(
+            lambda tx: response_attempts.load_response_attempt(tx, "@bot:example.org", "$ordinary"),
+        )
+        assert ordinary is not None
+        assert ordinary.logical_source_event_ids == ("$earlier", "$ordinary")
+        assert ordinary.edit_receipt_order is None
     finally:
         await store.close()
 

@@ -127,6 +127,15 @@ def _final_record(transaction: Transaction, row: Row, result: dict[str, object] 
     return replace(records[0], latest_edit_receipt_order=None) if len(records) == 1 else None
 
 
+def _decode_final_result(row: Row, driving: str) -> dict[str, object] | None:
+    """Decode one historical FINAL while retaining legacy inline precedence."""
+    payload = json.loads(str(row["payload_json"]))
+    if not isinstance(payload, dict):
+        msg = f"Outbox payload for delivery {driving!r} is not an object"
+        raise TypeError(msg)
+    return decode_delivery_result(payload, cast("str | None", row["result_json"]), delivery_id=driving)
+
+
 def _adopt_finals(transaction: Transaction) -> None:
     """Keep unrelated malformed deliveries outside the response ownership relation."""
     rows = transaction.fetchall("SELECT * FROM matrix_delivery_outbox WHERE stage = 'final'")
@@ -134,14 +143,16 @@ def _adopt_finals(transaction: Transaction) -> None:
         principal, driving = str(row["principal_id"]), str(row["delivery_id"])
         existing = load_response_attempt(transaction, principal, driving)
         try:
-            payload = json.loads(str(row["payload_json"]))
-            if not isinstance(payload, dict):
-                continue
-            result = decode_delivery_result(payload, cast("str | None", row["result_json"]), delivery_id=driving)
+            result = _decode_final_result(row, driving)
+        except (ValueError, TypeError, KeyError):
             if existing is not None:
-                if result is not None and row["result_json"] is None:
-                    _store_inline_result(transaction, principal, driving, result)
-                continue
+                raise _identity_error() from None
+            continue
+        if existing is not None:
+            if result is not None and row["result_json"] is None:
+                _store_inline_result(transaction, principal, driving, result)
+            continue
+        try:
             record = _final_record(transaction, row, result)
         except (ValueError, TypeError, KeyError):
             continue
@@ -154,8 +165,12 @@ def _adopt_finals(transaction: Transaction) -> None:
             or record.response_event_id != response
         ):
             continue
-        pending = (driving,) if record.latest_edit_receipt_order is not None else record.source_event_ids
-        if pending[0] != driving or not _sources_are_admitted(transaction, row, pending):
+        pending = (
+            (driving,)
+            if record.latest_edit_receipt_order is not None
+            else (driving, *(event_id for event_id in record.source_event_ids if event_id != driving))
+        )
+        if not _sources_are_admitted(transaction, row, pending):
             continue
         sources = ResponseSources(
             pending,
