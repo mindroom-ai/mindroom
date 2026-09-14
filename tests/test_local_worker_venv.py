@@ -16,6 +16,12 @@ from mindroom.api.sandbox_exec import resolve_subprocess_worker_context
 from mindroom.workers.backends import local as local_workers
 from tests.conftest import requires_linux
 
+_requires_uv_seed = pytest.mark.skipif(
+    shutil.which("uv") is None
+    or not any((Path(sysconfig.get_path("stdlib")) / "ensurepip" / "_bundled").glob("pip-*.whl")),
+    reason="offline uv seeding requires uv and the interpreter's bundled pip wheel",
+)
+
 
 def _assert_seeded_worker_environment(paths: local_workers.LocalWorkerStatePaths) -> None:
     completed = subprocess.run(
@@ -55,6 +61,7 @@ def _assert_seeded_worker_environment(paths: local_workers.LocalWorkerStatePaths
     assert imported.stdout.strip() == "MindRoomTools"
 
 
+@_requires_uv_seed
 @requires_linux(reason="worker virtualenvs use POSIX activation and launchers", timeout=60)
 def test_regular_worker_seeds_bundled_pip_offline_without_stdlib_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
@@ -76,6 +83,7 @@ def test_regular_worker_seeds_bundled_pip_offline_without_stdlib_bootstrap(
 
 
 @pytest.mark.parametrize("link_mode", [None, "symlink"])
+@_requires_uv_seed
 @requires_linux(reason="worker virtualenvs use POSIX activation and launchers", timeout=60)
 def test_seeded_pip_mutation_is_isolated_from_other_workers_and_shared_cache(
     link_mode: str | None,
@@ -138,6 +146,7 @@ def test_regular_worker_falls_back_to_stdlib_when_uv_seeding_is_unavailable(
     _assert_seeded_worker_environment(paths)
 
 
+@_requires_uv_seed
 @requires_linux(reason="worker virtualenvs use POSIX activation and launchers", timeout=60)
 def test_failed_uv_seed_is_retried_without_losing_existing_worker_files(
     monkeypatch: pytest.MonkeyPatch,
