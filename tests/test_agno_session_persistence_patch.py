@@ -166,11 +166,11 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
     ) == installed
     code = """
 from importlib import import_module
+from pathlib import Path
 
 patch = import_module("mindroom.agno_session_persistence_patch")
 patch.version = lambda _distribution: "0.0.0"
 storage_module = import_module("mindroom.agent_storage")
-from pathlib import Path
 try:
     storage_module.create_state_storage("version-check", Path("unused-state-root"), subdir="sessions", session_table="sessions")
 except RuntimeError as error:
