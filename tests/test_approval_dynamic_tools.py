@@ -39,7 +39,7 @@ from tests.test_openai_native_compaction import _ANSWER, _event, _response
 from tests.test_plugins import _preserved_plugin_loader_state
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -158,9 +158,12 @@ async def test_saved_approval_restores_deferred_local_tool(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("becomes_unavailable", [False, True], ids=["restored", "unavailable-owner"])
 async def test_saved_approval_restores_deferred_plugin_without_function_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    becomes_unavailable: bool,
 ) -> None:
     """Existing plugins may expose real functions without declaring their names in metadata."""
     plugin_path = tmp_path / "approval-plugin"
@@ -174,6 +177,19 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
         "from mindroom.tool_system.declarations import ToolCategory\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
+        "class ApprovalCalculator(CalculatorTools):\n"
+        "    unavailable = False\n"
+        "    executed_calls = []\n"
+        "\n"
+        "    def __init__(self):\n"
+        "        if self.unavailable:\n"
+        "            raise RuntimeError('Synthetic tool unavailable')\n"
+        "        super().__init__()\n"
+        "\n"
+        "    def add(self, a: float, b: float) -> str:\n"
+        "        self.executed_calls.append((a, b))\n"
+        "        return super().add(a, b)\n"
+        "\n"
         "@register_tool_with_metadata(\n"
         "    name='approval_calculator',\n"
         "    display_name='Approval Calculator',\n"
@@ -181,15 +197,83 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
         "    category=ToolCategory.DEVELOPMENT,\n"
         ")\n"
         "def approval_calculator_tools():\n"
-        "    return CalculatorTools\n",
+        "    return ApprovalCalculator\n",
         encoding="utf-8",
     )
+    plugin_classes: list[type] = []
+
+    def prepare_plugin_for_resume() -> None:
+        factory = TOOL_METADATA["approval_calculator"].factory
+        assert factory is not None
+        plugin_class = factory()
+        plugin_classes.append(plugin_class)
+        assert plugin_class.executed_calls == []
+        plugin_class.unavailable = becomes_unavailable
+
     with _preserved_plugin_loader_state():
         await _exercise_saved_approval(
             tmp_path,
             monkeypatch,
             tool_name="approval_calculator",
             plugin_path=plugin_path,
+            before_resume=prepare_plugin_for_resume,
+            expect_unavailable=becomes_unavailable,
+        )
+        assert plugin_classes[0].executed_calls == ([] if becomes_unavailable else [(2, 3)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_site", ["constructor", "get_async_functions"])
+@pytest.mark.parametrize("error_type", ["RuntimeError", "KeyError"])
+async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_site: str,
+    error_type: str,
+) -> None:
+    """An unused plugin's discovery failure cannot block a valid persisted calculator approval."""
+    plugin_path = tmp_path / "unavailable-plugin"
+    plugin_path.mkdir()
+    (plugin_path / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "unavailable-plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    failing_method = (
+        "    def __init__(self):\n"
+        if failure_site == "constructor"
+        else (
+            "    def __init__(self):\n"
+            "        super().__init__(name='unavailable', tools=[])\n"
+            "\n"
+            "    def get_async_functions(self):\n"
+        )
+    )
+    (plugin_path / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class UnavailableTools(Toolkit):\n"
+        + failing_method
+        + f"        raise {error_type}('Synthetic plugin unavailable')\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='unavailable_plugin',\n"
+        "    display_name='Unavailable Plugin',\n"
+        "    description='An unrelated unavailable integration',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def unavailable_tools():\n"
+        "    return UnavailableTools\n",
+        encoding="utf-8",
+    )
+    with _preserved_plugin_loader_state():
+        await _exercise_saved_approval(
+            tmp_path,
+            monkeypatch,
+            tool_name="calculator",
+            plugin_path=plugin_path,
+            unrelated_tool_name="unavailable_plugin",
         )
 
 
@@ -269,6 +353,9 @@ async def _exercise_saved_approval(  # noqa: PLR0915
     restriction: str | None = None,
     mixed_calls: bool = False,
     plugin_path: Path | None = None,
+    unrelated_tool_name: str | None = None,
+    before_resume: Callable[[], None] = lambda: None,
+    expect_unavailable: bool = False,
 ) -> None:
     function_name = "example_lookup" if tool_name == "mcp_example" else "add"
     arguments = {} if tool_name == "mcp_example" else {"a": 2, "b": 3}
@@ -288,6 +375,7 @@ async def _exercise_saved_approval(  # noqa: PLR0915
                         "tools": [
                             {tool_name: {"defer": True}},
                             {"sleep": {"defer": True}},
+                            *([{unrelated_tool_name: {"defer": True}}] if unrelated_tool_name is not None else []),
                         ],
                     },
                 },
@@ -370,7 +458,7 @@ async def _exercise_saved_approval(  # noqa: PLR0915
         original_schema = agent_tool_definition_payloads_for_logging(initial)
         original_names = {entry["name"] for entry in original_schema}
         if plugin_path is not None:
-            assert TOOL_METADATA[tool_name].function_names == ()
+            assert TOOL_METADATA[unrelated_tool_name or tool_name].function_names == ()
         if tool_name == "mcp_example":
             assert {"example_connection_status", "example_list_tools", "example_call_tool"} <= original_names
             assert function_name not in original_names
@@ -422,6 +510,7 @@ async def _exercise_saved_approval(  # noqa: PLR0915
         )
         cache_before = deepcopy(dynamic_toolkits._loaded_tools)
         _apply_current_tool_restriction(config, tool_name, restriction)
+        before_resume()
         continuation = ApprovalContinuation(
             approval_id="approval-example",
             run_id=paused.run_id,
@@ -466,7 +555,7 @@ async def _exercise_saved_approval(  # noqa: PLR0915
             assert isinstance(result, CompletedApprovalRun)
             return result
 
-        if restriction is not None:
+        if restriction is not None or expect_unavailable:
             with pytest.raises((ValueError, RuntimeError), match=r"(?i)(tool|function|approval)"):
                 await continue_saved_run()
             assert transport.executed == []

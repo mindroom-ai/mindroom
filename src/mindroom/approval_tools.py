@@ -54,10 +54,11 @@ def _constructed_tool_function_names(
             execution_identity=execution_identity,
             session_id=execution_identity.session_id,
         )
-    except (ValueError, ImportError) as exc:
-        logger.debug("Skipping unavailable tool during approval recovery", tool=entry.name, error=str(exc))
+        return frozenset(toolkit.get_async_functions()) if toolkit is not None else frozenset()
+    except Exception as exc:
+        # Optional plugin discovery must not block another toolkit's approval.
+        logger.warning("Skipping unavailable tool during approval recovery", tool=entry.name, error=str(exc))
         return frozenset()
-    return frozenset(toolkit.get_async_functions()) if toolkit is not None else frozenset()
 
 
 async def _discover_mcp_function_names(
