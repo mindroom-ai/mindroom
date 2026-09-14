@@ -1095,6 +1095,42 @@ class TestRedaction:
 
         assert await bodies(alice) == ["first"]
 
+    async def test_redacted_held_edit_refetches_surviving_revision_when_original_arrives(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+    ) -> None:
+        """Discarded edit bodies must not make a late original look authoritative."""
+        store = journal_database()
+        alice = store.principal("agent@alice")
+        await admit(alice, "$edit1", ts=2_000, content=edit("$original", "surviving edit"))
+        await admit(alice, "$edit2", ts=3_000, content=edit("$original", "deleted edit"))
+        await admit(alice, "$redaction", ts=4_000, redacts="$edit2", kind=EventKind.REDACTION)
+
+        assert await _held_edit_bodies(store) == ["{}"]
+        await store.close()
+        reopened = journal_database()
+        alice = reopened.principal("agent@alice")
+        await admit(alice, "$original", content=text("original"))
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        assert page.messages == ()
+        assert [request.logical_event_id for request in page.refresh_pending] == ["$original"]
+        assert page.refresh_pending[0].revision_event_id == "$edit2"
+        assert await _held_edit_bodies(reopened) == []
+        await admit(alice, "$late-older-edit", ts=1_500, content=edit("$original", "stale edit"))
+        assert await bodies(alice) == []
+        assert (
+            await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        ).refresh_pending == page.refresh_pending
+        assert await alice.install_refetched_revision(
+            page.refresh_pending[0],
+            revision_event_id="$edit1",
+            revision_ts=2_000,
+            revision_sender=ALICE,
+            content=text("surviving edit"),
+        )
+        assert await bodies(alice) == ["surviving edit"]
+
     async def test_redacting_a_target_that_never_arrived_drops_its_held_edit(
         self,
         alice: PrincipalStore,

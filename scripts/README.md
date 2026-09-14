@@ -65,6 +65,33 @@ Once the affected messages have been repaired and a fresh import has been verifi
 uv run python scripts/testing/benchmark_tool_call_overhead.py --iterations 1000 --warmup 100
 ```
 
+### Fuzz journal storage and ingestion
+
+```bash
+uv run pytest tests/test_event_journal_fuzz.py tests/test_durable_ingestion_decryption_fuzz.py -n 2 --no-cov --hypothesis-seed=1640 --hypothesis-show-statistics
+```
+
+These property tests run against real SQLite and PostgreSQL journals in the normal test suite.
+Hypothesis generates and shrinks action sequences; failures print the minimal sequence and a reproduction blob.
+Use the same `--hypothesis-seed` to repeat a campaign, or change it to explore another set of sequences.
+Examples use isolated principals; generated reopen actions close and reopen the actual database.
+
+The journal properties preserve the portable coverage from the retired cache fuzzer, while the live harness below checks complete agent turns:
+
+| Behavior | Generated journal checks | Live checks |
+| --- | --- | --- |
+| Edits | Edits before originals, timestamp ties, older late edits, forged authors, edits of edits, and attempted thread relocation | In-flight edits, regeneration, exact current source markers, and final response bodies |
+| Duplicate delivery | Actual repeated admission, concurrent duplicates, conflicting payloads, and replay after settlement or reopen | Repeated Matrix transactions and exact logical response attribution |
+| Redactions | Redaction before target, non-resurrection, tombstones, hidden revision debt, and server-authoritative restoration | Canonical redactions and follow-up probes proving deleted markers leave the complete model request |
+| History and isolation | Exact ordered logical messages, revision/body equality, pagination, pending receipt order, and separation of principals, rooms, and threads | Concurrent clients and threads, canonical Matrix history, and durable response ownership |
+| Restart | Exact observable journal state survives a real close and reopen | Graceful shutdown, crashes with unfinished work, outages, and recovery |
+| Encrypted input | Opaque/clear observations with the same identity, reordered delivery, provenance, and settled replay | The live workload uses unencrypted rooms; real crypto and opaque-reply recovery also have focused runtime tests |
+
+The oracle is checked by deliberately corrupting stored messages, revisions, thread placement, pending work, and tombstones and requiring failures.
+Redacting an edit that arrived before its original retains only bodyless ordering evidence, so the later original requests a refetch instead of losing an earlier surviving edit.
+The properties allow this temporary hidden state, then require complete canonical history after refetch.
+They do not recreate retired cache generations, staleness flags, or snapshot replacement operations.
+
 ### Fuzz live Matrix behavior
 ```bash
 uv run python scripts/testing/fuzz_live_matrix.py --seed 42 --steps 200 --threads 45 --restart-interval 5
