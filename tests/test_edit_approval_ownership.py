@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -17,7 +18,7 @@ from mindroom.approval_manager import initialize_approval_store
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, response_attempts
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec, _reset_handled_turn_ledger_runtime
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.edit_regenerator import EditRegenerator
     from mindroom.event_journal import ApprovalContinuation, EventJournalStore, MatrixDelivery, PrincipalStore
+    from mindroom.event_journal.backend import Transaction
     from mindroom.turn_controller import TurnController
     from mindroom.turn_store import TurnStore
 
@@ -661,6 +663,43 @@ class TestEditApprovalOwnership:
         await case.assert_stopped_edit_settled()
         assert case.bot.client.room_send.await_count == sends
 
+    async def test_delayed_stop_after_selection_before_new_pause(self, approval_case: _ApprovalCase) -> None:
+        """Current selection protects a newer run before it creates any attempt row."""
+        case = approval_case
+        await case.failed_stop()
+        event = nio.RoomMessageText.from_dict({**case.event.source, "event_id": "$newer-edit", "origin_server_ts": 30})
+        await case.principal.admit(
+            _inbound_event(case.room.room_id, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
+            _projected_event(case.room.room_id, event, EventKind.MESSAGE, self_sender=case.bot.matrix_id.full_id),
+        )
+        assert not await case.store._prepare_edit_response_source(
+            target=case.target,
+            source_event_ids=case.approval.sources.logical_source_event_ids,
+            response_event_id="$answer",
+            edit_receipt_order=6,
+        )
+
+        # Ownership must remain available without reading historical snapshot routing fields.
+        def remove_snapshot_routing(transaction: Transaction) -> None:
+            row = transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                (case.approval.approval_id,),
+            )
+            context = json.loads(row["context_json"])
+            context.update(prepared_edit_record=None, room_id="!unrelated:localhost", response_event_id="$unrelated")
+            transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(context), case.approval.approval_id),
+            )
+
+        await case.journal_store.backend.write(remove_snapshot_routing)
+        sends = case.bot.client.room_send.await_count
+        await case.stop()
+        await case.assert_stopped_edit_settled()
+        assert case.bot.client.room_send.await_count == sends
+        assert await case.principal.approval_continuation_for_source("$newer-edit") is None
+        assert await case.principal.is_pending("$newer-edit")
+
     async def test_stop_fences_all_owners_while_final_is_unresolved(self, approval_case: _ApprovalCase) -> None:
         """Unresolved successful debt cannot leave another stopped approval executable."""
         case = approval_case
@@ -750,6 +789,7 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: 
         _plain_request(_target(), source_event_id="$edit"),
         existing_event_id="$waiting",
         prepared_edit_record=selected,
+        sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=3),
     )
     lifecycle = runner._build_lifecycle(
         identity=runner._response_identity(request, response_kind="ai"),
@@ -781,6 +821,16 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: 
     assert progress.delivery_outcome.is_visible_response
     final = await runner.deps.approval_store.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL)
     assert final is not None
+    attempt = await journal_store.backend.read(
+        lambda tx: response_attempts.load_response_attempt(
+            tx,
+            principal.principal_id,
+            "$edit",
+        ),
+    )
+    assert attempt is not None
+    assert attempt.logical_source_event_ids == ("$source",)
+    assert attempt.response_event_id == "$waiting"
     if transport_fails:
         assert final.acknowledged_event_id is None
         assert progress.delivery_outcome.delivery_kind is None

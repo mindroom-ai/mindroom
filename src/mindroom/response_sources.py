@@ -42,3 +42,20 @@ class ResponseSources:
         ):
             message = "edit_receipt_order must be None or a positive integer"
             raise ValueError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseAttempt:
+    """Immutable response identity carried separately from delivery results."""
+
+    entity_name: str
+    sources: ResponseSources
+
+    def __post_init__(self) -> None:
+        """Require an exact entity and validated source value."""
+        if not isinstance(self.entity_name, str) or not self.entity_name:
+            message = "entity_name must be a non-empty string"
+            raise ValueError(message)
+        if not isinstance(self.sources, ResponseSources):
+            message = "sources must be ResponseSources"
+            raise TypeError(message)

@@ -1540,7 +1540,7 @@ async def test_user_stop_fences_waiting_approval_before_terminal_turn_record(tmp
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -1615,7 +1615,7 @@ async def test_user_stop_preserves_a_claimed_frozen_final_until_success_recovery
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -1704,7 +1704,7 @@ async def test_user_stop_retry_preserves_success_completed_by_source_worker(tmp_
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -1794,7 +1794,7 @@ async def test_user_stop_retry_keeps_turn_owner_after_frozen_final_recovery(tmp_
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -1914,7 +1914,7 @@ async def test_deleted_approval_recovery_expires_cards_without_editing_or_execut
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state=state,
         failure_reason=failure_reason,
@@ -1989,7 +1989,7 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -2058,7 +2058,7 @@ async def test_stale_claim_recovery_preserves_visible_partial_reply(tmp_path: Pa
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -2132,7 +2132,7 @@ async def test_claimed_approval_restart_persists_canonical_failure_reason(tmp_pa
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -2207,7 +2207,7 @@ async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_pa
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -2632,7 +2632,7 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -2976,7 +2976,10 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
             "resolved_thread_id": "$thread",
             "session_id": "session-1",
         },
-        source_event_ids=(request.response_envelope.source_event_id,),
+        sources=ResponseSources(
+            (request.response_envelope.source_event_id,),
+            (request.response_envelope.source_event_id,),
+        ),
         state="waiting",
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
@@ -3009,7 +3012,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         thread_id=target.resolved_thread_id,
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -3098,7 +3101,7 @@ async def test_ready_approval_replay_rechecks_current_authorization(
         thread_id=request.thread_id,
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -3188,7 +3191,7 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
         thread_id=request.thread_id,
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
         team_member_names=("general", "worker"),
@@ -3246,7 +3249,7 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
         thread_id=request.thread_id,
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -3460,7 +3463,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
         response_text="Before approval.\n\n🔧 `run_shell_command` [1] ⏳",
         response_tool_trace=(
@@ -3597,7 +3600,7 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
     decisions = dict.fromkeys(decision_call_ids, True)
@@ -3655,7 +3658,7 @@ async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tm
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
 
@@ -3726,7 +3729,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
     identity = ToolExecutionIdentity(
@@ -3842,7 +3845,7 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$thinking",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=plan.calls,
         state="waiting",
     )
@@ -3903,7 +3906,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$thinking",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=plan.calls,
         state="waiting",
     )
@@ -4461,7 +4464,7 @@ async def test_completed_approval_continuation_delivers_canonical_ordered_body_u
         thread_id=target.resolved_thread_id,
         requester_id="@user:localhost",
         response_event_id="$thinking",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="claimed",
     )
@@ -4591,7 +4594,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -4708,7 +4711,7 @@ async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_p
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
     )
@@ -4896,7 +4899,7 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
             ),
         ),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
@@ -4958,7 +4961,7 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
@@ -5028,7 +5031,7 @@ async def test_original_owner_recovery_retires_acknowledged_failure_without_succ
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="failing",
         failure_reason="Tool approval continuation failed safely.",
     )
@@ -5075,7 +5078,7 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
@@ -5140,7 +5143,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
@@ -5208,7 +5211,7 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
@@ -5279,7 +5282,7 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
             ),
         ),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="ready",
     )
     assert await store.create_approval_continuation(continuation) == continuation
@@ -5332,7 +5335,7 @@ async def test_continuation_rejects_missing_persisted_execution_identity(tmp_pat
         response_event_id="$waiting",
         calls=(),
         execution_identity={},
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         state="claimed",
     )
 
@@ -5372,7 +5375,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         thread_id=target.resolved_thread_id,
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="claimed",
         execution_identity={},
@@ -5427,7 +5430,7 @@ async def test_approval_request_restores_exact_hook_envelope_after_store_reload(
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
         request_body=original_envelope.body,
@@ -5489,7 +5492,7 @@ def test_sparse_approval_continuation_restores_origin(
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="ready",
         request_body="resume me",
@@ -5535,7 +5538,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",

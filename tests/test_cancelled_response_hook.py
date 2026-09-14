@@ -147,6 +147,7 @@ def _response_lifecycle(
             response_kind="ai",
             response_envelope=response_envelope,
             correlation_id=correlation_id,
+            sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
         ),
         pipeline_timing=None,
     )
@@ -353,6 +354,7 @@ async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
             response_kind="ai",
             response_envelope=_envelope(),
             correlation_id="corr-svc",
+            sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
         ),
         visible_response_event_id="$vis",
     )
@@ -384,6 +386,7 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
             response_kind="ai",
             response_envelope=_envelope(),
             correlation_id="corr-noop",
+            sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
         ),
     )
 
@@ -550,6 +553,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-suppressed-final",
+                sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
             ),
             tool_trace=None,
             extra_content=None,
@@ -670,6 +674,7 @@ async def test_process_shutdown_escapes_real_best_effort_after_response_hook(
             response_kind="ai",
             response_envelope=envelope,
             correlation_id="corr-process-stop-after",
+            sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
         ),
         pipeline_timing=None,
     )
@@ -716,6 +721,7 @@ async def test_process_shutdown_escapes_real_best_effort_final_response_transfor
         response_kind="ai",
         response_envelope=_envelope(),
         correlation_id="corr-process-stop-transform",
+        sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
     )
     task = asyncio.create_task(
         response_hooks._apply_final_response_transform(
@@ -779,6 +785,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
                     response_kind="ai",
                     response_envelope=_envelope(),
                     correlation_id="corr-delivery-failure",
+                    sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -858,6 +865,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-final-only-provider",
+                sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
             ),
             tool_trace=None,
             extra_content=None,
@@ -936,6 +944,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-suppressed-cleanup-fail",
+                sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
             ),
             tool_trace=None,
             extra_content=None,
@@ -1010,6 +1019,7 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
                 response_kind="ai",
                 response_envelope=_envelope(),
                 correlation_id="corr-suppressed-cleanup-exception",
+                sources=ResponseSources((_envelope().source_event_id,), (_envelope().source_event_id,)),
             ),
             tool_trace=None,
             extra_content=None,

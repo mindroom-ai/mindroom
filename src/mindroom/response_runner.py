@@ -87,7 +87,7 @@ from mindroom.response_shutdown_diagnostics import (
     context_with_response_shutdown_trace,
     response_shutdown_phase,
 )
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     TerminalFailureStatus,
@@ -1274,7 +1274,7 @@ class ResponseRunner:
                     thread_id=target.resolved_thread_id,
                     requester_id=requester_id,
                     response_event_id=response_event_id,
-                    source_event_ids=request.sources.pending_event_ids,
+                    sources=request.sources,
                     prepared_edit_record=request.prepared_edit_record,
                     calls=plan.calls,
                     state=continuation_state,
@@ -1719,24 +1719,7 @@ class ResponseRunner:
             thread_history=self._approval_memory_history(continuation),
             prompt=envelope.body,
             response_envelope=envelope,
-            sources=ResponseSources(
-                pending_event_ids=continuation.source_event_ids,
-                logical_source_event_ids=(
-                    continuation.prepared_edit_record.source_event_ids
-                    if continuation.prepared_edit_record is not None
-                    else continuation.source_event_ids
-                ),
-                discovery_event_ids=(
-                    continuation.prepared_edit_record.discovery_event_ids
-                    if continuation.prepared_edit_record is not None
-                    else ()
-                ),
-                edit_receipt_order=(
-                    continuation.prepared_edit_record.latest_edit_receipt_order
-                    if continuation.prepared_edit_record is not None
-                    else None
-                ),
-            ),
+            sources=continuation.sources,
             existing_event_id=continuation.response_event_id,
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,
@@ -2930,6 +2913,7 @@ class ResponseRunner:
         return ResponseIdentity(
             response_kind=response_kind,
             response_envelope=request.response_envelope,
+            sources=request.sources,
             correlation_id=_correlation_id_for_request(request),
             participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
         )
@@ -3389,6 +3373,7 @@ class ResponseRunner:
                     new_text=text,
                     extra_content=extra_content,
                     delivery_turn_id=request.response_envelope.source_event_id,
+                    response_attempt=ResponseAttempt(self.deps.agent_name, request.sources),
                 ),
             )
         return FinalDeliveryOutcome(

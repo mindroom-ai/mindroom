@@ -39,6 +39,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -172,6 +173,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         team_mode="coordinate",
         enable_streaming=False,
     )
+    install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
 
@@ -323,6 +325,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         team_mode="coordinate",
         enable_streaming=False,
     )
+    install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock()

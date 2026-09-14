@@ -60,6 +60,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -158,6 +159,7 @@ def setup_test_bot(
         rooms=[room_id],
         enable_streaming=enable_streaming,
     )
+    install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
     return install_runtime_journal_support(bot)
 

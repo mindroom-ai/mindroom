@@ -134,7 +134,12 @@ async def test_fallback_edit_keeps_cleanup_behind_delivery_lock(
             _PlaceholderFailureUpdateRequest(
                 target,
                 INITIAL,
-                ResponseIdentity("agent", _envelope(target, source_event_id=SOURCE), SOURCE),
+                ResponseIdentity(
+                    "agent",
+                    _envelope(target, source_event_id=SOURCE),
+                    SOURCE,
+                    ResponseSources((SOURCE,), (SOURCE,)),
+                ),
                 "delivery_failed",
                 None,
                 None,
@@ -1236,7 +1241,12 @@ async def test_recovery_respects_existing_source_and_final_owners(  # noqa: C901
                 _PlaceholderFailureUpdateRequest(
                     target,
                     INITIAL,
-                    ResponseIdentity("agent", _envelope(target, source_event_id=SOURCE), SOURCE),
+                    ResponseIdentity(
+                        "agent",
+                        _envelope(target, source_event_id=SOURCE),
+                        SOURCE,
+                        ResponseSources((SOURCE,), (SOURCE,)),
+                    ),
                     "delivery_failed",
                     None,
                     None,

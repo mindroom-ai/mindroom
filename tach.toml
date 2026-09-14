@@ -138,6 +138,8 @@ visibility = [
 [[modules]]
 path = "mindroom.event_journal"
 depends_on = [
+    "mindroom.event_journal.legacy_response_attempts",
+    "mindroom.response_sources",
     "mindroom.event_journal.legacy_approval_recovery",
     "mindroom.history.types",
     "mindroom.interactive_models",
@@ -148,6 +150,7 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
+    "mindroom.event_journal.legacy_response_attempts",
     "mindroom.approval_recovery",
     "mindroom.agent_reply_membership_sync",
     "mindroom.approval_execution",
@@ -570,6 +573,7 @@ visibility = [
 path = "mindroom.legacy_delivery_payloads"
 depends_on = ["mindroom.constants"]
 visibility = [
+    "mindroom.event_journal.legacy_response_attempts",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
     "mindroom.event_journal.outbox",
@@ -762,6 +766,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
+    "mindroom.response_sources",
     "mindroom.approval_failure",
     "mindroom.approval_manager",
     "mindroom.constants",
@@ -1555,6 +1560,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delivery_gateway"
 depends_on = [
+    "mindroom.response_sources",
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.hooks",
@@ -2048,6 +2054,10 @@ depends_on = [
 path = "mindroom.response_sources"
 depends_on = []
 visibility = [
+    "mindroom.event_journal",
+    "mindroom.event_journal.legacy_response_attempts",
+    "mindroom.approval_response",
+    "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
     "mindroom.response_runner",
     "mindroom.turn_controller",
@@ -5730,3 +5740,8 @@ visibility = ["mindroom.history.compaction"]
 path = "mindroom.history.summary_provider_compat"
 depends_on = ["mindroom.claude_prompt_cache"]
 visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
+
+[[modules]]
+path = "mindroom.event_journal.legacy_response_attempts"
+depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
+visibility = ["mindroom.event_journal"]

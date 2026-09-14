@@ -1428,7 +1428,7 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread",
             requester_id="@user:localhost",
             response_event_id="$waiting",
-            source_event_ids=("$source", "$coalesced"),
+            sources=ResponseSources(("$source", "$coalesced"), ("$source", "$coalesced")),
             calls=(),
             state="ready",
         )

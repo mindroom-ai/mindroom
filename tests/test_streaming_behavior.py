@@ -87,6 +87,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -334,6 +335,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_direct_response_admission(helper_bot)
         install_runtime_journal_support(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
@@ -353,6 +355,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
@@ -474,6 +477,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 

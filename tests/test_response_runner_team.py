@@ -70,6 +70,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import _PersistenceSeamProbe
 
 if TYPE_CHECKING:
@@ -110,6 +111,7 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=runtime_paths,
             team_mode="coordinate",
         )
+        install_direct_response_admission(bot)
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
@@ -450,6 +452,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         bot.orchestrator = MagicMock(
@@ -509,6 +512,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -560,6 +564,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -622,6 +627,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -693,6 +699,7 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,

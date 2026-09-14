@@ -21,6 +21,7 @@ from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 from mindroom.message_target import MessageTarget
+from mindroom.response_sources import ResponseAttempt
 from mindroom.tool_approval import (
     POLICY_CONFIRMATION_APPROVAL_TYPE,
     evaluate_tool_approval,
@@ -459,6 +460,7 @@ class ApprovalResponseCoordinator:
                 new_text=visible_reason,
                 extra_content={STREAM_STATUS_KEY: stream_status},
                 delivery_turn_id=current.source_event_ids[0],
+                response_attempt=ResponseAttempt(current.entity_name, current.sources),
                 defer_source_handoff=True,
             ),
         )

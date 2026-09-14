@@ -110,6 +110,7 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
     continuation = await principal.approval_continuation("approval-explicit-edit")
     assert continuation is not None
     assert continuation.source_event_ids == ("$edit",)
+    assert continuation.sources == request.sources
     resumed = runner._approval_response_request(
         continuation,
         target=request.response_envelope.target,

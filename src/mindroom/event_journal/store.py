@@ -30,6 +30,7 @@ from . import (
     membership_hooks,
     outbox,
     reads,
+    response_attempts,
     turn_records,
 )
 from .approval_card_state import (  # noqa: TC001 - part of this module's runtime return types
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
+    from mindroom.response_sources import ResponseAttempt
     from mindroom.turn_record import TurnRecord
 
     from .backend import Backend, Transaction
@@ -729,6 +731,7 @@ class PrincipalStore:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
+        response_attempt: ResponseAttempt | None = None,
         event_type: str = "m.room.message",
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
@@ -760,6 +763,7 @@ class PrincipalStore:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
+                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,
@@ -961,6 +965,18 @@ class PrincipalStore:
                 stage=stage,
                 event_id=event_id,
             )
+            if bound:
+                delivery = transaction.fetchone(
+                    "SELECT edits_event_id FROM matrix_delivery_outbox WHERE principal_id = ? AND delivery_id = ? AND stage = ?",
+                    (self._principal_id, delivery_id, stage.value),
+                )
+                if delivery is not None:
+                    response_attempts.bind_response_target(
+                        transaction,
+                        self._principal_id,
+                        delivery_id,
+                        str(delivery["edits_event_id"] or event_id),
+                    )
             # A caller that lost the acknowledgement must not write the record
             # either. The row already names another event, and a terminal
             # record pointing somewhere else is the disagreement this whole
@@ -1400,7 +1416,7 @@ class PrincipalStore:
     ) -> tuple[str, ...]:
         """Resolve edit-owned approvals and finished FINALs within one STOP cutoff."""
         return await self._backend.read(
-            lambda transaction: approval_continuations.edited_sources_for_user_stop(
+            lambda transaction: response_attempts.edited_attempt_sources_before_stop(
                 transaction,
                 self._principal_id,
                 room_id=room_id,
@@ -1592,6 +1608,7 @@ def _enqueue_matrix_delivery(
     thread_id: str | None,
     payload: Mapping[str, object],
     result: Mapping[str, object] | None,
+    response_attempt: ResponseAttempt | None,
     edits_event_id: str | None,
     settle_source_event_ids: tuple[str, ...],
     permanent_failure_reason: str | None,
@@ -1672,6 +1689,22 @@ def _enqueue_matrix_delivery(
     )
     if transaction_id is None:
         return None
+    if response_attempt is not None:
+        if response_attempt.sources.pending_event_ids[0] != delivery_id:
+            message = "Conflicting response attempt identity: driving event"
+            raise ValueError(message)
+        stored = response_attempts.load_response_attempt(transaction, principal_id, delivery_id)
+        if attempted and stored is None:
+            message = "Cannot replace an attempted delivery identity"
+            raise ValueError(message)
+        response_attempts.register_response_attempt(
+            transaction,
+            principal_id,
+            attempt=response_attempt,
+            room_id=room_id,
+            membership_epoch=membership_epoch,
+            response_event_id=edits_event_id,
+        )
     journal.settle_many(transaction, principal_id, settle_source_event_ids)
     return transaction_id
 

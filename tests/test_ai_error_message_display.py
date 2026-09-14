@@ -42,6 +42,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -74,6 +75,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
         runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
+    install_direct_response_admission(bot)
     bot.logger = MagicMock()
     bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)

@@ -39,7 +39,7 @@ from mindroom.constants import (
     resolve_runtime_paths,
 )
 from mindroom.delivery_gateway import FinalDeliveryRequest, ResponseIdentity
-from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.handled_turns import SourceEventMetadata, TurnRecord, TurnRecordCodec
 from mindroom.history.interrupted_replay import _build_interrupted_replay_run, build_interrupted_replay_snapshot
@@ -73,6 +73,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import fixture_entity_matrix_id, persist_entity_accounts
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -384,6 +385,7 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
     )
+    install_direct_response_admission(bot)
 
     # Mock the client
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_agent:example.com")
@@ -1954,6 +1956,19 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
         "sender": "@user:example.com",
     }
 
+    await principal.admit(
+        InboundEvent(
+            event_id=edit_event.event_id,
+            room_id=room.room_id,
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender=edit_event.sender,
+            origin_server_ts=1000001,
+            source=edit_event.source,
+        ),
+    )
+
     async def fail_visible_update(request: ResponseRequest) -> str | None:
         assert request.prepare_source_turn is not None
         assert await request.prepare_source_turn(request.thread_history) is False
@@ -1966,6 +1981,7 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
                     response_kind="agent",
                     response_envelope=request.response_envelope,
                     correlation_id=request.correlation_id or "failed-edit",
+                    sources=request.sources,
                 ),
                 tool_trace=None,
                 extra_content=None,

@@ -26,6 +26,7 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -60,6 +61,7 @@ def _bot(tmp_path: Path) -> AgentBot:
         user_id="@mindroom_general:localhost",
     )
     bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
