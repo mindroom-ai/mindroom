@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
@@ -36,13 +38,23 @@ from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs, create_scope_session_storage
 from mindroom.history.types import HistoryScope
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.tool_system.output_files import (
+    OUTPUT_PATH_ARGUMENT,
+    ToolOutputFilePolicy,
+    ToolOutputFileRequest,
+    finalize_tool_output_file,
+    normalize_output_path_argument,
+    prepare_tool_output_file,
+)
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
     run_with_tool_execution_identity,
     serialize_tool_execution_identity,
 )
+from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
@@ -606,14 +618,49 @@ def _child_completion_event(
     return event_type(tool=tool, run_id=response.run_id, session_id=response.session_id)
 
 
+def _prepare_delegation_output(
+    caller: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    identity: ToolExecutionIdentity,
+    raw_path: object,
+) -> ToolOutputFileRequest | dict[str, object] | None:
+    """Resolve the caller's output policy without scaffolding or reconciling its workspace."""
+    storage = resolve_agent_storage(caller, config, runtime_paths, execution_identity=identity)
+    workspace = resolve_agent_workspace_from_state_path(
+        caller,
+        config,
+        runtime_paths=runtime_paths,
+        state_storage_path=storage.state_root,
+        use_state_storage_path=storage.execution.policy.private_workspace_enabled,
+    )
+    if workspace is None:
+        if normalize_output_path_argument(raw_path) is not None:
+            return {
+                "mindroom_tool_output": {"status": "error", "error": "Output redirection requires an agent workspace."},
+            }
+        return None
+    policy = ToolOutputFilePolicy.from_runtime(
+        workspace.root,
+        runtime_paths,
+        auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+    )
+    return prepare_tool_output_file(policy, tool_name="run_subagent", output_path=raw_path)
+
+
 def _resolve_delegation_requirement(
     requirement: RunRequirement,
     result: str,
     response: RunOutput | TeamRunOutput,
     agent_name: str,
     on_event: Callable[[object], None] | None,
-) -> None:
+    *,
+    output_request: ToolOutputFileRequest | None = None,
+) -> str:
     """Resolve one external call and close its live tool trace, including rejections."""
+    if output_request is not None:
+        formatted = finalize_tool_output_file(output_request, result)
+        result = formatted if isinstance(formatted, str) else json.dumps(formatted)
     requirement.set_external_execution_result(result)
     if on_event is not None:
         on_event(
@@ -624,6 +671,8 @@ def _resolve_delegation_requirement(
                 agent_id=requirement.member_agent_id or agent_name,
             ),
         )
+
+    return result
 
 
 async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
@@ -720,6 +769,19 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 )
                 continue
             authorization = toolkit.authorize(child_name, task)
+            output_request = None
+            if not isinstance(authorization, str):
+                prepared_output = _prepare_delegation_output(
+                    caller,
+                    config,
+                    runtime_paths,
+                    replace(execution_identity, agent_name=caller),
+                    args.get(OUTPUT_PATH_ARGUMENT),
+                )
+                if isinstance(prepared_output, dict):
+                    authorization = json.dumps(prepared_output)
+                else:
+                    output_request = prepared_output
             if isinstance(authorization, str):
                 retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
                 if retained is not None:
@@ -740,6 +802,14 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                         result=authorization,
                     )
                 continue
+            resolve_result = partial(
+                _resolve_delegation_requirement,
+                requirement,
+                response=response,
+                agent_name=agent_name,
+                on_event=on_event,
+                output_request=output_request,
+            )
             if tool_may_require_approval(config, "run_subagent") and requirement_key not in state.gates:
                 projected = deepcopy(tool)
                 projected.external_execution_required = False
@@ -752,13 +822,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 await _persist(entity, response, state)
                 return response
             if state.gates.get(requirement_key) is False:
-                _resolve_delegation_requirement(
-                    requirement,
-                    "Delegation denied by requester; child was not executed.",
-                    response,
-                    agent_name,
-                    on_event,
-                )
+                resolve_result("Delegation denied by requester; child was not executed.")
                 continue
             if requirement.id not in state.hooks:
                 state.hooks[requirement.id] = await before_delegation(
@@ -770,18 +834,12 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 await _persist(entity, response, state)
             hook_state = state.hooks[requirement.id]
             if hook_state.blocked_result is not None:
-                _resolve_delegation_requirement(
-                    requirement,
-                    hook_state.blocked_result,
-                    response,
-                    agent_name,
-                    on_event,
-                )
+                blocked_result = resolve_result(hook_state.blocked_result)
                 await after_delegation(
                     hook_state,
                     config=config,
                     runtime_paths=runtime_paths,
-                    result=hook_state.blocked_result,
+                    result=blocked_result,
                 )
                 await _persist(entity, response, state)
                 continue
@@ -908,12 +966,12 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             result = child.result or "Agent completed the task but returned no content."
             if child.status != "completed":
                 result = f"Delegation to '{child_name}' {child.status}: {result}"
-            _resolve_delegation_requirement(requirement, f"{result}\n\n{receipt}", response, agent_name, on_event)
+            result = resolve_result(f"{result}\n\n{receipt}")
             await after_delegation(
                 hook_state,
                 config=config,
                 runtime_paths=runtime_paths,
-                result=f"{result}\n\n{receipt}",
+                result=result,
             )
         await _persist(entity, response, state)
         if isinstance(response, RunOutput):

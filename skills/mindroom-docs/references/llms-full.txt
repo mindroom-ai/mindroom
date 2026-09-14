@@ -7875,6 +7875,9 @@ New roots may not appear in discovery until they have a reply.
 | `message_extras` | `list[object] \| None` | `None` | Collapsible sections for send/edit; schema below. |
 | `limit` | `int \| None` | `None` | Read count, clamped to 1–50; default 20. |
 
+Workspace-backed agents may also see MindRoom's standard `mindroom_output_path` argument, which saves the tool result and returns a file receipt.
+It controls the returned tool output, not where the Matrix message is delivered.
+
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit the sending account's messages.
 `read` returns message event IDs; thread reads also include edit options for editable messages.
@@ -10047,6 +10050,8 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to run a configured agent with fresh conversation context and return its response inline.
+When the caller has a workspace, `run_subagent` also accepts the standard `mindroom_output_path` argument to save its result and return a file receipt.
+Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
 
 ### What It Does
 
@@ -15555,8 +15560,8 @@ It must not be empty, absolute, point at the workspace root, contain `..` or NUL
 When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.
 In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so `incoming/file.ext` and `~/incoming/file.ext` refer to the same saved file.
 
-`attachment_ids` accepts only context attachment IDs (`att_*`).
-`attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
+`matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
+Local files are registered in the current context before sending.
 Relative paths resolve from the agent workspace when one is available.
 Relative paths must stay inside the workspace.
 Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.

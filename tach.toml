@@ -5660,6 +5660,9 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation_execution"
 depends_on = [
+    "mindroom.tool_system.output_files",
+    "mindroom.runtime_resolution",
+    "mindroom.workspaces",
     "mindroom.delegation_hooks",
     "mindroom.dynamic_tool_continuation",
     "mindroom.history.native",

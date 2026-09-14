@@ -80,6 +80,9 @@ New roots may not appear in discovery until they have a reply.
 | `message_extras` | `list[object] \| None` | `None` | Collapsible sections for send/edit; schema below. |
 | `limit` | `int \| None` | `None` | Read count, clamped to 1–50; default 20. |
 
+Workspace-backed agents may also see MindRoom's standard `mindroom_output_path` argument, which saves the tool result and returns a file receipt.
+It controls the returned tool output, not where the Matrix message is delivered.
+
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit the sending account's messages.
 `read` returns message event IDs; thread reads also include edit options for editable messages.

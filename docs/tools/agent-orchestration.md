@@ -180,6 +180,8 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to run a configured agent with fresh conversation context and return its response inline.
+When the caller has a workspace, `run_subagent` also accepts the standard `mindroom_output_path` argument to save its result and return a file receipt.
+Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
 
 ### What It Does
 
