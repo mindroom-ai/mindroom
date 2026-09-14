@@ -32,7 +32,7 @@ import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.registration as registration_module
-from mindroom import __version__, runtime_env_policy
+from mindroom import __version__, runtime_env_policy, yaml_io
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
@@ -52,7 +52,13 @@ from mindroom.private_instance_identity_store import ensure_private_instance_ide
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolMetadata, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolMetadata,
+    ToolStatus,
+)
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     get_tool_by_name,
@@ -1771,7 +1777,9 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     envelope = sandbox_protocol_module.serialize_subprocess_envelope(
         request=prepared_request.model_dump(mode="json"),
         runtime_paths=serialize_runtime_paths(runtime_paths),
+        config_yaml="{}\n",
     )
+    config_path.write_text("models: [\n", encoding="utf-8")
 
     def _forbidden_prepare(*_args: object, **_kwargs: object) -> object:
         msg = "subprocess child should not re-run worker preparation"
@@ -1792,6 +1800,167 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     response = sandbox_runner_module.SandboxRunnerExecuteResponse.model_validate_json(response_json)
     assert response.ok is True
     assert '"result": 3' in str(response.result)
+
+
+def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() -> None:
+    """Built-in tools should receive required effective policy without unrelated agent definitions."""
+    config = Config.model_validate(
+        {
+            "agents": {f"agent_{index}": {"display_name": f"Agent {index}"} for index in range(50)},
+            "defaults": {"worker_grantable_credentials": ["github_private"]},
+        },
+    )
+
+    payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "calculator"))
+
+    assert payload == {
+        "plugins": [],
+        "defaults": {
+            "worker_grantable_credentials": ["github_private"],
+            "tool_output_auto_save_threshold_bytes": 51200,
+        },
+        "mcp_servers": {},
+    }
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Plugin calls should receive full native config values and observe explicit refresh."""
+    plugin_root = tmp_path / "plugins" / "runtime-config"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "runtime_config_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolManagedInitArg\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class RuntimeConfigPluginTool(Toolkit):\n"
+        "    def __init__(self, runtime_config) -> None:\n"
+        "        self.runtime_config = runtime_config\n"
+        "        super().__init__(name='runtime_config_plugin', tools=[self.inspect_config])\n"
+        "\n"
+        "    def inspect_config(self):\n"
+        "        settings = self.runtime_config.plugins[0].settings\n"
+        "        return {\n"
+        "            'agent': self.runtime_config.agents['unrelated'].display_name,\n"
+        "            'label': settings['label'],\n"
+        "            'released': settings['released'].isoformat(),\n"
+        "            'payload': settings['payload'].decode('utf-8'),\n"
+        "            'explicit_null': settings['nullable'] is None,\n"
+        "            'defaults_authored': 'defaults' in self.runtime_config.model_fields_set,\n"
+        "        }\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='runtime_config_plugin',\n"
+        "    display_name='Runtime Config Plugin',\n"
+        "    description='Inspect received runtime config',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        "    function_names=('inspect_config',),\n"
+        "    managed_init_args=(ToolManagedInitArg.RUNTIME_CONFIG,),\n"
+        ")\n"
+        "def runtime_config_plugin_tools():\n"
+        "    return RuntimeConfigPluginTool\n",
+        encoding="utf-8",
+    )
+    config_path = Path(os.environ["MINDROOM_CONFIG_PATH"])
+
+    def write_config(label: str) -> None:
+        config_path.write_text(
+            "agents:\n"
+            "  unrelated:\n"
+            "    display_name: Unrelated\n"
+            "plugins:\n"
+            "  - path: ./plugins/runtime-config\n"
+            "    settings:\n"
+            f"      label: {label}\n"
+            "      released: 2026-09-14\n"
+            "      payload: !!binary cmF3\n"
+            "      nullable: null\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    write_config("before")
+    _set_sandbox_token(monkeypatch)
+
+    def execute() -> dict[str, object]:
+        response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={"tool_name": "runtime_config_plugin", "function_name": "inspect_config"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True, data
+        assert isinstance(data["result"], dict)
+        return data["result"]
+
+    config_path.write_text("models: [\n", encoding="utf-8")
+    assert execute() == {
+        "agent": "Unrelated",
+        "label": "before",
+        "released": "2026-09-14",
+        "payload": "raw",
+        "explicit_null": True,
+        "defaults_authored": False,
+    }
+
+    write_config("after")
+    _refresh_runner_app_from_env()
+
+    assert execute()["label"] == "after"
+
+
+def test_subprocess_serialization_boundary_omits_unrelated_agents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The actual child envelope should carry the projected built-in tool configuration."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    config = Config.model_validate(
+        {"agents": {f"agent_{index}": {"display_name": f"Agent {index}"} for index in range(50)}},
+    )
+    captured_envelope: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **run_kwargs: object) -> subprocess.CompletedProcess[str]:
+        del cmd
+        captured_envelope.update(json.loads(str(run_kwargs["input"])))
+        response = sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result='{"result": 3}')
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="",
+            stderr=sandbox_protocol_module._RESPONSE_MARKER + response.model_dump_json(),
+        )
+
+    monkeypatch.setattr(sandbox_runner_module.subprocess, "run", fake_run)
+
+    response = sandbox_runner_module._execute_request_subprocess_sync(
+        sandbox_runner_module.SandboxRunnerExecuteRequest(
+            tool_name="calculator",
+            function_name="add",
+            args=[1, 2],
+        ),
+        runtime_paths,
+        config,
+    )
+
+    config_payload = yaml_io.safe_load(str(captured_envelope["config_yaml"]))
+    assert response.ok is True
+    assert "agents" not in config_payload
+    assert config_payload["defaults"]["tool_output_auto_save_threshold_bytes"] == 51200
 
 
 def test_sandbox_execution_env_passes_through_extra_env_passthrough_only(
@@ -2399,11 +2568,14 @@ def test_sandbox_runner_execute_rejects_invalid_mcp_tool_overrides(
     assert "include_tools and exclude_tools overlap" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("execution_mode", ["inprocess", "subprocess", "forkserver"])
 def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_refresh(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
 ) -> None:
     """Execute requests should keep using the runner's committed startup config after later disk drift."""
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
     _set_sandbox_token(monkeypatch)
     runtime_paths = sandbox_runner_module.app_runtime_paths(sandbox_runner_app)
     runtime_paths.config_path.write_text("models: [\n", encoding="utf-8")
@@ -3461,10 +3633,12 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
         runtime_paths: object,
         prepared_worker: object | None = None,
         *,
+        config: Config | None = None,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
+        assert config is not None
         assert prepared_worker is not None
         assert runner_token == SANDBOX_TOKEN
         return sandbox_runner_module.SandboxRunnerExecuteResponse(ok=True, result="ok")
@@ -4031,10 +4205,12 @@ def test_dedicated_worker_mode_resolves_relative_agent_base_dir_from_shared_stor
         runtime_paths: object,
         prepared_worker: object | None = None,
         *,
+        config: Config | None = None,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert runtime_paths is not None
+        assert config is not None
         assert runner_token == SANDBOX_TOKEN
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root
@@ -4126,11 +4302,13 @@ def test_dedicated_worker_mode_allows_private_template_dir_missing_from_worker_f
         runtime_paths: object,
         prepared_worker: object | None = None,
         *,
+        config: Config | None = None,
         runner_token: str | None = None,
     ) -> sandbox_runner_module.SandboxRunnerExecuteResponse:
         assert request.worker_key == worker_key
         assert request.private_agent_names == ["mind"]
         assert runtime_paths is not None
+        assert config is not None
         assert runner_token == SANDBOX_TOKEN
         assert prepared_worker is not None
         assert prepared_worker.paths.root == worker_root

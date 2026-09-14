@@ -1331,11 +1331,13 @@ depends_on = [
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.logging_config",
+    "mindroom.mcp.registry",
     "mindroom.runtime_resolution",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backends.local",
@@ -4931,6 +4933,7 @@ expose = [
 ]
 from = ["mindroom.tool_system.registry_state"]
 visibility = [
+    "mindroom.api.sandbox_runner",
     "mindroom.mcp.registry",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",

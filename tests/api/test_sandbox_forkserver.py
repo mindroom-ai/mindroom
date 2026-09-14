@@ -76,7 +76,13 @@ from agno.utils.schema import identity_injected_types
 def ready(socket_path, handler):
     before = set(sys.modules)
     identity_injected_types()
-    print(json.dumps({"new_modules": sorted(set(sys.modules) - before), "threads": threading.active_count()}))
+    print(json.dumps({
+        "new_modules": sorted(set(sys.modules) - before),
+        "preloaded_modules": sorted(
+            name for name in ("mindroom.tool_system.plugins", "mindroom.mcp.registry") if name in before
+        ),
+        "threads": threading.active_count(),
+    }))
     return 0
 
 sandbox_runner.sandbox_forkserver.serve_template = ready
@@ -90,7 +96,11 @@ sandbox_runner._run_forkserver_template()
         timeout=30,
     )
     result = json.loads(completed.stdout)
-    assert result == {"new_modules": [], "threads": 1}
+    assert result == {
+        "new_modules": [],
+        "preloaded_modules": ["mindroom.mcp.registry", "mindroom.tool_system.plugins"],
+        "threads": 1,
+    }
 
 
 @pytest.fixture
