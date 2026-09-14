@@ -85,7 +85,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.tool_schema_cache"
-depends_on = []
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.output_files"]
 visibility = [
     "mindroom.mcp_gateway.tools",
     "mindroom.history.prompt_tokens",
@@ -3702,6 +3702,7 @@ path = "mindroom.tool_system.output_files"
 depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
+    "mindroom.tool_system.declarations",
     "mindroom.workspaces",
 ]
 
@@ -3760,6 +3761,7 @@ depends_on = [
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.constants",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
@@ -4833,6 +4835,8 @@ expose = [
     "ToolMetadata",
     "ToolStatus",
     "ToolValidationInfo",
+    "declare_tool_schema_source",
+    "tool_schema_source",
 ]
 from = ["mindroom.tool_system.declarations"]
 

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -243,6 +244,16 @@ def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = F
     effective_strict = False if self.strict is False else strict
     Function.process_entrypoint(self, strict=effective_strict)
     ensure_output_path_schema_optional(self)
+
+
+def uses_output_file_schema(function: Function) -> bool:
+    """Whether this Function uses our known output-path schema processor."""
+    processor = function.process_entrypoint
+    return (
+        function.entrypoint is not None
+        and isinstance(processor, MethodType)
+        and processor.__func__ is _process_entrypoint_with_output_path_schema
+    )
 
 
 def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
@@ -731,6 +742,7 @@ def _wrap_entrypoint(
     wrapper.__module__ = getattr(entrypoint, "__module__", __name__)
     wrapper.__dict__["__signature__"] = _signature_with_output_path(entrypoint)
     _copy_annotations_with_output_path(wrapper, entrypoint)
+    declare_tool_schema_source(wrapper, entrypoint)
     setattr(wrapper, _WRAPPED_ATTR, True)
     return wrapper
 

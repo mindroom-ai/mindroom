@@ -21,6 +21,7 @@ import httpx
 
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -885,6 +886,7 @@ def _wrap_sync_function(
             worker_target=worker_target,
         )
 
+    declare_tool_schema_source(proxy_entrypoint, function.entrypoint)
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
@@ -925,6 +927,7 @@ def _wrap_async_function(
         )
         return await _run_in_worker_proxy_executor(call)
 
+    declare_tool_schema_source(proxy_entrypoint, function.entrypoint)
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 

@@ -343,6 +343,26 @@ async def test_authored_confirmation_never_runs_body(
     assert result["error"]["code"] == "approval_required"
 
 
+def test_schema_cache_fallback_allows_required_list_rebuild() -> None:
+    """Uncacheable input must still reach normal preparation that rebuilds required fields."""
+
+    def echo(text: str) -> str:
+        return text
+
+    required: list[object] = []
+    required.append(required)
+    function = Function(
+        name="echo",
+        entrypoint=echo,
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": required},
+    )
+
+    payload = gateway._schema_payload("helper", "example", function)
+
+    assert payload["inputSchema"]["required"] == ["text"]
+    assert function.parameters["required"][0] is function.parameters["required"]
+
+
 @pytest.mark.asyncio
 async def test_schema_and_result_bounds(context: AgentToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
     """Schema and result bounds."""
