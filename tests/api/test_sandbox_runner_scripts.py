@@ -37,7 +37,7 @@ _WORKER_KEY = "v1:test:shared:scripts"
 _SUPERVISOR_HANDLE = f"shell:{'a' * 32}"
 
 
-def _fake_local_worker_venv_create(_self: object, venv_dir: Path) -> None:
+def _fake_local_worker_venv_create(venv_dir: Path) -> None:
     bin_dir = venv_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     (bin_dir / "python").symlink_to(Path(sys.executable))
@@ -62,7 +62,7 @@ def runner_client(
             SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(tmp_path / "dedicated-worker"),
         },
     )
-    monkeypatch.setattr(local_workers_module.venv.EnvBuilder, "create", _fake_local_worker_venv_create)
+    monkeypatch.setattr(local_workers_module, "_create_local_worker_venv", _fake_local_worker_venv_create)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
     sandbox_runner_module.initialize_sandbox_runner_app(
@@ -336,7 +336,7 @@ router:
             SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(shared_storage_root),
         },
     )
-    monkeypatch.setattr(local_workers_module.venv.EnvBuilder, "create", _fake_local_worker_venv_create)
+    monkeypatch.setattr(local_workers_module, "_create_local_worker_venv", _fake_local_worker_venv_create)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
     monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
     app = FastAPI()

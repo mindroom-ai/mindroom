@@ -286,7 +286,7 @@ def _config_with_available_plugins(config: Config, runtime_paths: RuntimePaths) 
         "sandbox_runner_skipping_unavailable_plugins",
         plugin_paths=sorted(skipped_plugin_paths),
     )
-    return config.model_copy(update={"plugins": available_plugins}, deep=True)
+    return config.model_copy(update={"plugins": available_plugins})
 
 
 def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
