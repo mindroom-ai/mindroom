@@ -24,6 +24,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutc
 from mindroom.response_runner import ResponseRunner, _DeliveryProgress
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
+from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
 from tests.test_response_runner_focused import _admit_approval_source, _visible_event_response
@@ -281,14 +282,16 @@ async def test_edited_pause_survives_dispatch_and_restart(  # noqa: C901, PLR091
 
 
 @pytest.mark.asyncio
+@pytest.mark.ledger_loads_from_disk
 @pytest.mark.parametrize("started", [False, True])
 @pytest.mark.parametrize("transport_fails", [False, True])
-async def test_failed_pause_handoff_finalizes_visible_edited_response(
+async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: PLR0915
     tmp_path: Path,
+    journal_store: EventJournalStore,
     started: bool,
     transport_fails: bool,
 ) -> None:
-    """Failure before continuation creation must replace the pending visible status."""
+    """A visible error settles delivery without claiming the edited request was answered."""
     bot = _bot(tmp_path)
     bot.client.room_send.return_value = nio.RoomSendResponse("$terminal-edit", "!room:localhost")
     if transport_fails:
@@ -298,8 +301,43 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(
         body="Partial edited answer",
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await _admit_approval_source(runner.deps.approval_store, event_id="$edit")
-    request = replace(_plain_request(_target(), source_event_id="$edit"), existing_event_id="$waiting")
+    principal = journal_store.principal("general@@mindroom_general:localhost")
+    await _admit_approval_source(principal, event_id="$source")
+    await _admit_approval_source(principal, event_id="$edit")
+    await principal.settle_many(("$source",))
+    store = await _store(journal_store, agent_name="general")
+    await store.record_responded_turn(
+        TurnRecord.create(
+            ["$source"],
+            response_event_id="$waiting",
+            completed=True,
+            source_event_prompts={"$source": "original"},
+        ),
+    )
+    registered = await store.register_edit_revision("$source", (20, "$edit"))
+    assert registered is not None
+    selected = canonicalize_turn_record(
+        registered,
+        source_event_prompts={"$source": "selected edit"},
+        source_event_revisions={"$source": (20, "$edit")},
+    )
+    bot._turn_store = store
+    gateway = unwrap_extracted_collaborator(runner.deps.delivery_gateway)
+    gateway = replace(
+        gateway,
+        deps=replace(
+            gateway.deps,
+            outbox=principal,
+            terminal_turn_for=store.terminal_turn_record,
+            terminal_turn_committed=store.publish_committed_response,
+        ),
+    )
+    runner.deps = replace(runner.deps, approval_store=principal, delivery_gateway=gateway)
+    request = replace(
+        _plain_request(_target(), source_event_id="$edit"),
+        existing_event_id="$waiting",
+        prepared_edit_record=selected,
+    )
     lifecycle = runner._build_lifecycle(
         identity=runner._response_identity(request, response_kind="ai"),
         request=request,
@@ -340,6 +378,16 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(
         assert final is not None
     assert final.acknowledged_event_id is not None
     assert final.payload["m.new_content"][STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
+    assert not await principal.is_pending("$edit")
+    assert not await principal.is_pending("$source")
+    _reset_handled_turn_ledger_runtime()
+    persisted = (await _store(journal_store, agent_name="general")).get_turn_record("$source")
+    assert persisted is not None
+    assert persisted.response_event_id == "$waiting"
+    assert persisted.source_event_prompts == {"$source": "original"}
+    assert persisted.source_event_revisions is None
+    assert persisted.revision_watermark("$source") == (20, "$edit")
+    assert persisted.revision_replay["$edit"].response_event_id is None
 
 
 @pytest.mark.asyncio

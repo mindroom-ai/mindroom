@@ -3360,6 +3360,8 @@ class ResponseRunner:
         extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
         delivered = False
         if event_id is not None:
+            # Only completed answers consume prepared edit revisions. This
+            # error settles delivery without claiming the edit was answered.
             delivered = await self.deps.delivery_gateway.edit_text(
                 EditTextRequest(
                     target=target,
