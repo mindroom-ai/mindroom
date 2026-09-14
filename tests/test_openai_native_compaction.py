@@ -14,6 +14,8 @@ from agno.models.message import Message
 from agno.utils.message import filter_tool_calls
 from openai import AsyncOpenAI, OpenAI
 from openai.types.responses import Response
+from openai.types.responses.response_input_item_param import ResponseInputItemParam
+from pydantic import TypeAdapter
 
 from mindroom.codex_model import CodexResponses
 from mindroom.openai_models import MindRoomOpenAIResponses
@@ -494,6 +496,76 @@ def test_legacy_replay_reconstructs_calls_without_inventing_reasoning(
     ]
     assert replay[-1] == {"role": "user", "content": "Continue."}
     assert [message.model_dump() for message in replay_messages] == filtered
+    assert [message.model_dump() for message in messages] == original
+
+
+@pytest.mark.parametrize("retain_call", [False, True])
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (["first", "second"], [{"type": "input_text", "text": "first"}, {"type": "input_text", "text": "second"}]),
+        ([{"type": "text", "text": "answer"}], [{"type": "input_text", "text": "answer"}]),
+        (
+            [{"type": "output_text", "text": "answer", "annotations": []}],
+            [{"type": "input_text", "text": "answer"}],
+        ),
+        (
+            [
+                {"type": "input_text", "text": "answer"},
+                {"type": "input_image", "file_id": "file_image", "detail": "auto"},
+            ],
+            [
+                {"type": "input_text", "text": "answer"},
+                {"type": "input_image", "file_id": "file_image", "detail": "auto"},
+            ],
+        ),
+    ],
+)
+def test_reconstructed_assistant_content_uses_valid_responses_blocks(
+    content: list[Any],
+    expected: list[dict[str, Any]],
+    *,
+    retain_call: bool,
+) -> None:
+    """Canonical text shapes must become valid provider input without losing media or text."""
+    messages = [
+        Message(
+            role="assistant",
+            content=content,
+            tool_calls=[
+                {
+                    "id": "fc_lookup",
+                    "call_id": "call_lookup",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                },
+            ],
+            provider_data={"reasoning_output": _REASONING},
+        ),
+        Message(role="tool", tool_call_id="fc_lookup", content="Found it"),
+    ]
+    original = [message.model_dump() for message in messages]
+    filtered = list(messages)
+    filter_tool_calls(filtered, int(retain_call))
+
+    replay = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)._format_messages(filtered)
+
+    validated = TypeAdapter(list[ResponseInputItemParam]).validate_python(replay)
+    assert validated[0] == {"role": "assistant", "content": expected}
+    assert replay[0] == {"role": "assistant", "content": expected}
+    if retain_call:
+        assert replay[1:] == [
+            {
+                "type": "function_call",
+                "call_id": "call_lookup",
+                "name": "lookup",
+                "arguments": "{}",
+                "status": "completed",
+            },
+            {"type": "function_call_output", "call_id": "call_lookup", "output": "Found it"},
+        ]
+    else:
+        assert len(replay) == 1
     assert [message.model_dump() for message in messages] == original
 
 

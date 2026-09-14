@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.legacy_openai_tool_replay import repair_legacy_responses_span
 from mindroom.native_compaction import checkpoint_items
 
 if TYPE_CHECKING:
@@ -92,24 +93,23 @@ def formatted_input_with_provider_items(
 
 
 def _reconstructed_response_input(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]]:
-    """Build fresh input when the original provider output cannot be replayed.
-
-    Legacy Agno records retain only the last reasoning item, which cannot
-    establish the dependencies of even a single remaining call after filtering.
-    Omit that tail and the optional provider item IDs; call_id still pairs each
-    reconstructed function call with its already-normalized result. Canonical
-    text and arguments remain authoritative, including request-local rewrites.
-    """
+    """Build valid input from canonical content when original output cannot be reused."""
+    repaired_span = repair_legacy_responses_span(message, formatted_span)
+    content = message.content
+    if isinstance(content, list):
+        content = [
+            {"type": "input_text", "text": part}
+            if isinstance(part, str)
+            else {"type": "input_text", "text": part["text"]}
+            if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+            else part
+            for part in content
+        ]
     if not message.tool_calls:
-        return formatted_span[:1]
-    calls = [
-        {key: value for key, value in item.items() if key != "id"}
-        for item in formatted_span
-        if isinstance(item, dict) and item.get("type") == "function_call"
-    ]
-    if message.content:
-        calls.insert(0, {"role": "assistant", "content": message.content})
-    return calls
+        return [{**repaired_span[0], "content": content if content is not None else ""}]
+    if content:
+        repaired_span.insert(0, {"role": "assistant", "content": content})
+    return repaired_span
 
 
 def _canonical_response_output(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]] | None:
