@@ -46,6 +46,7 @@ from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.participation import RoomParticipationConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
@@ -311,6 +312,9 @@ class _SpyTurnPolicy:
         availability: ResponderAvailability | None = None,
     ) -> list[object]:
         return list(await self.inner.responder_candidates_for_room(room, requester_user_id, availability))
+
+    def adaptive_participation(self, **kwargs: Any) -> Any:  # noqa: ANN401
+        return self.inner.adaptive_participation(**kwargs)
 
     def effective_response_action(self, action: ResponseAction) -> ResponseAction:
         return self.inner.effective_response_action(action)
@@ -4692,3 +4696,120 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
         release.set()
         await dispatcher.stop()
         await harness.gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mention", [False, True])
+async def test_adaptive_text_admission_delays_then_passes_participation(
+    config: Config,
+    tmp_path: Path,
+    mention: bool,
+) -> None:
+    """Actual two-human context delays text and reaches response execution as adaptive."""
+    config.room_participation = {
+        _ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=1.0 if mention else 0.1),
+    }
+    history = thread_history_result(
+        [
+            make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=history)
+    room = _room_with_members(config, "general", "research")
+    room.add_member("@other:localhost", "Other", None)
+    await harness.controller.handle_text_event(room, _text_event("my thought", thread_id=_THREAD_ROOT))
+    await asyncio.sleep(0.02)
+    assert harness.runner.requests == []
+    if mention:
+        explicit = _text_event("please answer", event_id="$mention:localhost", thread_id=_THREAD_ROOT)
+        explicit.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+        await harness.controller.handle_text_event(room, explicit)
+    await asyncio.sleep(0.15)
+    await harness.runner.settle_inbox_responses()
+    assert len(harness.runner.requests) == 1
+    if mention:
+        assert harness.runner.requests[0].participation is None
+        assert "my thought" in harness.runner.requests[0].prompt
+    else:
+        assert harness.runner.requests[0].participation.agent == "general"
+    await harness.gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["multi_human", "single_human", "mentioned"])
+async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
+    config: Config,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """Active backlogs keep one ordered turn, selecting participation only for untagged multi-human context."""
+    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=30)}
+    first_sender = _SENDER if mode == "single_human" else "@other:localhost"
+    history = thread_history_result(
+        [
+            make_visible_message(sender=first_sender, body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="working", event_id="$working"),
+        ],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=history)
+    room = _room_with_members(config, "general", "research")
+    room.add_member(first_sender, first_sender, None)
+    idle = asyncio.Event()
+    dispatched = asyncio.Event()
+    batches: list[PreparedTurn] = []
+    key = active_follow_up_coalescing_key(_ROOM_ID, _THREAD_ROOT)
+
+    async def wait_until_idle(_key: CoalescingKey) -> None:
+        await idle.wait()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+        await harness.controller.handle_prepared_turn(batch)
+        await harness.runner.settle_inbox_responses()
+        dispatched.set()
+
+    gate = CoalescingGate(
+        dispatch_turn=dispatch_batch,
+        debounce_seconds=lambda: 30.0,
+        is_shutting_down=lambda: False,
+        wait_until_dispatch_allowed=wait_until_idle,
+    )
+    try:
+        for event_id, sender, body in (
+            ("$first:localhost", first_sender, "first follow-up"),
+            ("$second:localhost", _SENDER, "extra context"),
+        ):
+            event = _text_event(body, event_id=event_id, thread_id=_THREAD_ROOT, sender=sender)
+            if mode == "mentioned" and event_id == "$second:localhost":
+                event.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
+            pending = make_pending_event(
+                event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=sender,
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+            )
+            pending.text_debounce_seconds = 30.0 if mode == "multi_human" else 0.0
+            await gate.admit(key, ready_result=ReadyPendingEvent(pending_event=pending))
+        await asyncio.sleep(0)
+        assert batches == []
+        assert harness.runner.requests == []
+        idle.set()
+        async with asyncio.timeout(1):
+            await dispatched.wait()
+        assert len(batches) == len(harness.runner.requests) == 1
+        batch = batches[0]
+        assert batch.ingress.coalescing_key == key
+        assert batch.handled_turn.source_event_ids == ("$first:localhost", "$second:localhost")
+        assert batch.handled_turn.source_event_metadata["$first:localhost"].sender == first_sender
+        assert batch.handled_turn.source_event_metadata["$second:localhost"].sender == _SENDER
+        request = harness.runner.requests[0]
+        assert request.user_id == _SENDER
+        assert "first follow-up" in request.prompt
+        assert "extra context" in request.prompt
+        assert (request.participation is not None) == (mode == "multi_human")
+    finally:
+        idle.set()
+        await gate.drain_all()

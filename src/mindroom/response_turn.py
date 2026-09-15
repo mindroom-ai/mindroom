@@ -45,6 +45,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.hooks import EnrichmentItem
+    from mindroom.participation import ParticipationGate
     from mindroom.tool_system.events import ToolTraceEntry
 
 logger = get_logger(__name__)
@@ -75,6 +77,7 @@ __all__ = [
     "PausedAttempt",
     "ResponsePausedForApproval",
     "ResponseTurnContext",
+    "SkippedAttempt",
     "StandaloneReplaySnapshot",
     "StreamAttemptResolution",
     "StreamingTurnAdapter",
@@ -87,6 +90,7 @@ __all__ = [
     "paused_attempt_from_event",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
+    "skip_unapproved_attempt",
     "stream_response_turn",
 ]
 
@@ -295,6 +299,7 @@ class ResponseTurnContext:
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
+    participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
     scheduled_history_budget: ScheduledHistoryBudget | None = None
@@ -561,8 +566,18 @@ class HandledAttempt:
     """One streaming error whose user-facing text was already emitted."""
 
 
-BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt
-StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt
+@dataclass(frozen=True)
+class SkippedAttempt:
+    """One unapproved response attempt with no answer or successful-run effects."""
+
+    reason: str
+    session_id: str | None = None
+    run_id: str | None = None
+    output_tokens: int | None = None
+
+
+BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | SkippedAttempt
+StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
 
 
 @dataclass(frozen=True)
@@ -923,6 +938,16 @@ async def run_blocking_response_turn(
     except ResponsePausedForApproval:
         raise
     except Exception as e:
+        if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
+            _settle_skipped_attempt(
+                ctx,
+                sinks,
+                run,
+                skipped,
+                adapter.discard_empty_run,
+            )
+            logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
+            return ""
         _record_turn_excluded_fallback(
             ctx,
             adapter.persist_standalone_replay,
@@ -940,6 +965,41 @@ async def run_blocking_response_turn(
         adapter.close_runtime_dbs(run.scope_context)
 
 
+def skip_unapproved_attempt(
+    participation: ParticipationGate | None,
+    *,
+    reason: str,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    output_tokens: int | None = None,
+) -> SkippedAttempt | None:
+    """Resolve unapproved completion or failure without taking over run cleanup."""
+    if participation is None or not participation.decline(reason):
+        return None
+    return SkippedAttempt(reason=reason, session_id=session_id, run_id=run_id, output_tokens=output_tokens)
+
+
+def _settle_skipped_attempt(
+    ctx: ResponseTurnContext,
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: SkippedAttempt,
+    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
+) -> None:
+    """Discard the skipped provider run without recording an assistant turn."""
+    if resolution.run_id is not None:
+        discard_empty_run(
+            run.scope_context,
+            EmptyRunDiscard(
+                session_id=resolution.session_id or ctx.session_id,
+                run_id=resolution.run_id,
+                output_tokens=resolution.output_tokens,
+            ),
+        )
+    if sinks.turn_recorder is not None:
+        sinks.turn_recorder.mark_skipped()
+
+
 def _settle_blocking_attempt(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -954,6 +1014,9 @@ def _settle_blocking_attempt(
     # The blocking envelope publishes run metadata before recording, and only
     # for attempts that end the turn: a discarded empty run's or a superseded
     # continuation attempt's payload must not ride out on a later resolution.
+    if isinstance(resolution, SkippedAttempt):
+        _settle_skipped_attempt(ctx, sinks, run, resolution, adapter.discard_empty_run)
+        return ""
     if isinstance(resolution, PausedAttempt):
         if sinks.turn_recorder is not None:
             sinks.turn_recorder.mark_suspended()
@@ -1145,16 +1208,21 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 resolution: StreamAttemptResolution | None = None
                 keep_going = False
                 try:
-                    async for item in adapter.run_attempt(run, continuation):
-                        if isinstance(item, AttemptResolved):
-                            # The sentinel must be the attempt's final yield; never
-                            # break out of this loop, so attempt cleanup stays
-                            # deterministic at generator return.
-                            resolution = item.resolution
-                            continue
-                        yield item
+                    attempt_stream = adapter.run_attempt(run, continuation)
+                    async with closing_async_stream(attempt_stream):
+                        async for item in attempt_stream:
+                            if isinstance(item, AttemptResolved):
+                                # The sentinel must be the attempt's final yield; never
+                                # break out of this loop, so attempt cleanup stays
+                                # deterministic at generator return.
+                                resolution = item.resolution
+                                continue
+                            yield item
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
+                    if isinstance(resolution, SkippedAttempt):
+                        _settle_skipped_attempt(ctx, sinks, run, resolution, adapter.discard_empty_run)
+                        return
                     if isinstance(resolution, PausedAttempt):
                         if sinks.turn_recorder is not None:
                             sinks.turn_recorder.mark_suspended()
@@ -1236,6 +1304,16 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except ResponsePausedForApproval:
         raise
     except Exception as e:
+        if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
+            _settle_skipped_attempt(
+                ctx,
+                sinks,
+                run,
+                skipped,
+                adapter.discard_empty_run,
+            )
+            logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
+            return
         _record_turn_excluded_fallback(
             ctx,
             adapter.persist_standalone_replay,

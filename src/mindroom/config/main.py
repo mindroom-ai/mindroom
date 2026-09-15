@@ -63,6 +63,7 @@ from mindroom.config.models import (
     RouterConfig,
     ToolConfigEntry,
 )
+from mindroom.config.participation import RoomParticipationConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
@@ -86,6 +87,7 @@ from mindroom.constants import (
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
+from mindroom.entity_resolution import resolve_room_scoped_override
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
@@ -159,6 +161,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "rooms",
     "room_models",
+    "room_participation",
     "room_thread_summary_models",
     "knowledge_bases",
     "mcp_servers",
@@ -421,6 +424,7 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
+    room_participation: dict[str, RoomParticipationConfig] = Field(default_factory=dict)
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     room_thread_summary_models: dict[str, str] = Field(
         default_factory=dict,
@@ -1857,6 +1861,19 @@ class Config(BaseModel):
                 return next(iter(configured_modes))
 
         return "thread"
+
+    @model_validator(mode="after")
+    def validate_room_participation(self) -> Config:
+        """Require each room's designated responder to be an individual agent."""
+        for room, participation in self.room_participation.items():
+            if participation.agent not in self.agents or participation.agent == ROUTER_AGENT_NAME:
+                msg = f"Room participation for {room!r} requires a configured individual agent: {participation.agent!r}"
+                raise ValueError(msg)
+        return self
+
+    def get_room_participation(self, room_id: str, runtime_paths: RuntimePaths) -> RoomParticipationConfig | None:
+        """Resolve participation by concrete room ID or persisted room alias."""
+        return resolve_room_scoped_override(self.room_participation, room_id, runtime_paths, allow_raw_room_id=True)
 
     def _entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.

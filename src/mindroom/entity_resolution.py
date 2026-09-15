@@ -413,6 +413,17 @@ def resolve_room_scoped_model_override(
     allow_raw_room_id: bool = False,
 ) -> str | None:
     """Return a model override keyed by persisted room key or alias."""
+    return resolve_room_scoped_override(overrides, room_id, runtime_paths, allow_raw_room_id=allow_raw_room_id)
+
+
+def resolve_room_scoped_override[T](
+    overrides: Mapping[str, T],
+    room_id: str | None,
+    runtime_paths: RuntimePaths,
+    *,
+    allow_raw_room_id: bool = False,
+) -> T | None:
+    """Resolve an authored room override through persisted room keys and aliases."""
     if room_id is None or not overrides:
         return None
     if allow_raw_room_id and room_id in overrides:
