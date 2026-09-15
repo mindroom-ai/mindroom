@@ -168,6 +168,9 @@ class _WorkerBackend:
     def script_recovery_signature(self) -> str:
         return "stable-worker-authority"
 
+    def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
+        return {"profile": resource_profile, "requests": {}, "limits": {}}
+
     def ensure_worker(
         self,
         spec: WorkerSpec,
@@ -850,6 +853,58 @@ async def test_launch_admission_remains_fenced_until_every_reconciliation_owner_
 
     await manager.end_startup_reconciliation()
     launched = await manager.run(context, source="print('ok')\n")
+    assert launched.state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reconciliation_drain_reopens_launch_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation after acquiring a fence releases it without cancelling an admitted launch."""
+    manager, _backend, _client = _manager(tmp_path)
+    await manager._admit_launch()
+    drain_started = asyncio.Event()
+    wait_for_drain = manager._launches_drained.wait
+
+    async def observe_drain() -> bool:
+        drain_started.set()
+        return await wait_for_drain()
+
+    monkeypatch.setattr(manager._launches_drained, "wait", observe_drain)
+    reconciliation = asyncio.create_task(manager.begin_startup_reconciliation())
+    await drain_started.wait()
+    reconciliation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reconciliation
+    await manager._release_launch_admission()
+
+    launched = await manager.run(_context(tmp_path), source="print('ok')\n")
+    assert launched.state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reconciliation_contender_preserves_existing_fence(tmp_path: Path) -> None:
+    """A caller cancelled before acquiring ownership cannot release another caller's fence."""
+    manager, _backend, _client = _manager(tmp_path)
+    await manager.begin_startup_reconciliation()
+    contender_started = asyncio.Event()
+
+    async def begin_contender() -> None:
+        contender_started.set()
+        await manager.begin_startup_reconciliation()
+
+    async with manager._launch_admission_lock:
+        contender = asyncio.create_task(begin_contender())
+        await contender_started.wait()
+        contender.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await contender
+
+    with pytest.raises(ScriptRunManagerError, match="reconciliation is in progress"):
+        await manager.run(_context(tmp_path), source="print('blocked')\n")
+    await manager.end_startup_reconciliation()
+    launched = await manager.run(_context(tmp_path), source="print('ok')\n")
     assert launched.state is ScriptRunState.RUNNING
 
 
