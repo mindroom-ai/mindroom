@@ -264,7 +264,7 @@ class MatrixMessageTools(Toolkit):
                     message="Self-messaging requires a human requester. Use run_subagent for a fresh self-run in this runtime.",
                 )
             room_mode = selected.thread_mode == "room"
-            if room_mode and stored_intent is None:
+            if room_mode and (stored_intent is None or stored_intent.event_id is None):
                 if new_thread or thread_id not in {None, "room"}:
                     return self._payload(
                         "error",

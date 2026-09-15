@@ -367,27 +367,42 @@ async def test_invalid_store_never_resends(context: ToolRuntimeContext, transpor
     assert len(transport.attempts) == 1
 
 
-async def test_recipient_mode_change_preserves_prepared_thread(
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("new_thread", [False, True])
+async def test_recipient_mode_change_pauses_pending_thread(
     context: ToolRuntimeContext,
     transport: MatrixTransport,
+    pending: bool,
+    new_thread: bool,
 ) -> None:
-    """Current recipient availability must not rewrite the first prepared conversation."""
-    transport.lose_response = True
+    """Current room mode pauses pending threaded sends while completed receipts remain readable."""
+    transport.lose_response = pending
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(
-            message="first",
-            recipient="general",
-            new_thread=True,
-            idempotency_key="thread-mode",
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="first",
+                recipient="general",
+                new_thread=new_thread,
+                idempotency_key="thread-mode",
+            ),
         )
         context.config.agents["general"].thread_mode = "room"
         receipt = json.loads(
             await MatrixMessageTools().matrix_message(message="changed", idempotency_key="thread-mode"),
         )
-    assert receipt["status"] == "ok"
-    assert receipt["thread_id"] == receipt["event_id"]
+        assert len(transport.attempts) == 1
+        if pending:
+            assert receipt["status"] == "error"
+            assert "room conversations" in receipt["message"]
+        else:
+            assert receipt == first
+        context.config.agents["general"].thread_mode = "thread"
+        recovered = json.loads(
+            await MatrixMessageTools().matrix_message(message="changed", idempotency_key="thread-mode"),
+        )
+    assert recovered["status"] == "ok"
     assert len(transport.events) == 1
-    assert transport.attempts[0] == transport.attempts[1]
+    assert all(attempt == transport.attempts[0] for attempt in transport.attempts)
 
 
 async def test_alias_revocation_while_waiting_for_lock_fails_closed(

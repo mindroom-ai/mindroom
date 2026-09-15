@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -26,6 +27,18 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _RETENTION_SECONDS = 8 * 86400
+_CLAIM_TIMEOUT_SECONDS = 60.0
+_MAX_RETAINED_RECORDS = 10_000
+_MAX_PENDING_RECORDS = 1_024
+_MAX_STORE_BYTES = 16 * 1024 * 1024
+# https://spec.matrix.org/latest/appendices/#event-ids limits IDs to 255 UTF-8 bytes.
+_MAX_EVENT_ID_BYTES = 255
+# Six JSON escape bytes per event-ID byte plus a float timestamp fit in 2 KiB.
+# Reserve this for each pending row in addition to its current serialized size.
+_RECEIPT_RESERVE_BYTES = 2048
+_CAPACITY_ERROR = (
+    "Matrix message send capacity is exhausted; retry existing keys or wait for completed receipts to expire."
+)
 
 
 class MatrixMessageIdempotencyError(RuntimeError):
@@ -59,14 +72,36 @@ def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=True, sort_keys=True).encode()).hexdigest()
 
 
+def _serialized_size(payload: object) -> int:
+    # Match write_json_file_durable's default JSON separators and ensure_ascii.
+    return len(json.dumps(payload).encode("utf-8"))
+
+
+def _pending_count(state: _State) -> int:
+    return sum(intent.event_id is None for intent in state.sends.values())
+
+
+def _check_admission(state: _State) -> None:
+    if len(state.sends) >= _MAX_RETAINED_RECORDS or _pending_count(state) >= _MAX_PENDING_RECORDS:
+        raise MatrixMessageIdempotencyError(_CAPACITY_ERROR)
+
+
 def _write(path: Path, state: _State) -> None:
-    write_json_file_durable(path, state.model_dump(mode="json"), strict_atomic_replace=True)
+    payload = state.model_dump(mode="json")
+    if _serialized_size(payload) > _MAX_STORE_BYTES:
+        raise MatrixMessageIdempotencyError(_CAPACITY_ERROR)
+    write_json_file_durable(path, payload, strict_atomic_replace=True)
 
 
 def _read(path: Path, scope: tuple[str, str, str]) -> _State:
     if not path.exists():
         return _State(scope=scope)
-    state = _State.model_validate_json(path.read_bytes())
+    with path.open("rb") as source:
+        raw = source.read(_MAX_STORE_BYTES + 1)
+    if len(raw) > _MAX_STORE_BYTES:
+        msg = "Matrix message receipt store exceeds the size limit."
+        raise MatrixMessageIdempotencyError(msg)
+    state = _State.model_validate_json(raw)
     if (
         state.version != 1
         or state.scope != scope
@@ -130,6 +165,11 @@ class MatrixMessageSendClaim:
             thread_id=thread_id,
             starts_thread=starts_thread,
         )
+        reserved_size = (
+            _serialized_size(self.state.model_dump(mode="json")) + _pending_count(self.state) * _RECEIPT_RESERVE_BYTES
+        )
+        if reserved_size > _MAX_STORE_BYTES:
+            raise MatrixMessageIdempotencyError(_CAPACITY_ERROR)
         await run_blocking_until_complete(_write, self.path, self.state)
 
     async def deliver(self) -> tuple[str, str | None]:
@@ -154,6 +194,9 @@ class MatrixMessageSendClaim:
             if not isinstance(outcome, DeliveredMatrixEvent):
                 msg = "Matrix delivery is unconfirmed; retry with the same idempotency_key."
                 raise MatrixMessageIdempotencyError(msg)
+            if not outcome.event_id or len(outcome.event_id.encode("utf-8")) > _MAX_EVENT_ID_BYTES:
+                msg = "Matrix returned an invalid event ID; retry with the same idempotency_key."
+                raise MatrixMessageIdempotencyError(msg)
             intent.event_id = outcome.event_id
             intent.completed_at = time.time()
             intent.payload = None
@@ -164,7 +207,7 @@ class MatrixMessageSendClaim:
 
 
 @asynccontextmanager
-async def claim_matrix_message_send(
+async def _claim_matrix_message_send(
     context: ToolRuntimeContext,
     room_id: str,
     idempotency_key: str,
@@ -197,4 +240,23 @@ async def claim_matrix_message_send(
             msg = "Not authorized to send to the target room."
             raise MatrixMessageIdempotencyError(msg)
         state = await run_blocking_until_complete(_read, path, scope)
-        yield MatrixMessageSendClaim(context, path, state, _digest(idempotency_key))
+        key = _digest(idempotency_key)
+        if key not in state.sends:
+            _check_admission(state)
+        yield MatrixMessageSendClaim(context, path, state, key)
+
+
+@asynccontextmanager
+async def claim_matrix_message_send(
+    context: ToolRuntimeContext,
+    room_id: str,
+    idempotency_key: str,
+) -> AsyncIterator[MatrixMessageSendClaim]:
+    """Bound lock wait, preparation, and transport while allowing durable writes to settle."""
+    try:
+        async with asyncio.timeout(_CLAIM_TIMEOUT_SECONDS):
+            async with _claim_matrix_message_send(context, room_id, idempotency_key) as claim:
+                yield claim
+    except TimeoutError as exc:
+        msg = "Idempotent Matrix send timed out; retry with the same idempotency_key."
+        raise MatrixMessageIdempotencyError(msg) from exc

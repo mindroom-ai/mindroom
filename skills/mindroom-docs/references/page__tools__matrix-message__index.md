@@ -108,6 +108,8 @@ An error does not prove that Matrix rejected the message.
 Authorization for the sender and the original recipient is checked again on every retry, including completed receipts.
 A changed Matrix sender or device fails closed because its transaction IDs may no longer deduplicate the original send.
 These calls need durable control storage and a known Matrix sender and device.
+If the original recipient changes to room mode, a pending separate-thread send pauses before transport until compatible recipient settings are restored.
+Its stored target and transaction remain unchanged; completed receipts remain retrievable under current authorization.
 
 Completed receipts are retained for eight days, and the prepared message body is discarded after receipt storage.
 Pending sends never expire; retrying after eight days still uses their original payload.
@@ -117,6 +119,19 @@ Keep the storage across restarts and use the same Matrix device for retries.
 Rate limits also apply to retries; a rate-limit error requires waiting before retrying the same key.
 Keys cannot be used for `read`, `edit`, `react`, or attachment sends.
 There is no automatic retry worker; the caller controls retries.
+
+Keyed sends sharing the same canonical requester, acting agent, and room serialize under one file lock.
+A 60-second deadline covers lock wait, recipient discovery, preparation, and Matrix transport.
+On timeout the tool returns `status="error"` with `Idempotent Matrix send timed out; retry with the same idempotency_key.`
+Pending state and its transaction survive the timeout; the caller can retry, and other keys can proceed once the claim releases its lock.
+An in-flight durable filesystem write must finish before cancellation releases the lock, so a stalled filesystem can delay the timeout response.
+Ordinary sends have no new deadline.
+
+Each scope admits at most 10,000 retained records and 1,024 pending sends.
+The 16 MiB admission budget counts the exact serialized JSON plus 2 KiB reserved per pending receipt; durable files never exceed 16 MiB.
+Capacity errors reject new keys before Matrix send; existing keys can still recover or replay their receipts.
+Pending records are never evicted, and expired completed receipts can free admission capacity when the scope is used again.
+Oversized existing files fail closed before JSON parsing and are never discarded automatically.
 
 ## Attachments
 
