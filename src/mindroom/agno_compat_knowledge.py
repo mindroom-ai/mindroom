@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from agno.knowledge.knowledge import Knowledge
 
 
+# AGNO_COMPAT: Knowledge search hides provider failures as empty results.
 # Reason: Knowledge.search/asearch catch vector/provider errors and return [],
 # preventing callers from distinguishing an empty index from a failed search.
 # Upstream issue: https://github.com/agno-agi/agno/issues/10150
@@ -52,6 +53,7 @@ async def asearch(
         return knowledge.vector_db.search(query=query, limit=limit, filters=filters)
 
 
+# AGNO_COMPAT: Knowledge insertion lacks error and validation hooks.
 # Reason: Knowledge's private insertion handler catches vector failures and owns
 # status updates without a public error/validation callback for the caller.
 # Upstream issue: No matching public insertion error-policy issue identified.

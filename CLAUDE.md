@@ -468,7 +468,9 @@ Design migrations around that assumption rather than adding machinery to coordin
 - Isolate substantive Agno monkey patches, copied SDK internals, private-API adapters, and upstream bug workarounds in `agno_compat_<subject>.py` beside their owning module.
   Ordinary public-API usage and MindRoom's orchestration, approval, history, and storage policies remain with their current owners.
   Tiny overrides may stay in a cohesive adapter when extraction would only add indirection, but require the same source comment.
-- Each distinct workaround must have a nearby source comment with these fields:
+- Each distinct workaround must have a nearby source comment whose first line is `# AGNO_COMPAT: <short description of the upstream weakness>`.
+  Use one marker per independently removable workaround, including tiny overrides kept beside their owners, so `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists each gap with a useful summary.
+  Follow the marker with these fields:
   - `Reason`: the concrete upstream behavior or missing extension point and its effect on MindRoom.
   - `Upstream issue`: a verified issue URL, or an explicit tracking gap and why the boundary is needed.
   - `Upstream PR`: a verified fix or API proposal URL when one exists; state when none is identified or the linked PR covers only part of the workaround.

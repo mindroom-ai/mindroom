@@ -76,6 +76,7 @@ _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[_ModelMediaRoute, set[MediaKind]] = {}
 # These Agno adapters omit these inputs instead of rejecting them. Keep their
 # limitations separate from model capabilities learned from provider errors.
 # Module names avoid importing optional provider SDKs here; MRO covers our wrappers.
+# AGNO_COMPAT: Adapter media capabilities lack a public interface.
 # Reason: Agno has no public adapter media-capability API and silently omits some
 # input kinds. This small table stays beside the owner's fallback capability policy.
 # Upstream issue: No matching public adapter media-capability issue identified.

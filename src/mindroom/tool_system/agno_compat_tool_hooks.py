@@ -15,6 +15,7 @@ from agno.tools.function import FunctionCall, _detached, _record_entrypoint_resu
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+# AGNO_COMPAT: Tool-hook execution lacks deferred-result and sync-ownership hooks.
 # Reason: Agno's hook chains do not unwrap deferred async bridge results or expose
 # a public way to retain application ownership of an offloaded synchronous leaf.
 # Upstream issue: No matching issue identified for this hook-chain extension point.

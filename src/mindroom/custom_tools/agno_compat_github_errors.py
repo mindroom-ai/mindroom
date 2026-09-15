@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import logging
     from collections.abc import Callable
 
+# AGNO_COMPAT: GithubTools serializes provider failures without typed access.
 # Reason: GithubTools catches provider exceptions and returns JSON error strings;
 # callers cannot distinguish provider failures from local tool validation errors.
 # Upstream issue: No matching structured GithubTools error-handler issue identified.
@@ -68,6 +69,7 @@ def call_with_provider_failure_capture(
     return result, provider_failure
 
 
+# AGNO_COMPAT: GithubTools lacks structured errors and log-redaction hooks.
 # Reason: GithubTools logs some caught failures as strings with fixed prefixes,
 # and routes messages through multiple Agno loggers with no redaction hook.
 # Upstream issue: No matching GithubTools structured logging/redaction issue identified.

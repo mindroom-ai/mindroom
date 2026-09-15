@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 _RESPONSE_ITEMS_BUFFER_KEY = "mindroom_response_items"
 _LIFECYCLE_ONLY_KEY = "mindroom_stream_lifecycle_only"
 
+# AGNO_COMPAT: Responses streams accept incomplete EOF and publish IDs too early.
 # Reason: Agno 3.0.9 accepts EOF without response.completed and publishes a
 # continuation response ID on response.created, before the turn is complete.
 # Upstream issue: No separate issue identified; the verified fix is tracked by the PR.
@@ -35,6 +36,7 @@ _LIFECYCLE_ONLY_KEY = "mindroom_stream_lifecycle_only"
 # Coverage: tests/test_openai_responses_stream.py::test_unsuccessful_stream_raises_without_publishing_response_id;
 # tests/test_openai_responses_stream.py::test_completed_text_publishes_response_id_only_at_completion.
 
+# AGNO_COMPAT: Stream retries can reuse caller-visible partial output.
 # Reason: Agno's generic retry loop can restart a stream after the caller has
 # retained partial text or tool-call state, duplicating visible output or calls.
 # Upstream issue: No matching issue identified for partial-output retry ownership.
@@ -44,6 +46,7 @@ _LIFECYCLE_ONLY_KEY = "mindroom_stream_lifecycle_only"
 # Coverage: tests/test_openai_responses_stream.py::test_agent_does_not_retry_incomplete_stream;
 # tests/test_openai_responses_stream.py::test_agent_still_retries_transient_provider_errors.
 
+# AGNO_COMPAT: Responses continuation depends on hard-coded model names.
 # Reason: Agno 3.0.9 gates Responses continuation behind a hard-coded model-name
 # predicate, which excludes aliases and compatible Responses endpoints.
 # Upstream issue: No matching issue identified; the public capability is proposed by the PR.

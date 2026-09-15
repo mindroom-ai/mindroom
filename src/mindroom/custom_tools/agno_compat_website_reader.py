@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
     from agno.knowledge.reader.website_reader import WebsiteReader
 
+# AGNO_COMPAT: WebsiteReader lacks transport and crawl-policy hooks.
 # Reason: WebsiteReader inlines fetching, host admission and result handling in
 # its crawl loop; its private queue/visited state has no public policy hooks.
 # Upstream issue: No matching injectable crawl-policy/transport issue identified.

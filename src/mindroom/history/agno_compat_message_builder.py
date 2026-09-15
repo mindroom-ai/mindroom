@@ -20,6 +20,7 @@ from agno.run.messages import RunMessages
 from agno.team import _messages as team_messages
 from agno.utils.log import log_warning
 
+# AGNO_COMPAT: Team input loses message roles.
 # Reason: Team flattens roleful Message input into a single user message.
 # Upstream issue: https://github.com/agno-agi/agno/issues/9942
 # Upstream PR: https://github.com/agno-agi/agno/pull/9943
@@ -28,6 +29,7 @@ from agno.utils.log import log_warning
 # Coverage: tests/test_agno_compat_message_builder.py::test_team_list_message_patch_preserves_roleful_input_through_formatter;
 # tests/test_agno_compat_message_builder.py::test_team_list_message_patch_preserves_additional_input_separately.
 
+# AGNO_COMPAT: Historical-media filtering requires private message builders.
 # Reason: MindRoom omits persisted inline media while retaining current-turn media.
 # Upstream issue: No matching issue identified; this is an application replay policy
 # that currently requires wrapping Agno's private Agent/Team message builders.

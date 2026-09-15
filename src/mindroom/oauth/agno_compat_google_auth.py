@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
+# AGNO_COMPAT: Google authentication lacks injectable credentials and entrypoint hooks.
 # Reason: Agno's Google authentication decorator calls the private
 # ``_resolve_creds`` method directly, and registered Function entrypoints do not
 # expose a public authentication/error-policy middleware hook.

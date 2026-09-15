@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from typing import Any
 
+# AGNO_COMPAT: Function schema postprocessors lack a copy-preserved public contract.
 # Reason: Agno rebuilds Function schemas after per-run copies without a public
 # postprocessor contract; bound processors also need rebinding to the copied Function.
 # Upstream issue: No matching copy-preserved Function schema processor issue identified.

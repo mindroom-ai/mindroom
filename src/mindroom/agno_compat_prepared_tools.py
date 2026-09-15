@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from agno.tools.toolkit import Toolkit
 
 
+# AGNO_COMPAT: Prompt inspection requires private tool preparation.
 # Reason: Prompt estimation needs private tool preparation and temporary _tool_instructions.
 # Upstream issue: https://github.com/agno-agi/agno/issues/7806
 # Upstream PR: https://github.com/agno-agi/agno/pull/7807
@@ -78,6 +79,7 @@ def prepare_team_prompt_tools(
         return _PreparedTeamPromptTools(tuple(tools), tuple(team._tool_instructions or ()))
 
 
+# AGNO_COMPAT: Executable tool preparation lacks public run-context and media bindings.
 # Reason: RTC needs prepared Functions with Agno's run context and media bindings,
 # which Agent.aget_tools alone does not supply through a public preparation API.
 # Upstream issue: https://github.com/agno-agi/agno/issues/7806

@@ -6,6 +6,7 @@ from typing import Any
 
 from agno.utils.models.claude import format_tools_for_model
 
+# AGNO_COMPAT: Vertex Claude tool definitions contain unsupported strict fields.
 # Reason: Agno 3.0.9 emits provider-level strict fields that Vertex Claude
 # rejects, while nested JSON-schema properties named strict remain valid.
 # Upstream issue: https://github.com/agno-agi/agno/issues/6599

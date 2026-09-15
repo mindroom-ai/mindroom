@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 _CONNECT_LISTENER_NAME = "_set_sqlite_pragmas"
 
 
+# AGNO_COMPAT: SQLite journaling lacks a public configuration hook.
 # Reason: SqliteDb unconditionally installs a WAL connect listener without a public
 # journal-mode option. The owner must replace it to retain its chosen pragma policy.
 # Upstream issue: No matching configurable SQLite pragma issue identified.
@@ -37,6 +38,7 @@ def remove_default_pragmas(engine: Engine) -> None:
     event.remove(engine, "connect", listeners[0])
 
 
+# AGNO_COMPAT: Run insertion can reorder surviving stored runs.
 # Reason: Agno accepts an in-memory run position that can precede surviving stored
 # indexes after deletion. Its MAX+1 path is only used when the supplied index is None.
 # Upstream issue: https://github.com/agno-agi/agno/issues/9936
@@ -55,6 +57,7 @@ def upsert_run_at_end(
     SqliteDb.upsert_run(db, run=run, session_id=session_id, user_id=user_id, run_index=None)
 
 
+# AGNO_COMPAT: Run deletion and legacy-blob cleanup are not atomic.
 # Reason: Agno deletes run rows and scrubs legacy blobs in separate transactions,
 # swallows scrub failures, and skips legacy-only databases without a runs table.
 # Upstream issue: https://github.com/agno-agi/agno/issues/9934
@@ -71,6 +74,7 @@ def run_deletion_transaction(db: SqliteDb) -> Iterator[tuple[Session, Table | No
         yield session, runs_table, sessions_table
 
 
+# AGNO_COMPAT: Session-cache diagnostics require private counters.
 # Reason: Agno exposes no cache statistics; diagnostics currently read its private
 # per-session run map. Sampling, aggregation and storage lifetime belong to the owner.
 # Upstream issue: No matching public session-cache statistics issue identified.

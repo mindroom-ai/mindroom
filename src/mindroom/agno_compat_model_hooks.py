@@ -44,6 +44,7 @@ class _ClientProvider(Protocol):
     def get_async_client(self) -> object: ...
 
 
+# AGNO_COMPAT: Model message projection lacks a public hook.
 # Reason: Agno has no model-message projection hook shared by fallback models.
 # Upstream issue: No matching public transient-message projection issue identified.
 # Upstream PR: None identified for this extension point.
@@ -89,6 +90,7 @@ def install_message_projection(
     model_dict["aresponse"] = response_with_projection
 
 
+# AGNO_COMPAT: Post-tool callbacks lack mutable messages and results.
 # Reason: after_tool_results exists in Agno 3.0.9 but lacks the mutable messages
 # and results and is not exposed as an owner callback through Agent/Team runs.
 # Upstream issue: No matching public post-tool message callback issue identified.
@@ -146,6 +148,7 @@ def install_tool_result_callback(
     model_dict["_handle_function_call_media"] = handle_media
 
 
+# AGNO_COMPAT: Model invocation and streaming lack composable middleware.
 # Reason: Agno has no composable invocation/stream middleware, so owners must
 # capture and replace instance methods to retain installation order and context.
 # Upstream issue: No matching public model invocation middleware issue identified.
@@ -187,6 +190,7 @@ def install_stream_invocation_hooks(
     model_dict["ainvoke_stream"] = wrap_async(original_async)
 
 
+# AGNO_COMPAT: Final provider requests lack an attempt-scoped hook.
 # Reason: Agno has no attempt-scoped hook at the final provider request; agent
 # pre-hooks run before compression, and its answer cache bypasses invocation hooks.
 # Upstream issue: No matching public scoped provider-request hook issue identified.
@@ -219,6 +223,7 @@ def temporary_async_invocation_hooks(
                 model_dict[name] = value
 
 
+# AGNO_COMPAT: Retry cycles lack public context and classification hooks.
 # Reason: Request-scoped media state must enclose Agno's private retry loops,
 # while the owner's retry classifier must compose with Agno's predicate.
 # Upstream issue: No matching public retry-cycle context/predicate hook identified.
@@ -248,6 +253,7 @@ def install_retry_cycle_hooks(
     model_dict[marker] = True
 
 
+# AGNO_COMPAT: Normalized provider payloads lack a public transform hook.
 # Reason: Agno sends normalized Claude payloads through SDK clients without a
 # public request transform; client factories must be replaced to bind the proxy.
 # Upstream issue: No matching public normalized-provider-request hook identified.

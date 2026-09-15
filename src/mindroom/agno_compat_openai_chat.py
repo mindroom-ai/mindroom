@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
     from openai.types.chat import ChatCompletion
 
+# AGNO_COMPAT: Sparse streamed tool-call indexes leave malformed placeholders.
 # Reason: Agno 3.0.9 leaves empty slots when a streamed tool-call index starts
 # above zero. This removes only those malformed placeholders; it does not repair
 # index collisions or missing indexes.
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 # and missing indexes without producing empty or merged calls.
 # Coverage: tests/test_openai_models.py::test_chat_models_drop_sparse_stream_placeholders.
 
+# AGNO_COMPAT: Chat Completions parsing drops terminal finish reasons.
 # Reason: Agno 3.0.9 drops Chat Completions finish_reason during parsing, while
 # response completion classification needs the provider's terminal reason.
 # Upstream issue: No matching issue identified; this metadata extension point is untracked.

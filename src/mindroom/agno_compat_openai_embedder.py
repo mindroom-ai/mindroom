@@ -11,6 +11,7 @@ from agno.utils.log import log_info
 if TYPE_CHECKING:
     from openai.types.create_embedding_response import CreateEmbeddingResponse
 
+# AGNO_COMPAT: Embedding paths lack shared request and validation hooks.
 # Reason: Agno inlines request building in separate sync/async/batch paths and
 # exposes no common response-validation/error hook. Owner policy requires one
 # request builder, sanitized failures, and complete non-empty embedding batches.

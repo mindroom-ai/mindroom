@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
+# AGNO_COMPAT: Claude requests include unsupported sampling controls.
 # Reason: Agno 3.0.9 moves sampling controls into extra_body even for current
 # Claude generations that reject those controls in supported request modes.
 # Upstream issue: https://github.com/agno-agi/agno/issues/9931
@@ -22,6 +23,7 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 # Coverage: tests/test_claude_compat.py::test_default_sampling_models_lose_sampling_controls_everywhere;
 # tests/test_claude_compat.py::test_other_claude_models_keep_sampling_controls_in_extra_body.
 
+# AGNO_COMPAT: Claude parsing drops terminal stop reasons.
 # Reason: Agno 3.0.9 does not expose Claude's terminal stop_reason in parsed
 # provider_data, which prevents consumers from detecting provider-capped output.
 # Upstream issue: No matching issue identified; this metadata extension point is untracked.

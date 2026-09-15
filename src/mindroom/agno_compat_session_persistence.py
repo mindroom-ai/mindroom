@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 type _PersistenceTarget = tuple[str, str]
 
+# AGNO_COMPAT: Async persistence lacks hooks for synchronous storage owners.
 # Reason: Async Agent/Team session paths call owned synchronous storage on the event loop.
 # Upstream issue: https://github.com/agno-agi/agno/issues/10149
 # Upstream PR: No complete implementation yet; https://github.com/agno-agi/agno/pull/10148
@@ -90,6 +91,7 @@ class _PersistenceLane:
     )
 
 
+# AGNO_COMPAT: Cancelled-run persistence lacks an awaited drain boundary.
 # Reason: Agno persists cancelled runs in detached background tasks without a
 # public drain boundary before the caller writes canonical history.
 # Upstream issue: No matching public cancelled-run persistence drain issue identified.

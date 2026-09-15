@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from agno.models.response import ToolExecution
     from agno.team import Team
 
+# AGNO_COMPAT: Persisted tool denial requires live tools and private continuation hooks.
 # Reason: Agno resolves live Functions even for denied persisted calls, and offers
 # no continuation callback before tool lookup and resumed-message construction.
 # Upstream issue: No matching public continuation/removed-tool denial issue identified.

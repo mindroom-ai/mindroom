@@ -18878,7 +18878,14 @@ The goal is to make Agno weaknesses actionable upstream and remove local workaro
 For each weakness, connect the observed behavior, an upstream issue or PR, local regression coverage, and the condition that allows removal.
 Focused `agno_compat_<subject>.py` modules help isolate substantive workarounds; small adaptations can stay beside their owners when that makes the upstream gap clearer.
 Each workaround documents its reason, verified upstream issue/PR or explicit tracking gap, removal condition, and behavioral tests in source comments.
+Each comment starts with `# AGNO_COMPAT: <short description of the upstream weakness>`, once per independently removable workaround, including small adaptations kept beside their owners.
 The maintenance policy lives in `AGENTS.md` through its `CLAUDE.md` target.
+
+Find all documented workarounds and their summaries:
+
+```bash
+rg -n -F 'AGNO_COMPAT:' src/mindroom
+```
 
 ## Upstream work
 

@@ -13,6 +13,7 @@ TOOL_SEARCH_ITEMS_KEY = "tool_search_items"
 RESPONSE_OUTPUT_KEY = "mindroom_response_output"
 _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 
+# AGNO_COMPAT: Responses parsing loses reasoning items needed for replay.
 # Reason: Agno 3.0.9 persists only the last reasoning item and can omit reasoning
 # when stored Responses output must later be replayed explicitly.
 # Upstream issue: https://github.com/agno-agi/agno/issues/9960
@@ -22,6 +23,7 @@ _TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
 # Coverage: tests/test_openai_native_compaction.py::test_reasoning_survives_native_tool_loop;
 # tests/test_openai_native_compaction.py::test_ordered_replay_respects_canonical_tool_filtering.
 
+# AGNO_COMPAT: Responses parsing omits hosted tool-search items.
 # Reason: Agno 3.0.9 ignores hosted tool-search call and output items, so a later
 # explicit replay loses that provider output.
 # Upstream issue: No matching issue identified; hosted-search output capture is untracked.
