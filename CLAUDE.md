@@ -214,6 +214,7 @@ Matrix sync callback
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
 | `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
+| `tool_system/agno_compat_tool_hooks.py` | Private Agno hook-chain adapters installed by `tool_system/tool_hooks.py`; dispatch, approval, and cancellation ownership stay with the tool runtime |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |

@@ -35,6 +35,7 @@ Each boundary records the upstream issue or tracking gap, proposed PR, removal c
 | `history/agno_compat_message_builder.py` | Preserves roleful Team inputs and strips historical inline media in Agent/Team message builders; installed explicitly by `agents._initialize_agent_instance` and `teams._create_team_instance`. |
 | `agno_compat_session_persistence.py` | Guards and adapts Agno's asynchronous persistence against the owned session store; installed by `agent_storage._create_sqlite_state_storage` before filesystem work. |
 | `history/agno_compat_prompt.py` | Calls the private Agno Team tool preparer and temporarily supplies tool instructions, restoring the original list even on failure. |
+| `tool_system/agno_compat_tool_hooks.py` | Adapts Agno's private sync/async hook chains to deferred results and owner-controlled synchronous execution; installed by `tool_system/tool_hooks.py`, which retains dispatch, approval, and cancellation ownership. |
 | `history/claude_replay_compat.py` | Removes stale signed reasoning from completed portable turns after rewriting; native checkpoint replay retains its separate provider policy. |
 | `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested Claude/OpenAI SDK retries, and classifies provider completion signals. |
 | `history/provider_error_compat.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
