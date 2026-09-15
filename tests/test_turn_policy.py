@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.participation import RoomParticipationConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -673,7 +674,8 @@ async def test_adaptive_participation_counts_current_sender(config: Config, hist
 
 
 @pytest.mark.asyncio
-async def test_adaptive_participation_non_designated_agent_skips(config: Config) -> None:
+@pytest.mark.parametrize("mode", ["idle", "active", "backlog"])
+async def test_adaptive_participation_non_designated_agent_skips(config: Config, mode: str) -> None:
     """Opt-in does not grant other agents untagged access to multi-human threads."""
     config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
     room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "research").full_id)
@@ -684,7 +686,13 @@ async def test_adaptive_participation_non_designated_agent_skips(config: Config)
             make_visible_message(sender=_entity_id(config, "research").full_id, body="answer"),
         ],
     )
-    plan = await _plan(_policy_for(config, "research"), room, _dispatch(context, agent_name="research"))
+    dispatch = _dispatch(context, agent_name="research")
+    if mode == "backlog":
+        dispatch = replace(
+            dispatch,
+            envelope=replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND),
+        )
+    plan = await _plan(_policy_for(config, "research"), room, dispatch, has_active_response=mode == "active")
     assert plan.kind == "ignore"
 
 

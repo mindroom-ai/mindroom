@@ -65,6 +65,7 @@ from mindroom.llm_request_logging import record_llm_request_tools
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES
 from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.provider_tool_policy import provider_tools_disabled
 from mindroom.system_prompt import SESSION_CONTEXT_BOUNDARY
 
 if TYPE_CHECKING:
@@ -648,6 +649,21 @@ class _PromptCacheMessagesProxy:
         return getattr(self._messages_namespace, name)
 
 
+def _request_kwargs_without_provider_execution(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep native definitions cacheable while preventing server-side execution."""
+    if not provider_tools_disabled():
+        return request_kwargs
+    extra_body = request_kwargs.get("extra_body")
+    effective = {**request_kwargs, **extra_body} if isinstance(extra_body, dict) else request_kwargs
+    native_tools = any(tool.get("type") not in (None, "custom") for tool in effective.get("tools") or [])
+    if not native_tools and not effective.get("mcp_servers"):
+        return request_kwargs
+    prepared = {**request_kwargs, "tool_choice": {"type": "none"}}
+    if isinstance(extra_body, dict) and "tool_choice" in extra_body:
+        prepared["extra_body"] = {**extra_body, "tool_choice": {"type": "none"}}
+    return prepared
+
+
 def prepare_claude_request_kwargs(
     model: AnthropicClaude,
     request_kwargs: dict[str, Any],
@@ -658,6 +674,7 @@ def prepare_claude_request_kwargs(
         prepared_kwargs,
         _model_deferred_tool_names(model),
     )
+    prepared_kwargs = _request_kwargs_without_provider_execution(prepared_kwargs)
     if model.cache_system_prompt:
         cache_control = _prompt_cache_control(extended_cache_time=model.extended_cache_time is True)
         prepared_kwargs = _request_kwargs_with_shared_system_prefix(prepared_kwargs)

@@ -76,7 +76,9 @@ MindRoom's architecture consists of several key components working together.
 | `coalescing.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
-| `participation.py` | Same-model participation decision at the prepared provider-request boundary, with quiet decline and scoped model restoration |
+| `participation.py` | Primary-run participation decision at the prepared provider-request boundary, with one immutable result and isolated helper requests |
+| `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
+| `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |

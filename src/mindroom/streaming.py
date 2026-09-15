@@ -550,6 +550,9 @@ class StreamingResponse:
     # every earlier edit is transport and goes out directly.
     terminal_edit: TerminalEdit | None = None
     terminal_send: TerminalSend | None = None
+    # A caller may still be deciding whether this turn should become visible.
+    # Terminal cleanup can finish an owned event, but must not invent a reply.
+    allow_new_terminal_message: Callable[[], bool] | None = None
     # Applied to the answer text once, before the terminal payload is built.
     # Run afterwards it would need a second edit, outside the outbox and after
     # the durable row was acknowledged, leaving the row holding one body while
@@ -781,6 +784,26 @@ class StreamingResponse:
                 resolved_cancel_source = "sync_restart"
             elif cancelled:
                 resolved_cancel_source = "user_stop"
+        if (
+            self.event_id is None
+            and self.allow_new_terminal_message is not None
+            and not self.allow_new_terminal_message()
+        ):
+            return StreamTransportOutcome(
+                last_physical_stream_event_id=None,
+                terminal_status="cancelled"
+                if resolved_cancel_source is not None
+                else "error"
+                if error
+                else "completed",
+                rendered_body=None,
+                visible_body_state="none",
+                failure_reason=cancel_failure_reason(resolved_cancel_source)
+                if resolved_cancel_source is not None
+                else str(error)
+                if error
+                else None,
+            )
         if resolved_cancel_source is not None and current_task_is_process_shutdown():
             committed_rendered_body, committed_visible_body_state = self._committed_terminal_snapshot()
             return StreamTransportOutcome(
@@ -1994,6 +2017,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
     interactive_creator_agent: str | None = None,
     interactive_source_event_id: str | None = None,
+    allow_new_terminal_message: Callable[[], bool] | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome."""
     sc = config.defaults.streaming
@@ -2017,6 +2041,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         transport_is_current=transport_is_current,
         interactive_creator_agent=interactive_creator_agent,
         interactive_source_event_id=interactive_source_event_id,
+        allow_new_terminal_message=allow_new_terminal_message,
     )
 
     # Ensure the first chunk triggers an initial send immediately

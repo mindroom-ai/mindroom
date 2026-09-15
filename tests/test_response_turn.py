@@ -17,7 +17,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
-from mindroom.participation import ParticipationDecision, ParticipationGate
+from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
     BlockingTurnAdapter,
@@ -27,6 +27,7 @@ from mindroom.response_turn import (
     ExcludedAttempt,
     HandledAttempt,
     ResponseTurnContext,
+    SkippedAttempt,
     StandaloneReplaySnapshot,
     StreamAttemptResolution,
     StreamingTurnAdapter,
@@ -112,6 +113,10 @@ class _FakeTurnRecorder:
                 "interrupted_tools": list(interrupted_tools),
             },
         )
+
+    def mark_skipped(self) -> None:
+        """Record quiet nonparticipation."""
+        self.outcome = "skipped"
 
     def mark_suspended(self) -> None:
         """Record a native pause without classifying it as terminal."""
@@ -1796,12 +1801,13 @@ def test_declined_participation_discards_empty_run_without_retry(streaming: bool
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
-    gate = ParticipationGate(decision=ParticipationDecision(action="stay_silent", reason="Already answered."))
+    gate = ParticipationGate()
+    gate.decline("Already answered.")
 
-    async def attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> CompletedAttempt:
+    async def attempt(_run: TurnRunState, _c: DynamicContinuationRunState) -> SkippedAttempt:
         nonlocal attempts
         attempts += 1
-        return CompletedAttempt(is_empty=True, session_id="session-live", run_id="run-quiet")
+        return SkippedAttempt(reason="Already answered.", session_id="session-live", run_id="run-quiet")
 
     async def streamed_attempt(
         run: TurnRunState,
@@ -1831,4 +1837,69 @@ def test_declined_participation_discards_empty_run_without_retry(streaming: bool
     assert asyncio.run(execute()) == ""
     assert attempts == 1
     assert [discard.run_id for discard in log.discards] == ["run-quiet"]
-    assert recorder.outcome == "completed"
+    assert recorder.outcome == "skipped"
+    assert recorder.completed_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_outer_turn_failure_is_quiet_until_participation_approves(streaming: bool, approved: bool) -> None:
+    """Scope preparation failure cannot emit error text before primary approval."""
+    log = _AdapterLog()
+    recorder = _FakeTurnRecorder()
+    gate = ParticipationGate()
+    if approved:
+        gate.approve_existing_response()
+
+    def broken_scope() -> AbstractContextManager[ScopeSessionContext | None]:
+        message = "Scope unavailable"
+        raise RuntimeError(message)
+
+    async def attempt(_run: TurnRunState, _continuation: DynamicContinuationRunState) -> CompletedAttempt:
+        pytest.fail("Scope must open before an attempt")
+
+    async def streamed_attempt(
+        run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(await attempt(run, continuation))
+
+    if streaming:
+        result = "".join(
+            [
+                chunk
+                async for chunk in stream_response_turn(
+                    _ctx(participation=gate),
+                    _streaming_adapter(
+                        log,
+                        streamed_attempt,
+                        open_scope=broken_scope,
+                        unexpected_error_text=lambda _: "Visible error",
+                    ),
+                    TurnSinks(turn_recorder=cast("Any", recorder)),
+                    continuation=_continuation(),
+                )
+            ],
+        )
+    else:
+        result = await run_blocking_response_turn(
+            _ctx(participation=gate),
+            _blocking_adapter(
+                log,
+                attempt,
+                open_scope=broken_scope,
+                unexpected_error_text=lambda _: "Visible error",
+            ),
+            TurnSinks(turn_recorder=cast("Any", recorder)),
+            continuation=_continuation(),
+        )
+    if approved:
+        assert "Visible error" in result
+        assert recorder.outcome == "interrupted"
+    else:
+        assert result == ""
+        assert gate.is_silent
+        assert recorder.outcome == "skipped"
+        assert recorder.interrupted_calls == []
+        assert log.persisted == []

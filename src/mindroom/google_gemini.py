@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from agno.models.google import Gemini
 from agno.utils.message import normalize_tool_messages
-from google.genai.types import GenerateContentConfig
+from google.genai.types import GenerateContentConfig, HttpOptions, Tool
 
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
+from mindroom.provider_tool_policy import provider_tools_disabled
 
 if TYPE_CHECKING:
     from typing import Any
 
     from agno.models.message import Message
+    from google.genai.types import ToolListUnion
 
 _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 
@@ -36,12 +39,38 @@ class MindRoomGoogleGemini(Gemini):
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build request parameters accepted by the selected Gemini generation."""
-        request_params = super().get_request_params(
+        request_model = self
+        if provider_tools_disabled():
+            client_http_options = (self.client_params or {}).get("http_options")
+            if client_http_options is not None and HttpOptions.model_validate(client_http_options).extra_body:
+                msg = "Participation decisions cannot safely apply Gemini body overrides"
+                raise ValueError(msg)
+            # Agno updates authored generation dictionaries in place while merging.
+            request_model = copy(self)
+            request_model.generation_config = deepcopy(self.generation_config)
+        request_params = super(MindRoomGoogleGemini, request_model).get_request_params(
             system_message=system_message,
             response_format=response_format,
             tools=tools,
             tool_choice=tool_choice,
         )
+        if provider_tools_disabled() and (generation_config := request_params.get("config")) is not None:
+            generation_config = GenerateContentConfig.model_validate(generation_config).model_copy(deep=True)
+            if generation_config.cached_content:
+                # Cached content may contain native tools that this request cannot inspect.
+                msg = "Participation decisions cannot inspect tools in Gemini cached content"
+                raise ValueError(msg)
+            if generation_config.http_options is not None and generation_config.http_options.extra_body:
+                msg = "Participation decisions cannot safely apply Gemini body overrides"
+                raise ValueError(msg)
+            # Function-calling NONE does not disable grounding or other native tools.
+            declaration_tools: ToolListUnion = [
+                Tool(function_declarations=tool.function_declarations)
+                for tool in generation_config.tools or []
+                if isinstance(tool, Tool) and tool.function_declarations
+            ]
+            generation_config.tools = declaration_tools or None
+            request_params["config"] = generation_config
         if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
             return request_params
 

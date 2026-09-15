@@ -644,6 +644,7 @@ visibility = [
 [[modules]]
 path = "mindroom.model_loading"
 depends_on = [
+    "mindroom.groq_model",
     "mindroom.constants",
     "mindroom.credentials",
     "mindroom.credentials_sync",
@@ -5727,8 +5728,18 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
 
 [[modules]]
 path = "mindroom.participation"
-depends_on = ["mindroom.logging_config"]
+depends_on = ["mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy"]
 visibility = ["mindroom.ai", "mindroom.response_runner", "mindroom.response_turn"]
+
+[[modules]]
+path = "mindroom.provider_tool_policy"
+depends_on = []
+visibility = ["mindroom.participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model"]
+
+[[modules]]
+path = "mindroom.groq_model"
+depends_on = ["mindroom.provider_tool_policy"]
+visibility = ["mindroom.model_loading"]
 
 [[modules]]
 path = "mindroom.config.participation"

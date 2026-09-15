@@ -106,7 +106,9 @@ Matrix sync callback
 | `coalescing_batch.py` | Coalesced dispatch batch construction |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
-| `participation.py` | Same-model participation decision at the prepared provider-request boundary, with quiet decline and scoped model restoration |
+| `participation.py` | Primary-run participation decision at the prepared provider-request boundary, with one immutable result and isolated helper requests |
+| `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
+| `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |

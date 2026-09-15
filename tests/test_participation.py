@@ -14,7 +14,7 @@ from agno.metrics import MessageMetrics, RunMetrics
 from agno.run.agent import RunOutput
 
 from mindroom.ai import ai_response, stream_agent_response
-from mindroom.participation import ParticipationDecision, ParticipationGate, participation_model
+from mindroom.participation import ParticipationGate, participation_model
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context
 from tests.participation_helpers import ParticipationModel
@@ -47,14 +47,23 @@ async def test_decision_cannot_execute_tools(stream: bool) -> None:
     )
     gate = ParticipationGate()
     messages = [Message(role="user", content="Thanks, everyone.")]
-    with participation_model(model, gate):
+    with participation_model(model, gate, run_id="primary"):
         if stream:
             result = [
-                chunk async for chunk in model.aresponse_stream(messages, tools=[Function.from_callable(operate)])
+                chunk
+                async for chunk in model.aresponse_stream(
+                    messages,
+                    tools=[Function.from_callable(operate)],
+                    run_response=RunOutput(run_id="primary"),
+                )
             ]
             assert all(not chunk.content for chunk in result)
         else:
-            result = await model.aresponse(messages, tools=[Function.from_callable(operate)])
+            result = await model.aresponse(
+                messages,
+                tools=[Function.from_callable(operate)],
+                run_response=RunOutput(run_id="primary"),
+            )
             assert not result.content
     assert executed == []
     assert len(model.requests) == 1
@@ -75,10 +84,20 @@ async def test_approval_reuses_exact_normal_prefix_and_only_checks_once() -> Non
     original = deepcopy(messages)
     tools = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}}]
     original_response = model.ainvoke
-    with participation_model(model, gate):
-        response = await model.aresponse(messages, tools=tools, tool_choice="auto")
+    with participation_model(model, gate, run_id="primary"):
+        response = await model.aresponse(
+            messages,
+            tools=tools,
+            tool_choice="auto",
+            run_response=RunOutput(run_id="primary"),
+        )
         assert response.content == "Useful answer"
-        await model.aresponse([Message(role="user", content="Continue")], tools=tools, tool_choice="auto")
+        await model.aresponse(
+            [Message(role="user", content="Continue")],
+            tools=tools,
+            tool_choice="auto",
+            run_response=RunOutput(run_id="primary"),
+        )
     decision, normal, _continuation = model.requests
     assert decision["messages"][:-1] == original
     assert normal["messages"] == original
@@ -106,8 +125,11 @@ async def test_invalid_failed_or_declined_decision_stays_quiet(decision: ModelRe
     """An untrusted or failed decision must not authorize an ambient reply."""
     model = ParticipationModel(decision)
     gate = ParticipationGate()
-    with participation_model(model, gate):
-        result = await model.aresponse([Message(role="user", content="I agree.")])
+    with participation_model(model, gate, run_id="primary"):
+        result = await model.aresponse(
+            [Message(role="user", content="I agree.")],
+            run_response=RunOutput(run_id="primary"),
+        )
     assert not result.content
     assert len(model.requests) == 1
     assert gate.is_silent
@@ -127,8 +149,8 @@ async def test_cancellation_is_not_converted_to_silence() -> None:
 
     model = CancelledModel(ModelResponse())
     original = model.ainvoke
-    with pytest.raises(asyncio.CancelledError), participation_model(model, ParticipationGate()):
-        await model.aresponse([Message(role="user", content="Question")])
+    with pytest.raises(asyncio.CancelledError), participation_model(model, ParticipationGate(), run_id="primary"):
+        await model.aresponse([Message(role="user", content="Question")], run_response=RunOutput(run_id="primary"))
     assert model.ainvoke == original
 
 
@@ -191,8 +213,8 @@ async def test_decision_usage_is_included_in_run_metrics() -> None:
             response_usage=MessageMetrics(input_tokens=40, output_tokens=8, cache_read_tokens=30),
         ),
     )
-    run = RunOutput(metrics=RunMetrics())
-    with participation_model(model, ParticipationGate()):
+    run = RunOutput(run_id="primary", metrics=RunMetrics())
+    with participation_model(model, ParticipationGate(), run_id="primary"):
         await model.aresponse([Message(role="user", content="Question")], run_response=run)
     assert run.metrics.input_tokens == 40
     assert run.metrics.output_tokens == 8
@@ -210,8 +232,12 @@ async def test_decision_uses_same_compressed_messages_as_reply(monkeypatch: pyte
     monkeypatch.setattr(manager, "ashould_compress", AsyncMock(return_value=True))
     monkeypatch.setattr(manager, "acompress", compress)
     model = ParticipationModel(ModelResponse(content='{"action":"respond","reason":"Open question."}'))
-    with participation_model(model, ParticipationGate()):
-        await model.aresponse([Message(role="user", content="Long conversation")], compression_manager=manager)
+    with participation_model(model, ParticipationGate(), run_id="primary"):
+        await model.aresponse(
+            [Message(role="user", content="Long conversation")],
+            compression_manager=manager,
+            run_response=RunOutput(run_id="primary"),
+        )
     decision, reply = model.requests
     assert decision["messages"][:-1] == reply["messages"]
     assert decision["messages"][0].content == "Compressed conversation"
@@ -264,9 +290,9 @@ async def test_compression_failure_is_quiet_until_participation_is_approved(
     model = ParticipationModel(ModelResponse())
     agent = Agent(model=model, name="general", telemetry=False, compression_manager=manager)
     monkeypatch.setattr("mindroom.ai._prepare_agent_and_prompt", AsyncMock(return_value=_prepared_prompt_result(agent)))
-    gate = ParticipationGate(
-        decision=ParticipationDecision(action="respond", reason="Help requested") if approved else None,
-    )
+    gate = ParticipationGate()
+    if approved:
+        gate.approve_existing_response()
     ctx = replace(make_turn_context("general", session_id="session-1"), participation=gate)
     kwargs = {"prompt": "Question", "runtime_paths": _runtime_paths(tmp_path), "config": _config()}
     if streaming:
@@ -295,7 +321,10 @@ async def test_stream_backed_provider_does_not_reenter_decision() -> None:
             yield await super().ainvoke(messages, **kwargs)
 
     model = StreamBackedModel(ModelResponse(content='{"action":"respond","reason":"Help requested."}'))
-    with participation_model(model, ParticipationGate()):
-        response = await model.aresponse([Message(role="user", content="Question")])
+    with participation_model(model, ParticipationGate(), run_id="primary"):
+        response = await model.aresponse(
+            [Message(role="user", content="Question")],
+            run_response=RunOutput(run_id="primary"),
+        )
     assert response.content == "Useful answer"
     assert len(model.requests) == 2

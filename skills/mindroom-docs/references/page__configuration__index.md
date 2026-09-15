@@ -34,10 +34,17 @@ room_participation:
 ```
 
 The pause applies only to eligible untagged text in threads with at least two human participants, including the current sender.
-Registered agents and configured `bot_accounts` do not count as humans.
+Configured human aliases count as one participant across their transport identities.
+Registered agents, the internal service account, and configured `bot_accounts` do not count as humans.
 The pause defaults to three seconds and accepts finite values from zero to thirty seconds.
 A burst from one sender becomes one turn after the pause; explicit agent or human mentions bypass adaptive selection and end that sender's pending pause immediately.
 Single-human conversations keep their usual response behavior.
+A declined or failed decision stays quiet and does not record a completed assistant response.
+The check reuses the prepared conversation and tool definitions, but cannot execute tools.
+With Claude native tools, only the tool and system caches are reusable across the check and reply because disabling execution changes tool choice.
+Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
+Cancellation before approval does not create an interruption notice.
+If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
 Commands and scheduled work do not opt into adaptive participation.
 Omit `room_participation` to keep the default behavior.
 

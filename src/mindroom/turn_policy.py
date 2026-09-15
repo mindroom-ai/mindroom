@@ -757,8 +757,6 @@ class TurnPolicy:
         self,
         dispatch: PreparedDispatch,
         room: nio.MatrixRoom,
-        *,
-        has_active_response_for_target: Callable[[MessageTarget], bool],
     ) -> ResponseAction | None:
         """Select participation for ambient turns, including coalesced active follow-ups."""
         context = dispatch.context
@@ -771,16 +769,10 @@ class TurnPolicy:
             )
             if participation is not None:
                 return ResponseAction(kind="individual", participation=participation)
-            if (
-                self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths) is not None
-                and self._is_adaptive_thread_context(context, requester_user_id)
-                and not self._should_queue_follow_up_in_active_response_thread(
-                    context=context,
-                    target=dispatch.target,
-                    source_envelope=dispatch.envelope,
-                    has_active_response_for_target=has_active_response_for_target,
-                )
-            ):
+            if self.deps.runtime.config.get_room_participation(
+                room.room_id,
+                self.deps.runtime_paths,
+            ) is not None and self._is_adaptive_thread_context(context, requester_user_id):
                 return ResponseAction(kind="skip")
         return None
 
@@ -849,7 +841,6 @@ class TurnPolicy:
         participation_action = self._adaptive_response_action(
             dispatch,
             room,
-            has_active_response_for_target=has_active_response_for_target,
         )
         if participation_action is not None:
             return participation_action

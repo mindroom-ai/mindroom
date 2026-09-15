@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 class ParticipationModel(SyntheticModel):
     """Provider boundary double; real Agno response/tool loop remains in use."""
 
-    def __init__(self, decision: ModelResponse | Exception) -> None:
+    def __init__(self, decision: ModelResponse | BaseException) -> None:
         super().__init__(id="test", name="test", provider="test")
         self.decision = decision
         self.requests: list[dict[str, Any]] = []
@@ -39,7 +39,7 @@ class ParticipationModel(SyntheticModel):
             },
         )
         if len(self.requests) == 1:
-            if isinstance(self.decision, Exception):
+            if isinstance(self.decision, BaseException):
                 raise self.decision
             return self.decision
         return ModelResponse(content="Useful answer")

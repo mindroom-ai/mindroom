@@ -349,9 +349,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return Cerebras(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "groq":
-        from agno.models.groq import Groq  # noqa: PLC0415
+        from mindroom.groq_model import MindRoomGroq  # noqa: PLC0415
 
-        return Groq(id=model_id, **extra_kwargs)
+        return MindRoomGroq(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "deepseek":
         from mindroom.openai_models import MindRoomDeepSeek  # noqa: PLC0415

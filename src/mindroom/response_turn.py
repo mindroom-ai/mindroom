@@ -75,6 +75,7 @@ __all__ = [
     "PausedAttempt",
     "ResponsePausedForApproval",
     "ResponseTurnContext",
+    "SkippedAttempt",
     "StandaloneReplaySnapshot",
     "StreamAttemptResolution",
     "StreamingTurnAdapter",
@@ -501,8 +502,18 @@ class HandledAttempt:
     """One streaming error whose user-facing text was already emitted."""
 
 
-BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt
-StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt
+@dataclass(frozen=True)
+class SkippedAttempt:
+    """One unapproved response attempt with no answer or successful-run effects."""
+
+    reason: str
+    session_id: str | None = None
+    run_id: str | None = None
+    output_tokens: int | None = None
+
+
+BlockingAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | SkippedAttempt
+StreamAttemptResolution = CompletedAttempt | ExcludedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
 
 
 @dataclass(frozen=True)
@@ -863,6 +874,17 @@ async def run_blocking_response_turn(
     except ResponsePausedForApproval:
         raise
     except Exception as e:
+        if ctx.participation is not None and not ctx.participation.approved:
+            ctx.participation.decline("run_failed_before_decision")
+            _settle_skipped_attempt(
+                ctx,
+                sinks,
+                run,
+                SkippedAttempt(reason="run_failed_before_decision"),
+                adapter.discard_empty_run,
+            )
+            logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
+            return ""
         _record_turn_excluded_fallback(
             ctx,
             adapter.persist_standalone_replay,
@@ -880,6 +902,27 @@ async def run_blocking_response_turn(
         adapter.close_runtime_dbs(run.scope_context)
 
 
+def _settle_skipped_attempt(
+    ctx: ResponseTurnContext,
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: SkippedAttempt,
+    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None],
+) -> None:
+    """Discard the skipped provider run without recording an assistant turn."""
+    if resolution.run_id is not None:
+        discard_empty_run(
+            run.scope_context,
+            EmptyRunDiscard(
+                session_id=resolution.session_id or ctx.session_id,
+                run_id=resolution.run_id,
+                output_tokens=resolution.output_tokens,
+            ),
+        )
+    if sinks.turn_recorder is not None:
+        sinks.turn_recorder.mark_skipped()
+
+
 def _settle_blocking_attempt(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -894,6 +937,9 @@ def _settle_blocking_attempt(
     # The blocking envelope publishes run metadata before recording, and only
     # for attempts that end the turn: a discarded empty run's or a superseded
     # continuation attempt's payload must not ride out on a later resolution.
+    if isinstance(resolution, SkippedAttempt):
+        _settle_skipped_attempt(ctx, sinks, run, resolution, adapter.discard_empty_run)
+        return ""
     if isinstance(resolution, PausedAttempt):
         if sinks.turn_recorder is not None:
             sinks.turn_recorder.mark_suspended()
@@ -977,22 +1023,6 @@ def _settle_completed_attempt(
     continuation_count: int,
 ) -> _CompletionSettle:
     """Settle one completed attempt into a record/deliver plan or a continuation."""
-    if ctx.participation is not None and ctx.participation.is_silent:
-        discard_empty_run(
-            run.scope_context,
-            EmptyRunDiscard(
-                session_id=resolution.session_id or ctx.session_id,
-                run_id=resolution.run_id,
-                output_tokens=resolution.output_tokens,
-            ),
-        )
-        return _CompletionSettle(
-            keep_going=False,
-            continuation=continuation,
-            recorded_text="",
-            recorded_tools=(),
-            response_text="",
-        )
     if resolution.is_empty and ctx.allow_no_report_response:
         return _CompletionSettle(
             keep_going=False,
@@ -1111,6 +1141,9 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         yield item
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
+                    if isinstance(resolution, SkippedAttempt):
+                        _settle_skipped_attempt(ctx, sinks, run, resolution, adapter.discard_empty_run)
+                        return
                     if isinstance(resolution, PausedAttempt):
                         if sinks.turn_recorder is not None:
                             sinks.turn_recorder.mark_suspended()
@@ -1192,6 +1225,17 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except ResponsePausedForApproval:
         raise
     except Exception as e:
+        if ctx.participation is not None and not ctx.participation.approved:
+            ctx.participation.decline("run_failed_before_decision")
+            _settle_skipped_attempt(
+                ctx,
+                sinks,
+                run,
+                SkippedAttempt(reason="run_failed_before_decision"),
+                adapter.discard_empty_run,
+            )
+            logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
+            return
         _record_turn_excluded_fallback(
             ctx,
             adapter.persist_standalone_replay,
