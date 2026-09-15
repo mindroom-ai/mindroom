@@ -18874,9 +18874,67 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 
 # Agno compatibility boundaries
 
-MindRoom isolates private Agno bindings, copied SDK paths, and upstream repairs in `agno_compat_<subject>.py` modules beside their owners.
+The goal is to make Agno weaknesses actionable upstream and remove local workarounds as fixes ship.
+For each weakness, connect the observed behavior, an upstream issue or PR, local regression coverage, and the condition that allows removal.
+Focused `agno_compat_<subject>.py` modules help isolate substantive workarounds; small adaptations can stay beside their owners when that makes the upstream gap clearer.
 Each workaround documents its reason, verified upstream issue/PR or explicit tracking gap, removal condition, and behavioral tests in source comments.
 The maintenance policy lives in `AGENTS.md` through its `CLAUDE.md` target.
+
+## Upstream work
+
+### Existing tracking
+
+Issue and PR states below were checked on September 15, 2026. Recheck upstream before starting a contribution or removing a workaround.
+The source modules listed here contain the exact regression-test references and removal conditions.
+Paths are relative to `src/mindroom/`.
+
+| Agno weakness | Upstream issue / PR | Local workaround and remaining scope |
+| --- | --- | --- |
+| Deleted runs survive in legacy blobs or deletion spans separate transactions. | [Issue #9934](https://github.com/agno-agi/agno/issues/9934), [PR #9939](https://github.com/agno-agi/agno/pull/9939), both open. | `agno_compat_sqlite.py`; preserve owner descendant deletion when the atomic upstream fix ships. |
+| New runs can sort before surviving runs after deletion. | [Issue #9936](https://github.com/agno-agi/agno/issues/9936), [PR #9938](https://github.com/agno-agi/agno/pull/9938), both open. | `agno_compat_sqlite.py`; verify insertion after existing indexes with the local override disabled. |
+| Team input flattens roleful messages. | [Issue #9942](https://github.com/agno-agi/agno/issues/9942), [PR #9943](https://github.com/agno-agi/agno/pull/9943), both open. | `history/agno_compat_message_builder.py`; historical-media filtering needs a separate extension point. |
+| Responses streams accept incomplete EOFs and publish continuation IDs too early. | [PR #10135](https://github.com/agno-agi/agno/pull/10135), open. | `agno_compat_openai_responses.py`; retry safety after retained output remains a separate gap. |
+| Responses continuation depends on a hard-coded model-name predicate. | [PR #10075](https://github.com/agno-agi/agno/pull/10075), open. | `agno_compat_openai_responses.py`; preserve explicit storage and replay choices. |
+| Responses reasoning is lost during explicit tool-call replay. | [Issue #9960](https://github.com/agno-agi/agno/issues/9960), [PR #9968](https://github.com/agno-agi/agno/pull/9968), both open. | `agno_compat_openai_responses_items.py`; hosted tool-search output needs separate coverage and tracking. |
+| Unreliable streamed tool-call indexes create malformed or merged calls. | [Issue #8879](https://github.com/agno-agi/agno/issues/8879), [PR #8880](https://github.com/agno-agi/agno/pull/8880), both open. | `agno_compat_openai_chat.py`; local filtering only removes empty slots. |
+| Claude requests include sampling controls rejected in supported modes. | [Issue #9931](https://github.com/agno-agi/agno/issues/9931), [PR #9933](https://github.com/agno-agi/agno/pull/9933), both open. | `agno_compat_claude.py`; check top-level parameters and `extra_body` for the same model generations. |
+| Vertex Claude tool definitions contain rejected provider-level `strict` fields. | [Issue #6599](https://github.com/agno-agi/agno/issues/6599), open; [PR #6923](https://github.com/agno-agi/agno/pull/6923), closed without merge. | `agno_compat_vertex_claude_tools.py`; preserve schema properties named `strict`. |
+| Knowledge search failures become plausible empty results. | [Issue #10150](https://github.com/agno-agi/agno/issues/10150), [PR #10152](https://github.com/agno-agi/agno/pull/10152), both open. | `agno_compat_knowledge.py`; insertion failures and validation need separate work. |
+| Prepared requests and effective tools require private Agent/Team APIs. | [Issue #7806](https://github.com/agno-agi/agno/issues/7806), [PR #7807](https://github.com/agno-agi/agno/pull/7807), both open. | `agno_compat_prepared_tools.py`; an inspection API must also support executable run-context/media bindings to replace the RTC path. |
+| Async runs lack supported persistence hooks for synchronous storage owners. | [Issue #10149](https://github.com/agno-agi/agno/issues/10149), open; [PR #10148](https://github.com/agno-agi/agno/pull/10148), open and partial. | `agno_compat_session_persistence.py`; the PR only routes Agent startup through the awaitable read path. Agent/Team writes and owner dispatch remain. |
+
+[PR #9814](https://github.com/agno-agi/agno/pull/9814) is merged, and its typed embedding errors are present in the pinned Agno 3.0.9 embedder.
+The remaining embedder work concerns request/validation hooks and owner-controlled batch failure handling.
+
+### Tracking gaps
+
+These are unfinished contribution candidates identified by the local audit.
+Before filing an issue, check current Agno behavior and existing discussions, and build a minimal Agno-only reproducer or a concrete extension-point proposal.
+Missing extension points support intentional MindRoom behavior; establish the general upstream use case before proposing an API.
+Related gaps are grouped below for navigation; separate independent fixes and removal conditions when contributing.
+
+| Observed gap or required extension point | Next upstream work | Local evidence |
+| --- | --- | --- |
+| Parsed provider responses omit terminal stop metadata. | Preserve OpenAI `finish_reason` and Claude `stop_reason` through a stable parsed-response interface. | `agno_compat_openai_chat.py`, `agno_compat_claude.py`. |
+| Hosted Responses tool-search items are omitted from replay data. | Reproduce lost hosted-search output and preserve ordered call/output items. | `agno_compat_openai_responses_items.py`. |
+| Retrying a stream can reuse partial assistant or tool state. | Establish retry ownership and test that partial output cannot be duplicated. | `agno_compat_openai_responses.py`. |
+| SQLite journaling is forced, and cache statistics require private access. | Propose configurable pragmas; track public cache counters separately. | `agno_compat_sqlite.py`. |
+| Cancelled runs persist in detached tasks without an awaited drain boundary. | Expose completion for the exact cancelled run before caller-owned history writes. | `agno_compat_session_persistence.py`. |
+| Knowledge insertion lacks caller-controlled error propagation and validation. | Reproduce swallowed vector failures and propose validation before publishing content status. | `agno_compat_knowledge.py`. |
+| Embedder requests are built separately across sync, async, and batch paths. | Add shared request and response hooks while retaining typed provider failures. | `agno_compat_openai_embedder.py`. |
+| Denying a persisted tool call requires a live Function and private continuation interception. | Support denial after tool removal and an owner callback before resumed-tool lookup. | `agno_compat_approval.py`. |
+| Message projection and historical-media policy require private message interception. | Propose supported message-preparation hooks with explicit history-mutation ownership. | `agno_compat_model_hooks.py`, `history/agno_compat_message_builder.py`. |
+| Post-tool callbacks lack mutable messages/results at the required stage. | Extend the callback surface after result formatting and media insertion. | `agno_compat_model_hooks.py`. |
+| Invocation, retry-cycle, scoped request, and final SDK payload hooks are missing. | Define each lifecycle stage separately, including wrapper order, cache behavior, and cancellation cleanup. | `agno_compat_model_hooks.py`. |
+| Tool-hook chains cannot express the required deferred-result and synchronous execution ownership. | Propose an execution hook with regression coverage for cache hits, argument rewrites, and cancellation. | `tool_system/agno_compat_tool_hooks.py`. |
+| Function schema postprocessors are lost or misbound during copying/preparation. | Add a supported postprocessor that survives copies and runs after schema preparation. | `tool_system/agno_compat_function_schema.py`. |
+| Google authentication requires private resolver and Function entrypoint replacement. | Propose injectable credential resolution and an entrypoint middleware hook. | `oauth/agno_compat_google_auth.py`. |
+| WebsiteReader does not expose fetch, redirect, and crawl-admission hooks. | Propose a replaceable fetch path and explicit crawl-policy callbacks. | `custom_tools/agno_compat_website_reader.py`. |
+| GithubTools serializes provider failures and logs provider detail through fixed message formats. | Expose typed errors; separately provide structured logging or a redaction hook. | `custom_tools/agno_compat_github_errors.py`. |
+| Adapter media capabilities must be inferred from a private module-name table. | Expose accurate supported-input capabilities independently of provider error learning. | The small documented table in `provider_media_fallback.py`. |
+
+Module extraction does not close a tracking gap.
+The contribution is complete when the upstream behavior is available, the local regression passes without its workaround, and the obsolete adaptation is removed.
 
 ## Boundary inventory
 

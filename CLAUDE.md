@@ -463,6 +463,8 @@ Design migrations around that assumption rather than adding machinery to coordin
 
 ### Agno Compatibility Policy
 
+- The goal is to identify Agno weaknesses, contribute focused upstream fixes or extension points, and remove local workarounds as those changes ship.
+  Judge an extraction by whether it makes that upstream work easier to understand, test, and retire.
 - Isolate substantive Agno monkey patches, copied SDK internals, private-API adapters, and upstream bug workarounds in `agno_compat_<subject>.py` beside their owning module.
   Ordinary public-API usage and MindRoom's orchestration, approval, history, and storage policies remain with their current owners.
   Tiny overrides may stay in a cohesive adapter when extraction would only add indirection, but require the same source comment.
@@ -475,8 +477,11 @@ Design migrations around that assumption rather than adding machinery to coordin
 - Distinguish upstream bugs from missing public extension points and intentional application policy.
   Never invent a tracking link or treat a related PR as a complete fix.
   Separate removal conditions when one module handles multiple upstream gaps.
+- Treat an explicit tracking gap as unfinished upstream work. Record the concrete failing behavior or required extension point in the inventory, search for existing tracking before opening a new item, and replace the gap with verified links when available.
+- For an upstream contribution, reduce the problem to an Agno-only reproducer and regression test where possible.
+  Keep MindRoom-specific policy out of the proposed fix and retain local integration coverage for the behavior MindRoom requires.
 - Keep patch installation explicit and idempotent, preserve optional-import boundaries, and retain version guards where private signatures or semantics require them.
-- Keep the boundary inventory in `docs/architecture/agno-compatibility.md` aligned with extractions and removals; source comments own exact upstream tracking and test references.
+- Keep the weakness-to-upstream map and boundary inventory in `docs/architecture/agno-compatibility.md` aligned with contributions, extractions, and removals; source comments own exact upstream tracking and test references.
 - On each Agno upgrade, inspect these boundaries, verify which fixes the pinned release includes, and run their behavioral tests.
   Remove a workaround only when the relevant tests pass without it; a merged PR alone is insufficient.
   Retain regression coverage for behavior MindRoom still requires and update Tach boundaries with any extraction or removal.
