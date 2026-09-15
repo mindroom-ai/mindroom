@@ -42,7 +42,13 @@ class NativeCompactionModel:
         """Restore adapter-owned replay policy from the latest completed response."""
 
     def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
-        """Return a provider-aware estimate, or use the shared history estimator."""
+        """Return a provider-aware estimate, or None for canonical history sizing.
+
+        A non-None estimate must include the token cost of all media whose
+        transport data the shared history estimator removes. Callers combine
+        this estimate with a canonical text floor after removing image transport.
+        Returning None preserves the canonical transport estimate instead.
+        """
         return None
 
     def native_compaction_supported(self) -> bool:

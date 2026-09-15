@@ -9,12 +9,17 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
+from mindroom.history.message_content import (
+    image_content_for_token_estimation,
+    media_payload_snapshot,
+    message_media_entries,
+    render_message_content,
+)
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_items, native_replay_messages
-from mindroom.token_budget import estimate_text_tokens, image_content_for_token_estimation, stable_serialize
+from mindroom.token_budget import estimate_text_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,15 +56,14 @@ def estimate_prompt_visible_history_tokens(
         history_settings=history_settings,
     )
     if native_route is None:
-        estimated = _estimate_history_messages_tokens(history_messages)
-        if replay_model is not None:
-            provider_estimate = replay_model.estimate_portable_replay_tokens(history_messages)
-            if provider_estimate is not None:
-                # The provider accounts for visual input. Do not reintroduce
-                # encoded image bytes through the canonical chars/4 fallback.
-                text_messages = [_without_image_transport(message) for message in history_messages]
-                estimated = max(_estimate_history_messages_tokens(text_messages), provider_estimate)
-        return summary_tokens + estimated
+        provider_estimate = (
+            replay_model.estimate_portable_replay_tokens(history_messages) if replay_model is not None else None
+        )
+        if provider_estimate is not None:
+            # The provider accounts for visual input. Do not reintroduce
+            # encoded image bytes through the canonical chars/4 fallback.
+            history_messages = [_without_image_transport(message) for message in history_messages]
+        return summary_tokens + max(_estimate_history_messages_tokens(history_messages), provider_estimate or 0)
     projected = native_replay_messages(history_messages, native_route)
     checkpoint_tokens = 0
     tail = []

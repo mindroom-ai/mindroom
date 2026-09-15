@@ -5651,7 +5651,7 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 [[modules]]
 path = "mindroom.history.message_content"
 depends_on = ["mindroom.token_budget"]
-visibility = ["mindroom.history.replay", "mindroom.history.summary_input"]
+visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
 
 [[modules]]
 path = "mindroom.history.provider_error_compat"

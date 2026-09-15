@@ -26,6 +26,7 @@ from openai.types.responses import (
 )
 
 from mindroom.error_handling import IncompleteResponsesStreamError
+from mindroom.history.message_content import image_content_for_token_estimation
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
 from mindroom.native_compaction import (
@@ -45,7 +46,7 @@ from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
 )
-from mindroom.token_budget import approximate_o200k_tokens, image_content_for_token_estimation, stable_serialize
+from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator

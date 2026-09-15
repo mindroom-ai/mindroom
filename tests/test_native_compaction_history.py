@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from base64 import b64encode
 from dataclasses import replace
 from io import BytesIO
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("representation", ["bytes", "path", "data_url", "content_block"])
 def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_bytes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     representation: str,
 ) -> None:
     """One uncompressed PNG must fit as visual input after a saved summary."""
@@ -87,6 +89,15 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     )
     before = session.to_dict()
     request_before = model._format_messages([message])
+    serialized_sizes = []
+    serialize = json.dumps
+
+    def record_serialization(value: object, **kwargs: Any) -> str:  # noqa: ANN401
+        result = serialize(value, **kwargs)
+        serialized_sizes.append(len(result))
+        return result
+
+    monkeypatch.setattr(json, "dumps", record_serialization)
     for _ in range(2):
         tokens = estimate_prompt_visible_history_tokens(
             session=session,
@@ -101,6 +112,9 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
         )
         assert decision.mode == "none", (tokens, decision.reason)
         assert 77 < tokens < 2000
+    assert serialized_sizes
+    # Estimation must not serialize image transport even for a discarded fallback.
+    assert max(serialized_sizes) < 10_000
     assert session.to_dict() == before
     assert model._format_messages([message]) == request_before
 
