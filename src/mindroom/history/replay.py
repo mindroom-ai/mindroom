@@ -59,7 +59,11 @@ def estimate_prompt_visible_history_tokens(
         provider_estimate = (
             replay_model.estimate_portable_replay_tokens(history_messages) if replay_model is not None else None
         )
-        if provider_estimate is not None:
+        if (
+            replay_model is not None
+            and provider_estimate is not None
+            and replay_model.portable_replay_uses_visual_tokens()
+        ):
             # The provider accounts for visual input. Do not reintroduce
             # encoded image bytes through the canonical chars/4 fallback.
             history_messages = [_without_image_transport(message) for message in history_messages]
@@ -75,7 +79,7 @@ def estimate_prompt_visible_history_tokens(
     provider_estimate = (
         replay_model.estimate_portable_replay_tokens(tail) if replay_model is not None and tail else None
     )
-    if provider_estimate is not None:
+    if replay_model is not None and provider_estimate is not None and replay_model.portable_replay_uses_visual_tokens():
         tail = [_without_image_transport(message) for message in tail]
     tail_tokens = sum((_estimated_message_chars(message) + 3) // 4 for message in tail)
     return summary_tokens + checkpoint_tokens + max(tail_tokens, provider_estimate or 0)

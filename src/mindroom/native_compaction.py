@@ -44,12 +44,17 @@ class NativeCompactionModel:
     def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
         """Return a provider-aware estimate, or None for canonical history sizing.
 
-        A non-None estimate must include the token cost of all media whose
-        transport data the shared history estimator removes. Callers combine
-        this estimate with a canonical text floor after removing image transport.
-        Returning None preserves the canonical transport estimate instead.
+        Callers retain the canonical transport floor unless
+        portable_replay_uses_visual_tokens() returns True. In that case, this
+        estimate must include the cost of all images whose transport data the
+        shared history estimator removes. Returning None always preserves the
+        canonical transport estimate.
         """
         return None
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        """Return whether portable estimates replace image transport with visual cost."""
+        return False
 
     def native_compaction_supported(self) -> bool:
         """Return whether this concrete route can use automatic compaction."""

@@ -7,6 +7,7 @@ import json
 from base64 import b64encode
 from dataclasses import replace
 from io import BytesIO
+from random import Random
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
@@ -115,6 +116,71 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
     assert serialized_sizes
     # Estimation must not serialize image transport even for a discarded fallback.
     assert max(serialized_sizes) < 10_000
+    assert session.to_dict() == before
+    assert model._format_messages([message]) == request_before
+
+
+@pytest.mark.parametrize("floor", ["canonical", "provider"])
+@pytest.mark.parametrize("native", [False, True])
+def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: str, *, native: bool) -> None:
+    """Unsupported visual accounting retains both full transport estimates."""
+    buffer = BytesIO()
+    # Seeded pixels keep the provider-dominant transport fixture reproducible.
+    pixels = (
+        PillowImage.new("RGB", (256, 256), "blue")
+        if floor == "canonical"
+        else PillowImage.frombytes("RGB", (256, 256), Random(0).randbytes(256 * 256 * 3))  # noqa: S311
+    )
+    pixels.save(buffer, format="PNG", compress_level=0)
+    if floor == "canonical":
+        block = {"type": "input_image", "image_url": "data:image/png;base64," + b64encode(buffer.getvalue()).decode()}
+        message = Message(role="user", content=[block])
+        expected_tokens = (len(stable_serialize(block)) + (3 if native else 0)) // 4
+    else:
+        message = Message(role="user", content="Describe.", images=[Image(content=buffer.getvalue(), format="png")])
+    model = MindRoomOpenAIResponses(id="unrecognized-image-model")
+    request_before = model._format_messages([message])
+    provider_tokens = approximate_o200k_tokens(stable_serialize(request_before))
+    if floor == "canonical":
+        assert expected_tokens > provider_tokens
+    else:
+        # Binary media has tiny canonical metadata but a large encoded provider payload.
+        assert provider_tokens > 100_000
+        expected_tokens = provider_tokens
+    messages = [message]
+    route = "unknown-image-route" if native else None
+    if native:
+        messages.insert(
+            0,
+            Message(
+                role="assistant",
+                provider_data={
+                    "mindroom_native_compaction": {
+                        "route": route,
+                        "items": [{"type": "compaction", "encrypted_content": "checkpoint"}],
+                    },
+                },
+            ),
+        )
+        expected_tokens += 15  # Serialized checkpoint is 59 characters, rounded up.
+    session = _session("session", runs=[_completed_run("recent", messages=messages)])
+    config, _ = _make_config(tmp_path)
+    resolved = resolve_agent_preparation_inputs(
+        agent=_agent(model=model),
+        agent_name="test_agent",
+        full_prompt="Continue",
+        config=config,
+        static_prompt_tokens=100,
+    )
+    before = session.to_dict()
+    tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=resolved.history_settings,
+        native_route=route,
+        replay_model=model,
+    )
+    assert tokens == expected_tokens
     assert session.to_dict() == before
     assert model._format_messages([message]) == request_before
 

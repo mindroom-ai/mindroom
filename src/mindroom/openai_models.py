@@ -143,11 +143,8 @@ def _responses_image_tokens(block: dict[str, Any], model_id: str) -> int:
     """Estimate visual patches, never tokenize encoded image transport as text.
 
     Current patch-model sizing: https://developers.openai.com/api/docs/guides/images-vision
-    Unknown models retain the existing transport estimate until their visual
-    accounting is known. Unknown dimensions use the model/detail image ceiling.
+    Unknown dimensions use the model/detail image ceiling.
     """
-    if not model_id.startswith(OPENAI_IMAGE_PATCH_MODEL_PREFIXES):
-        return approximate_o200k_tokens(stable_serialize(block))
     detail = block.get("detail", "auto")
     recent = model_id.startswith(OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES)
     if detail == "auto":
@@ -260,6 +257,8 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         replay_model._portable_replay = True
         replay_model.native_compaction = None
         formatted = replay_model._format_messages(messages)
+        if not self.portable_replay_uses_visual_tokens():
+            return approximate_o200k_tokens(stable_serialize(formatted))
         estimated_input = []
         image_tokens = 0
         for item in formatted:
@@ -275,6 +274,10 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
                     )
             estimated_input.append(projected)
         return approximate_o200k_tokens(stable_serialize(estimated_input)) + image_tokens
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        """Use visual accounting only for models with known image patch budgets."""
+        return self.id.startswith(OPENAI_IMAGE_PATCH_MODEL_PREFIXES)
 
     def native_compaction_supported(self) -> bool:
         """Use explicit replay on public Responses and Codex routes."""
