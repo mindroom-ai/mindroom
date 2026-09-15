@@ -94,16 +94,25 @@ def test_responses_file_search_does_not_upload_before_decision(monkeypatch: pyte
 
 
 @pytest.mark.parametrize("model_type", [MindRoomOpenAIChat, MindRoomOpenAIResponses])
-def test_function_only_requests_preserve_tools_and_choice(model_type: type) -> None:
-    """Function declarations remain cache-compatible when no hosted execution exists."""
-    model = model_type(id="gpt-6-astra", api_key="test-key")
+@pytest.mark.parametrize("source", ["argument", "request_params", "extra_body"])
+def test_function_only_decisions_disable_selection_after_overrides(model_type: type, source: str) -> None:
+    """Function selection can invalidate a decision even though no tool is executed."""
+    authored: dict[str, Any] = {} if source == "argument" else {"tool_choice": "required"}
+    if source == "extra_body":
+        authored = {"extra_body": {"tool_choice": "required"}}
+    before = deepcopy(authored)
+    model = model_type(id="gpt-6-astra", api_key="test-key", request_params=authored)
     regular = model.get_request_params(tools=[_function_tool()], tool_choice="auto")
 
     with without_provider_tools():
         decision = model.get_request_params(tools=[_function_tool()], tool_choice="auto")
 
-    assert decision == regular
-    assert decision["tool_choice"] == "auto"
+    assert decision["tool_choice"] == "none"
+    if source == "extra_body":
+        assert decision["extra_body"]["tool_choice"] == "none"
+    assert decision["tools"] == regular["tools"]
+    assert authored == before
+    assert model.get_request_params(tools=[_function_tool()], tool_choice="auto") == regular
 
 
 @pytest.mark.parametrize(
@@ -162,7 +171,7 @@ def test_gemini_removes_native_tools_without_mutating_authored_config(source: st
         assert len(config.tools) == 1
         assert config.tools[0].function_declarations[0].name == "read_status"
         assert config.system_instruction == "Stable agent instructions"
-        assert config.tool_config.function_calling_config.mode == "AUTO"
+        assert config.tool_config.function_calling_config.mode == "NONE"
     assert options == before
     regular = GenerateContentConfig.model_validate(model.get_request_params()["config"])
     assert any(tool.google_search is not None for tool in regular.tools)
@@ -228,8 +237,8 @@ def test_openrouter_explicit_search_fails_closed(options: dict[str, Any]) -> Non
 
 
 @pytest.mark.parametrize("source", ["request_params", "extra_body", "extra_body_override"])
-def test_openrouter_disabled_search_keeps_ordinary_request(source: str) -> None:
-    """An explicit disabled web plugin must keep its normal function request intact."""
+def test_openrouter_disabled_search_still_suppresses_function_selection(source: str) -> None:
+    """A disabled web plugin permits the check while ordinary functions remain unselectable."""
     plugins = [{"id": "web", "enabled": False}, {"id": "response-healing"}]
     if source == "request_params":
         model = MindRoomOpenRouter(api_key="test-key", request_params={"plugins": plugins})
@@ -245,8 +254,9 @@ def test_openrouter_disabled_search_keeps_ordinary_request(source: str) -> None:
     with without_provider_tools():
         decision = model.get_request_params(tools=[_function_tool()], tool_choice="auto")
 
-    assert decision == regular
-    assert decision["tool_choice"] == "auto"
+    assert decision == {**regular, "tool_choice": "none"}
+    assert regular["tool_choice"] == "auto"
+    assert model.get_request_params(tools=[_function_tool()], tool_choice="auto") == regular
     assert plugins[0]["enabled"] is False
 
 
@@ -311,6 +321,56 @@ def test_groq_explicit_tools_preserve_functions_and_disable_native_execution(tmp
     with without_provider_tools():
         decision = model.get_request_params(tools=tools, tool_choice="auto")
 
-    assert decision["tool_choice"] == ("auto" if tool_type == "function" else "none")
+    assert decision["tool_choice"] == "none"
     assert decision["tools"] == regular["tools"]
     assert model.get_request_params(tools=tools, tool_choice="auto") == regular
+
+
+@pytest.mark.parametrize(
+    ("provider", "source"),
+    [
+        ("cerebras", "tools"),
+        ("cerebras", "request_params"),
+        ("cerebras", "extra_body"),
+        ("ollama", "tools"),
+        ("ollama", "request_params"),
+    ],
+)
+def test_loader_provider_decisions_cannot_select_functions(tmp_path: Path, provider: str, source: str) -> None:
+    """Providers that discard Agno's tool_choice still need a final request restriction."""
+    function = _function_tool()
+    function["function"]["description"] = "Read current status"
+    authored: dict[str, Any] = {}
+    if source == "request_params":
+        authored = {"tools": [function]}
+        if provider == "cerebras":
+            authored["tool_choice"] = "required"
+    elif source == "extra_body":
+        authored = {"extra_body": {"tools": [function], "tool_choice": "required"}}
+    before = deepcopy(authored)
+    options: dict[str, Any] = {"request_params": authored}
+    if provider == "cerebras":
+        options["api_key"] = "test-key"
+    config = bind_runtime_paths(
+        Config(models={"candidate": ModelConfig(provider=provider, id="test", extra_kwargs=options)}),
+        test_runtime_paths(tmp_path),
+    )
+    model = get_model_instance(config, runtime_paths_for(config), "candidate")
+    tools = [function] if source == "tools" else None
+    regular = model.get_request_params(tools=tools)
+
+    with without_provider_tools():
+        decision = model.get_request_params(tools=tools)
+
+    if provider == "ollama":
+        assert "tools" not in decision
+        assert "tools" in regular
+    else:
+        assert decision["tool_choice"] == "none"
+        if source == "extra_body":
+            assert decision["extra_body"]["tool_choice"] == "none"
+            assert decision["extra_body"]["tools"] == regular["extra_body"]["tools"]
+        else:
+            assert decision["tools"] == regular["tools"]
+    assert authored == before
+    assert model.get_request_params(tools=tools) == regular

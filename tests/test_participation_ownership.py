@@ -155,7 +155,10 @@ async def test_claude_wire_payload_preserves_prefix_with_transient_context() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("native_source", ["tools", "skills", "deferred_search", "extra_body", "mcp_servers"])
+@pytest.mark.parametrize(
+    "native_source",
+    ["tools", "skills", "deferred_search", "extra_body", "mcp_servers", "function", "function_extra_body"],
+)
 async def test_claude_native_tools_cannot_execute_during_decision(
     monkeypatch: pytest.MonkeyPatch,
     native_source: str,
@@ -199,7 +202,11 @@ async def test_claude_native_tools_cannot_execute_during_decision(
     monkeypatch.setattr(model, "get_async_client", lambda: client)
     install_claude_prompt_cache_hook(model)
     tools: list[dict[str, Any]] = []
-    if native_source == "tools":
+    if native_source in {"function", "function_extra_body"}:
+        tools = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+        if native_source == "function_extra_body":
+            model.request_params["extra_body"] = {"tool_choice": {"type": "auto"}}
+    elif native_source == "tools":
         tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 1}]
     elif native_source == "skills":
         model.skills = [{"type": "anthropic", "skill_id": "xlsx", "version": "latest"}]

@@ -8,7 +8,14 @@ from typing import TYPE_CHECKING
 
 from agno.models.google import Gemini
 from agno.utils.message import normalize_tool_messages
-from google.genai.types import GenerateContentConfig, HttpOptions, Tool
+from google.genai.types import (
+    FunctionCallingConfig,
+    FunctionCallingConfigMode,
+    GenerateContentConfig,
+    HttpOptions,
+    Tool,
+    ToolConfig,
+)
 
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
 from mindroom.provider_tool_policy import provider_tools_disabled
@@ -25,6 +32,30 @@ _SAMPLING_CONTROL_NAMES = ("temperature", "top_p", "top_k")
 def _provider_tool_call_id(value: object) -> str | None:
     """Return a non-empty provider tool-call ID."""
     return value if isinstance(value, str) and value else None
+
+
+def _without_tool_selection(config: object) -> GenerateContentConfig:
+    """Preserve function schemas and remove native tools from a decision request."""
+    generation_config = GenerateContentConfig.model_validate(config).model_copy(deep=True)
+    if generation_config.cached_content:
+        # Cached content may contain native tools that this request cannot inspect.
+        msg = "Participation decisions cannot inspect tools in Gemini cached content"
+        raise ValueError(msg)
+    if generation_config.http_options is not None and generation_config.http_options.extra_body:
+        msg = "Participation decisions cannot safely apply Gemini body overrides"
+        raise ValueError(msg)
+    # Function-calling NONE does not disable grounding or other native tools.
+    declaration_tools: ToolListUnion = [
+        Tool(function_declarations=tool.function_declarations)
+        for tool in generation_config.tools or []
+        if isinstance(tool, Tool) and tool.function_declarations
+    ]
+    generation_config.tools = declaration_tools or None
+    if declaration_tools:
+        generation_config.tool_config = ToolConfig(
+            function_calling_config=FunctionCallingConfig(mode=FunctionCallingConfigMode.NONE),
+        )
+    return generation_config
 
 
 @dataclass
@@ -55,22 +86,7 @@ class MindRoomGoogleGemini(Gemini):
             tool_choice=tool_choice,
         )
         if provider_tools_disabled() and (generation_config := request_params.get("config")) is not None:
-            generation_config = GenerateContentConfig.model_validate(generation_config).model_copy(deep=True)
-            if generation_config.cached_content:
-                # Cached content may contain native tools that this request cannot inspect.
-                msg = "Participation decisions cannot inspect tools in Gemini cached content"
-                raise ValueError(msg)
-            if generation_config.http_options is not None and generation_config.http_options.extra_body:
-                msg = "Participation decisions cannot safely apply Gemini body overrides"
-                raise ValueError(msg)
-            # Function-calling NONE does not disable grounding or other native tools.
-            declaration_tools: ToolListUnion = [
-                Tool(function_declarations=tool.function_declarations)
-                for tool in generation_config.tools or []
-                if isinstance(tool, Tool) and tool.function_declarations
-            ]
-            generation_config.tools = declaration_tools or None
-            request_params["config"] = generation_config
+            request_params["config"] = _without_tool_selection(generation_config)
         if not self.id.casefold().endswith(GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES):
             return request_params
 

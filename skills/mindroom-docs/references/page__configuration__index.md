@@ -41,7 +41,8 @@ A burst from one sender becomes one turn after the pause; explicit agent or huma
 Single-human conversations keep their usual response behavior.
 A declined or failed decision stays quiet and does not record a completed assistant response.
 The check reuses the prepared conversation and tool definitions, but cannot execute tools.
-With Claude native tools, only the tool and system caches are reusable across the check and reply because disabling execution changes tool choice.
+With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
+Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
 Cancellation before approval does not create an interruption notice.
 If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.

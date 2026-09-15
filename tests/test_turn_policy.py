@@ -657,7 +657,12 @@ async def test_current_room_grant_preserves_existing_thread_owner(config: Config
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("history_sender", ["@other:localhost", _SENDER])
-async def test_adaptive_participation_counts_current_sender(config: Config, history_sender: str) -> None:
+@pytest.mark.parametrize("active_follow_up", [False, True])
+async def test_adaptive_participation_counts_current_sender(
+    config: Config,
+    history_sender: str,
+    active_follow_up: bool,
+) -> None:
     """Only an actual second human makes an untagged turn adaptive."""
     config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
     room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "general").full_id)
@@ -668,7 +673,13 @@ async def test_adaptive_participation_counts_current_sender(config: Config, hist
             make_visible_message(sender=_entity_id(config, "general").full_id, body="answer"),
         ],
     )
-    plan = await _plan(_policy_for(config, "general"), room, _dispatch(context, agent_name="general"))
+    dispatch = _dispatch(context, agent_name="general")
+    if active_follow_up:
+        dispatch = replace(
+            dispatch,
+            envelope=replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND),
+        )
+    plan = await _plan(_policy_for(config, "general"), room, dispatch)
     assert plan.kind == "respond"
     assert (plan.response_action.participation is not None) == (history_sender != _SENDER)
 

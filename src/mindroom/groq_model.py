@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.models.groq import Groq
 
-from mindroom.provider_tool_policy import provider_tools_disabled
+from mindroom.provider_tool_policy import disable_tool_selection, provider_tools_disabled
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -25,7 +25,7 @@ class MindRoomGroq(Groq):
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Reject automatic Compound tools and disable explicitly listed native tools."""
+        """Reject automatic Compound tools and disable all declared tool selection."""
         request_params = super().get_request_params(
             response_format=response_format,
             tools=tools,
@@ -42,13 +42,4 @@ class MindRoomGroq(Groq):
             # Compound enables hosted tools by default; tool_choice controls local calls.
             msg = "Participation decisions cannot disable native Groq Compound tools"
             raise ValueError(msg)
-        effective_tools = (
-            extra_body.get("tools", request_params.get("tools"))
-            if isinstance(extra_body, dict)
-            else request_params.get("tools")
-        )
-        if any(not isinstance(tool, dict) or tool.get("type") != "function" for tool in effective_tools or []):
-            request_params["tool_choice"] = "none"
-            if isinstance(extra_body, dict) and "tool_choice" in extra_body:
-                request_params["extra_body"] = {**extra_body, "tool_choice": "none"}
-        return request_params
+        return disable_tool_selection(request_params)

@@ -650,13 +650,12 @@ class _PromptCacheMessagesProxy:
 
 
 def _request_kwargs_without_provider_execution(request_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Keep native definitions cacheable while preventing server-side execution."""
+    """Keep definitions cacheable while preventing tool calls in participation checks."""
     if not provider_tools_disabled():
         return request_kwargs
     extra_body = request_kwargs.get("extra_body")
     effective = {**request_kwargs, **extra_body} if isinstance(extra_body, dict) else request_kwargs
-    native_tools = any(tool.get("type") not in (None, "custom") for tool in effective.get("tools") or [])
-    if not native_tools and not effective.get("mcp_servers"):
+    if not effective.get("tools") and not effective.get("mcp_servers"):
         return request_kwargs
     prepared = {**request_kwargs, "tool_choice": {"type": "none"}}
     if isinstance(extra_body, dict) and "tool_choice" in extra_body:

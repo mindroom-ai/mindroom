@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 from agno.agent import Agent
 from agno.compression.manager import CompressionManager
 from agno.metrics import MessageMetrics, RunMetrics
 from agno.run.agent import RunOutput
+from openai import AsyncOpenAI
 
 from mindroom.agno_participation import participation_model
 from mindroom.ai import ai_response, stream_agent_response
+from mindroom.openai_models import MindRoomOpenAIChat
 from mindroom.participation import ParticipationGate
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context
@@ -23,6 +27,7 @@ from tests.participation_helpers import ParticipationModel
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+    from typing import Any
 
 import pytest
 from agno.models.message import Message
@@ -103,13 +108,82 @@ async def test_approval_reuses_exact_normal_prefix_and_only_checks_once() -> Non
     assert decision["messages"][:-1] == original
     assert normal["messages"] == original
     assert decision["tools"] == normal["tools"] == tools
-    assert decision["tool_choice"] == normal["tool_choice"] == "auto"
+    assert decision["tool_choice"] == "none"
+    assert normal["tool_choice"] == "auto"
     assert decision["response_format"] == normal["response_format"]
     assert "Offer concise technical help." in decision["messages"][-1].content
     assert len(model.requests) == 3
     assert gate.approved
     assert gate.decided.is_set()
     assert model.ainvoke == original_response
+
+
+@pytest.mark.asyncio
+async def test_openai_decision_disables_function_selection_before_answering() -> None:
+    """A decision containing a selected function would discard an otherwise useful answer."""
+    requests: list[dict[str, Any]] = []
+    executions: list[tuple[int, int]] = []
+
+    def multiply(a: int, b: int) -> str:
+        """Multiply two integers."""
+        executions.append((a, b))
+        return str(a * b)
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        deciding = len(requests) == 1
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": '{"action":"respond","reason":"An unanswered math question."}' if deciding else "437",
+        }
+        finish_reason = "stop"
+        if (deciding and payload.get("tool_choice") != "none") or len(requests) == 2:
+            message["tool_calls"] = [
+                {
+                    "id": "call-multiply",
+                    "type": "function",
+                    "function": {"name": "multiply", "arguments": '{"a":23,"b":19}'},
+                },
+            ]
+            finish_reason = "tool_calls"
+            if not deciding:
+                message["content"] = None
+        return httpx.Response(
+            200,
+            json={
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "test",
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http_client:
+        model = MindRoomOpenAIChat(
+            id="test",
+            api_key="test-key",
+            async_client=AsyncOpenAI(api_key="test-key", http_client=http_client),
+        )
+        gate = ParticipationGate()
+        with participation_model(model, gate, run_id="primary"):
+            response = await model.aresponse(
+                [Message(role="user", content="Use the calculator to multiply 23 by 19.")],
+                tools=[Function.from_callable(multiply)],
+                tool_choice="auto",
+                run_response=RunOutput(run_id="primary"),
+            )
+
+    assert response.content == "437"
+    assert gate.approved
+    assert executions == [(23, 19)]
+    assert len(requests) == 3
+    assert requests[0]["tool_choice"] == "none"
+    assert requests[1]["tool_choice"] == "auto"
+    assert requests[0]["tools"] == requests[1]["tools"]
+    assert requests[0]["messages"][:-1] == requests[1]["messages"]
 
 
 @pytest.mark.asyncio

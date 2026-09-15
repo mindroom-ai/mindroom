@@ -218,11 +218,11 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         extra_kwargs.setdefault("timeout", _CLAUDE_REQUEST_TIMEOUT_SECONDS)
 
     if canonical_provider_key == "ollama":
-        from agno.models.ollama import Ollama  # noqa: PLC0415
+        from mindroom.ollama_model import MindRoomOllama  # noqa: PLC0415
 
         host = model_config.host or get_ollama_host(runtime_paths=runtime_paths) or OLLAMA_HOST_DEFAULT
         logger.debug("using_ollama_host", host=host)
-        return Ollama(id=model_id, host=host, **extra_kwargs)
+        return MindRoomOllama(id=model_id, host=host, **extra_kwargs)
 
     if canonical_provider_key == "synthetic":
         from mindroom.synthetic_model import SyntheticModel  # noqa: PLC0415
@@ -344,9 +344,9 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return MindRoomLlamaCpp(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "cerebras":
-        from agno.models.cerebras import Cerebras  # noqa: PLC0415
+        from mindroom.cerebras_model import MindRoomCerebras  # noqa: PLC0415
 
-        return Cerebras(id=model_id, **extra_kwargs)
+        return MindRoomCerebras(id=model_id, **extra_kwargs)
 
     if canonical_provider_key == "groq":
         from mindroom.groq_model import MindRoomGroq  # noqa: PLC0415

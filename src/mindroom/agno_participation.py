@@ -49,6 +49,7 @@ async def _request_decision(
     decision_messages.append(Message(role="user", content=render_transient_context([prompt])))
     try:
         decision_kwargs = dict(kwargs)
+        decision_kwargs["tool_choice"] = "none"
         decision_kwargs["assistant_message"] = Message(role=model.assistant_message_role)
         token = _active_decision.set(gate)
         try:

@@ -46,7 +46,7 @@ from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
 )
-from mindroom.provider_tool_policy import provider_tools_disabled
+from mindroom.provider_tool_policy import disable_tool_selection, provider_tools_disabled
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -60,27 +60,6 @@ if TYPE_CHECKING:
     from openai.types.chat import ChatCompletion
     from openai.types.responses import Response, ResponseStreamEvent
     from pydantic import BaseModel
-
-
-def _disable_native_tools(request_params: dict[str, Any]) -> dict[str, Any]:
-    """Keep native schemas cacheable while forbidding their provider-side execution."""
-    if not provider_tools_disabled():
-        return request_params
-    extra_body = request_params.get("extra_body")
-    effective_tools = (
-        extra_body.get("tools", request_params.get("tools"))
-        if isinstance(extra_body, dict)
-        else request_params.get("tools")
-    )
-    if not effective_tools or all(
-        isinstance(tool, dict) and tool.get("type") in {"function", "custom"} for tool in effective_tools
-    ):
-        return request_params
-    request_params["tool_choice"] = "none"
-    if isinstance(extra_body, dict) and "tool_choice" in extra_body:
-        # The SDK merges extra_body after normal fields, including tool_choice.
-        request_params["extra_body"] = {**extra_body, "tool_choice": "none"}
-    return request_params
 
 
 class OpenAIChatProviderCompat:
@@ -130,7 +109,7 @@ class OpenAIChatProviderCompat:
             ):
                 msg = "Participation decisions cannot disable native OpenRouter search"
                 raise ValueError(msg)
-        return _disable_native_tools(request_params)
+        return disable_tool_selection(request_params)
 
     def _parse_provider_response(self, response: ChatCompletion, **kwargs: object) -> ModelResponse:
         """Retain the terminal reason Agno drops when parsing Chat Completions."""
@@ -448,7 +427,7 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
                 {"type": "compaction", "compact_threshold": self.native_compaction.threshold},
             ]
         request_params = request_params_with_deferred_tool_search(request_params, model_deferred_tool_names(self))
-        return _disable_native_tools(request_params)
+        return disable_tool_selection(request_params)
 
     def _format_tool_params(
         self,

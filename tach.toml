@@ -661,6 +661,8 @@ visibility = [
 [[modules]]
 path = "mindroom.model_loading"
 depends_on = [
+    "mindroom.cerebras_model",
+    "mindroom.ollama_model",
     "mindroom.groq_model",
     "mindroom.constants",
     "mindroom.credentials",
@@ -5867,7 +5869,7 @@ visibility = ["mindroom.ai"]
 [[modules]]
 path = "mindroom.provider_tool_policy"
 depends_on = []
-visibility = ["mindroom.agno_participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model"]
+visibility = ["mindroom.agno_participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model", "mindroom.cerebras_model", "mindroom.ollama_model"]
 
 [[modules]]
 path = "mindroom.groq_model"
@@ -5930,3 +5932,13 @@ visibility = [
 path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
 visibility = ["mindroom.event_journal"]
+
+[[modules]]
+path = "mindroom.cerebras_model"
+depends_on = ["mindroom.provider_tool_policy"]
+visibility = ["mindroom.model_loading"]
+
+[[modules]]
+path = "mindroom.ollama_model"
+depends_on = ["mindroom.provider_tool_policy"]
+visibility = ["mindroom.model_loading"]
