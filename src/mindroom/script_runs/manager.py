@@ -241,12 +241,17 @@ class ScriptRunManager:
         await self._launches_drained.wait()
 
     async def begin_startup_reconciliation(self) -> None:
-        """Fence launches until inherited durable ownership is recovered or retired."""
+        """Acquire a launch fence and drain admitted launches, undoing acquisition on failure."""
         async with self._launch_admission_lock:
             self._startup_reconciliation_owners += 1
             if self._launches_in_progress == 0:
                 self._launches_drained.set()
-        await self._launches_drained.wait()
+        try:
+            await self._launches_drained.wait()
+        except BaseException:
+            # Cancellation before acquiring the lock above never owns a fence to release.
+            await run_coroutine_until_complete(self.end_startup_reconciliation())
+            raise
 
     async def end_startup_reconciliation(self) -> None:
         """Reopen launch admission only after startup cleanup is durably complete."""
@@ -433,8 +438,6 @@ class ScriptRunManager:
                     agent_name=context.agent_name,
                     gateway_url=self.gateway_url,
                     resource_profile=profile,
-                    resource_requests=requests,
-                    resource_limits=limits,
                 ),
                 resource_profile=profile,
                 resource_requests=requests,

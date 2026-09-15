@@ -20,10 +20,6 @@ from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
-from mindroom.script_runs.legacy_recovery import (
-    is_legacy_script_recovery_signature,
-    legacy_script_recovery_signature,
-)
 from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
@@ -44,7 +40,7 @@ from mindroom.script_runs.reasons import (
     SCRIPT_TOOL_REMOVED,
     WORKER_CONFIGURATION_CHANGED,
 )
-from mindroom.script_runs.recovery import script_process_authority, script_recovery_signature
+from mindroom.script_runs.recovery import script_process_authority, verified_script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
 from mindroom.tool_approval import (
@@ -195,6 +191,16 @@ class _WorkerLeaseDelivery:
                 "script_worker_backend_pending_acquire_failed",
                 exc_info=(type(failure), failure, failure.__traceback__),
             )
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingWorkerLease:
+    """Keep one acquisition task and its delivery ownership in the same generation."""
+
+    task: asyncio.Task[_WorkerManagerLease | None]
+    delivery: _WorkerLeaseDelivery
+    epoch: int
+    backend_locator: str | None
 
 
 @dataclass(slots=True)
@@ -395,14 +401,7 @@ class ScriptRuntimeLifecycle:
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _current_worker_lease: _WorkerManagerLease | None = field(default=None, init=False, repr=False)
     _worker_config_epoch: int = field(default=0, init=False, repr=False)
-    _pending_worker_lease_task: asyncio.Task[_WorkerManagerLease | None] | None = field(
-        default=None,
-        init=False,
-        repr=False,
-    )
-    _pending_worker_lease_delivery: _WorkerLeaseDelivery | None = field(default=None, init=False, repr=False)
-    _pending_worker_lease_epoch: int = field(default=-1, init=False, repr=False)
-    _pending_worker_backend_locator: str | None = field(default=None, init=False, repr=False)
+    _pending_worker_lease: _PendingWorkerLease | None = field(default=None, init=False, repr=False)
     _startup_cleanup_pending: bool = field(default=False, init=False, repr=False)
     _reload_launch_fence_started: bool = field(default=False, init=False, repr=False)
     _worker_replacement_phase: _WorkerReplacementPhase = field(default="idle", init=False, repr=False)
@@ -498,49 +497,41 @@ class ScriptRuntimeLifecycle:
         if current is not None and (
             required_backend_locator is None or current.manager.cleanup_locator == required_backend_locator
         ):
-            self.manager.worker_backend = current.manager
+            self._publish_worker_lease(current)
             return current.manager
         if current is not None:
-            self._clear_current_worker_backend()
+            self._publish_worker_lease(None)
             await asyncio.to_thread(current.release)
         lease = await self._acquire_current_worker_lease(required_backend_locator)
         if lease is None:
-            self._clear_current_worker_backend()
+            self._publish_worker_lease(None)
             return None
         if required_backend_locator is not None and lease.manager.cleanup_locator != required_backend_locator:
             await asyncio.to_thread(lease.release)
-            self._clear_current_worker_backend()
+            self._publish_worker_lease(None)
             return None
-        self._current_worker_lease = lease
-        backend = lease.manager
-        self.manager.worker_backend = backend
-        return backend
+        self._publish_worker_lease(lease)
+        return lease.manager
 
     async def _acquire_current_worker_lease(
         self,
         required_backend_locator: str | None,
     ) -> _WorkerManagerLease | None:
         while True:
-            task, delivery, task_epoch = self._get_or_create_worker_lease_acquisition(required_backend_locator)
+            pending = self._get_or_create_worker_lease_acquisition(required_backend_locator)
             try:
-                lease = await asyncio.shield(task)
+                lease = await asyncio.shield(pending.task)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                if self._pending_worker_lease_task is task:
-                    self._pending_worker_lease_task = None
-                    self._pending_worker_lease_delivery = None
-                    self._pending_worker_lease_epoch = -1
-                    self._pending_worker_backend_locator = None
+                if self._pending_worker_lease is pending:
+                    self._pending_worker_lease = None
                 raise
-            if self._pending_worker_lease_task is task:
-                self._pending_worker_lease_task = None
-                self._pending_worker_lease_delivery = None
-                self._pending_worker_lease_epoch = -1
-                self._pending_worker_backend_locator = None
-            if lease is not None and not delivery.acknowledge(lease):
+            if self._pending_worker_lease is pending:
+                self._pending_worker_lease = None
+            if lease is not None and not pending.delivery.acknowledge(lease):
                 return None
-            if task_epoch == self._worker_config_epoch:
+            if pending.epoch == self._worker_config_epoch:
                 return lease
             if lease is not None:
                 await asyncio.to_thread(lease.release)
@@ -548,17 +539,13 @@ class ScriptRuntimeLifecycle:
     def _get_or_create_worker_lease_acquisition(
         self,
         required_backend_locator: str | None,
-    ) -> tuple[asyncio.Task[_WorkerManagerLease | None], _WorkerLeaseDelivery, int]:
-        task = self._pending_worker_lease_task
-        if task is not None:
-            if self._pending_worker_backend_locator != required_backend_locator:
+    ) -> _PendingWorkerLease:
+        pending = self._pending_worker_lease
+        if pending is not None:
+            if pending.backend_locator != required_backend_locator:
                 msg = "Concurrent worker lease acquisitions require the same durable cleanup locator."
                 raise RuntimeError(msg)
-            delivery = self._pending_worker_lease_delivery
-            if delivery is None:
-                msg = "Pending worker lease acquisition has no delivery owner."
-                raise RuntimeError(msg)
-            return task, delivery, self._pending_worker_lease_epoch
+            return pending
 
         delivery = _WorkerLeaseDelivery()
         task = asyncio.create_task(
@@ -566,11 +553,9 @@ class ScriptRuntimeLifecycle:
             name="script_worker_backend_acquire",
         )
         task.add_done_callback(delivery.settle_task)
-        self._pending_worker_lease_task = task
-        self._pending_worker_lease_delivery = delivery
-        self._pending_worker_lease_epoch = self._worker_config_epoch
-        self._pending_worker_backend_locator = required_backend_locator
-        return task, delivery, self._pending_worker_lease_epoch
+        pending = _PendingWorkerLease(task, delivery, self._worker_config_epoch, required_backend_locator)
+        self._pending_worker_lease = pending
+        return pending
 
     async def complete_worker_replacement(self) -> None:
         """Commit a prepared config generation and publish its replacement backend."""
@@ -598,7 +583,7 @@ class ScriptRuntimeLifecycle:
                         current_config is None
                         or configured_primary_worker_manager_identity(self.runtime_paths, current_config) is None
                     ):
-                        self._clear_current_worker_backend()
+                        self._publish_worker_lease(None)
                     else:
                         replacement_lease = await asyncio.wait_for(
                             self._acquire_current_worker_lease(None),
@@ -607,8 +592,7 @@ class ScriptRuntimeLifecycle:
                         if replacement_lease is None:
                             logger.warning("script_worker_backend_commit_refresh_pending")
                             return
-                        self._current_worker_lease = replacement_lease
-                        self.manager.worker_backend = replacement_lease.manager
+                        self._publish_worker_lease(replacement_lease)
                 except TimeoutError:
                     logger.warning(
                         "script_worker_backend_commit_refresh_timeout",
@@ -646,9 +630,10 @@ class ScriptRuntimeLifecycle:
         if self.api_enabled and self._api_ready.is_set() and not self._startup_cleanup_pending:
             self.broker.open_call_admission()
 
-    def _clear_current_worker_backend(self) -> None:
-        self._current_worker_lease = None
-        self.manager.worker_backend = None
+    def _publish_worker_lease(self, lease: _WorkerManagerLease | None) -> None:
+        """Publish the lifecycle lookup and manager backend together without yielding."""
+        self._current_worker_lease = lease
+        self.manager.worker_backend = None if lease is None else lease.manager
 
     def _worker_backend_for(self, run: ScriptRunRecord | None) -> WorkerBackend | None:
         """Resolve a durable run only through its exact owning cleanup backend."""
@@ -663,7 +648,7 @@ class ScriptRuntimeLifecycle:
 
     async def _release_current_worker_lease(self) -> None:
         lease = self._current_worker_lease
-        self._clear_current_worker_backend()
+        self._publish_worker_lease(None)
         if lease is not None:
             await asyncio.to_thread(lease.release)
 
@@ -717,11 +702,11 @@ class ScriptRuntimeLifecycle:
         async def apply_update_boundary() -> None:
             nonlocal launch_fence_started, previous_replacement_phase
             async with self._worker_refresh_lock:
-                self.broker.close_call_admission()
                 if not self._reload_launch_fence_started:
-                    launch_fence_started = True
                     await self.manager.begin_startup_reconciliation()
                     self._reload_launch_fence_started = True
+                    launch_fence_started = True
+                self.broker.close_call_admission()
                 if worker_configuration_changed:
                     previous_replacement_phase = self._worker_replacement_phase
                     self._worker_replacement_phase = "preparing"
@@ -850,28 +835,14 @@ class ScriptRuntimeLifecycle:
 
     def _run_matches_recovery_contract(self, run: ScriptRunRecord, *, config: Config) -> bool:
         """Return whether the current backend advertises this run as recoverable."""
-        backend = self._worker_backend_for(run)
-        current_signature = script_recovery_signature(
-            backend=backend,
-            config=config,
-            agent_name=run.agent_name,
-            gateway_url=self.manager.gateway_url,
-            resource_profile=run.resource_profile,
-            resource_requests=run.resource_requests,
-            resource_limits=run.resource_limits,
-        )
-        if current_signature is not None and current_signature == run.recovery_signature:
-            return True
-        if not is_legacy_script_recovery_signature(run.recovery_signature):
-            return False
         return (
-            legacy_script_recovery_signature(
-                backend=backend,
+            verified_script_recovery_signature(
+                run=run,
+                backend=self._worker_backend_for(run),
                 config=config,
-                agent_name=run.agent_name,
                 gateway_url=self.manager.gateway_url,
             )
-            == run.recovery_signature
+            is not None
         )
 
     async def _interrupt_runs(
@@ -1130,38 +1101,23 @@ class ScriptRuntimeLifecycle:
                 backend = await self._refresh_worker_backend(required_backend_locator=run.worker_backend_locator)
                 if backend is not None and run.worker_key is not None:
                     await asyncio.to_thread(backend.touch_worker, run.worker_key)
-                current_signature = script_recovery_signature(
+                current_signature = verified_script_recovery_signature(
+                    run=run,
                     backend=backend,
                     config=config,
-                    agent_name=run.agent_name,
                     gateway_url=self.manager.gateway_url,
-                    resource_profile=run.resource_profile,
-                    resource_requests=run.resource_requests,
-                    resource_limits=run.resource_limits,
                 )
-                legacy_signature = (
-                    legacy_script_recovery_signature(
-                        backend=backend,
-                        config=config,
-                        agent_name=run.agent_name,
-                        gateway_url=self.manager.gateway_url,
-                    )
-                    if is_legacy_script_recovery_signature(run.recovery_signature)
-                    else None
-                )
-                if current_signature == run.recovery_signature:
-                    pass
-                elif legacy_signature == run.recovery_signature and current_signature is not None:
+                if current_signature is None:
+                    await self.manager.revoke(run.run_id, reason=WORKER_CONFIGURATION_CHANGED)
+                    await self.manager.reconcile_durable(run_id=run.run_id)
+                    continue
+                if current_signature != run.recovery_signature:
                     verified_run = await asyncio.to_thread(
                         self.store.replace_recovery_signature,
                         run.run_id,
                         expected_signature=run.recovery_signature,
                         recovery_signature=current_signature,
                     )
-                else:
-                    await self.manager.revoke(run.run_id, reason=WORKER_CONFIGURATION_CHANGED)
-                    await self.manager.reconcile_durable(run_id=run.run_id)
-                    continue
                 authorized = self.resolver.is_authorized(verified_run, config=config)
                 if authorized is None:
                     continue
@@ -1208,7 +1164,7 @@ class ScriptRuntimeLifecycle:
                     required_backend_locator=locator,
                 )
             except WorkerBackendError:
-                self._clear_current_worker_backend()
+                self._publish_worker_lease(None)
                 logger.warning("script_worker_backend_owner_refresh_pending", exc_info=True)
             await self._interrupt_durably_revoked_runs(
                 backend_runs,
@@ -1366,24 +1322,20 @@ class ScriptRuntimeLifecycle:
 
     def _detach_worker_leases(self) -> list[_WorkerManagerLease]:
         leases = [self._current_worker_lease] if self._current_worker_lease is not None else []
-        pending_lease_task = self._pending_worker_lease_task
-        if self._pending_worker_lease_delivery is not None:
-            pending_lease = self._pending_worker_lease_delivery.abandon()
+        pending = self._pending_worker_lease
+        if pending is not None:
+            pending_lease = pending.delivery.abandon()
             if pending_lease is not None:
                 leases.append(pending_lease)
-        if pending_lease_task is not None and pending_lease_task.done() and not pending_lease_task.cancelled():
-            pending_failure = pending_lease_task.exception()
+        if pending is not None and pending.task.done() and not pending.task.cancelled():
+            pending_failure = pending.task.exception()
             if pending_failure is not None:
                 logger.warning(
                     "script_worker_backend_pending_acquire_failed",
                     exc_info=(type(pending_failure), pending_failure, pending_failure.__traceback__),
                 )
-        self._pending_worker_lease_task = None
-        self._pending_worker_lease_delivery = None
-        self._pending_worker_lease_epoch = -1
-        self._pending_worker_backend_locator = None
-        self._current_worker_lease = None
-        self.manager.worker_backend = None
+        self._pending_worker_lease = None
+        self._publish_worker_lease(None)
         return leases
 
 

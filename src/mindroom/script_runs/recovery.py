@@ -7,9 +7,14 @@ import json
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
+from mindroom.script_runs.legacy_recovery import (
+    is_legacy_script_recovery_signature,
+    legacy_script_recovery_signature,
+)
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.workers.backend import WorkerBackend
 
 
@@ -18,9 +23,6 @@ class _RecoveringScriptBackend(Protocol):
     def script_recovery_signature(self) -> str:
         """Return a digest of the authority preserved by an existing worker."""
 
-
-@runtime_checkable
-class _RecoveringScriptResourceBackend(Protocol):
     def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
         """Return current physical resources for one persisted profile."""
 
@@ -52,8 +54,6 @@ def script_recovery_signature(
     agent_name: str,
     gateway_url: str,
     resource_profile: str | None = None,
-    resource_requests: dict[str, str] | None = None,
-    resource_limits: dict[str, str] | None = None,
 ) -> str | None:
     """Bind one recoverable launch to its worker authority, private scope and gateway."""
     if (
@@ -64,22 +64,43 @@ def script_recovery_signature(
         or (process_authority := script_process_authority(config, agent_name)) is None
     ):
         return None
-    resource_authority = (
-        backend.script_resource_recovery_authority(resource_profile)
-        if isinstance(backend, _RecoveringScriptResourceBackend)
-        else {
-            "profile": resource_profile,
-            "requests": resource_requests or {},
-            "limits": resource_limits or {},
-        }
-    )
     payload = {
         "protocol": SCRIPT_PROTOCOL_VERSION,
         "backend": backend.script_recovery_signature(),
         "agent": agent_name,
         "process_authority": process_authority,
         "gateway": gateway_url.rstrip("/"),
-        "resources": resource_authority,
+        "resources": backend.script_resource_recovery_authority(resource_profile),
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return f"{_RECOVERY_SIGNATURE_VERSION}:{digest}"
+
+
+def verified_script_recovery_signature(
+    *,
+    run: ScriptRunRecord,
+    backend: WorkerBackend | None,
+    config: Config,
+    gateway_url: str,
+) -> str | None:
+    """Return current authority only when the durable current or legacy digest verifies."""
+    current_signature = script_recovery_signature(
+        backend=backend,
+        config=config,
+        agent_name=run.agent_name,
+        gateway_url=gateway_url,
+        resource_profile=run.resource_profile,
+    )
+    if current_signature is None:
+        return None
+    if current_signature == run.recovery_signature:
+        return current_signature
+    if not is_legacy_script_recovery_signature(run.recovery_signature):
+        return None
+    legacy_signature = legacy_script_recovery_signature(
+        backend=backend,
+        config=config,
+        agent_name=run.agent_name,
+        gateway_url=gateway_url,
+    )
+    return current_signature if legacy_signature == run.recovery_signature else None
