@@ -479,7 +479,8 @@ Design migrations around that assumption rather than adding machinery to coordin
 - Distinguish upstream bugs from missing public extension points and intentional application policy.
   Never invent a tracking link or treat a related PR as a complete fix.
   Separate removal conditions when one module handles multiple upstream gaps.
-- Treat an explicit tracking gap as unfinished upstream work. Record the concrete failing behavior or required extension point in the inventory, search for existing tracking before opening a new item, and replace the gap with verified links when available.
+- Treat an explicit tracking gap as unfinished upstream work.
+  Record the concrete failing behavior or required extension point in the inventory, search for existing tracking before opening a new item, and replace the gap with verified links when available.
 - For an upstream contribution, reduce the problem to an Agno-only reproducer and regression test where possible.
   Keep MindRoom-specific policy out of the proposed fix and retain local integration coverage for the behavior MindRoom requires.
 - Keep patch installation explicit and idempotent, preserve optional-import boundaries, and retain version guards where private signatures or semantics require them.
