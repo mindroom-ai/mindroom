@@ -1,4 +1,4 @@
-"""Legacy provider error interpretation for compaction.
+"""Provider error interpretation for compaction.
 
 Agno sometimes wraps SDK failures as generic ModelProviderError values or text.
 Keep cause-chain inspection and wording compatibility outside core retry policy.
@@ -11,9 +11,16 @@ from agno.exceptions import ModelProviderError
 
 from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES
 
-# Status 502 is excluded because ``ModelProviderError`` uses it for unclassified
-# errors. Default-502 errors retry only when their cause chain proves a typed
-# network failure.
+# AGNO_COMPAT: Unclassified ModelProviderError failures default to HTTP 502.
+# Reason: A generic 502 does not prove a transient provider failure; inspect its
+# typed network cause chain before allowing an unchanged compaction retry.
+# Upstream issue: https://github.com/agno-agi/agno/issues/8869
+# Upstream PR: https://github.com/agno-agi/agno/pull/8870 (partial: preserves OpenAI
+# codes and classifies Responses failures; generic and non-OpenAI errors remain).
+# Remove when: Agno distinguishes unclassified failures from typed transient
+# errors across supported providers; retain the owner's retry budget and policy.
+# Coverage: tests/test_compaction_invariants.py::test_retry_policy_classifies_default_status_by_typed_network_chain;
+# tests/test_compaction_invariants.py::test_retry_policy_does_not_retry_default_provider_error_status.
 _TRANSIENT_SUMMARY_STATUS_CODES = TRANSIENT_PROVIDER_STATUS_CODES - {502}
 
 _SHRINKABLE_PROVIDER_ERROR_FRAGMENTS = (

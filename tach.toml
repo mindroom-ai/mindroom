@@ -2886,9 +2886,18 @@ depends_on = []
 [[modules]]
 path = "mindroom.desktop.command_journal"
 depends_on = [
+    "mindroom.desktop.legacy_command_journal",
     "mindroom.desktop.protocol",
-    "mindroom.durable_write",
 ]
+
+[[modules]]
+path = "mindroom.desktop.legacy_command_journal"
+depends_on = ["mindroom.desktop.protocol"]
+visibility = ["mindroom.desktop.command_journal"]
+
+[[interfaces]]
+from = ["mindroom.desktop.legacy_command_journal"]
+expose = ["parse_legacy_records"]
 
 [[modules]]
 path = "mindroom.desktop.media"

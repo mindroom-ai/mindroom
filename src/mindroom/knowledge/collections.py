@@ -230,13 +230,16 @@ def paths_with_vectors(vector_db: ChromaDb, relative_paths: Sequence[str]) -> se
     return _collection_paths_with_vectors(collection, relative_paths)
 
 
+# AGNO_COMPAT: Chroma metadata deletion forces equality filters and fans out across owners.
+# Reason: Agno wraps metadata values in $eq and visits every owner collection.
+# Direct collection deletion supports one scoped $in batch instead of per-file calls.
+# Upstream issue: No matching operator-aware, collection-scoped deletion issue identified.
+# Upstream PR: None identified; the missing bulk/filter deletion API remains untracked.
+# Remove when: Agno supports operator filters for one explicitly selected collection;
+# retain source-path batching, collection ownership, and failure propagation.
+# Coverage: tests/test_knowledge_resumable_refresh.py::test_candidate_path_removal_is_batched.
 def delete_source_path_vectors(vector_db: ChromaDb, relative_paths: Sequence[str]) -> None:
     """Delete vectors for many source paths in one vector-store round trip.
-
-    Agno's ``delete_by_metadata`` wraps values in ``$eq`` and so can only
-    take one path per call, which turns a large source update into one
-    thread hop and one get+delete per file. The collection accepts ``$in``
-    directly.
 
     Unlike the ``$in`` the verification query issues, this one needs no
     ceiling protection: a delete does not bind one SQL variable per matched
@@ -279,6 +282,15 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
     return False
 
 
+# AGNO_COMPAT: Chroma collection deletion conflates absence with provider failure.
+# Reason: Agno returns False for both cases, so probe existence before reporting
+# success or reclaiming orphaned storage after a failed delete.
+# Upstream issue: No matching typed collection-deletion outcome issue identified.
+# Upstream PR: None identified; distinguishing absence from failure remains untracked.
+# Remove when: Agno reports typed deletion failures and an already-absent outcome;
+# retain idempotent owner deletion, client closure, and safe storage reclamation.
+# Coverage: tests/test_knowledge_collections.py::test_delete_collection_releases_owned_client;
+# tests/test_knowledge_collections.py::test_delete_collection_failure_releases_owned_client.
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
     """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
