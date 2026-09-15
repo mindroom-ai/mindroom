@@ -31,6 +31,7 @@ from mindroom.requester_identity import is_human_requester_id
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.message_extras import MessageExtraSection
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
@@ -86,6 +87,9 @@ class MatrixMessageOperations:
         message_extras: list[MessageExtraSection] | None,
         known_latest_thread_event_id: str | None = None,
         attachment_ids: list[str] | None = None,
+        send_claim: MatrixMessageSendClaim | None = None,
+        recipient_name: str | None = None,
+        starts_thread: bool = False,
     ) -> str | None:
         latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
             room_id=room_id,
@@ -118,6 +122,16 @@ class MatrixMessageOperations:
             # Formatting also finds names in quoted task text. Only the explicit
             # recipient should dispatch, regardless of those incidental mentions.
             content["m.mentions"] = {"user_ids": [recipient_user_id]}
+        if send_claim is not None:
+            await send_claim.prepare(
+                content,
+                recipient=recipient_name,
+                recipient_user_id=recipient_user_id,
+                thread_id=thread_id,
+                starts_thread=starts_thread,
+            )
+            event_id, _ = await send_claim.deliver()
+            return event_id
         delivered = await send_message_result(context.client, room_id, content)
         return delivered.event_id if delivered is not None else None
 
@@ -173,7 +187,22 @@ class MatrixMessageOperations:
         room_mode: bool,
         new_thread: bool,
         message_extras: list[MessageExtraSection] | None,
+        send_claim: MatrixMessageSendClaim | None = None,
+        recipient_name: str | None = None,
     ) -> MatrixMessageOperationResult:
+        if send_claim is not None and send_claim.intent is not None:
+            event_id, resolved_thread_id = await send_claim.deliver()
+            return self._result(
+                "ok",
+                action="send",
+                **asdict(
+                    _MessageSendState(
+                        room_id=room_id,
+                        thread_id=resolved_thread_id,
+                        event_id=event_id,
+                    ),
+                ),
+            )
         text = message.strip() if message and message.strip() else None
         if text is None and message_extras:
             return self._result("error", action="send", message="message_extras requires a non-empty message body.")
@@ -224,6 +253,10 @@ class MatrixMessageOperations:
                 context,
                 room_id=room_id,
                 text=text or "",
+                send_claim=send_claim,
+                recipient_name=recipient_name,
+                starts_thread=state.thread_id is None
+                and (new_thread or (not room_mode and recipient_user_id is not None)),
                 thread_id=state.thread_id,
                 recipient_user_id=recipient_user_id,
                 attachment_ids=state.resolved_attachment_ids if recipient_user_id is not None else None,
@@ -453,6 +486,8 @@ class MatrixMessageOperations:
         new_thread: bool,
         message_extras: list[MessageExtraSection] | None,
         read_limit: int,
+        send_claim: MatrixMessageSendClaim | None = None,
+        recipient_name: str | None = None,
     ) -> MatrixMessageOperationResult:
         """Dispatch one authorized action with an already resolved conversation."""
         if action == "send":
@@ -460,6 +495,8 @@ class MatrixMessageOperations:
                 context,
                 message=message,
                 attachments=attachments,
+                send_claim=send_claim,
+                recipient_name=recipient_name,
                 room_id=room_id,
                 thread_id=thread_id,
                 recipient_user_id=recipient_user_id,
