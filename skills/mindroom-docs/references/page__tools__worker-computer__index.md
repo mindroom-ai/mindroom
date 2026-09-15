@@ -89,11 +89,17 @@ install packages, choose another server, add capabilities, or change launch/init
 `browser_evaluate` remains available; it does not expose server-side Node APIs.
 
 The browser runs visibly on its worker display with sandboxing enabled. Its profile persists under the worker
-storage root at `browser-profiles/native-mcp`; native screenshots, PDFs, and downloads use `browser/` inside
-the shared workspace. Upstream workspace file restrictions remain enabled. Screenshots without a native
+storage root at `browser-profiles/native-mcp`; automatic screenshots, PDFs, and downloads use `browser/` inside
+the shared workspace. Explicit native filenames resolve relative to the workspace; use `browser/native.png`
+or `browser/native.pdf` to keep named files in that directory. Upstream workspace file restrictions remain enabled. Screenshots without a native
 `filename` return inline model-visible images; a native filename produces the upstream file result instead.
 MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media
 receipt. The primary never fetches worker paths to reconstruct images.
+
+Native tab indices can change; list tabs again before selecting one. The native `browser_resize` tool changes
+the page viewport, while the operating-system window can retain its previous size. The pinned upstream server
+can display Chromium's resolver-flag banner when using the required destination proxy. Worker startup still
+requires Chromium sandboxing and the configured container restrictions.
 
 All native calls, including snapshots and browser close, use the same takeover gate as the existing provider.
 Timeout, cancellation, and server failure close owned resources before replacement. On Linux, a dedicated
@@ -235,16 +241,21 @@ On desktop the panel sits beside the conversation and closes the Members drawer.
 On mobile it fills the screen and provides a close button.
 Keyboard input over the controlled screen stays out of the composer and command palette.
 
-The browser process persists across runner requests, including stable target IDs and native tabs opened by the user.
+The browser process persists across runner requests, including tabs opened by the user.
+The `browser` provider uses stable target IDs; `browser_mcp` exposes the native server's current tab indices.
 When the agent selects a managed tab with focus or a page action, Chromium brings that page to the visible foreground.
 A tool's screenshot or snapshot therefore observes the page shown in the viewer.
 
 ## Storage and lifetime
 
 Browser profiles live under `browser-profiles/<profile>` in the dedicated worker's persistent storage root.
-Completed downloads are copied into the agent workspace's `browser/` directory with a unique filename prefix, so the shell/file tools can read them.
+Completed downloads are available in the agent workspace's `browser/` directory, so the shell/file tools can read them.
+The `browser` provider adds a unique filename prefix; `browser_mcp` follows native download naming.
 These files survive computer stop/restart and worker recreation while the storage volume remains.
 Stopping the computer is not a sign-out or profile reset.
+
+When a storage path exceeds Linux's Unix socket limit, the display uses a unique private temporary directory
+for its RFB socket. Cleanup removes that directory after the display children are reaped; persistent storage remains in place.
 
 To reset a profile, stop the computer and recycle/stop its dedicated worker first.
 Remove only that worker's `browser-profiles/<profile>` directory from its persistent storage, then let the next browser action create a new profile.
@@ -286,8 +297,12 @@ uv run scripts/test-worker-computer.py --build \
 ```
 
 Use `--image <already-built-image>` without `--build` to reuse a local worker image.
+Use `--provider browser_mcp` to exercise the native provider, including uploads, inline image decoding through
+the primary proxy, named image/PDF files, and native typing. The default remains `--provider browser`.
 Use `--chromium <executable>` if host Chromium is not discoverable.
-The probe verifies same-target reuse, framebuffer pixels, rejected watch input, takeover/agent blocking, native-tab focus/navigation, downloads through shell, stop/restart persistence, and requester isolation.
+The probe verifies browser-session reuse, framebuffer pixels, rejected watch input, takeover waiting for an active
+browser call, agent blocking during control, tab focus/navigation, downloads through shell, stop/restart persistence,
+and requester isolation. It records the actual worker security settings and Chromium sandbox diagnostics.
 
 For the Chat desktop/mobile spec, make a local Tuwunel image available, start Chat on loopback, then start this fixture:
 
