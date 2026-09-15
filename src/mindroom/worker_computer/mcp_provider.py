@@ -86,6 +86,7 @@ class WorkerBrowserMCP:
         if function_name not in browser_mcp_catalog():
             msg = "Unsupported native browser MCP function."
             raise ValueError(msg)
+        arguments = self._file_arguments(function_name, arguments)
         try:
             if not self._ready:
                 self._workspace.mkdir(parents=True, exist_ok=True)
@@ -105,6 +106,30 @@ class WorkerBrowserMCP:
             await self.close()
             raise
         return tool_result_from_call_result("browser_mcp", result)
+
+    def _file_arguments(self, function_name: str, arguments: dict[str, object]) -> dict[str, object]:
+        """Confine upload/drop files before startup; retain native cancellation/data-only calls."""
+        if function_name not in {"browser_file_upload", "browser_drop"} or "paths" not in arguments:
+            return arguments
+        paths = arguments["paths"]
+        if not isinstance(paths, list):
+            msg = "Native browser paths must be an array of file paths."
+            raise ValueError(msg)  # noqa: TRY004 - invalid tool payloads share the validation error contract
+        canonical_paths: list[str] = []
+        for value in paths:
+            if not isinstance(value, str) or not value:
+                msg = "Native browser paths must contain non-empty file paths."
+                raise ValueError(msg)
+            msg = "Native browser files must be existing regular files within the worker workspace."
+            try:
+                path = (self._workspace / value).resolve(strict=True)
+                allowed = path.is_relative_to(self._workspace) and path.is_file()
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(msg) from exc
+            if not allowed:
+                raise ValueError(msg)
+            canonical_paths.append(str(path))
+        return {**arguments, "paths": canonical_paths}
 
     async def close(self) -> None:
         """Reap MCP/browser and callback resources while keeping profile and output files."""

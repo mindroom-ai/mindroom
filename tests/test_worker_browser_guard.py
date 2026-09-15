@@ -1,11 +1,13 @@
 """Authenticated loopback URL verifier behavior."""
 
 import asyncio
+import shutil
 from pathlib import Path
 
 import httpx
 import pytest
 
+from mindroom.worker_computer import browser_guard
 from mindroom.worker_computer.browser_guard import BrowserURLVerifier
 
 
@@ -37,11 +39,6 @@ async def test_verifier_auth_and_address_policy(private: bool) -> None:
 @pytest.mark.asyncio
 async def test_guard_hook_concurrent_install_and_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The packaged JS hook awaits one shared route and aborts malformed/failed callbacks."""
-    import shutil  # noqa: PLC0415
-    from pathlib import Path  # noqa: PLC0415
-
-    from mindroom.worker_computer import browser_guard  # noqa: PLC0415
-
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node required for packaged init hook")

@@ -9,8 +9,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from aiohttp import web
 
-from mindroom.worker_computer import browser_proxy
+from mindroom.worker_computer import browser_proxy, mcp_provider
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 
 
@@ -266,10 +267,6 @@ async def test_stalled_destination_connect_is_cancelled(stop: str, monkeypatch: 
 @pytest.mark.asyncio
 async def test_pinned_browser_redirect_destinations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: C901, PLR0915 - one real browser fixture lifecycle
     """Real pinned MCP/Chromium cannot send redirected traffic to a denied host."""
-    from aiohttp import web  # noqa: PLC0415
-
-    from mindroom.worker_computer import mcp_provider  # noqa: PLC0415
-
     cli = os.environ.get("MINDROOM_TEST_BROWSER_MCP_CLI")
     executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
     if not cli or not executable:

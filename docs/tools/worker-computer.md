@@ -69,8 +69,7 @@ Changing the feature flag changes the worker configuration signature, so workers
 
 ## Native Playwright MCP provider
 
-Select `browser_mcp` for native Playwright tools such as `browser_navigate`, `browser_snapshot`,
-`browser_click`, `browser_evaluate`, `browser_tabs`, and `browser_take_screenshot`:
+Select `browser_mcp` for native Playwright tools such as `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_evaluate`, `browser_tabs`, and `browser_take_screenshot`:
 
 ```yaml
 agents:
@@ -83,42 +82,44 @@ agents:
 ```
 
 `browser_mcp` routes to workers by default and requires an enabled dedicated Computer worker.
-Assign exactly one browser provider to this scope. The existing `browser` action-based provider and connected
-user desktop extension remain available separately.
+Assign exactly one browser provider to this scope.
+The existing `browser` action-based provider and connected user desktop extension remain available separately.
 
 The full image installs `@playwright/mcp@0.0.78` with fixed `vision,pdf` capabilities at build time.
-The native provider uses that server's bundled Chromium `151.0.7922.10` (revision `1232`), installed
-under root-owned `/opt/mindroom-browser-mcp` with a fixed executable path and `browser-version.json`
-build metadata. Update and test the server and bundled browser together, including a fresh download after
-reopening a saved profile. System Chromium 152 can crash during that sequence with the pipe transport;
-the bundled browser preserves the existing sandbox, persistent profiles, and stdio process architecture.
+The native provider uses that server's bundled Chromium `151.0.7922.10` (revision `1232`), installed under root-owned `/opt/mindroom-browser-mcp` with a fixed executable path and `browser-version.json` build metadata.
+Update and test the server and bundled browser together, including a fresh download after reopening a saved profile.
+System Chromium 152 can crash during that sequence with the pipe transport; the bundled browser preserves the existing sandbox, persistent profiles, and stdio process architecture.
 The action-based `browser` provider also defaults to this bundle when bound to a Computer worker display.
-Its existing operator `BROWSER_EXECUTABLE_PATH` override remains supported; custom browser versions need
-the same restart/download checks. Ordinary headless and connected desktop browser selection is unchanged.
-The native schemas are pinned and checked against the installed server on connection. Runtime calls cannot
-install packages, choose another server, add capabilities, or change launch/init settings.
-`browser_run_code_unsafe`, browser installation, and route mutation tools are excluded. Page-context
-`browser_evaluate` remains available; it does not expose server-side Node APIs.
+Its existing operator `BROWSER_EXECUTABLE_PATH` override remains supported; custom browser versions need the same restart/download checks.
+Ordinary headless and connected desktop browser selection is unchanged.
+The native schemas are pinned and checked against the installed server on connection.
+Runtime calls cannot install packages, choose another server, add capabilities, or change launch/init settings.
+`browser_run_code_unsafe`, browser installation, and route mutation tools are excluded.
+Page-context `browser_evaluate` remains available; it does not expose server-side Node APIs.
 
-The browser runs visibly on its worker display with sandboxing enabled. Its profile persists under the worker
-storage root at `browser-profiles/native-mcp`; automatic screenshots, PDFs, and downloads use `browser/` inside
-the shared workspace. Explicit native filenames resolve relative to the workspace; use `browser/native.png`
-or `browser/native.pdf` to keep named files in that directory. Upstream workspace file restrictions remain enabled. Screenshots without a native
-`filename` return inline model-visible images; a native filename produces the upstream file result instead.
-MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media
-receipt. The primary never fetches worker paths to reconstruct images.
+The browser runs visibly on its worker display with sandboxing enabled.
+Its profile persists under the worker storage root at `browser-profiles/native-mcp`; automatic screenshots, PDFs, and downloads use `browser/` inside the shared workspace.
+Explicit native filenames resolve relative to the workspace; use `browser/native.png` or `browser/native.pdf` to keep named files in that directory.
+Upstream workspace file restrictions remain enabled.
+File upload and drop paths are resolved before dispatch and must name existing regular files inside the canonical worker workspace.
+This rejects symlinks to files outside the workspace while allowing symlinks to files inside it.
+This path check does not protect against concurrent filesystem changes by malicious shell code.
+Screenshots without a native `filename` return inline model-visible images; a native filename produces the upstream file result instead.
+MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media receipt.
+The primary never fetches worker paths to reconstruct images.
 
-Native tab indices can change; list tabs again before selecting one. The native `browser_resize` tool changes
-the page viewport, while the operating-system window can retain its previous size. The pinned upstream server
-can display Chromium's resolver-flag banner when using the required destination proxy. Worker startup still
-requires Chromium sandboxing and the configured container restrictions.
+Native tab indices can change; list tabs again before selecting one.
+The native `browser_resize` tool changes the page viewport, while the operating-system window can retain its previous size.
+The pinned upstream server can display Chromium's resolver-flag banner when using the required destination proxy.
+Worker startup still requires Chromium sandboxing and the configured container restrictions.
 
 All native calls, including snapshots and browser close, use the same takeover gate as the existing provider.
-Timeout, cancellation, and server failure close owned resources before replacement. On Linux, a dedicated
-child supervisor reaps detached Chromium descendants as well as the MCP server.
+Timeout, cancellation, and server failure close owned resources before replacement.
+On Linux, a dedicated child supervisor reaps detached Chromium descendants as well as the MCP server.
 
 The packaged init-page hook checks intercepted requests through an authenticated worker-loopback verifier.
-Private networks are denied by default. To allow trusted private destinations, configure:
+Private networks are denied by default.
+To allow trusted private destinations, configure:
 
 ```yaml
 agents:
@@ -129,26 +130,26 @@ agents:
     worker_scope: user_agent
 ```
 
-Metadata and link-local addresses stay blocked even with this option. A worker-local destination proxy checks
-HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
-The browser keeps normal TLS, origins, and redirect behavior. The URL callback also restricts request schemes;
-callback errors and timeouts deny requests, and service workers are blocked. This guard does not promise DNS-rebinding
-protection, coverage of every network protocol, or confinement of malicious shell code. Persistent workspace files remain intentionally shared
-with the agent's other worker tools.
+Metadata and link-local addresses stay blocked even with this option.
+A worker-local destination proxy checks HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
+The browser keeps normal TLS, origins, and redirect behavior.
+The URL callback also restricts request schemes; callback errors and timeouts deny requests, and service workers are blocked.
+This guard does not promise DNS-rebinding protection, coverage of every network protocol, or confinement of malicious shell code.
+Persistent workspace files remain intentionally shared with the agent's other worker tools.
 
 ## Browser and container sandboxing
 
-Worker computers launch Chromium with its Linux process sandbox enabled. A startup failure is returned to the caller;
-MindRoom does not retry with Chromium's sandbox disabled.
+Worker computers launch Chromium with its Linux process sandbox enabled.
+A startup failure is returned to the caller; MindRoom does not retry with Chromium's sandbox disabled.
 
-Docker workers automatically drop all Linux capabilities and set `no-new-privileges`. When worker computers are
-enabled, the backend also installs the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
-That profile is based on Moby's maintained default policy and adds only the namespace and `chroot` operations used by
-the Chromium sandbox. Existing Docker worker containers are replaced if these host security settings are missing.
+Docker workers automatically drop all Linux capabilities and set `no-new-privileges`.
+When worker computers are enabled, the backend also installs the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
+That profile is based on Moby's maintained default policy and adds only the namespace and `chroot` operations used by the Chromium sandbox.
+Existing Docker worker containers are replaced if these host security settings are missing.
 
-Kubernetes workers keep the pod-level `RuntimeDefault` seccomp policy. If that policy supports unprivileged user
-namespaces, no extra setting is needed. Runtimes that block Chromium's namespace sandbox need the packaged profile
-installed on every eligible node at:
+Kubernetes workers keep the pod-level `RuntimeDefault` seccomp policy.
+If that policy supports unprivileged user namespaces, no extra setting is needed.
+Runtimes that block Chromium's namespace sandbox need the packaged profile installed on every eligible node at:
 
 ```text
 /var/lib/kubelet/seccomp/profiles/worker-computer.json
@@ -160,8 +161,8 @@ Then select it for the main worker container:
 MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON={"type":"Localhost","localhostProfile":"profiles/worker-computer.json"}
 ```
 
-The runtime chart accepts the same object at `workers.kubernetes.seccompProfile`; the instance chart uses
-`kubernetesWorkerSeccompProfile`. For example:
+The runtime chart accepts the same object at `workers.kubernetes.seccompProfile`; the instance chart uses `kubernetesWorkerSeccompProfile`.
+For example:
 
 ```yaml
 workers:
@@ -171,14 +172,13 @@ workers:
       localhostProfile: profiles/worker-computer.json
 ```
 
-Kubernetes applies this override only to the main worker container. Init and extra containers continue to inherit the
-pod's `RuntimeDefault` policy. A missing node profile causes pod startup to fail with `CreateContainerError`, which
-keeps the sandbox requirement explicit. The node kernel and its security modules must also permit unprivileged user
-namespaces.
+Kubernetes applies this override only to the main worker container.
+Init and extra containers continue to inherit the pod's `RuntimeDefault` policy.
+A missing node profile causes pod startup to fail with `CreateContainerError`, which keeps the sandbox requirement explicit.
+The node kernel and its security modules must also permit unprivileged user namespaces.
 
-The Chromium process sandbox, the container runtime's seccomp filter, and the persistent worker filesystem address
-different boundaries. The browser sandbox isolates Chromium processes, seccomp limits host syscalls, and persistent
-storage deliberately retains the browser profile and worker files across container replacement.
+The Chromium process sandbox, the container runtime's seccomp filter, and the persistent worker filesystem address different boundaries.
+The browser sandbox isolates Chromium processes, seccomp limits host syscalls, and persistent storage deliberately retains the browser profile and worker files across container replacement.
 
 ## Connect MindRoom Chat
 
