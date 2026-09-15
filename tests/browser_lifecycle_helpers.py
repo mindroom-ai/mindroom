@@ -110,12 +110,14 @@ class LifecycleBrowser:
 
     async def close(self) -> None:
         """Release the context resource."""
+        await self.checkpoint("context_close")
         self.live_resources.discard("context")
         for page in self.pages:
             page.closed = True
 
     async def stop(self) -> None:
         """Release the Playwright driver resource."""
+        await self.checkpoint("driver_stop")
         self.live_resources.discard("driver")
 
     async def __aexit__(self, *_args: object) -> None:

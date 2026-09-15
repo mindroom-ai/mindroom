@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from uuid import uuid4
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.worker_computer.protocol import BrowserSession, ComputerDisplay, ComputerStatus
 
 
@@ -40,7 +41,7 @@ class WorkerComputerRuntime:
     async def _start_locked(self) -> None:
         if self._state == "ready" and self.display.healthy():
             return
-        if self._state != "stopped":
+        if self._state != "stopped" or self._browser is not None:
             await self._stop_locked()
         self._state = "starting"
         try:
@@ -94,10 +95,8 @@ class WorkerComputerRuntime:
         async def action() -> object:
             if self._browser_key != binding_key:
                 if self._browser is not None:
-                    await self._browser.close()
+                    await run_coroutine_until_complete(self._close_browser_locked())
                     self._invalidate()
-                self._browser = None
-                self._browser_key = None
                 self._browser = factory(self.display.display)
                 self._browser_key = binding_key
             assert self._browser is not None
@@ -184,19 +183,37 @@ class WorkerComputerRuntime:
         self._streams.clear()
 
     async def _stop_locked(self) -> None:
+        # Capture the caller before handing cleanup to another task: the display
+        # monitor may itself be the caller and must not cancel/wait on itself.
         monitor, self._monitor = self._monitor, None
-        if monitor is not None and monitor is not asyncio.current_task():
+        if monitor is asyncio.current_task():
+            monitor = None
+        await run_coroutine_until_complete(self._finish_stop_locked(monitor))
+
+    async def _finish_stop_locked(self, monitor: asyncio.Task[None] | None) -> None:
+        if monitor is not None:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
         self._invalidate()
+        errors: list[Exception] = []
         try:
-            if self._browser is not None:
-                await self._browser.close()
-        finally:
+            await self._close_browser_locked()
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            await self.display.close()
+        except Exception as exc:
+            errors.append(exc)
+        self._state = "stopped"
+        if errors:
+            msg = "Failed to close computer resources"
+            raise ExceptionGroup(msg, errors)
+
+    async def _close_browser_locked(self) -> None:
+        if self._browser is not None:
+            await self._browser.close()
             self._browser = None
             self._browser_key = None
-            self._state = "stopped"
-            await self.display.close()
 
     def _check_generation(self, generation: str | None) -> None:
         if generation is not None and generation != self._generation:

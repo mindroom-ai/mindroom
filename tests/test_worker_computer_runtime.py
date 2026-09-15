@@ -222,3 +222,149 @@ async def test_stale_control_generation_cannot_stop_replacement_runtime() -> Non
         await runtime.stop(generation=original["generation"])
     assert runtime.status() == replacement
     await runtime.close()
+
+
+class DeferredDisplayChild:
+    """Process boundary exposing termination and reaping independently."""
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.terminated = False
+        self.waiting = asyncio.Event()
+        self.exit_allowed = asyncio.Event()
+
+    def terminate(self) -> None:
+        """Record the signal without pretending the child has exited."""
+        self.terminated = True
+
+    def kill(self) -> None:
+        """Allow a forcefully killed child to exit."""
+        self.exit_allowed.set()
+
+    async def wait(self) -> int:
+        """Complete reaping only when the external child exits."""
+        self.waiting.set()
+        await self.exit_allowed.wait()
+        self.returncode = 0
+        return 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_runtime", [False, True])
+async def test_display_teardown_drains_both_children_after_repeated_cancellation(
+    tmp_path: Path,
+    via_runtime: bool,
+) -> None:
+    """Cancellation at either child wait cannot abandon another display child."""
+    initial_tasks = asyncio.all_tasks()
+    display = WorkerDisplay(tmp_path)
+    server, manager = DeferredDisplayChild(), DeferredDisplayChild()
+    display._children = [server, manager]
+    runtime = WorkerComputerRuntime(display)
+    await runtime.ensure_started()
+    closing = asyncio.create_task(runtime.stop() if via_runtime else display.close())
+    await asyncio.wait_for(manager.waiting.wait(), timeout=1)
+    restarting = asyncio.create_task(runtime.ensure_started() if via_runtime else display.start())
+    try:
+        for _ in range(3):
+            closing.cancel()
+            await asyncio.sleep(0)
+        assert not closing.done(), "Display teardown escaped with unreaped children"
+        if restarting is not None:
+            assert not restarting.done()
+            restarting.cancel()
+            await asyncio.gather(restarting, return_exceptions=True)
+        manager.exit_allowed.set()
+        await asyncio.wait_for(server.waiting.wait(), timeout=1)
+        for _ in range(3):
+            closing.cancel()
+            await asyncio.sleep(0)
+        assert not closing.done()
+    finally:
+        manager.exit_allowed.set()
+        server.exit_allowed.set()
+        if restarting is not None:
+            restarting.cancel()
+            await asyncio.gather(restarting, return_exceptions=True)
+        await asyncio.gather(closing, return_exceptions=True)
+        await runtime.close()
+    assert closing.cancelled()
+    assert server.terminated
+    assert manager.terminated
+    assert server.returncode == manager.returncode == 0
+    assert not display._children
+    assert not (asyncio.all_tasks() - initial_tasks)
+
+
+@pytest.mark.asyncio
+async def test_monitor_can_finish_its_own_teardown() -> None:
+    """Display failure cleanup cannot cancel the monitor awaiting that cleanup."""
+    initial_tasks = asyncio.all_tasks()
+    display = FakeDisplay()
+    runtime = WorkerComputerRuntime(display)
+    await runtime.ensure_started()
+    monitor = runtime._monitor
+    assert monitor is not None
+    display.alive = False
+    await asyncio.wait_for(asyncio.shield(monitor), timeout=1)
+    assert not monitor.cancelled()
+    assert runtime.status()["state"] == "stopped"
+    await runtime.close()
+    assert not (asyncio.all_tasks() - initial_tasks)
+
+
+@pytest.mark.asyncio
+async def test_display_cleanup_error_still_reaps_other_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreapable child stays owned while other children still get reaped."""
+    display = WorkerDisplay(tmp_path)
+    server, manager = DeferredDisplayChild(), DeferredDisplayChild()
+    display._children = [server, manager]
+    server.exit_allowed.set()
+
+    async def failed_wait() -> int:
+        msg = "wait failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(manager, "wait", failed_wait)
+    try:
+        with pytest.raises(ExceptionGroup, match="display children"):
+            await display.close()
+        assert server.returncode == 0
+        assert display._children == [manager]
+    finally:
+        monkeypatch.undo()
+        manager.exit_allowed.set()
+        await display.close()
+    assert not display._children
+
+
+@pytest.mark.asyncio
+async def test_runtime_retries_failed_browser_cleanup_before_restart() -> None:
+    """A failed browser close keeps ownership and blocks replacement until retry."""
+    display = FakeDisplay()
+    runtime = WorkerComputerRuntime(display)
+    resources = {"old browser"}
+    allow_cleanup = False
+
+    async def execute() -> str:
+        return "ready"
+
+    async def close() -> None:
+        if not allow_cleanup:
+            msg = "close failed"
+            raise RuntimeError(msg)
+        resources.clear()
+
+    await runtime.run_browser_call("binding", lambda _: BrowserSession(execute, close), [], {})
+    try:
+        with pytest.raises(ExceptionGroup, match="computer resources"):
+            await runtime.stop()
+        assert not display.healthy()
+        with pytest.raises(ExceptionGroup, match="computer resources"):
+            await runtime.ensure_started()
+        assert not display.healthy()
+    finally:
+        allow_cleanup = True
+        await runtime.ensure_started()
+        await runtime.close()
+    assert not resources

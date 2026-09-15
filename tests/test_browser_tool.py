@@ -1706,3 +1706,131 @@ async def test_repeated_start_cancellation_keeps_cleanup_owned_until_runtime_clo
         await task
     await asyncio.wait_for(closing, timeout=1)
     assert adapter.live_resources == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+@pytest.mark.parametrize("profiles", [1, 2])
+@pytest.mark.parametrize("entry", ["aclose", "profile_stop", "runtime_stop", "replacement"])
+async def test_established_browser_teardown_survives_repeated_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    profiles: int,
+    entry: str,
+) -> None:
+    """Cancelled teardown drains every owned resource before a later restart."""
+    initial_tasks = asyncio.all_tasks()
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    adapters = [LifecycleBrowser() for _ in range(profiles)]
+    pending = iter(adapters)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    async def execute(**kwargs: object) -> object:
+        return await browser.browser(**kwargs)
+
+    def factory(_display: str) -> BrowserSession:
+        return BrowserSession(execute, browser.aclose)
+
+    for index in range(profiles):
+        await runtime.run_browser_call("original", factory, [], {"action": "start", "profile": f"p{index}"})
+    adapters[0].pause_at = phase
+    if entry == "aclose":
+        operation = browser.aclose()
+    elif entry == "profile_stop":
+        operation = browser.browser("stop", profile="p0")
+    elif entry == "runtime_stop":
+        operation = runtime.stop()
+    else:
+        operation = runtime.run_browser_call("replacement", factory, [], {"action": "status"})
+    task = asyncio.create_task(operation)
+    await asyncio.wait_for(adapters[0].reached.wait(), timeout=1)
+    try:
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done(), "Caller escaped before owned teardown completed"
+        assert adapters[0].live_resources
+    finally:
+        adapters[0].proceed.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await runtime.close()
+    assert task.cancelled()
+    assert all(not adapter.live_resources for adapter in adapters)
+    assert not browser._profiles
+    assert not browser._startup_cleanup_tasks
+    await runtime.ensure_started()
+    await runtime.close()
+    assert not runtime.display.healthy()
+    assert not (asyncio.all_tasks() - initial_tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+async def test_cancelled_profile_stop_blocks_replacement_until_resources_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """A cancelled ordinary stop cannot unlock an occupied persistent profile."""
+    initial_tasks = asyncio.all_tasks()
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    old, new = LifecycleBrowser(), LifecycleBrowser()
+    pending = iter([old, new])
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    await browser.browser("start")
+    old.pause_at = phase
+    stopping = asyncio.create_task(browser.browser("stop"))
+    await asyncio.wait_for(old.reached.wait(), timeout=1)
+    restarting = asyncio.create_task(browser.browser("start"))
+    try:
+        for _ in range(3):
+            stopping.cancel()
+            await asyncio.sleep(0)
+        assert not restarting.done()
+        assert not new.live_resources, "Replacement acquired resources before old teardown drained"
+    finally:
+        old.proceed.set()
+        await asyncio.gather(stopping, restarting, return_exceptions=True)
+        await browser.aclose()
+    assert stopping.cancelled()
+    assert not old.live_resources
+    assert not new.live_resources
+    assert not (asyncio.all_tasks() - initial_tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+async def test_browser_cleanup_error_still_drains_other_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """One failing cleanup cannot strand other profiles or forget retry ownership."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    first, second = LifecycleBrowser(), LifecycleBrowser()
+    pending = iter([first, second])
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    for profile in ["first", "second"]:
+        await browser.browser("start", profile=profile)
+
+    async def fail_cleanup(at: str) -> None:
+        if at == phase:
+            msg = "cleanup failed"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(first, "checkpoint", fail_cleanup)
+    try:
+        with pytest.raises(ExceptionGroup, match="browser profiles"):
+            await browser.aclose()
+        assert not second.live_resources
+        assert "first" in browser._profiles
+    finally:
+        monkeypatch.undo()
+        await browser.aclose()
+    assert not first.live_resources
+    assert not browser._profiles

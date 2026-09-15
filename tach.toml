@@ -5920,7 +5920,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.worker_computer.display"
-depends_on = []
+depends_on = ["mindroom.background_tasks"]
 
 [[modules]]
 path = "mindroom.worker_computer.rfb"
@@ -5928,7 +5928,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.worker_computer.runtime"
-depends_on = ["mindroom.worker_computer.protocol"]
+depends_on = ["mindroom.background_tasks", "mindroom.worker_computer.protocol"]
 
 [[modules]]
 path = "mindroom.api.worker_computer"

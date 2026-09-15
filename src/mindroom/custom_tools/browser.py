@@ -24,6 +24,7 @@ from agno.tools.function import ToolResult
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
@@ -593,6 +594,10 @@ class BrowserTools(Toolkit):
 
     async def aclose(self) -> None:
         """Close persistent browser resources on their owning event loop."""
+        await run_coroutine_until_complete(self._aclose())
+
+    async def _aclose(self) -> None:
+        """Drain all profiles and retained startup cleanup before releasing ownership."""
         try:
             await self._close_profiles()
         finally:
@@ -662,8 +667,16 @@ class BrowserTools(Toolkit):
 
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
-        for profile_name in list(self._profiles.keys()):
-            await self._stop_profile(profile_name)
+        errors: list[Exception] = []
+        async with self._lock:
+            for profile_name in list(self._profiles):
+                try:
+                    await self._stop_profile_locked(profile_name)
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            msg = "Failed to close browser profiles"
+            raise ExceptionGroup(msg, errors)
 
     def close(self) -> None:
         """Close toolkit resources."""
@@ -1642,13 +1655,17 @@ class BrowserTools(Toolkit):
 
     async def _stop_profile(self, profile_name: str) -> None:
         async with self._lock:
-            state = self._profiles.pop(profile_name, None)
-            if state is None:
-                return
-            try:
-                await state.context.close()
-            finally:
-                await state.playwright.stop()
+            await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
+
+    async def _stop_profile_locked(self, profile_name: str) -> None:
+        state = self._profiles.get(profile_name)
+        if state is None:
+            return
+        try:
+            await state.context.close()
+        finally:
+            await state.playwright.stop()
+        del self._profiles[profile_name]
 
     async def _resolve_tab(
         self,
