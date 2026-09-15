@@ -1693,12 +1693,16 @@ def _enqueue_matrix_delivery(
         if response_attempt.sources.pending_event_ids[0] != delivery_id:
             message = "Conflicting response attempt identity: driving event"
             raise ValueError(message)
-        frozen = transaction.fetchone(
-            """SELECT delivery.edits_event_id FROM matrix_delivery_outbox AS delivery
-            JOIN response_attempts AS attempt
-              ON attempt.principal_id = delivery.principal_id AND attempt.driving_event_id = delivery.delivery_id
-            WHERE delivery.principal_id = ? AND delivery.delivery_id = ? AND delivery.stage = ?""",
-            (principal_id, delivery_id, stage.value),
+        frozen = (
+            transaction.fetchone(
+                """SELECT delivery.edits_event_id FROM matrix_delivery_outbox AS delivery
+                JOIN response_attempts AS attempt
+                  ON attempt.principal_id = delivery.principal_id AND attempt.driving_event_id = delivery.delivery_id
+                WHERE delivery.principal_id = ? AND delivery.delivery_id = ? AND delivery.stage = ?""",
+                (principal_id, delivery_id, stage.value),
+            )
+            if attempted
+            else None
         )
         if attempted and (frozen is None or frozen["edits_event_id"] != edits_event_id):
             message = "Cannot replace an attempted delivery identity"

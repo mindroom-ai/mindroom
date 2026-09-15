@@ -561,16 +561,12 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
         approval_ids,
     )
-    sources_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
+    pending_by_approval: dict[str, list[str]] = {approval_id: [] for approval_id in approval_ids}
     for source in source_rows:
-        sources_by_approval[str(source["approval_id"])].append(source)
+        pending_by_approval[str(source["approval_id"])].append(str(source["event_id"]))
     calls_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
     for call in call_rows:
         calls_by_approval[str(call["approval_id"])].append(call)
-    pending_by_approval = {
-        approval_id: tuple(str(source["event_id"]) for source in sources)
-        for approval_id, sources in sources_by_approval.items()
-    }
     attempts = response_attempts.load_response_attempts(
         transaction,
         tuple(
@@ -579,20 +575,15 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
             if (pending := pending_by_approval[str(row["approval_id"])])
         ),
     )
-    return tuple(
-        (
-            str(row["principal_id"]),
-            _from_rows(
-                row,
-                tuple(calls_by_approval[str(row["approval_id"])]),
-                pending_by_approval[str(row["approval_id"])],
-                attempts.get((str(row["principal_id"]), pending_by_approval[str(row["approval_id"])][0]))
-                if pending_by_approval[str(row["approval_id"])]
-                else None,
-            ),
-        )
-        for row in rows
-    )
+    owners = []
+    for row in rows:
+        principal_id = str(row["principal_id"])
+        approval_id = str(row["approval_id"])
+        pending = tuple(pending_by_approval[approval_id])
+        attempt = attempts.get((principal_id, pending[0])) if pending else None
+        continuation = _from_rows(row, tuple(calls_by_approval[approval_id]), pending, attempt)
+        owners.append((principal_id, continuation))
+    return tuple(owners)
 
 
 def all_owners(
