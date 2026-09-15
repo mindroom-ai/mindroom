@@ -7,6 +7,7 @@ import enum
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from typing import TYPE_CHECKING
 
 from .cancellation import request_task_cancel
@@ -195,9 +196,9 @@ class CoalescingGate:
     only ready, conversation-assigned events to this gate. State machine per
     (room, thread, sender) key:
     IDLE (absent) -> DEBOUNCE -> flush -> IN_FLIGHT, while all undispatched
-    work remains in one FIFO queue. A live batch ending in a text-like
-    utterance is complete and flushes immediately; a live batch ending in
-    media waits the debounce window for more attachments or a trailing
+    work remains in one FIFO queue. Ordinary text completes a live utterance
+    and flushes immediately; adaptive text waits its configured quiet period.
+    A live batch ending in media waits the debounce window for more attachments or a trailing
     caption (a continuous attachment stream extends the window without
     bound). Follow-up backlogs queued behind an active response are exempt:
     they flush as one combined turn as soon as the conversation idles, since
@@ -531,12 +532,36 @@ class CoalescingGate:
         return count
 
     @staticmethod
+    def _front_live_run_length(
+        gate: _GateEntry,
+        *,
+        coalesce_normal_events: bool,
+        max_receipt_time: float | None = None,
+    ) -> int:
+        """Keep later adaptive text behind an already complete live utterance."""
+        normal_count = CoalescingGate._front_normal_run_length(
+            gate,
+            coalesce_normal_events=coalesce_normal_events,
+            max_receipt_time=max_receipt_time,
+        )
+        immediate_count = 0
+        for count, queued in enumerate(islice(gate.queue, normal_count), start=1):
+            pending = queued.pending_event
+            if pending_event_is_text(pending):
+                if pending.text_debounce_seconds > 0:
+                    if immediate_count:
+                        return immediate_count
+                else:
+                    immediate_count = count
+        return normal_count
+
+    @staticmethod
     def _has_barrier_after_front_normal_run(
         gate: _GateEntry,
         *,
         coalesce_normal_events: bool,
     ) -> bool:
-        normal_count = CoalescingGate._front_normal_run_length(
+        normal_count = CoalescingGate._front_live_run_length(
             gate,
             coalesce_normal_events=coalesce_normal_events,
         )
@@ -544,7 +569,7 @@ class CoalescingGate:
 
     def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> bool:
         """Return whether the claimable front run is terminated by a text-like utterance."""
-        count = self._front_normal_run_length(gate, coalesce_normal_events=coalesce_normal_events)
+        count = self._front_live_run_length(gate, coalesce_normal_events=coalesce_normal_events)
         return (
             count > 0
             and pending_event_is_text(gate.queue[count - 1].pending_event)
@@ -552,7 +577,7 @@ class CoalescingGate:
         )
 
     def _front_debounce_seconds(self, gate: _GateEntry, *, coalesce_normal_events: bool) -> float:
-        count = self._front_normal_run_length(gate, coalesce_normal_events=coalesce_normal_events)
+        count = self._front_live_run_length(gate, coalesce_normal_events=coalesce_normal_events)
         if count and pending_event_is_text(gate.queue[count - 1].pending_event):
             return max(gate.queue[count - 1].pending_event.text_debounce_seconds, 0.0)
         return max(self._debounce_seconds(), 0.0)
@@ -814,11 +839,11 @@ class CoalescingGate:
         *,
         coalesce_normal_events: Callable[[], bool],
     ) -> _DebounceWaitResult:
-        """Wait for the media debounce window, returning early when the batch completes.
+        """Wait for the live quiet window, returning early when the batch completes.
 
-        A front run ending in text is a complete utterance and skips the wait;
-        a run ending in media keeps waiting for more attachments or a trailing
-        caption until the window goes quiet or a barrier appears.
+        Ordinary text completes an utterance and skips the wait. Adaptive text
+        and media keep their configured quiet windows until an immediate text
+        message completes the utterance or a barrier appears.
         """
         gate.phase = _GatePhase.DEBOUNCE
         if not gate.queue:
@@ -1105,7 +1130,7 @@ class CoalescingGate:
             while len(self._root_dispatches) >= _MAX_ROOT_PREPARATIONS:
                 await asyncio.wait(self._root_dispatches, return_when=asyncio.FIRST_COMPLETED)
 
-        candidate_count = self._front_normal_run_length(
+        candidate_count = self._front_live_run_length(
             gate,
             coalesce_normal_events=self._should_coalesce_normal_events(key, gate),
             max_receipt_time=debounce_result.quiet_deadline,

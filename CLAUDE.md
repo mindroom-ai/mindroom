@@ -78,7 +78,7 @@ Matrix sync callback
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
-       -> coalescing.py                                          (text dispatches immediately; media-tailed batches debounce)
+       -> coalescing.py                                          (ordinary text dispatches immediately; adaptive text and media debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
             -> response_turn.py                                  (shared blocking/streaming turn drivers)
