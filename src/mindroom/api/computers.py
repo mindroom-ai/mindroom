@@ -16,7 +16,10 @@ from nio.exceptions import ProtocolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import RuntimePaths, runtime_env_flag
+from mindroom.logging_config import get_logger
+from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.worker_computer.auth import MatrixOpenIDToken, computer_origins, verify_openid
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
@@ -79,6 +82,8 @@ class _ComputerRoute(APIRoute):
         return handler
 
 
+logger = get_logger(__name__)
+
 router = APIRouter(prefix="/api/computers", tags=["computers"], route_class=_ComputerRoute)
 
 
@@ -106,7 +111,7 @@ def _runtime(connection: Request | WebSocket) -> ComputerRuntime:
     snapshot = config_lifecycle.require_api_state(connection.app).snapshot
     runtime = state.computer_runtime
     if runtime is None or not runtime_env_flag(
-        "MINDROOM_WORKER_COMPUTER_ENABLED",
+        WORKER_COMPUTER_ENABLED_ENV,
         runtime_paths=snapshot.runtime_paths,
     ):
         raise ComputerError(503, "Computer authorization runtime is unavailable.")
@@ -246,9 +251,24 @@ async def control(payload: _Control, request: Request, session_id: str) -> dict[
     session = _session(request, session_id)
     await _checked_status(request, session)
     assert session.handle is not None
-    status = await computer_request(session.handle, payload.action, session.session_id, generation=session.generation)
+    store = _store(request.app)
+    try:
+        status = await run_coroutine_until_complete(
+            computer_request(session.handle, payload.action, session.session_id, generation=session.generation),
+            on_cancelled=lambda: store.close(session.session_id),
+        )
+        store.get(session.session_id)
+    except BaseException:
+        if payload.action == "take":
+            # A delayed worker take can settle after local revocation. Drain its
+            # compensation before reporting failure, even if our caller cancels.
+            with suppress(ComputerError):
+                await run_coroutine_until_complete(
+                    computer_request(session.handle, "release", session.session_id, generation=session.generation),
+                )
+        raise
     if payload.action == "stop":
-        _store(request.app).close(session.session_id)
+        store.close(session.session_id)
     return _public_status(session, status)
 
 
@@ -264,17 +284,27 @@ async def delete_session(request: Request, session_id: str) -> Response:
     return Response(status_code=204)
 
 
+def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:
+    """Collect live Computer worker keys on the app's owning event loop."""
+    sessions = config_lifecycle.app_state(app).computer_sessions
+    return sessions.active_worker_keys() if sessions is not None else frozenset()
+
+
 def touch_computer_workers(app: FastAPI, manager: WorkerBackend) -> None:
-    """Keep live computer streams active before the existing worker cleanup pass."""
-    app_state = config_lifecycle.app_state(app)
-    if app_state.computer_sessions is not None:
-        for worker_key in app_state.computer_sessions.active_worker_keys():
-            manager.touch_worker(worker_key)
+    """Keep live streams active during manual cleanup on the owning loop."""
+    for worker_key in active_computer_worker_keys(app):
+        manager.touch_worker(worker_key)
 
 
 async def _upstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:
     while True:
-        await upstream.send_bytes(await websocket.receive_bytes())
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        data = message.get("bytes")
+        if not isinstance(data, bytes):
+            raise WebSocketDisconnect(code=1003)
+        await upstream.send_bytes(data)
 
 
 async def _downstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:
@@ -350,8 +380,10 @@ async def stream(websocket: WebSocket, session_id: str) -> None:
                     headers={"Cache-Control": "no-store"},
                 ),
             )
-    except (HTTPException, WebSocketDisconnect, OSError, KeyError, TypeError):
+    except (HTTPException, WebSocketDisconnect, OSError, aiohttp.ClientError):
         pass
+    except Exception as error:
+        logger.warning("Computer stream failed", error_type=type(error).__name__)
     finally:
         stream_closed.set()
         for task in tasks:

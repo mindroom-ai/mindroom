@@ -6,12 +6,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from typing import Never
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+from structlog.testing import capture_logs
 
-from mindroom.api import sandbox_runner, sandbox_worker_prep
+from mindroom.api import sandbox_runner, sandbox_worker_prep, worker_computer
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.api.worker_computer import router
 from mindroom.config.main import Config
@@ -132,7 +135,8 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
         )
 
 
-def test_rfb_stream(tmp_path: Path) -> None:
+@pytest.mark.parametrize("termination", ["normal", "text", "bug"])
+def test_rfb_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, termination: str) -> None:  # noqa: PLR0915 - transport lifecycle through teardown
     """Watcher input is filtered on the worker even when the viewer sends raw key bytes."""
     received = bytearray()
     display = FakeDisplay()
@@ -167,7 +171,7 @@ def test_rfb_stream(tmp_path: Path) -> None:
     key = bytes.fromhex("0401000000000061")
     update = bytes.fromhex("03010000000005000320")
     hello = b"RFB 003.008\n\x01\x01"
-    with TestClient(app) as client:
+    with TestClient(app) as client, capture_logs() as logs:
         generation = client.get("/computer", headers=headers).json()["generation"]
         with client.websocket_connect(
             f"/computer/stream?session_id=viewer&generation={generation}",
@@ -194,4 +198,93 @@ def test_rfb_stream(tmp_path: Path) -> None:
                 ).status_code
                 == 409
             )
+            if termination == "bug":
+
+                def fail_parser(*_args: object, **_kwargs: object) -> Never:
+                    message = "credential-bearing-secret"
+                    raise KeyError(message)
+
+                monkeypatch.setattr(worker_computer.RfbClientFilter, "feed", fail_parser)
+                ws.send_bytes(key)
+            elif termination == "text":
+                ws.send_text("credential-bearing-secret")
+            if termination != "normal":
+                with pytest.raises(WebSocketDisconnect):
+                    ws.receive_bytes()
         assert client.get("/computer", headers=headers).json()["controller_session_id"] is None
+        if termination == "bug":
+            assert any(entry.get("error_type") == "KeyError" for entry in logs)
+        assert "credential-bearing-secret" not in str(logs)
+        assert all(not entry.get("exc_info") for entry in logs)
+
+
+@pytest.mark.asyncio
+async def test_worker_stream_cancellation_drains_socket_and_exact_ownership(  # noqa: PLR0915 - real transport ownership through repeated cancellation
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation during sibling drain cannot strand the Unix socket or viewer lease."""
+    runtime = WorkerComputerRuntime(FakeDisplay())
+    runtime.display.socket_path = tmp_path / "cancellation-rfb"
+    status = await runtime.ensure_started()
+    closed = asyncio.Event()
+
+    async def peer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            closed.set()
+
+    server = await asyncio.start_unix_server(peer, path=runtime.display.socket_path)
+    app = FastAPI()
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
+    app.state.worker_computer = runtime
+    messages: asyncio.Queue[dict] = asyncio.Queue()
+    await messages.put({"type": "websocket.connect"})
+    accepted, draining, proceed = (asyncio.Event() for _ in range(3))
+
+    async def send(message: dict) -> None:
+        if message["type"] == "websocket.accept":
+            accepted.set()
+
+    websocket = WebSocket(
+        {"type": "websocket", "app": app, "headers": [(b"x-mindroom-sandbox-token", RUNNER_TOKEN.encode())]},
+        messages.get,
+        send,
+    )
+    downstream = worker_computer._display_to_client
+
+    async def pause_drain(reader: asyncio.StreamReader, socket: WebSocket) -> None:
+        try:
+            await downstream(reader, socket)
+        finally:
+            draining.set()
+            await proceed.wait()
+
+    monkeypatch.setattr(worker_computer, "_display_to_client", pause_drain)
+    handler = asyncio.create_task(worker_computer.stream(websocket, "viewer", status["generation"]))
+    try:
+        await asyncio.wait_for(accepted.wait(), timeout=1)
+        await runtime.take_control("viewer")
+        await messages.put({"type": "websocket.disconnect", "code": 1000})
+        await asyncio.wait_for(draining.wait(), timeout=1)
+        for _ in range(3):
+            handler.cancel()
+            await asyncio.sleep(0)
+        assert not handler.done(), "Cancellation escaped before socket and ownership cleanup"
+        proceed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await handler
+        assert runtime.status()["controller_session_id"] is None
+        assert not runtime._streams
+        await asyncio.wait_for(closed.wait(), timeout=1)
+    finally:
+        proceed.set()
+        await asyncio.gather(handler, return_exceptions=True)
+        await runtime.close()
+        server.close()
+        server.abort_clients()
+        await server.wait_closed()

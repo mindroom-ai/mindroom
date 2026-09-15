@@ -1834,3 +1834,61 @@ async def test_browser_cleanup_error_still_drains_other_profiles(
         await browser.aclose()
     assert not first.live_resources
     assert not browser._profiles
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Ordinary operations never reuse an invalid context or overlap retained cleanup ownership."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    old, new = LifecycleBrowser(), LifecycleBrowser()
+    pending = iter([old, new])
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    await browser.browser("start")
+    checkpoint = old.checkpoint
+
+    async def fail_cleanup(at: str) -> None:
+        if at == phase:
+            message = "cleanup failed"
+            raise RuntimeError(message)
+
+    old.checkpoint = fail_cleanup
+    try:
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await browser.browser("stop")
+        assert old.live_resources
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await browser.browser("start")
+        assert not new.live_resources
+        assert json.loads(await browser.browser("status"))["running"] is False
+        assert json.loads(await browser.browser("profiles"))["running_profiles"] == []
+        old.checkpoint = checkpoint
+        old.pause_at = phase
+        restarting = asyncio.create_task(browser.browser("start"))
+        await asyncio.wait_for(old.reached.wait(), timeout=1)
+        replacement = asyncio.create_task(browser.browser("start"))
+        try:
+            for _ in range(3):
+                restarting.cancel()
+                await asyncio.sleep(0)
+            assert not restarting.done()
+            assert not replacement.done()
+            assert not new.live_resources
+        finally:
+            old.proceed.set()
+            await asyncio.gather(restarting, replacement, return_exceptions=True)
+        assert restarting.cancelled()
+        assert not old.live_resources
+        assert new.live_resources == {"driver", "context"}
+        assert json.loads(await browser.browser("status"))["running"] is True
+    finally:
+        old.checkpoint = checkpoint
+        old.proceed.set()
+        await browser.aclose()
+    assert not old.live_resources
+    assert not new.live_resources

@@ -258,6 +258,7 @@ class _BrowserProfileState:
     context: BrowserContext
     tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
+    cleanup_required: bool = False
 
 
 def _clean_str(value: object) -> str | None:
@@ -1073,13 +1074,13 @@ class BrowserTools(Toolkit):
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
         async with self._lock:
             state = self._profiles.get(profile_name)
-            if state is None:
+            if state is None or state.cleanup_required:
                 return {"action": "status", "profile": profile_name, "running": False, "status": "ok", "tabs": []}
             return await self._profile_status(profile_name, state)
 
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
         async with self._lock:
-            running = sorted(self._profiles.keys())
+            running = sorted(name for name, state in self._profiles.items() if not state.cleanup_required)
         advertised = sorted({_DEFAULT_PROFILE, "chrome", *running})
         return {
             "action": "profiles",
@@ -1578,11 +1579,13 @@ class BrowserTools(Toolkit):
         payload.update(extra)
         return payload
 
-    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901 - one startup ownership boundary
+    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901, PLR0915 - one startup ownership boundary
         async with self._lock:
             state = self._profiles.get(profile_name)
             if state is not None:
-                return state
+                if not state.cleanup_required:
+                    return state
+                await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
 
             manager = async_playwright()
             acquisition = asyncio.create_task(manager.start())
@@ -1661,6 +1664,7 @@ class BrowserTools(Toolkit):
         state = self._profiles.get(profile_name)
         if state is None:
             return
+        state.cleanup_required = True
         try:
             await state.context.close()
         finally:

@@ -18,7 +18,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
-from mindroom.api.computers import rebind_computer_runtime, touch_computer_workers
+from mindroom.api.computers import active_computer_worker_keys, rebind_computer_runtime
 from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 from mindroom.api.config_reload import router as config_reload_router
@@ -225,7 +225,7 @@ def _cleanup_workers_once(
     *,
     runtime_config: Config | None = None,
     touch_live_workers: Callable[[WorkerBackend], None] | None = None,
-    api_app: FastAPI | None = None,
+    computer_worker_keys: frozenset[str] = frozenset(),
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
     worker_lease = lease_configured_primary_worker_manager(
@@ -237,8 +237,8 @@ def _cleanup_workers_once(
     with worker_lease as worker_manager:
         if touch_live_workers is not None:
             touch_live_workers(worker_manager)
-        if api_app is not None:
-            touch_computer_workers(api_app, worker_manager)
+        for worker_key in computer_worker_keys:
+            worker_manager.touch_worker(worker_key)
         maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
@@ -286,7 +286,7 @@ async def _worker_cleanup_loop(
                     runtime_paths,
                     runtime_config=runtime_config,
                     touch_live_workers=config_lifecycle.app_state(api_app).script_worker_keepalive,
-                    api_app=api_app,
+                    computer_worker_keys=active_computer_worker_keys(api_app),
                 )
             except Exception:
                 logger.exception("Background worker cleanup failed")

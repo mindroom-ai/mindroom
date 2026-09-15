@@ -9,9 +9,13 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSock
 from pydantic import BaseModel, Field
 
 from mindroom.api.sandbox_runner import app_runner_token, validate_runner_token
+from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.logging_config import get_logger
 from mindroom.worker_computer.protocol import ComputerStatus
 from mindroom.worker_computer.rfb import RfbClientFilter, RfbProtocolError
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/computer", tags=["worker-computer"])
 
@@ -79,7 +83,12 @@ async def _client_to_display(
 ) -> None:
     parser = RfbClientFilter()
     while not stream.is_set():
-        data = await websocket.receive_bytes()
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        data = message.get("bytes")
+        if not isinstance(data, bytes):
+            raise WebSocketDisconnect(code=1003)
         filtered = parser.feed(data, allow_input=computer.allows_input(session_id, stream))
         if filtered and not stream.is_set():
             writer.write(filtered)
@@ -92,7 +101,7 @@ async def _display_to_client(reader: asyncio.StreamReader, websocket: WebSocket)
 
 
 @router.websocket("/stream")
-async def stream(websocket: WebSocket, session_id: str, generation: str) -> None:
+async def stream(websocket: WebSocket, session_id: str, generation: str) -> None:  # noqa: C901 - one owned stream lifecycle
     """Bridge only this worker's private display with per-message input checks."""
     token = app_runner_token(websocket.app)
     supplied = websocket.headers.get("x-mindroom-sandbox-token", "")
@@ -123,14 +132,29 @@ async def stream(websocket: WebSocket, session_id: str, generation: str) -> None
             task.result()
     except (WebSocketDisconnect, OSError, RfbProtocolError):
         pass
+    except Exception as error:
+        logger.warning("Worker computer stream failed", error_type=type(error).__name__)
     finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if writer is not None:
-            writer.close()
-            with suppress(OSError):
-                await writer.wait_closed()
-        await computer.detach_stream(session_id, lease)
-        with suppress(RuntimeError, OSError):
-            await websocket.close()
+
+        async def cleanup() -> None:
+            try:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                try:
+                    if writer is not None:
+                        writer.close()
+                        with suppress(OSError):
+                            await writer.wait_closed()
+                finally:
+                    try:
+                        await computer.detach_stream(session_id, lease)
+                    finally:
+                        with suppress(RuntimeError, OSError):
+                            await websocket.close()
+
+        try:
+            await run_coroutine_until_complete(cleanup())
+        except Exception as error:
+            logger.warning("Worker computer stream cleanup failed", error_type=type(error).__name__)

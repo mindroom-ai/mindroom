@@ -1,21 +1,25 @@
 """Public Computer routes deny unauthenticated callers independently of dashboard auth."""
 
 import asyncio
+import json
+import threading
 from collections.abc import Iterator
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal, Never
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import httpx
 import pytest
 import yaml
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
 from nio.exceptions import LocalProtocolError, RemoteTransportError
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import computers, config_lifecycle
@@ -24,9 +28,11 @@ from mindroom.api.computers import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
+from mindroom.worker_computer.auth import computer_origins
+from mindroom.worker_computer.protocol import ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
-from mindroom.workers.models import WorkerMaintenanceResult
+from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.computer_helpers import ComputerPeer, authorized_target, computer_app
 
 type Gateway = tuple[TestClient, ComputerPeer, FastAPI]
@@ -446,7 +452,11 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
     ) as websocket:
         assert websocket.receive_bytes() == b"screen"
         config, paths = config_lifecycle.read_app_committed_runtime_config(app)
-        api_main._cleanup_workers_once(paths, runtime_config=config, api_app=app)
+        api_main._cleanup_workers_once(
+            paths,
+            runtime_config=config,
+            computer_worker_keys=computers.active_computer_worker_keys(app),
+        )
         assert actions == ["touch:worker", "maintain"]
 
 
@@ -535,3 +545,261 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://chat.example.org",
+        "https://host:bad",
+        "https://host:70000",
+        "https://user:password@host",
+        "https://host/path",
+        "https://host\n",
+        "https://",
+    ],
+)
+def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> None:
+    """Remote cleartext and malformed configured origins never grant browser authority."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
+    )
+    assert computer_origins(paths) == ()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["https://chat.example.org", "http://localhost:4173", "http://127.0.0.2:4173", "http://[::1]:4173"],
+)
+def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, tmp_path: Path) -> None:
+    """Accepted origins retain exact matching, including the explicit port."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
+    )
+    assert computer_origins(paths) == (origin,)
+
+
+def test_configured_remote_http_denied_at_cors_and_stream(gateway: Gateway) -> None:
+    """An explicitly configured insecure remote origin cannot pass either browser boundary."""
+    client, _, app = gateway
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    paths = config_lifecycle.require_api_state(app).snapshot.runtime_paths
+    state = config_lifecycle.require_api_state(app)
+    state.snapshot = replace(
+        state.snapshot,
+        runtime_paths=replace(
+            paths,
+            process_env={**paths.process_env, "MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["http://chat.example.org"]'},
+        ),
+    )
+    response = client.options(
+        path,
+        headers={"Origin": "http://chat.example.org", "Access-Control-Request-Method": "POST"},
+    )
+    assert response.status_code == 400
+    assert "access-control-allow-origin" not in response.headers
+    with (
+        pytest.raises(WebSocketDenialResponse) as denied,
+        client.websocket_connect(
+            path + "/stream",
+            subprotocols=["binary", "mindroom-ticket." + ticket],
+            headers={"Origin": "http://chat.example.org"},
+        ),
+    ):
+        pass
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_background_maintenance_snapshots_computers_on_owning_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutable sessions stay on their event loop; maintenance receives only immutable live keys."""
+    peer = ComputerPeer()
+    app = computer_app(peer, tmp_path)
+    loop = asyncio.get_running_loop()
+    owner = threading.get_ident()
+    collected: list[int] = []
+    actions: list[str] = []
+    stop = asyncio.Event()
+    async with app.router.lifespan_context(app):
+        store = config_lifecycle.app_state(app).computer_sessions
+        assert store is not None
+        session = store.create(authorized_target())
+        session.stream = asyncio.Event()
+        original = store.active_worker_keys
+
+        def collect() -> frozenset[str]:
+            collected.append(threading.get_ident())
+            return original()
+
+        manager = MagicMock(spec=WorkerBackend)
+        manager.touch_worker.side_effect = lambda key: actions.append("touch:" + key)
+
+        def maintain(_manager: WorkerBackend) -> WorkerMaintenanceResult:
+            assert threading.get_ident() != owner
+            actions.append("maintain")
+            loop.call_soon_threadsafe(stop.set)
+            return WorkerMaintenanceResult((), ())
+
+        monkeypatch.setattr(store, "active_worker_keys", collect)
+        monkeypatch.setattr(api_main, "_worker_cleanup_interval_seconds", lambda _paths: 0.001)
+        monkeypatch.setattr(
+            api_main,
+            "lease_configured_primary_worker_manager",
+            lambda *_args, **_kwargs: nullcontext(manager),
+        )
+        monkeypatch.setattr(api_main, "maintain_workers", maintain)
+        await asyncio.wait_for(api_main._worker_cleanup_loop(stop, app), timeout=1)
+    assert collected == [owner]
+    assert actions == ["touch:worker", "maintain"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["delete", "expiry", "unbind"])
+@pytest.mark.parametrize("cancel_compensation", [False, True])
+async def test_delayed_take_revocation_drains_compensation(  # noqa: PLR0915 - deterministic revocation and cancellation ordering
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revocation: str,
+    *,
+    cancel_compensation: bool,
+) -> None:
+    """A revoked delayed takeover never succeeds or owns input after its response settles."""
+    peer = ComputerPeer()
+    app = computer_app(peer, tmp_path)
+    async with app.router.lifespan_context(app):
+        store = config_lifecycle.app_state(app).computer_sessions
+        assert store is not None
+        session = store.create(authorized_target())
+        session.handle = peer.handle
+        session.generation = (await peer.runtime.ensure_started())["generation"]
+        stream = await peer.runtime.attach_stream(session.session_id, session.generation)
+        session.stream = asyncio.Event()
+        request = Request(
+            {"type": "http", "app": app, "headers": [(b"authorization", ("Bearer " + session.session_token).encode())]},
+        )
+        entered, proceed, releasing, finish = (asyncio.Event() for _ in range(4))
+        original = computers.computer_request
+
+        async def delayed(
+            handle: WorkerHandle,
+            action: Literal["status", "start", "take", "release", "stop"],
+            session_id: str,
+            *,
+            generation: str | None = None,
+        ) -> ComputerStatus:
+            if action == "take":
+                entered.set()
+                await proceed.wait()
+            if action == "release" and proceed.is_set():
+                releasing.set()
+                await finish.wait()
+            return await original(handle, action, session_id, generation=generation)
+
+        monkeypatch.setattr(computers, "_resolve_worker", lambda *_args, **_kwargs: peer.handle)
+        monkeypatch.setattr(computers, "computer_request", delayed)
+        task = asyncio.create_task(computers.control(computers._Control(action="take"), request, session.session_id))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        if revocation == "delete":
+            assert (await computers.delete_session(request, session.session_id)).status_code == 204
+        elif revocation == "expiry":
+            peer.now += 3600
+        else:
+            store.close_all()
+        proceed.set()
+        release_waiter = asyncio.create_task(releasing.wait())
+        try:
+            await asyncio.wait([task, release_waiter], timeout=1, return_when=asyncio.FIRST_COMPLETED)
+            assert not task.done(), "Revoked control returned before compensating release"
+            assert releasing.is_set()
+            if cancel_compensation:
+                for _ in range(3):
+                    task.cancel()
+                    await asyncio.sleep(0)
+                assert not task.done()
+        finally:
+            finish.set()
+            results = await asyncio.gather(task, return_exceptions=True)
+            release_waiter.cancel()
+            await asyncio.gather(release_waiter, return_exceptions=True)
+            controller = peer.runtime.status()["controller_session_id"]
+            accepts_input = peer.runtime.allows_input(session.session_id, stream)
+            await peer.runtime.detach_stream(session.session_id, stream)
+        assert isinstance(results[0], asyncio.CancelledError if cancel_compensation else ComputerError)
+        assert controller is None
+        assert not accepts_input
+
+
+@pytest.mark.parametrize("termination", ["text", "bug"])
+def test_public_stream_invalid_frames_close_and_unexpected_errors_are_sanitized(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+    termination: str,
+) -> None:
+    """Malformed traffic releases stream ownership; programmer failures leave only a safe type diagnostic."""
+    client, peer, _ = gateway
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    if termination == "bug":
+
+        async def fail_after_input(websocket: WebSocket, _upstream: aiohttp.ClientWebSocketResponse) -> Never:
+            await websocket.receive()
+            message = "credential-bearing-secret"
+            raise KeyError(message)
+
+        monkeypatch.setattr(computers, "_upstream", fail_after_input)
+    with (
+        capture_logs() as logs,
+        client.websocket_connect(
+            path + "/stream",
+            subprotocols=["binary", "mindroom-ticket." + ticket],
+            headers={"Origin": "https://chat.example.org"},
+        ) as websocket,
+    ):
+        assert websocket.receive_bytes() == b"screen"
+        assert client.post(path + "/control", headers=headers, json={"action": "take"}).json()["mode"] == "control"
+        websocket.send_text("credential-bearing-secret")
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_bytes()
+    assert peer.runtime.status()["controller_session_id"] is None
+    if termination == "bug":
+        assert any(entry.get("error_type") == "KeyError" for entry in logs)
+    assert "credential-bearing-secret" not in str(logs)
+    assert all(not entry.get("exc_info") for entry in logs)
+
+
+def test_requester_quota_rejects_before_allocating_worker(gateway: Gateway) -> None:
+    """Verified requester admission protects other users without starting rejected resources."""
+    client, peer, app = gateway
+    state = config_lifecycle.app_state(app)
+    state.computer_sessions = ComputerSessionStore(clock=lambda: peer.now)
+    assert state.computer_runtime is not None
+
+    async def authorize(requester: str, _room: str, _agent: str) -> computers.ComputerTarget:
+        return replace(authorized_target(), requester_id=requester)
+
+    state.computer_runtime = replace(state.computer_runtime, authorize=authorize)
+    sessions = [create(client).json() for _ in range(8)]
+    before = len(peer.requests)
+    assert create(client).status_code == 429
+    assert len(peer.requests) == before
+    peer.openid_subject = "@bob:example.org"
+    assert create(client).status_code == 200
+    session = sessions[0]
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    assert client.get(path, headers=headers).status_code == 200
+    assert client.delete(path, headers=headers).status_code == 204
+    peer.openid_subject = "@alice:example.org"
+    assert create(client).status_code == 200

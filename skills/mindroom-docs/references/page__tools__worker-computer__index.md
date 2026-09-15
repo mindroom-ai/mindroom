@@ -87,6 +87,8 @@ The backend verifies a fresh Matrix OpenID token against its configured homeserv
 The Matrix server name must match the configured server.
 HTTP session credentials remain in Chat memory; stream tickets are single-use and expire after 30 seconds.
 Sessions last at most one hour.
+Each verified requester can hold up to eight concurrent viewer sessions, within a process-wide limit of 256.
+Closing a viewer or reaching session expiry frees its slot; excess requests are rejected before allocating a worker.
 The worker token stays between the backend and worker.
 
 ### Reverse proxy and host routing
@@ -94,6 +96,7 @@ The worker token stays between the backend and worker.
 Route `/api/computers/*`, including WebSocket upgrades, to the **MindRoom runtime API**.
 Preserve the `Origin` and `Sec-WebSocket-Protocol` headers and allow long-lived WSS connections.
 Use the explicit `MINDROOM_COMPUTER_ALLOWED_ORIGINS` list for both HTTP CORS and WebSocket origin checks.
+Allowed browser origins require HTTPS except for localhost and literal loopback IP addresses, which also support HTTP.
 These routes use computer-session authentication, separately from dashboard authentication.
 Do not log bearer tokens or stream-ticket subprotocols.
 

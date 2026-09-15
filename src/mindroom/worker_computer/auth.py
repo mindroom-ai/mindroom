@@ -1,6 +1,8 @@
 """Computer-specific Matrix OpenID verification and exact browser origins."""
 
+import ipaddress
 import json
+from contextlib import suppress
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -30,12 +32,21 @@ def computer_origins(paths: RuntimePaths) -> tuple[str, ...]:
         if not isinstance(origins, list):
             return ()
         for origin in origins:
-            if not isinstance(origin, str):
+            if not isinstance(origin, str) or any(character.isspace() or ord(character) < 32 for character in origin):
                 return ()
             parsed = urlsplit(origin)
+            hostname = parsed.hostname
+            port = parsed.port  # Validate malformed and out-of-range ports.
+            loopback = hostname == "localhost"
+            if hostname and not loopback:
+                with suppress(ValueError):
+                    loopback = ipaddress.ip_address(hostname).is_loopback
             if (
                 parsed.scheme not in {"http", "https"}
                 or not parsed.netloc
+                or not hostname
+                or (parsed.scheme == "http" and not loopback)
+                or (port is None and parsed.netloc.endswith(":"))
                 or parsed.username is not None
                 or parsed.password is not None
                 or parsed.path

@@ -71,6 +71,8 @@ class ComputerSessionStore:
         self._prune()
         if len(self._sessions) >= self.capacity:
             raise ComputerError(429, "Computer session capacity reached.")
+        if sum(session.target.requester_id == target.requester_id for session in self._sessions.values()) >= 8:
+            raise ComputerError(429, "Computer requester session capacity reached.")
         session = ComputerSession(secrets.token_urlsafe(24), secrets.token_urlsafe(32), target, self.clock() + 3600)
         self._sessions[session.session_id] = session
         return session
