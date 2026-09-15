@@ -28,8 +28,8 @@ from agno.run.base import RunStatus
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
+from mindroom.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.agno_participation import participation_model
-from mindroom.agno_session_persistence_patch import drain_agent_cancellation
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,

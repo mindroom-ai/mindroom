@@ -65,7 +65,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
-from mindroom.history.agno_message_builder_patch import apply_patch as install_message_builder_patch
+from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
     tool_execution_call_id,

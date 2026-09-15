@@ -62,6 +62,44 @@ def test_strict_search_knowledge_drops_agno_user_scope() -> None:
     assert vector_db.calls == [("query", 3, None)]
 
 
+class _FailingSearchVectorDb(_RecordingVectorDb):
+    def search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
+        del query, limit, filters
+        msg = "vector search failed"
+        raise RuntimeError(msg)
+
+    async def async_search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
+        return self.search(query=query, limit=limit, filters=filters)
+
+
+def test_strict_search_knowledge_propagates_vector_failure() -> None:
+    """Failed searches must not become plausible empty search results."""
+    knowledge = StrictSearchKnowledge(vector_db=_FailingSearchVectorDb())
+    with pytest.raises(RuntimeError, match="vector search failed"):
+        knowledge.search("query")
+
+
+@pytest.mark.asyncio
+async def test_strict_search_knowledge_propagates_async_vector_failure() -> None:
+    """The async search path retains the vector provider's failure."""
+    knowledge = StrictSearchKnowledge(vector_db=_FailingSearchVectorDb())
+    with pytest.raises(RuntimeError, match="vector search failed"):
+        await knowledge.asearch("query")
+
+
+@pytest.mark.asyncio
+async def test_strict_search_knowledge_sync_fallback_propagates_failure() -> None:
+    """An unimplemented async adapter must not hide a failed synchronous fallback."""
+
+    class SyncOnlyVectorDb(_FailingSearchVectorDb):
+        async def async_search(self, *, query: str, limit: int, filters: object = None) -> list[Document]:
+            raise NotImplementedError
+
+    knowledge = StrictSearchKnowledge(vector_db=SyncOnlyVectorDb())
+    with pytest.raises(RuntimeError, match="vector search failed"):
+        await knowledge.asearch("query")
+
+
 class _UnembeddingVectorDb:
     """A store that embeds in-process but leaves every chunk without a vector."""
 

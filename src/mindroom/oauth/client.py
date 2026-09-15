@@ -10,12 +10,13 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum, auto
-from functools import partial, wraps
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol
+from functools import partial
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport import requests as google_requests
 
+from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
@@ -140,14 +141,7 @@ class _OAuthClientThreadState(threading.local):
         self.entrypoint_depth = 0
 
 
-class _AuthDescriptor(Protocol):
-    """Descriptor contract for unbound tool auth methods."""
-
-    def __get__(self, instance: object, owner: type[object] | None = None) -> Callable[[], Any]:
-        """Bind the auth method to one tool instance."""
-
-
-class ScopedOAuthClientMixin:
+class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
     """Shared scoped credential loading and refresh logic for OAuth-backed tools."""
 
     _oauth_provider: OAuthProvider
@@ -215,41 +209,6 @@ class ScopedOAuthClientMixin:
             return None
         return self._load_stored_credentials()
 
-    def _set_original_auth(self, auth_method: _AuthDescriptor) -> None:
-        """Store the bound parent credential resolver used for the service-account fallback."""
-        self._original_auth = auth_method.__get__(self, type(self))
-
-    def _resolve_creds(self) -> Any:  # noqa: ANN401
-        """Resolve credentials for Agno's auth decorator through MindRoom's credential policy.
-
-        Agno 3 calls this instead of ``_auth`` whenever a decorated tool sees
-        missing or expired credentials; without this override it would fall
-        back to Agno's own token files, DB lookups, and interactive OAuth.
-        """
-        self._authenticate()
-        return self.creds
-
-    def _wrap_oauth_function_entrypoints(self) -> None:
-        """Return structured OAuth prompts from every registered toolkit function."""
-        for function in self.functions.values():
-            entrypoint = function.entrypoint
-            if entrypoint is None:
-                continue
-
-            @wraps(entrypoint)
-            def oauth_entrypoint(
-                *args: object,
-                _entrypoint: Callable[..., object] = entrypoint,
-                **kwargs: object,
-            ) -> object:
-                if self._provided_creds:
-                    with self._provided_credentials_lock:
-                        return self._run_oauth_entrypoint(_entrypoint, args, kwargs)
-                return self._run_oauth_entrypoint(_entrypoint, args, kwargs)
-
-            function.entrypoint = oauth_entrypoint
-            setattr(self, function.name, oauth_entrypoint)
-
     def _run_oauth_entrypoint(
         self,
         entrypoint: Callable[..., object],
@@ -257,6 +216,18 @@ class ScopedOAuthClientMixin:
         kwargs: dict[str, object],
     ) -> object:
         """Run one wrapped call while retaining its thread-local auth outcome."""
+        if self._provided_creds:
+            with self._provided_credentials_lock:
+                return self._run_oauth_entrypoint_with_scope(entrypoint, args, kwargs)
+        return self._run_oauth_entrypoint_with_scope(entrypoint, args, kwargs)
+
+    def _run_oauth_entrypoint_with_scope(
+        self,
+        entrypoint: Callable[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> object:
+        """Apply owner-managed auth state to one serialized toolkit call."""
         with self._oauth_entrypoint_scope() as outermost:
             return self._run_scoped_oauth_entrypoint(entrypoint, args, kwargs, outermost=outermost)
 

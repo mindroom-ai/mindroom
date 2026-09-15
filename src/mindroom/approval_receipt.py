@@ -7,19 +7,19 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from agno.models.message import Message
 
+from mindroom.agno_compat_model_hooks import install_message_projection
 from mindroom.event_journal import ApprovalCall
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator
+    from collections.abc import Generator
 
     from agno.models.base import Model
     from agno.models.fallback import FallbackConfig
-    from agno.models.response import ModelResponse
 
 _MARKER_KEY = "mindroom_approval_receipt"
 _HOOK_ATTR = "_mindroom_approval_receipt_hook_installed"
@@ -178,46 +178,17 @@ def _messages_with_approval_receipt(
 
 def _install_approval_receipt_hook(model: Model) -> None:
     """Append a trusted approval receipt immediately before a resumed model call."""
-    try:
-        original_aresponse = cast("Callable[..., Awaitable[ModelResponse]]", model.aresponse)
-        model_dict = vars(model)
-    except (AttributeError, TypeError):
-        return
-    if model_dict.get(_HOOK_ATTR) is True:
-        return
-    setattr(model, _HOOK_ATTR, True)
     model_id = id(model)
     after_response_id = isinstance(model, _ResponseChainReceiptModel) and model.approval_receipt_after_response_id
-
-    async def _aresponse_with_approval_receipt(*args: object, **kwargs: object) -> ModelResponse:
-        messages: object = kwargs.get("messages")
-        if isinstance(messages, list):
-            projection = _messages_with_approval_receipt(
-                cast("list[Message]", messages),
-                model_id=model_id,
-                after_response_id=after_response_id,
-            )
-            if projection is None:
-                return await original_aresponse(*args, **kwargs)
-            try:
-                return await original_aresponse(*args, **{**kwargs, "messages": projection.outbound_messages})
-            finally:
-                projection.publish_model_mutations()
-        if args and isinstance(args[0], list):
-            projection = _messages_with_approval_receipt(
-                cast("list[Message]", args[0]),
-                model_id=model_id,
-                after_response_id=after_response_id,
-            )
-            if projection is None:
-                return await original_aresponse(*args, **kwargs)
-            try:
-                return await original_aresponse(projection.outbound_messages, *args[1:], **kwargs)
-            finally:
-                projection.publish_model_mutations()
-        return await original_aresponse(*args, **kwargs)
-
-    model_dict["aresponse"] = _aresponse_with_approval_receipt
+    install_message_projection(
+        model,
+        marker=_HOOK_ATTR,
+        project=lambda messages: _messages_with_approval_receipt(
+            messages,
+            model_id=model_id,
+            after_response_id=after_response_id,
+        ),
+    )
 
 
 def install_approval_receipt_hooks(model: Model, fallback_config: FallbackConfig | None) -> None:

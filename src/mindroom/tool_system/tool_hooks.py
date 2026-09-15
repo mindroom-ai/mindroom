@@ -10,12 +10,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from functools import reduce, wraps
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
-
-from agno.tools.function import FunctionCall, _detached, _record_entrypoint_result, _start_entrypoint_call
 
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
@@ -29,6 +26,7 @@ from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
+from mindroom.tool_system import agno_compat_tool_hooks
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolDispatchContext,
@@ -88,15 +86,6 @@ class _ToolApprovalGate(Protocol):
         ...
 
 
-# Agno does not currently expose a hook-chain extension point for unwrapping MindRoom's
-# deferred sync-bridge results. Keep these wrappers covered by tests when bumping Agno
-# in uv.lock, and drop them once upstream supports this as public API. The chain builders
-# take the result-cache plumbing (``cached_result``, ``raw_results``, ``cache_key``) that
-# ``FunctionCall.execute``/``aexecute`` thread through (verified against agno 3.0.9).
-_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC = FunctionCall._build_nested_execution_chain_async
-_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN = FunctionCall._build_nested_execution_chain
-_AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = False
-_AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = False
 logger = get_logger(__name__)
 
 
@@ -429,155 +418,6 @@ def _resolve_deferred_sync_result(result: _ToolHookResult) -> _ToolHookResult:
     return result
 
 
-def _patch_agno_sync_tool_hook_chain() -> None:
-    """Teach Agno's sync tool hook chain to unwrap deferred async bridge results."""
-    global _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED
-
-    if _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED:
-        return
-
-    @wraps(_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN)
-    def _patched_build_nested_execution_chain(
-        self: FunctionCall,
-        entrypoint_args: dict[str, Any],
-        cached_result: Any | None = None,  # noqa: ANN401
-        raw_results: list[Any] | None = None,
-        cache_key: str | None = None,
-    ) -> Callable[..., _ToolHookResult]:
-        execution_chain = _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN(
-            self,
-            entrypoint_args,
-            cached_result=cached_result,
-            raw_results=raw_results,
-            cache_key=cache_key,
-        )
-
-        def _wrapped_execution_chain(name: str, func: Callable[..., Any], args: dict[str, Any]) -> _ToolHookResult:
-            return _resolve_deferred_sync_result(execution_chain(name, func, args))
-
-        return _wrapped_execution_chain
-
-    type.__setattr__(FunctionCall, "_build_nested_execution_chain", _patched_build_nested_execution_chain)
-    _AGNO_SYNC_TOOL_HOOK_CHAIN_PATCHED = True
-
-
-def _build_sync_async_execution_chain(
-    function_call: FunctionCall,
-    entrypoint: Callable[..., _ToolHookResult],
-    entrypoint_args: dict[str, Any],
-    *,
-    cached_result: Any | None,  # noqa: ANN401
-    raw_results: list[Any] | None,
-    cache_key: str | None,
-) -> Callable[..., Awaitable[_ToolHookResult]]:
-    """Build Agno's async hook chain around one offloaded synchronous leaf.
-
-    Mirrors ``FunctionCall._build_nested_execution_chain_async``: a cache hit
-    stands in for the entrypoint call unless a hook rewrote the keyed
-    arguments, and every real entrypoint return is recorded in ``raw_results``
-    so the caller can store it.
-    """
-
-    async def execute_sync_entrypoint(
-        _name: str,
-        _func: Callable[..., Any],
-        _args: dict[str, Any],
-    ) -> _ToolHookResult:
-        if cached_result is not None and not function_call._moved_its_key(cache_key, entrypoint_args):
-            return _detached(cached_result)
-        arguments = entrypoint_args.copy()
-        if function_call.arguments is not None:
-            arguments.update(function_call.arguments)
-        slot = _start_entrypoint_call(raw_results) if raw_results is not None else -1
-        result = await _run_sync_tool_entrypoint(entrypoint, arguments)
-        if raw_results is not None:
-            _record_entrypoint_result(raw_results, slot, result)
-        return result
-
-    def create_hook_wrapper(
-        inner_func: Callable[..., Awaitable[_ToolHookResult]],
-        hook: Callable[..., Any],
-    ) -> Callable[..., Awaitable[_ToolHookResult]]:
-        async def wrapper(
-            name: str,
-            func: Callable[..., Any],
-            args: dict[str, Any],
-        ) -> _ToolHookResult:
-            async def next_func(**kwargs: object) -> _ToolHookResult:
-                return await inner_func(name, func, kwargs)
-
-            hook_args = function_call._build_hook_args(hook, name, next_func, args)
-            if inspect.iscoroutinefunction(hook):
-                return await function_call._safe_hook_call_async(hook, hook_args)
-            return function_call._safe_hook_call(hook, hook_args)
-
-        return wrapper
-
-    return reduce(
-        create_hook_wrapper,
-        reversed(function_call.function.tool_hooks or []),
-        execute_sync_entrypoint,
-    )
-
-
-def _patch_agno_async_tool_hook_chain() -> None:
-    """Teach Agno's async tool hook chain to unwrap deferred sync-hook awaitables."""
-    global _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED
-
-    if _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED:
-        return
-
-    @wraps(_ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC)
-    async def _patched_build_nested_execution_chain_async(
-        self: FunctionCall,
-        entrypoint_args: dict[str, Any],
-        cached_result: Any | None = None,  # noqa: ANN401
-        raw_results: list[Any] | None = None,
-        cache_key: str | None = None,
-    ) -> Callable[..., Awaitable[_ToolHookResult]]:
-        entrypoint = self.function.entrypoint
-        if (
-            _SYNC_TOOL_COMPLETION_TRACKER.get() is None
-            or entrypoint is None
-            or inspect.iscoroutinefunction(entrypoint)
-            or inspect.isasyncgenfunction(entrypoint)
-            or inspect.isgeneratorfunction(entrypoint)
-        ):
-            execution_chain = await _ORIGINAL_BUILD_NESTED_EXECUTION_CHAIN_ASYNC(
-                self,
-                entrypoint_args,
-                cached_result=cached_result,
-                raw_results=raw_results,
-                cache_key=cache_key,
-            )
-        else:
-            execution_chain = _build_sync_async_execution_chain(
-                self,
-                entrypoint,
-                entrypoint_args,
-                cached_result=cached_result,
-                raw_results=raw_results,
-                cache_key=cache_key,
-            )
-
-        async def _wrapped_execution_chain(
-            name: str,
-            func: Callable[..., Any],
-            args: dict[str, Any],
-        ) -> _ToolHookResult:
-            result = await execution_chain(name, func, args)
-            return await _resolve_async_tool_hook_result(result)
-
-        return _wrapped_execution_chain
-
-    type.__setattr__(FunctionCall, "_build_nested_execution_chain_async", _patched_build_nested_execution_chain_async)
-    _AGNO_ASYNC_TOOL_HOOK_CHAIN_PATCHED = True
-
-
-_patch_agno_sync_tool_hook_chain()
-_patch_agno_async_tool_hook_chain()
-
-
 async def _run_sync_tool_entrypoint(
     entrypoint: Callable[..., _ToolHookResult],
     arguments: dict[str, Any],
@@ -602,6 +442,14 @@ async def _run_sync_tool_entrypoint(
         if tracker._cancel_before_start():
             task.cancel()
         raise
+
+
+agno_compat_tool_hooks.install_patch(
+    resolve_sync_result=_resolve_deferred_sync_result,
+    resolve_async_result=_resolve_async_tool_hook_result,
+    run_sync_entrypoint=_run_sync_tool_entrypoint,
+    has_completion_tracker=lambda: _SYNC_TOOL_COMPLETION_TRACKER.get() is not None,
+)
 
 
 async def _call_tool(

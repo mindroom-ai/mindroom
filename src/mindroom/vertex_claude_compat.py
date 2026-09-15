@@ -8,9 +8,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 from agno.exceptions import ContextWindowExceededError
 from agno.models.vertexai.claude import Claude as VertexAIClaude
-from agno.utils.models.claude import format_messages, format_tools_for_model
+from agno.utils.models.claude import format_messages
 from agno.utils.tokens import count_schema_tokens
 
+from mindroom.agno_compat_vertex_claude_tools import (
+    format_tools_for_vertex_claude,
+    strip_vertex_claude_tool_strict,
+)
 from mindroom.claude_compat import ClaudeProviderCompat
 from mindroom.claude_prompt_cache import (
     SERVER_TOOL_USE_BLOCK_TYPE,
@@ -58,43 +62,6 @@ def _messages_with_replay_safe_reasoning(messages: list[Message]) -> list[Messag
         sanitized_message.reasoning_content = None
         sanitized_messages[index] = sanitized_message
     return sanitized_messages if sanitized_messages is not None else messages
-
-
-def _strip_vertex_claude_tool_strict(
-    tools: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]] | None:
-    """Return Vertex-compatible tool definitions without mutating the caller's list.
-
-    Agno 3.0.9 still emits ``strict`` flags on Vertex Claude tool definitions.
-    Anthropic-on-Vertex rejects those provider-level fields with a 400 error
-    (``tools.0.custom.strict``), while schema properties named ``strict`` are
-    valid user data and must be preserved. Strip only the provider metadata here
-    until Agno normalizes Vertex Claude tool payloads itself.
-    """
-    if not tools:
-        return tools
-
-    changed = False
-    sanitized: list[dict[str, Any]] = []
-    for tool in tools:
-        next_tool = tool
-        if "strict" in next_tool:
-            next_tool = dict(next_tool)
-            next_tool.pop("strict", None)
-            changed = True
-
-        function = next_tool.get("function")
-        if isinstance(function, dict) and "strict" in function:
-            if next_tool is tool:
-                next_tool = dict(next_tool)
-            next_function = dict(function)
-            next_function.pop("strict", None)
-            next_tool["function"] = next_function
-            changed = True
-
-        sanitized.append(next_tool)
-
-    return sanitized if changed else tools
 
 
 def _blocks_require_exact_count(blocks: list[Any]) -> bool:
@@ -286,9 +253,9 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
         system = self._build_system(system_prompt)
         if system:
             request_kwargs["system"] = system
-        sanitized_tools = _strip_vertex_claude_tool_strict(tools)
-        if sanitized_tools:
-            request_kwargs["tools"] = format_tools_for_model(sanitized_tools)
+        formatted_tools = format_tools_for_vertex_claude(tools)
+        if formatted_tools:
+            request_kwargs["tools"] = formatted_tools
         if thinking := self.effective_thinking():
             request_kwargs["thinking"] = thinking
         return prepare_claude_request_kwargs(self, request_kwargs)
@@ -504,7 +471,7 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     ) -> dict[str, Any]:
         return super()._prepare_request_kwargs(
             system_message=system_message,
-            tools=_strip_vertex_claude_tool_strict(tools),
+            tools=strip_vertex_claude_tool_strict(tools),
             response_format=response_format,
             messages=messages,
         )
@@ -516,5 +483,5 @@ class MindroomVertexAIClaude(ClaudeProviderCompat, VertexAIClaude):
     ) -> bool:
         return super()._has_beta_features(
             response_format=response_format,
-            tools=_strip_vertex_claude_tool_strict(tools),
+            tools=strip_vertex_claude_tool_strict(tools),
         )

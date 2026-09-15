@@ -32,7 +32,7 @@ from agno.team import Team
 from agno.team import _session as team_session_module
 
 from mindroom import agent_storage
-from mindroom import agno_session_persistence_patch as persistence_patch
+from mindroom import agno_compat_session_persistence as persistence_patch
 from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
 from mindroom.config.main import Config
 from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
@@ -168,7 +168,7 @@ def test_installation_is_exact_version_guarded_and_idempotent() -> None:
 from importlib import import_module
 from pathlib import Path
 
-patch = import_module("mindroom.agno_session_persistence_patch")
+patch = import_module("mindroom.agno_compat_session_persistence")
 patch.version = lambda _distribution: "0.0.0"
 storage_module = import_module("mindroom.agent_storage")
 try:

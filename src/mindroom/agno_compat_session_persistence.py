@@ -40,13 +40,23 @@ if TYPE_CHECKING:
 
 type _PersistenceTarget = tuple[str, str]
 
+# AGNO_COMPAT: Async persistence lacks hooks for synchronous storage owners.
+# Reason: Async Agent/Team session paths call owned synchronous storage on the event loop.
+# Upstream issue: https://github.com/agno-agi/agno/issues/10149
+# Upstream PR: No complete implementation yet; https://github.com/agno-agi/agno/pull/10148
+# only routes Agent startup through the existing awaitable read path.
+# Remove when: Supported async persistence preserves nonmutating preparation and
+# owner-controlled dispatch across the required Agent/Team reads and writes.
+# Keep MindRoom's FIFO, snapshot, cancellation, and resource-lifetime guarantees.
+# Coverage: tests/test_agno_compat_session_persistence.py::test_registered_writes_run_on_a_dedicated_thread;
+# tests/test_agno_compat_session_persistence.py::test_cross_loop_reservation_precedes_snapshot_work;
+# tests/test_agno_compat_session_persistence.py::test_async_session_read_shares_save_lane_and_drains_cancellation.
+
 # Agno 3.0 splits one session save into a session-row write (``asave_session``) and
 # per-run writes (``asave_run``); both call the synchronous SQLite adapter directly,
 # so both are offloaded through the same FIFO lane to keep their order.
-# When bumping this pin, check whether these upstream fixes are included and delete
-# the matching MindRoom override (each is linked from its own docstring):
-#   agno-agi/agno#9939  delete_runs scrubs the 2.x blob atomically  -> agent_storage delete_runs blob part
-#   agno-agi/agno#9938  run_index never below MAX+1 (or #9342)      -> agent_storage upsert_run
+# SQLite deletion and ordering have separate upstream tracking and removal
+# conditions in agno_compat_sqlite.py; review those when bumping this pin too.
 _SUPPORTED_AGNO_VERSION = "3.0.9"
 _ORIGINAL_AGENT_AREAD_SESSION = agent_storage.aread_session
 _ORIGINAL_AGENT_READ_SESSION = agent_storage.read_session
@@ -81,6 +91,15 @@ class _PersistenceLane:
     )
 
 
+# AGNO_COMPAT: Cancelled-run persistence lacks an awaited drain boundary.
+# Reason: Agno persists cancelled runs in detached background tasks without a
+# public drain boundary before the caller writes canonical history.
+# Upstream issue: No matching public cancelled-run persistence drain issue identified.
+# Upstream PR: None identified for this extension point.
+# Remove when: Agno exposes an awaited cancellation-persistence boundary with exact
+# agent/run ownership; preserve caller history ownership and cross-task stream safety.
+# Coverage: tests/test_agno_cancellation.py exercises exact-run ownership and drainage.
+# Additional coverage: tests/test_ai_cancellation_lifecycle.py and tests/test_delegation_stream_lifecycle.py.
 @dataclass
 class _CancellationOwner:
     agent: Agent

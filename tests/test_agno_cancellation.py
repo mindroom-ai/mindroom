@@ -16,10 +16,10 @@ from agno.run.base import RunStatus
 from agno.run.concurrency import mark_worker_managed, unmark_worker_managed
 from agno.session.agent import AgentSession
 
-from mindroom import agno_session_persistence_patch as persistence_patch
+from mindroom import agno_compat_session_persistence as persistence_patch
 from mindroom.agent_storage import get_agent_session
 from mindroom.cancellation import request_task_cancel
-from tests.test_agno_session_persistence_patch import _owner_and_session, _storage
+from tests.test_agno_compat_session_persistence import _owner_and_session, _storage
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -13,7 +13,7 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import apply_tool_approval_capability
-from mindroom.agno_session_persistence_patch import drain_agent_cancellation
+from mindroom.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.delegate import DelegateTools

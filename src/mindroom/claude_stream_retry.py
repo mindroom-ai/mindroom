@@ -23,17 +23,17 @@ import asyncio
 import random
 import time
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
+from mindroom.agno_compat_model_hooks import install_stream_invocation_hooks
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
-    from typing import Any
 
     from agno.models.anthropic import Claude as AnthropicClaude
     from agno.models.response import ModelResponse
@@ -174,14 +174,9 @@ def install_claude_stream_retry_hook(model: object) -> None:
     claude_model = as_anthropic_claude(model)
     if claude_model is None:
         return
-    model_dict = vars(claude_model)
-    if model_dict.get(_STREAM_RETRY_HOOK_ATTR) is True:
-        return
-    original_invoke_stream = claude_model.invoke_stream
-    original_ainvoke_stream = claude_model.ainvoke_stream
-    model_dict[_STREAM_RETRY_HOOK_ATTR] = True
-    model_dict["invoke_stream"] = partial(_invoke_stream_with_retry, claude_model, original_invoke_stream)
-    model_dict["ainvoke_stream"] = cast(
-        "Any",
-        partial(_ainvoke_stream_with_retry, claude_model, original_ainvoke_stream),
+    install_stream_invocation_hooks(
+        claude_model,
+        marker=_STREAM_RETRY_HOOK_ATTR,
+        wrap_sync=lambda original: partial(_invoke_stream_with_retry, claude_model, original),
+        wrap_async=lambda original: partial(_ainvoke_stream_with_retry, claude_model, original),
     )
