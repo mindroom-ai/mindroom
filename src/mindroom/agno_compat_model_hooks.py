@@ -6,6 +6,7 @@ them to the Agno methods that currently expose the required lifecycle stages.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
@@ -184,6 +185,38 @@ def install_stream_invocation_hooks(
     model_dict[marker] = True
     model_dict["invoke_stream"] = wrap_sync(original_sync)
     model_dict["ainvoke_stream"] = wrap_async(original_async)
+
+
+# Reason: Agno has no attempt-scoped hook at the final provider request; agent
+# pre-hooks run before compression, and its answer cache bypasses invocation hooks.
+# Upstream issue: No matching public scoped provider-request hook issue identified.
+# Upstream PR: None identified for this extension point.
+# Remove when: A public scoped request hook runs after compression and before cached
+# answers, restoring previous hooks on exit; retain owner participation and run identity.
+# Coverage: tests/test_participation.py::test_agent_turn_applies_decision_before_model_answer;
+# tests/test_participation.py::test_cancellation_is_not_converted_to_silence;
+# tests/test_participation_ownership.py::test_helpers_cannot_acquire_primary_decision.
+@contextmanager
+def temporary_async_invocation_hooks(
+    model: Model,
+    *,
+    invoke: _AsyncInvoke,
+    stream: _AsyncStream,
+) -> Iterator[None]:
+    """Bind attempt-scoped provider callbacks while bypassing Agno's answer cache."""
+    model_dict = vars(model)
+    saved = {name: model_dict.get(name) for name in ("ainvoke", "ainvoke_stream", "cache_response")}
+    model_dict["ainvoke"] = invoke
+    model_dict["ainvoke_stream"] = stream
+    model_dict["cache_response"] = False
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                model_dict.pop(name, None)
+            else:
+                model_dict[name] = value
 
 
 # Reason: Request-scoped media state must enclose Agno's private retry loops,

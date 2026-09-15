@@ -18890,7 +18890,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
-| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media callbacks, invocation/retry method binding, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, and prompt caching remain in their owning modules. |
+| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
@@ -18907,6 +18907,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 ## Installation and ownership
 
 Installers are explicit and idempotent, and preserve the existing order of model wrappers.
+Attempt-scoped bindings restore the previous methods and answer-cache settings when the attempt exits.
 The bindings call owner-supplied callbacks for behavior such as message projection, retry classification, and schema transformation.
 They do not choose approval outcomes, move storage ownership, change retry limits, or alter provider configuration.
 SQLite descendant discovery and legacy scrubbing remain inside the same deletion transaction.

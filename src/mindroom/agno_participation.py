@@ -13,6 +13,7 @@ from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 
+from mindroom.agno_compat_model_hooks import temporary_async_invocation_hooks
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.logging_config import get_logger
@@ -100,17 +101,14 @@ def participation_model(model: Model | None, gate: ParticipationGate | None, *, 
     learning and other helper calls lack that run identity, even when Agno
     shares or copies the model. Methods are restored before agent release.
 
-    Agno 3.0.9 has no supported hook here: agent pre-hooks precede compression,
-    and tool-result hooks miss the first request. Keep this compatibility seam
-    scoped to the attempt instead of spreading it across provider subclasses.
+    The compatibility binding keeps request interception scoped to the attempt
+    and prevents Agno's answer cache from bypassing the participation decision.
     """
     if gate is None or model is None:
         yield
         return
     original_invoke = model.ainvoke
     original_stream = model.ainvoke_stream
-    model_attributes = vars(model)
-    saved = {name: model_attributes.get(name) for name in ("ainvoke", "ainvoke_stream", "cache_response")}
 
     async def allow_request(messages: list[Message], kwargs: Mapping[str, object]) -> bool:
         response = kwargs.get("run_response")
@@ -132,15 +130,5 @@ def participation_model(model: Model | None, gate: ParticipationGate | None, *, 
         async for chunk in original_stream(messages=messages, **kwargs):
             yield chunk
 
-    model_attributes["ainvoke"] = invoke
-    model_attributes["ainvoke_stream"] = stream
-    # Agno's local answer cache returns before these hooks. Provider prompt caching stays enabled.
-    model_attributes["cache_response"] = False
-    try:
+    with temporary_async_invocation_hooks(model, invoke=invoke, stream=stream):
         yield
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                model_attributes.pop(name, None)
-            else:
-                model_attributes[name] = value
