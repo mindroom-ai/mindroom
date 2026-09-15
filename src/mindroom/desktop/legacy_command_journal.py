@@ -21,7 +21,8 @@ _MAX_SESSIONS = 128
 # executable bodies, and marks saved responses delivered until explicitly replayed.
 # Coverage: tests/test_desktop_command_journal.py::test_legacy_receipts_import_without_repeating_started_control;
 # tests/test_desktop_command_journal.py::test_legacy_completed_receipts_wait_for_explicit_replay;
-# tests/test_desktop_command_journal.py::test_full_legacy_started_cache_does_not_block_new_admission.
+# tests/test_desktop_command_journal.py::test_full_legacy_started_cache_does_not_block_new_admission;
+# tests/test_desktop_command_journal.py::test_malformed_legacy_import_preserves_existing_work_and_can_retry.
 
 
 def parse_legacy_records(

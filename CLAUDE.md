@@ -222,6 +222,7 @@ Matrix sync callback
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
+| `desktop/legacy_command_journal.py` | Validates historical JSON v1 receipts for the SQLite journal's one-time import |
 | `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
 | `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
 | `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |

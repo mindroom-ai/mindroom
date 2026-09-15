@@ -116,6 +116,44 @@ def test_legacy_receipts_import_without_repeating_started_control(tmp_path: Path
     journal.close()
 
 
+def test_malformed_legacy_import_preserves_existing_work_and_can_retry(tmp_path: Path) -> None:
+    """Reject the whole historical batch before adopting any receipt or sequence."""
+    path = tmp_path / "commands.sqlite3"
+    journal = DesktopCommandJournal.load(path)
+    journal.admit(COMMAND, FINGERPRINT)
+    journal.close()
+
+    legacy_entry = {"request_id": "legacy-1", "command_fingerprint": FINGERPRINT, "response": None}
+    payload = {
+        "v": 1,
+        "entries": [legacy_entry, {**legacy_entry, "request_id": "legacy-2", "command_fingerprint": "invalid"}],
+        "sequence_high_watermarks": [{"session_id": COMMAND.session_id, "sequence": 9}],
+    }
+    legacy = tmp_path / "command_journal.json"
+    legacy.write_text(json.dumps(payload), encoding="utf-8")
+    legacy.chmod(0o600)
+
+    with pytest.raises(DesktopCommandJournalError, match="legacy command journal is malformed"):
+        DesktopCommandJournal.load(path, legacy_path=legacy)
+
+    unchanged = DesktopCommandJournal.load(path)
+    assert unchanged.get("legacy-1") is None
+    assert unchanged.get("legacy-2") is None
+    assert unchanged.queued()[0].command == COMMAND
+    next_command = replace(COMMAND, request_id="next", sequence=2)
+    assert unchanged.sequence_error(next_command) is None
+    unchanged.close()
+
+    payload["entries"] = [legacy_entry]
+    legacy.write_text(json.dumps(payload), encoding="utf-8")
+    retried = DesktopCommandJournal.load(path, legacy_path=legacy)
+    assert retried.get("legacy-1").state == "started"
+    assert retried.get("legacy-1").command is None
+    assert retried.queued()[0].command == COMMAND
+    assert retried.sequence_error(next_command) is not None
+    retried.close()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Unix permission bits")
 def test_private_journal_and_sidecars(tmp_path: Path) -> None:
     """Desktop content cannot inherit group-readable file modes."""
