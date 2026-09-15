@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import nullcontext
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -12,11 +13,15 @@ import httpx
 import pytest
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
+from agno.session import TeamSession
 from agno.team import Team
 from agno.tools.function import Function
 from openai import AsyncOpenAI
 
-from mindroom.event_journal import ApprovalContinuation
+from mindroom.agent_storage import create_session_storage, save_runs
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.types import HistoryScope
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -25,7 +30,7 @@ from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_te
 from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import runtime_paths_for, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _noop_typing
+from tests.response_runner_helpers import _bot, _config, _noop_typing
 from tests.test_openai_native_compaction import _ANSWER, _CALL, _CHECKPOINT, _REASONING, _event, _response
 from tests.test_team_response import _build_test_config
 
@@ -42,6 +47,14 @@ async def _resume_approval(
     tmp_path: Path,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Enter the production agent or team approval boundary with a fresh actor."""
+    calls = (
+        ApprovalCall(
+            tool_call_id=tool_call_id,
+            tool_name="lookup",
+            invoking_agent=identity.agent_name,
+            expires_at_ns=2**62,
+        ),
+    )
     if isinstance(actor, Agent):
         continuation = ApprovalContinuation(
             approval_id="approval-native",
@@ -53,7 +66,7 @@ async def _resume_approval(
             thread_id="$thread",
             requester_id="@user:localhost",
             response_event_id="$waiting",
-            calls=(),
+            calls=calls,
             execution_identity={},
             sources=ResponseSources(("$source",), ("$source",)),
             state="claimed",
@@ -74,7 +87,7 @@ async def _resume_approval(
                 continuation,
                 execution_identity=identity,
                 tool_dispatch=ToolDispatchContext(execution_identity=identity),
-                decisions={tool_call_id: True},
+                decisions={tool_call_id: False},
                 denial_reasons={tool_call_id: None},
                 tool_trace_collector=[],
                 typing_log_context={},
@@ -88,15 +101,25 @@ async def _resume_approval(
             materialized_agent_names=set(),
             failed_agent_names=[],
         )
-        scope = SimpleNamespace(storage=None, storage_factory=lambda: actor.db)
+        session = await actor.aget_session(session_id="session-1", user_id="@user:localhost")
+        assert isinstance(session, TeamSession)
+        assert actor.db is not None
+        scope = ScopeSessionContext(
+            scope=HistoryScope(kind="team", scope_id=identity.agent_name),
+            storage=actor.db,
+            session=session,
+            session_id="session-1",
+            storage_factory=lambda: actor.db,
+        )
         with (
             patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-            patch("mindroom.teams.open_bound_scope_session_context", return_value=nullcontext(scope)),
+            patch("mindroom.teams.open_resolved_scope_session_context", return_value=nullcontext(scope)),
             patch("mindroom.teams.build_materialized_team_instance", return_value=actor),
             patch("mindroom.teams.close_team_runtime_state_dbs"),
         ):
             result = await continue_paused_team_run(
                 member_names=(),
+                approval_calls=calls,
                 mode=TeamMode.COORDINATE,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -106,7 +129,7 @@ async def _resume_approval(
                 user_id="@user:localhost",
                 configured_team_name=identity.agent_name,
                 model_name="default",
-                decisions={tool_call_id: True},
+                decisions={tool_call_id: False},
                 denial_reasons={tool_call_id: None},
                 refresh_scheduler=None,
                 prior_presentation_state=_TeamStreamPresentation.new([], [], show_tool_calls=True).to_state(),
@@ -118,7 +141,7 @@ async def _resume_approval(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entity", ["agent", "team"])
 @pytest.mark.parametrize("disable_before_pause", [False, True])
-async def test_rebuilt_approval_resumes_latest_native_policy(
+async def test_rebuilt_approval_resumes_latest_native_policy(  # noqa: PLR0915
     tmp_path: Path,
     entity: str,
     *,
@@ -151,7 +174,12 @@ async def test_rebuilt_approval_resumes_latest_native_policy(
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    db = SqliteDb(db_file=str(tmp_path / "approval.db"))
+    config = _config(tmp_path)
+    db = (
+        create_session_storage(name, config, runtime_paths_for(config), identity)
+        if entity == "agent"
+        else SqliteDb(db_file=str(tmp_path / "approval.db"))
+    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         client = AsyncOpenAI(api_key="test-key", http_client=http_client)
 
@@ -188,7 +216,7 @@ async def test_rebuilt_approval_resumes_latest_native_policy(
         )
 
         assert isinstance(result, CompletedApprovalRun)
-        assert executed == ["lookup"]
+        assert executed == []
         assert len(requests) == 3
         resumed = requests[-1]
         replay = resumed["input"]
@@ -251,7 +279,12 @@ async def test_rebuilt_approval_preserves_reasoning_context(  # noqa: PLR0915
         resolved_thread_id="$thread",
         session_id="session-1",
     )
-    db = SqliteDb(db_file=str(tmp_path / "approval.db"))
+    config = _config(tmp_path)
+    db = (
+        create_session_storage(name, config, runtime_paths_for(config), identity)
+        if entity == "agent"
+        else SqliteDb(db_file=str(tmp_path / "approval.db"))
+    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         client = AsyncOpenAI(api_key="test-key", http_client=http_client)
 
@@ -283,14 +316,14 @@ async def test_rebuilt_approval_preserves_reasoning_context(  # noqa: PLR0915
         if provenance != "saved":
             session = await actor.aget_session(session_id="session-1", user_id="@user:localhost")
             assert session is not None
-            persisted = session.get_run(paused.run_id)
+            persisted = deepcopy(session.get_run(paused.run_id))
             assert persisted is not None
             latest = next(message for message in reversed(persisted.messages or []) if message.role == "assistant")
             assert latest.provider_data is not None
             latest.provider_data.pop("mindroom_portable_replay", None)
             if provenance == "malformed":
                 latest.provider_data["mindroom_portable_replay"] = "false"
-            db.upsert_session(session)
+            save_runs(db, session, [persisted])
         result = await _resume_approval(
             build_actor(portable=not portable_before_pause),
             identity=identity,
@@ -299,7 +332,7 @@ async def test_rebuilt_approval_preserves_reasoning_context(  # noqa: PLR0915
             tmp_path=tmp_path,
         )
         assert isinstance(result, CompletedApprovalRun)
-        assert executed == ["lookup"]
+        assert executed == []
         assert len(requests) == 2
         resumed = requests[-1]
         assert resumed["store"] is True

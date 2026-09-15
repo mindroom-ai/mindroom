@@ -251,6 +251,7 @@ async def test_blocking_paused_attempt_escapes_without_recording_terminal_interr
             session_id="session-1",
             run_id="run-1",
             tools=(tool,),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
 
     with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
@@ -290,6 +291,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
         response,
         fallback_session_id="fallback-session",
         fallback_run_id="fallback-run",
+        toolkit_owners={},
     )
 
     assert paused is not None
@@ -314,6 +316,7 @@ def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
             requirements=(invalid_requirement,),
             session_id="session-1",
             run_id="run-1",
+            toolkit_owners={},
         )
 
 
@@ -336,6 +339,7 @@ def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
             requirements=requirements,
             session_id="session-1",
             run_id="run-1",
+            toolkit_owners={},
         )
 
 
@@ -362,6 +366,7 @@ def test_paused_attempt_rejects_mixed_unresolved_hitl_requirements() -> None:
             requirements=(confirmation, user_input),
             session_id="session-1",
             run_id="run-1",
+            toolkit_owners={},
         )
 
 
@@ -424,6 +429,7 @@ async def test_streaming_paused_attempt_escapes_without_recording_terminal_inter
         session_id="session-1",
         run_id="run-stream",
         tools=(tool,),
+        toolkit_owners={("general", "dangerous"): "test_toolkit"},
     )
 
     async def paused_attempt(

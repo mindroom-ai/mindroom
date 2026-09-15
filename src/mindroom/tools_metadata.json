@@ -198,7 +198,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "View Matrix room details, members, and conversation threads",
+      "description": "Discover available agents and view Matrix room details, members, and conversation threads",
       "display_name": "Matrix Room",
       "docs_url": "https://github.com/mindroom-ai/mindroom",
       "function_names": [
@@ -5151,7 +5151,7 @@
       "display_name": "OpenClaw Compat",
       "docs_url": null,
       "function_names": [],
-      "helper_text": "Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
+      "helper_text": "Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
       "icon": "Workflow",
       "icon_color": "text-orange-500",
       "name": "openclaw_compat",
@@ -6129,33 +6129,6 @@
       "icon_color": "text-purple-500",
       "name": "sleep",
       "requires_room_context": false,
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "development",
-      "config_fields": null,
-      "consumes_workspace_paths": false,
-      "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
-      "description": "Delegate tasks to sub-agents and follow up on their work",
-      "display_name": "Sub-Agents",
-      "docs_url": "https://github.com/mindroom-ai/mindroom",
-      "function_names": [
-        "agents_list",
-        "list_sessions",
-        "sessions_send",
-        "sessions_spawn"
-      ],
-      "helper_text": null,
-      "icon": "Workflow",
-      "icon_color": "text-teal-500",
-      "name": "subagents",
-      "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
     },
@@ -7900,11 +7873,12 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Delegate tasks to other configured agents",
-      "display_name": "Agent Delegation",
+      "description": "Start allowed subagents, continue their conversations, and return their results",
+      "display_name": "Subagents",
       "docs_url": null,
       "function_names": [
-        "delegate_task"
+        "run_subagent",
+        "continue_subagent"
       ],
       "helper_text": null,
       "icon": "Users",
@@ -8055,7 +8029,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Tool names workflow participants may call without per-call user approval. Use \"*\" to pre-approve every granted tool. System-mutating tools (claude_agent, config_manager, scheduler, subagents) always require per-call approval and cannot be pre-approved.",
+          "description": "Tool names workflow participants may call without per-call user approval. Use \"*\" to pre-approve every granted tool. System-mutating tools (claude_agent, config_manager, scheduler) always require per-call approval and cannot be pre-approved.",
           "label": "Pre-approved participant tools",
           "name": "allowed_tools",
           "options": null,

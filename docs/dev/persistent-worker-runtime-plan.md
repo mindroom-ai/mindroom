@@ -365,7 +365,7 @@ The default local-only set includes:
 - Tools that schedule or orchestrate background work globally.
 - Tools that delegate to sub-agents using primary runtime orchestration.
 
-Concrete current examples include `scheduler`, `subagents`, and self-configuration flows.
+Concrete current examples include `scheduler`, self-configuration flows.
 
 ## Background Processes
 

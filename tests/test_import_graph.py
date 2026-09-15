@@ -375,3 +375,33 @@ def test_tool_auto_install_smoke_entrypoint_imports() -> None:
         check=True,
         timeout=120,
     )
+
+
+@pytest.mark.parametrize(
+    ("module", "forbidden"),
+    [
+        (
+            "mindroom.delegation.sessions",
+            (
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
+                "mindroom.delegation.lifecycle",
+                "mindroom.custom_tools.delegate",
+            ),
+        ),
+        (
+            "mindroom.delegation.audit",
+            (
+                "mindroom.delegation.sessions",
+                "mindroom.delegation.lifecycle",
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
+            ),
+        ),
+        ("mindroom.delegation.execution", ("mindroom.ai", "mindroom.custom_tools.delegate")),
+        ("mindroom.delegation.state", ("agno", "mindroom.config", "mindroom.knowledge")),
+    ],
+)
+def test_delegation_dependencies_point_toward_state_and_storage(module: str, forbidden: tuple[str, ...]) -> None:
+    """Storage/audit cannot boot execution; the driver cannot construct its response adapter."""
+    _assert_probe_clean(module, forbidden)

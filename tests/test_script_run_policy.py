@@ -219,7 +219,7 @@ def test_background_approval_overlay_never_preapproves_system_mutation() -> None
         config,
         function_owners=function_owners,
         preapproved_toolkits=frozenset({"*"}),
-        never_preapprove_toolkits=frozenset({"config_manager", "scheduler", "subagents", "claude_agent"}),
+        never_preapprove_toolkits=frozenset({"claude_agent", "config_manager", "scheduler"}),
     )
 
     read_rule = _matching_tool_approval_rule(resolved, "read_url")

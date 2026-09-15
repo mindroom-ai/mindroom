@@ -3397,6 +3397,7 @@ class TestAgentBot(AgentBotTestBase):
                 session_id=target.target.session_id,
                 run_id="run-1",
                 tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={}),),
+                toolkit_owners={("general", "dangerous"): "test_toolkit"},
             ),
         )
         waiting = FinalDeliveryOutcome(

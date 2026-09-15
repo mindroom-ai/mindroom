@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
 
-NEVER_PREAPPROVE_TOOLKITS = frozenset({"claude_agent", "config_manager", "scheduler", "subagents"})
+NEVER_PREAPPROVE_TOOLKITS = frozenset({"claude_agent", "config_manager", "scheduler"})
 
 
 def build_automation_approval_config(

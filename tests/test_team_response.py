@@ -6,14 +6,14 @@ import asyncio
 import inspect
 import tempfile
 from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from agno.agent import Agent as AgnoAgent
-from agno.db.base import SessionType
+from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
 from agno.models.response import ToolExecution
@@ -31,6 +31,7 @@ from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
+from agno.session import TeamSession
 from agno.team import Team as AgnoTeam
 from agno.team._run import _cleanup_and_store
 from agno.tools.function import Function
@@ -48,6 +49,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, ROUTER_AGENT_NAME, RuntimePaths
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -56,7 +58,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
 )
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
-from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.storage import read_scope_seen_event_ids, update_scope_seen_event_ids
 from mindroom.history.summary_input import _compaction_replay_messages
 from mindroom.history.turn_recorder import TurnRecorder
@@ -66,7 +68,12 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.media_inputs import MediaInputs
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import (
+    CompletedApprovalRun,
+    PausedAttempt,
+    ResponsePausedForApproval,
+    apply_exact_approval_decisions,
+)
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -163,6 +170,7 @@ def test_team_pause_reindexes_interleaved_member_tools_to_document_order() -> No
         response_text=presentation.render_body(),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
+        toolkit_owners={("general", "inspect_first"): "test_toolkit", ("general", "inspect_second"): "test_toolkit"},
     )
 
     require_ordered_pause_presentation(paused, show_tool_calls=True)
@@ -450,6 +458,7 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
             run_id="run-1",
             tools=(tool,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=response,
         config_names=["general"],
@@ -483,6 +492,7 @@ def test_blocking_team_pause_renders_a_marker_only_member_tool_on_its_own_line()
             run_id="run-1",
             tools=(tool,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=TeamRunOutput(tools=[tool], status=RunStatus.paused),
         config_names=["general"],
@@ -507,6 +517,7 @@ def test_blocking_team_pause_maps_provider_member_id_to_raw_config_name() -> Non
             run_id="run-1",
             tools=(tool,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=TeamRunOutput(
             tools=[tool],
@@ -555,6 +566,7 @@ def test_blocking_team_pause_scopes_reused_call_ids_to_distinct_members() -> Non
             run_id="run-1",
             tools=(pending,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=response,
         config_names=["first", "second"],
@@ -779,18 +791,10 @@ def test_materialize_exact_requested_team_members_short_circuits_missing_live_me
 
 
 @pytest.mark.asyncio
-async def test_paused_team_scope_open_failure_closes_materialized_member_databases() -> None:
-    """A scope __enter__ failure must still release every newly materialized member DB."""
+async def test_paused_team_scope_open_failure_does_not_materialize_members() -> None:
+    """A failed history lookup must not materialize team members."""
     config = _build_test_config()
     runtime_paths = runtime_paths_for(config)
-    agent = _make_test_agent("GeneralAgent")
-    members = ResolvedExactTeamMembers(
-        requested_agent_names=["general"],
-        agents=[agent],
-        display_names=["GeneralAgent"],
-        materialized_agent_names={"general"},
-        failed_agent_names=[],
-    )
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",
@@ -810,9 +814,8 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
             return None
 
     with (
-        patch("mindroom.teams.materialize_exact_team_members", return_value=members),
-        patch("mindroom.teams.install_approval_receipt_hooks") as install_receipt,
-        patch("mindroom.teams.open_bound_scope_session_context", return_value=ThrowingScope()),
+        patch("mindroom.teams.materialize_exact_team_members") as materialize,
+        patch("mindroom.teams.open_resolved_scope_session_context", return_value=ThrowingScope()),
         patch("mindroom.teams.close_team_runtime_state_dbs") as close_dbs,
         pytest.raises(RuntimeError, match="scope open failed"),
     ):
@@ -832,29 +835,34 @@ async def test_paused_team_scope_open_failure_closes_materialized_member_databas
             refresh_scheduler=None,
         )
 
+    materialize.assert_not_called()
     close_dbs.assert_called_once_with(
-        agents=[agent],
+        agents=[],
         team_db=None,
         shared_scope_storage=None,
     )
-    install_receipt.assert_called_once_with(agent.model, agent.fallback_config)
 
 
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
+@pytest.mark.parametrize("delegated", [False, True])
 @pytest.mark.asyncio
-async def test_team_continuation_executes_real_agno_confirmation(
+async def test_team_continuation_executes_real_agno_confirmation(  # noqa: PLR0915
     tmp_path: Path,
     approved: bool,
     reason: str | None,
+    delegated: bool,
 ) -> None:
     """Exercise the real persisted Agno team pause and continuation spine."""
     executed: list[list[str]] = []
     observed_metadata: list[dict[str, object] | None] = []
-    original_metadata = {
+    original_metadata: dict[str, object] = {
         "room_id": "!room:localhost",
         "thread_id": "$thread",
         "correlation_id": "team-approval-metadata",
     }
+
+    if delegated:
+        original_metadata[DELEGATION_STATE_KEY] = DelegationState().to_dict()
 
     def run_shell_command(args: list[str], run_context: RunContext) -> str:
         executed.append(args)
@@ -925,18 +933,64 @@ async def test_team_continuation_executes_real_agno_confirmation(
     )
     persisted_scope = HistoryScope(kind="team", scope_id="ad_hoc_original_scope")
     storage_factory = MagicMock()
-    scope_context = SimpleNamespace(storage=None, storage_factory=storage_factory)
+    session = await team.aget_session(session_id="session-1", user_id="@user:localhost")
+    assert isinstance(session, TeamSession)
+    assert team.db is not None
+    # Conversation history can belong to an earlier participant than this paused run.
+    session.user_id = "@history-owner:localhost"
+    scope_context = ScopeSessionContext(
+        scope=persisted_scope,
+        storage=team.db,
+        session=session,
+        session_id="session-1",
+        storage_factory=storage_factory,
+    )
+
+    async def drive_resumed(
+        entity: object,
+        events: AsyncIterator[object],
+        **kwargs: object,
+    ) -> AsyncIterator[object]:
+        """Continue a local approval in a parent that may have delegated earlier."""
+        assert entity is team
+        if not delegated:
+            assert kwargs["decisions"] is None
+            async for event in events:
+                yield event
+            return
+        assert kwargs["decisions"] == {tool_call_id: approved}
+        assert kwargs["denial_reasons"] == {tool_call_id: reason}
+        async for retained in events:
+            assert isinstance(retained, TeamRunOutput)
+            requirements = apply_exact_approval_decisions(
+                deepcopy(retained.requirements or []),
+                decisions={tool_call_id: approved},
+                denial_reasons={tool_call_id: reason},
+            )
+            async for event in team.acontinue_run(
+                run_response=retained,
+                requirements=requirements,
+                session_id="session-1",
+                user_id="@user:localhost",
+                metadata=deepcopy(retained.metadata),
+                stream=True,
+                stream_events=True,
+                yield_run_output=True,
+            ):
+                yield event
 
     with (
+        pytest.raises(RuntimeError, match="approval calls") if approved else nullcontext(),
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
         patch(
-            "mindroom.teams.open_bound_scope_session_context",
+            "mindroom.teams.open_resolved_scope_session_context",
             return_value=nullcontext(scope_context),
         ) as open_scope,
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
         patch.object(team, "acontinue_run", new=continue_run),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
         patch("mindroom.teams.ai_runtime.register_queued_notice_storage") as register_notice,
+        patch("mindroom.teams.drive_delegation_stream", new=drive_resumed),
         approval_receipt_context("trusted approval receipt"),
     ):
         result = await continue_paused_team_run(
@@ -961,6 +1015,9 @@ async def test_team_continuation_executes_real_agno_confirmation(
             tool_trace_collector=collected_trace,
         )
 
+    if approved:
+        assert executed == []
+        return
     assert isinstance(result, CompletedApprovalRun)
     assert AI_RUN_METADATA_KEY in result.metadata_content
     assert bool(executed) is approved
@@ -1021,7 +1078,7 @@ async def test_team_continuation_rejects_non_exact_persisted_call_ids(
     )
     team = MagicMock()
     team.db = None
-    team.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
+    team.model = None
     team.acontinue_run = AsyncMock(
         return_value=TeamRunOutput(
             run_id="run-1",
@@ -1048,11 +1105,17 @@ async def test_team_continuation_rejects_non_exact_persisted_call_ids(
     decisions = dict.fromkeys(decision_call_ids, True)
     denial_reasons = dict.fromkeys(decision_call_ids)
 
+    scope_context = ScopeSessionContext(
+        scope=HistoryScope(kind="team", scope_id="research"),
+        storage=MagicMock(spec=BaseDb),
+        session=TeamSession(session_id="session-1", team_id="research", user_id="@user:localhost", runs=[persisted]),
+        session_id="session-1",
+    )
     with (
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
         patch(
-            "mindroom.teams.open_bound_scope_session_context",
-            return_value=nullcontext(SimpleNamespace(storage=None, storage_factory=None)),
+            "mindroom.teams.open_resolved_scope_session_context",
+            return_value=nullcontext(scope_context),
         ),
         patch("mindroom.teams.build_materialized_team_instance", return_value=team),
         patch("mindroom.teams.close_team_runtime_state_dbs"),
@@ -2709,7 +2772,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_cancelle
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -2781,7 +2844,7 @@ async def test_team_response_stream_drains_confirmation_pause_before_handoff() -
     orchestrator.agent_bots = {"general": MagicMock(running=True)}
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -2973,14 +3036,14 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
         )
         yield TeamToolCallStartedEvent(
             tool=ToolExecution(
-                tool_name="delegate_task",
+                tool_name="run_subagent",
                 tool_args={"agent": "general"},
                 tool_call_id="team-call-1",
             ),
         )
         yield TeamToolCallCompletedEvent(
             tool=ToolExecution(
-                tool_name="delegate_task",
+                tool_name="run_subagent",
                 tool_args={"agent": "general"},
                 tool_call_id="team-call-1",
                 result="delegated",
@@ -3074,7 +3137,7 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
                 "team_name": "Team (GeneralAgent)",
                 "tool_scope": "team",
                 "agent_name": None,
-                "tool_name": "delegate_task",
+                "tool_name": "run_subagent",
                 "tool_call_id": "team-call-1",
                 "show_tool_calls": True,
             },
@@ -3086,7 +3149,7 @@ async def test_team_response_stream_marks_tool_call_timing_for_agent_and_team_to
                 "team_name": "Team (GeneralAgent)",
                 "tool_scope": "team",
                 "agent_name": None,
-                "tool_name": "delegate_task",
+                "tool_name": "run_subagent",
                 "tool_call_id": "team-call-1",
                 "show_tool_calls": True,
             },
@@ -3382,7 +3445,7 @@ async def test_team_response_stream_emits_team_run_output_fallback() -> None:
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3506,7 +3569,7 @@ async def test_team_response_stream_keys_canonical_text_by_provider_member_id() 
     orchestrator.agent_bots = {"Code_Review": MagicMock(running=True)}
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["Code_Review"],
-        agents=[],
+        agents=[_make_test_agent("Code Review")],
         display_names=["Code Review"],
         materialized_agent_names={"Code_Review"},
         failed_agent_names=[],
@@ -3584,7 +3647,7 @@ async def test_team_response_stream_emits_plain_run_output_fallback_with_team_fo
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3649,7 +3712,7 @@ async def test_team_response_stream_raises_cancelled_error_for_team_run_output_f
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3702,7 +3765,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_run_outpu
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],
@@ -3758,7 +3821,7 @@ async def test_team_response_stream_returns_friendly_error_for_errored_plain_run
 
     team_members = ResolvedExactTeamMembers(
         requested_agent_names=["general"],
-        agents=[],
+        agents=[_make_test_agent("GeneralAgent")],
         display_names=["GeneralAgent"],
         materialized_agent_names={"general"},
         failed_agent_names=[],

@@ -112,7 +112,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         (identity,) = config_lifecycle.app_state(api.client.app).openai_responses
         assert (identity.responder, identity.requester_id) == ("leader", "@alice:example.org")
         tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
-        return await tool.delegate_task("specialist", "help")
+        return await tool.run_subagent(agent_name="specialist", task="help")
 
     async def streaming(
         ctx: ResponseTurnContext,
@@ -126,7 +126,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     with (
         patch.object(openai_compat, "ai_response", side_effect=delegate),
         patch.object(openai_compat, "stream_agent_response", side_effect=streaming),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=child),
+        patch("mindroom.ai.ai_response", side_effect=child),
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -156,11 +156,11 @@ def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> Non
         **_kwargs: object,
     ) -> str:
         tool = DelegateTools("leader", [target], api.runtime_paths, api.config, execution_identity)
-        return await tool.delegate_task(target, "help")
+        return await tool.run_subagent(agent_name=target, task="help")
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=delegate),
-        patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as child,
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -223,7 +223,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
 
     async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
         tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
-        return await tool.delegate_task("specialist", "help")
+        return await tool.run_subagent(agent_name="specialist", task="help")
 
     async def child(ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
         assert ctx.requester_id == "@alice:example.org"
@@ -236,11 +236,11 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
             execution_identity,
             delegation_depth=1,
         )
-        return await tool.delegate_task("forbidden", "help")
+        return await tool.run_subagent(agent_name="forbidden", task="help")
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=parent),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=child) as child_mock,
+        patch("mindroom.ai.ai_response", side_effect=child) as child_mock,
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -267,11 +267,11 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
         if policy == "replace_runtime":
             snapshot.runtime_paths = resolve_runtime_paths(config_path=tmp_path / "replaced.yaml", process_env={})
         tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
-        return await tool.delegate_task("specialist", "help")
+        return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=parent),
-        patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as child,
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -291,11 +291,11 @@ def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
         replacement.agents["leader"].delegate_to = []
         config_lifecycle.require_api_state(api.client.app).snapshot.runtime_config = replacement
         tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
-        return await tool.delegate_task("specialist", "help")
+        return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=parent),
-        patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as child,
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
             "/v1/chat/completions",

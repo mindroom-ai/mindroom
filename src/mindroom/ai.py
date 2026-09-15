@@ -27,6 +27,7 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.agno_participation import participation_model
 from mindroom.ai_run_metadata import (
@@ -35,8 +36,16 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
+from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
+from mindroom.delegation.lifecycle import (
+    authorize_delegation,
+    child_execution_identity,
+    note_child_run_id,
+    observe_child_event,
+)
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
@@ -52,6 +61,7 @@ from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
     open_resolved_scope_session_context,
 )
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
     EnrichmentItem,
@@ -59,6 +69,7 @@ from mindroom.hooks import (
     render_system_enrichment_block,
     render_transient_context,
 )
+from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
@@ -102,6 +113,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     format_tool_combined,
 )
+from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -116,7 +128,7 @@ if TYPE_CHECKING:
     from mindroom.ai_turn_state import AITurnState
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
-    from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.delegation.state import DelegationChild
     from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -131,6 +143,7 @@ __all__ = [
     "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
+    "run_delegated_child_response",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -289,6 +302,7 @@ class _StreamingAttemptState:
     latest_request_cache_write_tokens: int | None = None
     cancelled_run_event: RunCancelledEvent | None = None
     paused_run_event: RunPausedEvent | None = None
+    terminal_response: RunOutput | None = None
     completed_run_event: RunCompletedEvent | None = None
     canonical_final_body_candidate: str | None = None
     completed_tool_executions: list[ToolExecution] = field(default_factory=list)
@@ -1324,7 +1338,81 @@ async def _prepare_agent_run_context(
         )
 
 
-async def ai_response(  # noqa: C901
+async def run_delegated_child_response(
+    child: DelegationChild,
+    *,
+    prompt: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    supports_native_tool_approval: bool,
+) -> str:
+    """Execute the normal response envelope for a prepared child owned by either adapter."""
+    identity = child_execution_identity(child)
+    active_config = authorize_delegation(
+        child.caller_agent_name,
+        child.child_agent_name,
+        prompt,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=replace(identity, agent_name=child.caller_agent_name),
+        depth=child.depth - 1,
+    )
+    if isinstance(active_config, str):
+        return active_config
+    knowledge = await resolve_agent_knowledge_access_async(
+        child.child_agent_name,
+        active_config,
+        runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        execution_identity=identity,
+    )
+    context = get_tool_runtime_context()
+    child_context = (
+        replace(
+            context,
+            agent_name=child.child_agent_name,
+            active_model_name=child.model_name,
+            target=replace(context.target, session_id=child.session_id),
+        )
+        if context is not None
+        else None
+    )
+    turn = ResponseTurnContext(
+        entity_label=child.child_agent_name,
+        session_id=child.session_id,
+        run_id=child.run_id,
+        correlation_id=(child_context.correlation_id if child_context is not None else None) or uuid4().hex,
+        reply_to_event_id=None,
+        room_id=identity.room_id,
+        thread_id=identity.resolved_thread_id,
+        requester_id=identity.requester_id,
+        matrix_run_metadata=None,
+        active_model_name=child.model_name,
+        transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
+    )
+    with tool_runtime_context(child_context):
+        return await ai_response(
+            turn,
+            prompt=prompt,
+            runtime_paths=runtime_paths,
+            config=active_config,
+            knowledge=knowledge.knowledge,
+            run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
+            include_interactive_questions=False,
+            include_openai_compat_guidance=identity.channel == "openai_compat",
+            tool_function_filter=context.tool_function_filter if context is not None else None,
+            execution_identity=identity,
+            delegation_depth=child.depth,
+            refresh_scheduler=refresh_scheduler,
+            attempt_model_runtime=ToolRuntimeModelBinding(),
+            supports_native_tool_approval=supports_native_tool_approval,
+            collect_streamed_response=True,
+            turn_recorder=TurnRecorder(user_message=prompt),
+        )
+
+
+async def ai_response(  # noqa: C901, PLR0915
     ctx: ResponseTurnContext,
     prompt: str,
     runtime_paths: RuntimePaths,
@@ -1470,7 +1558,7 @@ async def ai_response(  # noqa: C901
         retain_agent_runtime_state=reusable_agent is not None,
     )
 
-    async def _run_blocking_attempt(
+    async def _run_blocking_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> BlockingAttemptResolution:
@@ -1551,6 +1639,21 @@ async def ai_response(  # noqa: C901
             )
         ):
             return skipped
+        if supports_native_tool_approval:
+            response = cast(
+                "RunOutput",
+                await drive_delegations(
+                    prepared_run.agent,
+                    response,
+                    run_child=run_delegated_child_response,
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                    delegation_depth=delegation_depth,
+                    refresh_scheduler=refresh_scheduler,
+                ),
+            )
 
         response_tool_trace = _extract_tool_trace(response)
         if tool_trace_collector is not None:
@@ -1577,6 +1680,7 @@ async def ai_response(  # noqa: C901
                 response,
                 fallback_session_id=session_id,
                 fallback_run_id=attempt.attempt_run_id,
+                toolkit_owners=toolkit_owners_for_agents([prepared_run.agent]),
             )
             if paused_attempt is not None:
                 return replace(
@@ -1670,6 +1774,10 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
     try:
         async for event in stream_generator:
+            await observe_child_event(event)
+            if isinstance(event, RunOutput):
+                state.terminal_response = event
+                continue
             if isinstance(event, RunContentEvent):
                 if not event.content:
                     continue
@@ -1775,6 +1883,7 @@ async def _stream_agent_attempt_chunks(
     run_id_callback: Callable[[str], None] | None,
     state_updated: Callable[[], None] | None,
     pipeline_timing: DispatchPipelineTiming | None,
+    transform_events: Callable[[AsyncIterator[Any]], AsyncIterator[Any]] | None = None,
 ) -> AsyncGenerator[AIStreamChunk, None]:
     """Start and consume one streaming agent attempt."""
     agent = run_context.prepared_run.agent
@@ -1802,12 +1911,15 @@ async def _stream_agent_attempt_chunks(
                 run_id=attempt.attempt_run_id,
                 stream=True,
                 stream_events=True,
+                yield_run_output=True,
                 metadata=run_context.metadata,
             )
         stream_generator = stream_with_llm_request_log_context(
             stream_generator,
             request_context=request_context,
         )
+        if transform_events is not None:
+            stream_generator = transform_events(stream_generator)
         async for stream_chunk in _process_stream_events(
             stream_generator,
             state=state,
@@ -2057,6 +2169,21 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 run_id_callback=run_id_callback,
                 state_updated=_sync_live_turn_recorder,
                 pipeline_timing=pipeline_timing,
+                transform_events=(
+                    lambda events: drive_delegation_stream(
+                        prepared_run.agent,
+                        events,
+                        run_child=run_delegated_child_response,
+                        agent_name=agent_name,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        execution_identity=execution_identity,
+                        delegation_depth=delegation_depth,
+                        refresh_scheduler=refresh_scheduler,
+                    )
+                )
+                if supports_native_tool_approval
+                else None,
             ),
             active_model_name=prepared_run.runtime_model_name,
         )
@@ -2109,10 +2236,20 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             return
 
         if state.paused_run_event is not None:
-            paused_attempt = paused_attempt_from_event(
-                state.paused_run_event,
-                fallback_session_id=session_id,
-                fallback_run_id=attempt.attempt_run_id,
+            paused_attempt = (
+                paused_attempt_from_response(
+                    state.terminal_response,
+                    fallback_session_id=session_id,
+                    fallback_run_id=attempt.attempt_run_id,
+                    toolkit_owners=toolkit_owners_for_agents([prepared_run.agent]),
+                )
+                if state.terminal_response is not None
+                else paused_attempt_from_event(
+                    state.paused_run_event,
+                    fallback_session_id=session_id,
+                    fallback_run_id=attempt.attempt_run_id,
+                    toolkit_owners=toolkit_owners_for_agents([prepared_run.agent]),
+                )
             )
             if paused_attempt is not None:
                 for tool_event in _materialize_paused_agent_tool_events(

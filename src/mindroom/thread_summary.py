@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _VERTEXAI_CLAUDE_CLASS = ("agno.models.vertexai.claude", "Claude")
 _GOOGLE_GEMINI_CLASS = ("mindroom.google_gemini", "MindRoomGoogleGemini")
-THREAD_SUMMARY_MAX_LENGTH = 300
+_THREAD_SUMMARY_MAX_LENGTH = 300
 _MAX_INITIAL_TAGS = 3
 _MARKDOWN_LINK_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)|\[([^\]]+)\]\([^)]+\)")
 _MARKDOWN_CODE_BLOCK_RE = re.compile(r"```(?:[^\n`]*)\n?(.*?)```", re.DOTALL)
@@ -103,7 +103,7 @@ class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
     summary: str = Field(
-        max_length=THREAD_SUMMARY_MAX_LENGTH,
+        max_length=_THREAD_SUMMARY_MAX_LENGTH,
         description="One-line summary of the thread conversation",
     )
 
@@ -171,7 +171,7 @@ def _configure_summary_model_temperature(
     )
 
 
-def normalize_thread_summary_text(raw_text: str) -> str:
+def _normalize_thread_summary_text(raw_text: str) -> str:
     """Strip common markdown formatting and collapse the result to one plain-text line."""
     normalized = raw_text.strip()
     if not normalized:
@@ -199,7 +199,7 @@ def _thread_summary_lock(room_id: str, thread_id: str) -> asyncio.Lock:
     return _thread_locks[_thread_summary_cache_key(room_id, thread_id)]
 
 
-def update_last_summary_count(room_id: str, thread_id: str, message_count: int) -> None:
+def _update_last_summary_count(room_id: str, thread_id: str, message_count: int) -> None:
     """Record the latest summarized message count for one thread monotonically."""
     cache_key = _thread_summary_cache_key(room_id, thread_id)
     existing_count = _last_summary_counts.get(cache_key, 0)
@@ -748,7 +748,7 @@ async def _deliver_generated_summary(
         )
 
     try:
-        await send_thread_summary_event(
+        await _send_thread_summary_event(
             client,
             room_id,
             thread_id,
@@ -762,7 +762,7 @@ async def _deliver_generated_summary(
         logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
 
 
-async def send_thread_summary_event(
+async def _send_thread_summary_event(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
@@ -773,23 +773,17 @@ async def send_thread_summary_event(
     *,
     initial_enrichment_complete: bool | None = None,
     pinned: bool | None = None,
-    known_latest_thread_event_id: str | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
-
-    ``known_latest_thread_event_id`` lets a caller that already knows the newest
-    event in the thread (for example the creator of a brand-new thread) supply it
-    directly, skipping the history read that would otherwise scan the homeserver
-    for a thread with no cache snapshot yet.
 
     ``pinned`` records an explicit decision about whether this summary should
     stop automatic re-summarization. It defaults to ``None``, which omits the
     key entirely and leaves any existing pin decision untouched. Only callers
     acting on a user's intent should pass a boolean: writers that summarize as a
-    side effect, such as the subagent spawn path, must not disturb pin state on
+    side effect must not disturb pin state on
     a thread the user already pinned.
     """
-    normalized_summary = normalize_thread_summary_text(summary)
+    normalized_summary = _normalize_thread_summary_text(summary)
     if not normalized_summary:
         logger.warning(
             "Refusing to send empty normalized thread summary",
@@ -800,25 +794,23 @@ async def send_thread_summary_event(
         return None
 
     truncated_summary = (
-        normalized_summary[: THREAD_SUMMARY_MAX_LENGTH - 3] + "..."
-        if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH
+        normalized_summary[: _THREAD_SUMMARY_MAX_LENGTH - 3] + "..."
+        if len(normalized_summary) > _THREAD_SUMMARY_MAX_LENGTH
         else normalized_summary
     )
-    latest_thread_event_id = known_latest_thread_event_id
-    if latest_thread_event_id is None:
-        try:
-            latest_thread_event_id = await conversation_reader.latest_thread_event_id(
-                room_id=room_id,
-                thread_id=thread_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Falling back to thread root for summary send after latest-event lookup failure",
-                room_id=room_id,
-                thread_id=thread_id,
-                error=str(exc),
-            )
-            latest_thread_event_id = None
+    try:
+        latest_thread_event_id = await conversation_reader.latest_thread_event_id(
+            room_id=room_id,
+            thread_id=thread_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Falling back to thread root for summary send after latest-event lookup failure",
+            room_id=room_id,
+            thread_id=thread_id,
+            error=str(exc),
+        )
+        latest_thread_event_id = None
     summary_metadata: dict[str, object] = {
         "version": 1,
         "summary": truncated_summary,
@@ -874,12 +866,12 @@ async def set_manual_thread_summary(
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
 
-    normalized_summary = normalize_thread_summary_text(summary)
+    normalized_summary = _normalize_thread_summary_text(summary)
     if not normalized_summary:
         msg = "summary must be a non-empty string."
         raise ThreadSummaryWriteError(msg)
-    if len(normalized_summary) > THREAD_SUMMARY_MAX_LENGTH:
-        msg = f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
+    if len(normalized_summary) > _THREAD_SUMMARY_MAX_LENGTH:
+        msg = f"summary must be {_THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
         raise ThreadSummaryWriteError(msg)
 
     async with _thread_summary_lock(room_id, thread_id):
@@ -901,7 +893,7 @@ async def set_manual_thread_summary(
             trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
         )
         try:
-            event_id = await send_thread_summary_event(
+            event_id = await _send_thread_summary_event(
                 client,
                 room_id,
                 thread_id,
@@ -918,7 +910,7 @@ async def set_manual_thread_summary(
             msg = "Failed to send thread summary event."
             raise ThreadSummaryWriteError(msg)
 
-        update_last_summary_count(room_id, thread_id, message_count)
+        _update_last_summary_count(room_id, thread_id, message_count)
         return _ThreadSummaryWriteResult(
             event_id=event_id,
             message_count=message_count,
@@ -992,7 +984,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             trusted_sender_ids=trusted_sender_ids,
         )
         if recovered_summary_count > 0:
-            update_last_summary_count(room_id, thread_id, recovered_summary_count)
+            _update_last_summary_count(room_id, thread_id, recovered_summary_count)
 
         threshold = _next_thread_summary_threshold(room_id, thread_id, config)
         message_count = _count_non_summary_thread_messages(
@@ -1008,7 +1000,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             )
             # Advance the baseline so the cheap pre-check stops firing, and
             # therefore stops spawning a history-loading pass, on every turn.
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
         if message_count < threshold:
             return
@@ -1019,7 +1011,7 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
                 thread_id=thread_id,
                 message_count=message_count,
             )
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         initial_enrichment = recovered_summary_count > 0 and not _recover_initial_enrichment_complete(
@@ -1049,24 +1041,24 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
         except Exception:
             logger.exception("Thread summary generation failed", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         if generated is None:
             logger.warning("Thread summary generation returned None", room_id=room_id, thread_id=thread_id)
             # Record current count to prevent retry storms until next threshold
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         summary = generated.summary if isinstance(generated, _ThreadEnrichment) else generated
-        normalized_summary = normalize_thread_summary_text(summary)
+        normalized_summary = _normalize_thread_summary_text(summary)
         if not normalized_summary:
             logger.warning(
                 "Thread summary generation returned no plain-text content",
                 room_id=room_id,
                 thread_id=thread_id,
             )
-            update_last_summary_count(room_id, thread_id, message_count)
+            _update_last_summary_count(room_id, thread_id, message_count)
             return
 
         await _deliver_generated_summary(
@@ -1082,4 +1074,4 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
         )
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.
-        update_last_summary_count(room_id, thread_id, message_count)
+        _update_last_summary_count(room_id, thread_id, message_count)

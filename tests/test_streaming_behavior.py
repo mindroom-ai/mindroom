@@ -3391,6 +3391,7 @@ class TestStreamingBehavior:
                 tools=(tool,),
                 response_text=f"Before approval.{marker}",
                 tool_trace=(trace_entry,),
+                toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
         )
         recorded_force_flags: list[bool] = []
@@ -3482,6 +3483,7 @@ class TestStreamingBehavior:
                 tools=(tool,),
                 response_text=f"{raw_interactive}{marker}".rstrip(),
                 tool_trace=(trace_entry,),
+                toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
         )
 

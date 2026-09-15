@@ -16,19 +16,29 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.base import RunStatus
+from agno.session.agent import AgentSession
 
 from mindroom import ai_runtime
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
+from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
+from mindroom.approval_tools import (
+    approval_denial_context,
+    required_approval_tool_names,
+    toolkit_owners_for_agents,
+    validate_approval_tool_owners,
+)
+from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
+from mindroom.delegation.state import DelegationState
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
     CompletedApprovalRun,
     PausedAttempt,
-    apply_exact_approval_decisions,
+    apply_local_approval_decisions,
     paused_attempt_from_response,
 )
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
@@ -41,7 +51,6 @@ if TYPE_CHECKING:
     import nio
     from agno.agent import Agent
     from agno.run.requirement import RunRequirement
-    from agno.session.agent import AgentSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -92,12 +101,26 @@ async def _collect_agent_continuation(
         terminal_content,
         saw_content_delta=saw_content_delta,
     )
+    _reconcile_agent_tools(presentation, response)
+    return response
+
+
+def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: RunOutput) -> None:
+    """Retain exact delegated approval anchors alongside the parent's own tools."""
+    paused = paused_attempt_from_response(
+        response,
+        fallback_session_id=response.session_id,
+        fallback_run_id=response.run_id,
+        toolkit_owners={},
+    )
+    if paused is not None:
+        for tool in paused.tools:
+            presentation.start_tool(tool)
     for tool in response.tools or ():
         if tool.is_paused:
             presentation.start_tool(tool)
         else:
             presentation.complete_tool(tool)
-    return response
 
 
 async def _continue_persisted_agent(
@@ -105,17 +128,46 @@ async def _continue_persisted_agent(
     continuation: ApprovalContinuation,
     persisted: RunOutput,
     requirements: list[RunRequirement],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    decisions: dict[str, bool],
+    denial_reasons: dict[str, str | None],
 ) -> tuple[RunOutput, CollectedStreamPresentation]:
     """Resume a persisted agent with event streaming so presentation order is retained."""
-    events = agent.acontinue_run(
-        run_id=continuation.run_id,
-        requirements=requirements,
-        session_id=continuation.session_id,
-        user_id=continuation.requester_id,
-        metadata=deepcopy(persisted.metadata),
-        stream=True,
-        stream_events=True,
-        yield_run_output=True,
+
+    async def persisted_event() -> AsyncIterator[RunOutput]:
+        yield persisted
+
+    delegated = has_delegation_state(persisted)
+    native_events = (
+        persisted_event()
+        if delegated
+        else agent.acontinue_run(
+            run_id=continuation.run_id,
+            requirements=requirements,
+            session_id=continuation.session_id,
+            user_id=continuation.requester_id,
+            metadata=deepcopy(persisted.metadata),
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        )
+    )
+    events = drive_delegation_stream(
+        agent,
+        cast("AsyncIterator[object]", native_events),
+        run_child=run_delegated_child_response,
+        agent_name=continuation.entity_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        decisions=decisions if delegated else None,
+        denial_reasons=denial_reasons if delegated else None,
+        approval_calls=continuation.calls if delegated else (),
     )
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
@@ -123,7 +175,7 @@ async def _continue_persisted_agent(
         tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
         track_hidden_tools=True,
     )
-    response = await _collect_agent_continuation(cast("AsyncIterator[object]", events), presentation)
+    response = await _collect_agent_continuation(events, presentation)
     return response, presentation
 
 
@@ -168,6 +220,26 @@ class AgentApprovalExecution:
             execution_identity,
         )
         try:
+            session = await asyncio.to_thread(
+                history_storage.get_session,
+                session_id=continuation.session_id,
+                session_type=SessionType.AGENT,
+                user_id=continuation.requester_id,
+            )
+            persisted = session.get_run(continuation.run_id) if isinstance(session, AgentSession) else None
+            if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
+                msg = f"Paused run {continuation.run_id!r} is no longer available"
+                raise RuntimeError(msg)  # noqa: TRY301 - the preparation guard owns storage cleanup
+            delegation = DelegationState.from_metadata(persisted.metadata)
+            local_calls = () if delegation.pending_child_id is not None else continuation.calls
+            approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
+            required_tool_names = await required_approval_tool_names(
+                continuation.entity_name,
+                approved_calls,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=execution_identity,
+            )
             agent = await asyncio.to_thread(
                 create_agent,
                 continuation.entity_name,
@@ -181,6 +253,7 @@ class AgentApprovalExecution:
                 refresh_scheduler=self.refresh_scheduler(),
                 dynamic_tool_continuation=True,
                 supports_native_tool_approval=True,
+                required_tool_names=required_tool_names,
             )
         except BaseException:
             history_storage.close()
@@ -192,38 +265,43 @@ class AgentApprovalExecution:
                     notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
                 )
                 install_approval_receipt_hooks(agent.model, agent.fallback_config)
-            session = await agent.aget_session(
-                session_id=continuation.session_id,
-                user_id=continuation.requester_id,
-            )
-            persisted = None if session is None else session.get_run(continuation.run_id)
-            if not isinstance(persisted, RunOutput) or persisted.status != RunStatus.paused:
-                msg = f"Paused run {continuation.run_id!r} is no longer available"
-                raise RuntimeError(msg)
             restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession", session))
-            requirements = apply_exact_approval_decisions(
-                [deepcopy(requirement) for requirement in persisted.requirements or ()],
+            requirements = apply_local_approval_decisions(
+                persisted,
                 decisions=decisions,
                 denial_reasons=denial_reasons,
             )
+            validate_approval_tool_owners([agent], approved_calls, requirements)
 
-            async with typing_indicator(
-                self.client(),
-                continuation.room_id,
-                log_context=typing_log_context,
+            with approval_denial_context(
+                agent,
+                {
+                    continuation.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id)),
+                },
             ):
-                response, presentation = await self.tool_runtime.run_in_context(
-                    tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-                    operation=lambda: run_with_tool_execution_identity(
-                        tool_dispatch.execution_identity,
-                        operation=lambda: _continue_persisted_agent(
-                            agent,
-                            continuation,
-                            persisted,
-                            requirements,
+                async with typing_indicator(
+                    self.client(),
+                    continuation.room_id,
+                    log_context=typing_log_context,
+                ):
+                    response, presentation = await self.tool_runtime.run_in_context(
+                        tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+                        operation=lambda: run_with_tool_execution_identity(
+                            tool_dispatch.execution_identity,
+                            operation=lambda: _continue_persisted_agent(
+                                agent,
+                                continuation,
+                                persisted,
+                                requirements,
+                                config=config,
+                                runtime_paths=self.runtime_paths,
+                                execution_identity=execution_identity,
+                                refresh_scheduler=self.refresh_scheduler(),
+                                decisions=decisions,
+                                denial_reasons=denial_reasons,
+                            ),
                         ),
-                    ),
-                )
+                    )
         finally:
             try:
                 ai_runtime.register_queued_notice_storage(
@@ -246,6 +324,7 @@ class AgentApprovalExecution:
             response,
             fallback_session_id=continuation.session_id,
             fallback_run_id=continuation.run_id,
+            toolkit_owners=toolkit_owners_for_agents([agent]),
         )
         if paused is not None:
             return replace(

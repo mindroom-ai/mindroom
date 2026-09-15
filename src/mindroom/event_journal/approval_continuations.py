@@ -90,6 +90,7 @@ class ApprovalCall:
     decision: ApprovalDecision | None = None
     reason: str | None = None
     human_approval_required: bool | None = None
+    toolkit_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +153,7 @@ class ApprovalContinuation:
     response_text: str = ""
     response_tool_trace: tuple[dict[str, object], ...] = ()
     response_presentation_state: dict[str, object] = field(default_factory=dict)
+    delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     show_tool_calls: bool = True
     show_tool_calls_is_frozen: bool = True
     execution_identity: dict[str, object] = field(default_factory=dict)
@@ -195,6 +197,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "response_text": continuation.response_text,
         "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
         "response_presentation_state": continuation.response_presentation_state,
+        "delegation_storage_bindings": continuation.delegation_storage_bindings,
         "show_tool_calls": continuation.show_tool_calls,
         "execution_identity": continuation.execution_identity,
         "runtime_model_name": continuation.runtime_model_name,
@@ -258,7 +261,7 @@ def get(
     call_rows = transaction.fetchall(
         """
         SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
-               human_approval_required
+               human_approval_required, toolkit_name
         FROM approval_continuation_calls
         WHERE principal_id = ? AND approval_id = ? AND generation = ?
         ORDER BY call_ordinal
@@ -297,6 +300,7 @@ def _from_rows(
             tool_call_id=str(call["tool_call_id"]),
             tool_name=str(call["tool_name"]),
             invoking_agent=str(call["invoking_agent"]),
+            toolkit_name=cast("str | None", call["toolkit_name"]),
             expires_at_ns=int(call["expires_at_ns"]),
             decision=(ApprovalDecision(str(call["decision"])) if call["decision"] is not None else None),
             reason=cast("str | None", call["reason"]),
@@ -326,6 +330,10 @@ def _from_rows(
         response_presentation_state=cast(
             "dict[str, object]",
             stored.get("response_presentation_state", {}),
+        ),
+        delegation_storage_bindings=cast(
+            "dict[str, dict[str, object]]",
+            stored.get("delegation_storage_bindings", {}),
         ),
         show_tool_calls=stored.get("show_tool_calls", True) is not False,
         show_tool_calls_is_frozen="show_tool_calls" in stored,
@@ -384,8 +392,8 @@ def _insert_calls(
             INSERT INTO approval_continuation_calls (
                 principal_id, approval_id, generation, tool_call_id, call_ordinal,
                 tool_name, invoking_agent, expires_at_ns, decision, reason,
-                human_approval_required
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                human_approval_required, toolkit_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 principal_id,
@@ -399,6 +407,7 @@ def _insert_calls(
                 call.decision.value if call.decision is not None else None,
                 call.reason,
                 call.human_approval_required,
+                call.toolkit_name,
             ),
         )
 
@@ -550,7 +559,7 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         f"""
         SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
                calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason,
-               calls.human_approval_required
+               calls.human_approval_required, calls.toolkit_name
         FROM approval_continuation_calls AS calls
         JOIN approval_continuations AS continuations
           ON continuations.principal_id = calls.principal_id
@@ -660,6 +669,7 @@ def advance(
     response_text: str | None = None,
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
+    delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
@@ -680,6 +690,9 @@ def advance(
         response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
         response_presentation_state=(
             current.response_presentation_state if response_presentation_state is None else response_presentation_state
+        ),
+        delegation_storage_bindings=(
+            current.delegation_storage_bindings if delegation_storage_bindings is None else delegation_storage_bindings
         ),
         state=state,
         runtime_generation=publication_owner,

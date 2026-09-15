@@ -337,7 +337,6 @@ class TestConfigInit:
             "scheduler",
             "update_awareness",
             "todo",
-            "subagents",
             "matrix_message",
             {"name": "thread_model", "defer": True},
             "thread_tags",
@@ -1464,7 +1463,6 @@ agents:
       - website
       - browser
       - scheduler
-      - subagents
       - matrix_message
       - thread_tags
     skills:

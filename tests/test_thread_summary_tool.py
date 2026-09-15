@@ -15,7 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
 from mindroom.message_target import MessageTarget
-from mindroom.thread_summary import THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
+from mindroom.thread_summary import _THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
@@ -333,19 +333,19 @@ async def test_set_thread_summary_rejects_overlong_summary() -> None:
             "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
             new=AsyncMock(
                 side_effect=ThreadSummaryWriteError(
-                    f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization.",
+                    f"summary must be {_THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization.",
                 ),
             ),
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.set_thread_summary("x" * (THREAD_SUMMARY_MAX_LENGTH + 1)))
+        payload = json.loads(await tool.set_thread_summary("x" * (_THREAD_SUMMARY_MAX_LENGTH + 1)))
 
     assert payload["status"] == "error"
     assert payload["room_id"] == context.room_id
     assert (
         payload["message"]
-        == f"summary must be {THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
+        == f"summary must be {_THREAD_SUMMARY_MAX_LENGTH} characters or fewer after whitespace normalization."
     )
 
 

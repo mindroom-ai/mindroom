@@ -24,6 +24,7 @@ from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.delegation.recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (
@@ -491,6 +492,12 @@ class _MultiAgentOrchestrator:
             ),
             entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
             recover_unavailable_final=self._recover_unavailable_final,
+            cancel_delegations=lambda continuation, reason: cancel_approval_delegations(
+                continuation,
+                config=self._require_config(),
+                runtime_paths=self.runtime_paths,
+                reason=reason,
+            ),
         )
         self._startup_maintenance = StartupMaintenanceController(
             recover_stale_streams=lambda bots, config, startup_cutoff_ms, scanned_room_ids: (

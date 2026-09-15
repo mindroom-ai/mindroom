@@ -218,7 +218,7 @@ The request body's `user` field and requester headers cannot override this ident
 
 Mapped callers only see and invoke models allowed by the existing responder access policy, including every member of a selected team.
 Auto-routing uses the same permitted agents.
-`delegate_task` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
+`run_subagent` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
 Grant access with `agents.<name>.access.users`, administrator membership, or a ready managed `members_of_rooms` membership snapshot.
 There is no current Matrix room for `/v1`, so `current_room_members` cannot grant access, and missing or stale room membership fails closed.
 
