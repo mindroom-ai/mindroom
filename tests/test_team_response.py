@@ -163,6 +163,7 @@ def test_team_pause_reindexes_interleaved_member_tools_to_document_order() -> No
         response_text=presentation.render_body(),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
+        toolkit_owners={("general", "inspect_first"): "test_toolkit", ("general", "inspect_second"): "test_toolkit"},
     )
 
     require_ordered_pause_presentation(paused, show_tool_calls=True)
@@ -450,6 +451,7 @@ def test_blocking_team_pause_uses_the_structured_member_slot() -> None:
             run_id="run-1",
             tools=(tool,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=response,
         config_names=["general"],
@@ -483,6 +485,7 @@ def test_blocking_team_pause_renders_a_marker_only_member_tool_on_its_own_line()
             run_id="run-1",
             tools=(tool,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=TeamRunOutput(tools=[tool], status=RunStatus.paused),
         config_names=["general"],
@@ -507,6 +510,7 @@ def test_blocking_team_pause_maps_provider_member_id_to_raw_config_name() -> Non
             run_id="run-1",
             tools=(tool,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=TeamRunOutput(
             tools=[tool],
@@ -555,6 +559,7 @@ def test_blocking_team_pause_scopes_reused_call_ids_to_distinct_members() -> Non
             run_id="run-1",
             tools=(pending,),
             requirements=(requirement,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
         response=response,
         config_names=["first", "second"],
@@ -928,6 +933,7 @@ async def test_team_continuation_executes_real_agno_confirmation(
     scope_context = SimpleNamespace(storage=None, storage_factory=storage_factory)
 
     with (
+        pytest.raises(RuntimeError, match="approval calls") if approved else nullcontext(),
         patch("mindroom.teams.materialize_exact_team_members", return_value=members),
         patch(
             "mindroom.teams.open_bound_scope_session_context",
@@ -961,6 +967,9 @@ async def test_team_continuation_executes_real_agno_confirmation(
             tool_trace_collector=collected_trace,
         )
 
+    if approved:
+        assert executed == []
+        return
     assert isinstance(result, CompletedApprovalRun)
     assert AI_RUN_METADATA_KEY in result.metadata_content
     assert bool(executed) is approved

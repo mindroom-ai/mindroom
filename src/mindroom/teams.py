@@ -42,7 +42,13 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
 )
 from mindroom.approval_receipt import install_approval_receipt_hooks
-from mindroom.approval_tools import required_approval_tool_names
+from mindroom.approval_tools import (
+    install_approval_denial_handler,
+    record_approval_denials,
+    required_approval_tool_names,
+    toolkit_owners_for_agents,
+    validate_approval_tool_owners,
+)
 from mindroom.authorization import get_available_responders_in_room
 from mindroom.constants import (
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -132,6 +138,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ApprovalCall
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle, HistoryScope, PreparedHistoryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -2515,7 +2522,7 @@ async def continue_paused_team_run(
     denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     member_model_names: Mapping[str, str] | None = None,
-    required_function_names: Mapping[str, frozenset[str]] | None = None,
+    approval_calls: Sequence[ApprovalCall] = (),
     history_scope: HistoryScope | None = None,
     prior_response_text: str = "",
     prior_tool_trace: Sequence[ToolTraceEntry] = (),
@@ -2524,12 +2531,13 @@ async def continue_paused_team_run(
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run."""
+    approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
     async with asyncio.TaskGroup() as recovery:
         required_tool_tasks = {
             name: recovery.create_task(
                 required_approval_tool_names(
                     name,
-                    (required_function_names or {}).get(name, frozenset()),
+                    tuple(call for call in approved_calls if call.invoking_agent == name),
                     config=config,
                     runtime_paths=runtime_paths,
                     execution_identity=execution_identity,
@@ -2552,6 +2560,14 @@ async def continue_paused_team_run(
         required_tool_names=required_tool_names,
     )
     for member in members.agents:
+        install_approval_denial_handler(
+            member,
+            tuple(
+                call
+                for call in approval_calls
+                if call.invoking_agent == member.id and not decisions.get(call.tool_call_id)
+            ),
+        )
         if member.model is not None:
             install_approval_receipt_hooks(member.model, member.fallback_config)
     stack = ExitStack()
@@ -2596,12 +2612,22 @@ async def continue_paused_team_run(
             decisions=decisions,
             denial_reasons=denial_reasons,
         )
+        validate_approval_tool_owners(members.agents, approved_calls, requirements)
         presentation = _TeamStreamPresentation.restore(
             config_names=member_names,
             show_tool_calls=show_tool_calls,
             state=prior_presentation_state,
             tool_trace=prior_tool_trace,
             prior_response_text=prior_response_text,
+        )
+        record_approval_denials(
+            team,
+            persisted,
+            tuple(
+                call
+                for call in approval_calls
+                if call.invoking_agent == configured_team_name and not decisions.get(call.tool_call_id)
+            ),
         )
         continuation_stream = team.acontinue_run(
             run_response=persisted,
@@ -2621,6 +2647,7 @@ async def continue_paused_team_run(
             continued,
             fallback_session_id=session_id,
             fallback_run_id=run_id,
+            toolkit_owners=toolkit_owners_for_agents(members.agents),
         )
         if paused is not None:
             return _continued_team_pause(presentation, paused)
@@ -2973,6 +3000,7 @@ async def team_response(  # noqa: C901, PLR0915
                 response,
                 fallback_session_id=ctx.session_id,
                 fallback_run_id=attempt_run_id,
+                toolkit_owners=toolkit_owners_for_agents(attempt_agents),
             )
             if paused_attempt is not None:
                 return replace(
@@ -3637,6 +3665,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                     event,
                     fallback_session_id=ctx.session_id,
                     fallback_run_id=attempt_run_id,
+                    toolkit_owners=toolkit_owners_for_agents(attempt_agents),
                 )
                 if paused_attempt is not None:
                     paused_attempt = _continued_team_pause(presentation, paused_attempt)

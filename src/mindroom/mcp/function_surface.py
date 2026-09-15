@@ -14,42 +14,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Collection
 
-    from mindroom.config.models import EffectiveToolConfig
-    from mindroom.mcp.types import MCPOAuthCredentialScope, MCPServerCatalog
+    from mindroom.mcp.types import MCPOAuthCredentialScope
 
 __all__ = [
     "MCPFunctionCollisionReport",
     "MCPFunctionSurfaceSnapshot",
     "analyze_mcp_function_collisions",
-    "catalog_function_names_for_tool_config",
     "local_mcp_function_name_collisions",
 ]
-
-
-def _normalized_tool_filter(value: object) -> set[str]:
-    """Normalize an MCP assignment's remote tool filter."""
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        return {part.strip() for part in value.replace("\n", ",").split(",") if part.strip()}
-    if isinstance(value, list):
-        return {part.strip() for part in value if isinstance(part, str) and part.strip()}
-    return set()
-
-
-def catalog_function_names_for_tool_config(
-    catalog: MCPServerCatalog,
-    tool_config: EffectiveToolConfig,
-) -> set[str]:
-    """Return catalog function names after one agent MCP assignment's filters."""
-    include_tools = _normalized_tool_filter(tool_config.tool_config_overrides.get("include_tools"))
-    exclude_tools = _normalized_tool_filter(tool_config.tool_config_overrides.get("exclude_tools"))
-    return {
-        tool.function_name
-        for tool in catalog.tools
-        if (not exclude_tools or tool.remote_name not in exclude_tools)
-        and (not include_tools or tool.remote_name in include_tools)
-    }
 
 
 @dataclass(frozen=True, slots=True)

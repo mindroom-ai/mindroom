@@ -1,15 +1,17 @@
-"""Recover tools required by saved approvals without changing session selection."""
+"""Restore recorded approval toolkit origins under current tool permissions."""
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools
+from agno.agent._tools import reject_tool_call
+from agno.run.agent import RunOutput
+from agno.run.messages import RunMessages
+from agno.tools.function import Function
+from agno.tools.toolkit import Toolkit
+
 from mindroom.credentials import get_runtime_credentials_manager
-from mindroom.logging_config import get_logger
-from mindroom.mcp.config import resolved_mcp_tool_prefix
-from mindroom.mcp.function_surface import catalog_function_names_for_tool_config
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -18,62 +20,131 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Sequence
+
+    from agno.agent import Agent
+    from agno.run.requirement import RunRequirement
+    from agno.run.team import TeamRunOutput
+    from agno.team import Team
+
     from mindroom.config.main import Config
-    from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ApprovalCall
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-logger = get_logger(__name__)
+def toolkit_owners_for_agents(agents: Sequence[Agent]) -> dict[tuple[str, str], str | None]:
+    """Observe final async toolkit functions with Agno's first-wins collision policy."""
+    owners: dict[tuple[str, str], str | None] = {}
+    for agent in agents:
+        if agent.id is None:
+            continue
+        for tool in agent.tools if isinstance(agent.tools, list) else ():
+            if isinstance(tool, Toolkit):
+                for name, function in tool.get_async_functions().items():
+                    owners.setdefault((agent.id, name), function.owning_toolkit)
+            elif isinstance(tool, Function):
+                owners.setdefault((agent.id, tool.name), tool.owning_toolkit)
+            elif callable(tool) and isinstance(name := getattr(tool, "__name__", None), str):
+                owners.setdefault((agent.id, name), None)
+    return owners
 
 
-def _constructed_tool_function_names(
-    entry: EffectiveToolConfig,
-    *,
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity,
-) -> frozenset[str]:
-    """Inspect current functions when a registered toolkit omits optional metadata."""
-    try:
-        toolkit = build_agent_toolkit(
-            entry.name,
-            agent_name=agent_name,
-            config=config,
-            runtime_paths=runtime_paths,
-            worker_tools=resolve_runtime_worker_tools(
-                agent_name,
-                config,
-                runtime_paths,
-                [entry.name],
-                tool_registry_preloaded=True,
-            ),
-            runtime_overrides=config.resolve_entity(agent_name).tool_runtime_overrides(entry.name),
-            tool_config_overrides=entry.tool_config_overrides,
-            execution_identity=execution_identity,
-            session_id=execution_identity.session_id,
-        )
-        return frozenset(toolkit.get_async_functions()) if toolkit is not None else frozenset()
-    except Exception as exc:
-        # Optional plugin discovery must not block another toolkit's approval.
-        logger.warning("Skipping unavailable tool during approval recovery", tool=entry.name, error=str(exc))
-        return frozenset()
+def record_approval_denials(
+    actor: Agent | Team,
+    run: RunOutput | TeamRunOutput,
+    calls: Sequence[ApprovalCall],
+) -> None:
+    """Consume exact denied IDs using Agno's native rejection result formatting."""
+    denied = {call.tool_call_id: call for call in calls}
+    run.messages = run.messages or []
+    tools = [*(run.tools or ()), *(r.tool_execution for r in run.requirements or () if r.tool_execution)]
+    for tool in tools:
+        call = denied.get(tool.tool_call_id or "")
+        if call is None or tool.confirmed is not False:
+            continue
+        if tool.tool_name != call.tool_name:
+            msg = "Denied approval no longer matches the pending function; retry the request"
+            raise RuntimeError(msg)
+        if not any(message.tool_call_id == tool.tool_call_id for message in run.messages):
+            reject_tool_call(
+                cast("Agent", actor),
+                RunMessages(messages=run.messages),
+                tool,
+                functions={
+                    call.tool_name: Function(name=call.tool_name, stop_after_tool_call=tool.stop_after_tool_call),
+                },
+            )
+        tool.requires_confirmation = False
+        tool.tool_call_error = True
 
 
-async def _discover_mcp_function_names(
+def install_approval_denial_handler(actor: Agent, calls: Sequence[ApprovalCall]) -> None:
+    """Consume member/agent denials after Agno binds the canonical continued run.
+
+    Agno resolves a Function even to reject a removed tool. Continuation invokes
+    aget_tools after binding decisions but before copying messages, so record
+    native rejection results there. No placeholder enters the model tool surface.
+    """
+    if not calls:
+        return
+    original = cast("Callable[..., Awaitable[list[object]]]", actor.aget_tools)
+
+    async def tools_after_denials(*args: object, **kwargs: object) -> list[object]:
+        run = kwargs.get("run_response")
+        if isinstance(run, RunOutput):
+            # This reconstructed actor consumes one canonical continuation. A
+            # later member run must never reuse these run-scoped denied IDs.
+            actor.__dict__["aget_tools"] = original
+            record_approval_denials(actor, run, calls)
+        return await original(*args, **kwargs)
+
+    actor.__dict__["aget_tools"] = tools_after_denials
+
+
+def validate_approval_tool_owners(
+    agents: Sequence[Agent],
+    calls: Sequence[ApprovalCall],
+    requirements: Sequence[RunRequirement],
+) -> None:
+    """Reject an approved call unless its final executable has the recorded owner."""
+    owners = toolkit_owners_for_agents(agents)
+    pending = {
+        requirement.tool_execution.tool_call_id: requirement
+        for requirement in requirements
+        if requirement.confirmation is True and requirement.tool_execution is not None
+    }
+    if set(pending) != {call.tool_call_id for call in calls}:
+        msg = "Saved approval calls no longer match the pending requirements; retry the request"
+        raise RuntimeError(msg)
+    for call in calls:
+        requirement = pending[call.tool_call_id]
+        tool = requirement.tool_execution
+        if (
+            tool is None
+            or tool.tool_name != call.tool_name
+            or (requirement.member_agent_id is not None and requirement.member_agent_id != call.invoking_agent)
+        ):
+            msg = "Saved approval function or member no longer matches the pending call; retry the request"
+            raise RuntimeError(msg)
+        if call.toolkit_name is None or owners.get((call.invoking_agent, call.tool_name)) != call.toolkit_name:
+            msg = f"Saved approval tool {call.tool_name!r} no longer has its original toolkit; retry the request"
+            raise RuntimeError(msg)
+
+
+async def _warm_approval_mcp_catalog(
     server_id: str,
-    entry: EffectiveToolConfig,
+    tool_name: str,
     *,
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
-) -> set[str]:
-    """Discover current catalog functions through normal agent credential routing."""
+) -> None:
+    """Warm one required catalog through normal agent credential routing."""
     manager = require_mcp_server_manager()
     if manager is None:
-        msg = f"MCP tool {entry.name!r} is unavailable for approval continuation"
+        msg = f"MCP tool {tool_name!r} is unavailable for approval continuation"
         raise RuntimeError(msg)
     runtime = await asyncio.to_thread(
         resolve_agent_runtime,
@@ -83,7 +154,7 @@ async def _discover_mcp_function_names(
         execution_identity=execution_identity,
         create=False,
     )
-    catalog = await manager.get_request_catalog(
+    await manager.get_request_catalog(
         server_id,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=build_agent_toolkit_worker_target(
@@ -95,26 +166,22 @@ async def _discover_mcp_function_names(
         ),
         expected_config=config,
     )
-    return catalog_function_names_for_tool_config(catalog, entry)
 
 
 async def required_approval_tool_names(
     agent_name: str,
-    function_names: frozenset[str],
+    calls: Sequence[ApprovalCall],
     *,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
 ) -> tuple[str, ...]:
-    """Resolve saved function names through the current agent's permitted tools.
-
-    OAuth catalogs and dynamic selections are process-local, so neither can be
-    assumed warm when an approval resumes. Only discover matching MCP servers,
-    using the same credential routing as normal agent construction. Return
-    run-local additions; a newer session load or unload remains authoritative.
-    """
-    if not function_names:
+    """Restore only recorded toolkit origins, without changing session selection."""
+    if not calls:
         return ()
+    if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):
+        msg = "Saved approval has unknown toolkit ownership; retry the request"
+        raise RuntimeError(msg)
     await asyncio.to_thread(ensure_tool_registry_loaded, runtime_paths, config)
     surface = visible_tool_surface(
         agent_name=agent_name,
@@ -122,45 +189,29 @@ async def required_approval_tool_names(
         loaded_tools=[entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs],
         include_matrix_room_runtime_tools=execution_identity.room_id is not None,
     )
-    owners: dict[str, set[str]] = {name: set() for name in function_names}
-    for entry in surface.runtime_tool_configs:
+    permitted = {entry.authored_name or entry.name: entry for entry in surface.runtime_tool_configs}
+    required = sorted({call.toolkit_name for call in calls if call.toolkit_name is not None})
+    for name in required:
+        entry = permitted.get(name)
+        if entry is None:
+            msg = f"Saved approval toolkit {name!r} is no longer permitted; retry the request"
+            raise RuntimeError(msg)
         metadata = TOOL_METADATA.get(entry.name)
         if metadata is not None and metadata.requires_room_context and execution_identity.room_id is None:
-            continue
-        matching_names = function_names.intersection(metadata.function_names if metadata is not None else ())
+            msg = f"Saved approval toolkit {name!r} requires room context; retry the request"
+            raise RuntimeError(msg)
         server_id = mcp_server_id_from_tool_name(entry.name)
         if server_id is not None:
             server_config = config.mcp_servers.get(server_id)
             if server_config is None or not server_config.enabled:
-                continue
-            prefix = f"{resolved_mcp_tool_prefix(server_id, server_config)}_"
-            if any(name.startswith(prefix) for name in function_names - matching_names):
-                matching_names |= function_names.intersection(
-                    await _discover_mcp_function_names(
-                        server_id,
-                        entry,
-                        agent_name=agent_name,
-                        config=config,
-                        runtime_paths=runtime_paths,
-                        execution_identity=execution_identity,
-                    ),
-                )
-        elif metadata is not None and metadata.factory is not None and not metadata.function_names:
-            matching_names = function_names.intersection(
-                await asyncio.to_thread(
-                    _constructed_tool_function_names,
-                    entry,
-                    agent_name=agent_name,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                ),
+                msg = f"Saved approval toolkit {name!r} is unavailable; retry the request"
+                raise RuntimeError(msg)
+            await _warm_approval_mcp_catalog(
+                server_id,
+                entry.name,
+                agent_name=agent_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
             )
-        for name in matching_names:
-            owners[name].add(entry.authored_name or entry.name)
-    if any(len(tool_names) > 1 for tool_names in owners.values()):
-        # A current collision winner cannot identify the toolkit that owned an
-        # older paused call. Never redirect approval to another implementation.
-        msg = "Saved approval function has ambiguous configured tool ownership"
-        raise RuntimeError(msg)
-    return tuple(sorted({owner for tool_names in owners.values() for owner in tool_names}))
+    return tuple(required)

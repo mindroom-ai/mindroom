@@ -40,7 +40,7 @@ from mindroom.cancellation import current_task_is_process_shutdown, request_task
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
@@ -3272,6 +3272,7 @@ async def test_waiting_message_without_continuation_replays_the_safe_paused_turn
             session_id="session-1",
             run_id="run-paused",
             tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         ),
     )
     identity = ToolExecutionIdentity(
@@ -3327,6 +3328,7 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
             tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
             runtime_model_name="large",
             team_member_model_names=(("general", "large"),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         ),
     )
     identity = ToolExecutionIdentity(
@@ -3399,6 +3401,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
                 name="run_shell_command",
                 entrypoint=run_shell_command,
                 requires_confirmation=True,
+                owning_toolkit="shell",
             ),
         ],
         db=SqliteDb(db_file=str(tmp_path / "agent-continuation.db"), session_table="sessions"),
@@ -3433,7 +3436,15 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        calls=(),
+        calls=(
+            ApprovalCall(
+                tool_call_id=tool_call_id,
+                tool_name="run_shell_command",
+                invoking_agent="general",
+                toolkit_name="shell",
+                expires_at_ns=2**62,
+            ),
+        ),
         execution_identity={},
         source_event_ids=("$source",),
         state="claimed",
@@ -3447,6 +3458,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         ),
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
     continue_run = MagicMock(wraps=agent.acontinue_run)
     knowledge = MagicMock()
     refresh_scheduler = MagicMock()
@@ -3687,6 +3699,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         await runner._approval_responses.plan_pause(
             ((tool, "call-1", "dangerous", "general"),),
             requester_id="@user:localhost",
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
 
     continuation = ApprovalContinuation(
@@ -3747,6 +3760,7 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
         plan = await runner._approval_responses.plan_pause(
             ((tool, "call-1", "dangerous", "general"),),
             requester_id="@user:localhost",
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         )
 
     assert plan.calls[0].decision is response_runner.ContinuationDecision.DENIED
@@ -3777,6 +3791,7 @@ async def test_pause_plan_keeps_each_calls_approval_provenance(tmp_path: Path) -
                 (policy_tool, "call-policy", "read_report", "general"),
             ),
             requester_id="@user:localhost",
+            toolkit_owners={("general", "publish_report"): "test_toolkit", ("general", "read_report"): "test_toolkit"},
         )
 
     assert [call.human_approval_required for call in plan.calls] == [True, False]
@@ -3805,6 +3820,10 @@ async def test_mixed_pause_plan_publishes_only_human_gated_calls(tmp_path: Path)
                 (gated, "call-gated", "conditional_write", "general"),
             ),
             requester_id="@user:localhost",
+            toolkit_owners={
+                ("general", "conditional_read"): "test_toolkit",
+                ("general", "conditional_write"): "test_toolkit",
+            },
         )
 
     continuation = ApprovalContinuation(
@@ -3866,6 +3885,7 @@ async def test_all_human_gated_pause_plan_keeps_waiting_text_and_cards(tmp_path:
                 (second, "call-2", "dangerous_two", "general"),
             ),
             requester_id="@user:localhost",
+            toolkit_owners={("general", "dangerous_one"): "test_toolkit", ("general", "dangerous_two"): "test_toolkit"},
         )
 
     continuation = ApprovalContinuation(
@@ -3937,6 +3957,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
                     tool_args={"requires_approval": False},
                 ),
             ),
+            toolkit_owners={("general", "conditional_tool"): "test_toolkit"},
         ),
     )
     identity = runner.deps.tool_runtime.build_execution_identity(
@@ -3988,6 +4009,7 @@ async def test_automatic_pause_without_visible_event_sends_ordered_tools(tmp_pat
             session_id="session-1",
             run_id="run-1",
             tools=(ToolExecution(tool_call_id="call-auto", tool_name="conditional_read", tool_args={}),),
+            toolkit_owners={("general", "conditional_read"): "test_toolkit"},
         ),
     )
     identity = runner.deps.tool_runtime.build_execution_identity(
@@ -4055,6 +4077,7 @@ async def test_pause_persists_visibility_and_presentation_frozen_for_the_turn(
         tools=(ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}),),
         response_text=("Before approval.\n\n🔧 `inspect` [1] ⏳" if turn_visibility else "Before approval."),
         tool_trace=(trace,),
+        toolkit_owners={("general", "inspect"): "test_toolkit"},
     )
     identity = runner.deps.tool_runtime.build_execution_identity(
         target=request.response_envelope.target,
@@ -4126,6 +4149,7 @@ async def test_pause_republishes_the_acknowledged_interactive_body_but_persists_
             tools=(tool,),
             response_text=f"{raw_interactive}{marker}",
             tool_trace=(trace,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     error.capture_presentation(
@@ -4183,6 +4207,7 @@ async def test_pause_publication_rejects_an_unanchored_agent_tool(tmp_path: Path
             tools=(tool,),
             response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
             tool_trace=(trace,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     error.capture_presentation(
@@ -4249,6 +4274,7 @@ async def test_pause_publication_rejects_an_unanchored_team_tool(
             requirements=(requirement,),
             response_text="🤝 **Team Response** (Member A):\n\n**Member A**: 🔧 `inspect` [1] ⏳",
             tool_trace=(trace,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     error.capture_presentation(
@@ -4309,6 +4335,7 @@ def test_pause_presentation_rejects_a_tool_in_the_wrong_member_scope() -> None:
                 scope_key="agent:member-b",
             ),
         ),
+        toolkit_owners={("general", "inspect"): "test_toolkit"},
     )
 
     with pytest.raises(RuntimeError, match="ordered presentation"):
@@ -4323,6 +4350,7 @@ def test_pause_presentation_rejects_a_duplicate_visible_marker() -> None:
             session_id="session-1",
             run_id="run-1",
             tools=(tool,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     duplicated = replace(paused, response_text=f"{paused.response_text}\n\n{paused.response_text}")
@@ -4339,6 +4367,7 @@ def test_pause_presentation_rejects_an_unmatched_visible_marker() -> None:
             session_id="session-1",
             run_id="run-1",
             tools=(tool,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     unmatched = replace(paused, response_text=f"{paused.response_text}\n\n🔧 `other` [2] ⏳")
@@ -4354,6 +4383,7 @@ def test_streaming_pause_handoff_uses_only_transport_committed_presentation() ->
             session_id="session-1",
             run_id="run-1",
             tools=(ToolExecution(tool_call_id="call-1", tool_name="inspect"),),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     trace = ToolTraceEntry(type="tool_call_started", tool_name="inspect", tool_call_id="call-1")
@@ -4401,6 +4431,7 @@ def test_hidden_textless_team_pause_keeps_internal_continuation_snapshot() -> No
             tools=(tool,),
             tool_trace=(trace,),
             response_presentation_state=state,
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     error.capture_presentation(StreamingPresentation(response_text=""))
@@ -4490,6 +4521,7 @@ async def test_missing_approver_denial_stays_neutral_and_wakes_continuation(tmp_
             session_id="session-1",
             run_id="run-1",
             tools=(ToolExecution(tool_call_id="call-denied", tool_name="dangerous", tool_args={}),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         ),
     )
     identity = runner.deps.tool_runtime.build_execution_identity(
@@ -4599,6 +4631,10 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
         response_text=("Committed before pause.\n\n🔧 `conditional_read` [1] ⏳\n\n🔧 `conditional_write` [2] ⏳"),
         tool_trace=committed_trace,
         response_presentation_state=committed_state,
+        toolkit_owners={
+            ("general", "conditional_read"): "test_toolkit",
+            ("general", "conditional_write"): "test_toolkit",
+        },
     )
     edit_text = AsyncMock(return_value=True)
     approval_store = MagicMock(
@@ -4708,6 +4744,7 @@ async def test_chained_pause_rejects_an_unanchored_tool_before_persistence(tmp_p
                 tool_call_id="call-1",
             ),
         ),
+        toolkit_owners={("general", "first"): "test_toolkit", ("general", "second"): "test_toolkit"},
     )
     edit_text = AsyncMock(return_value=True)
 
@@ -4748,6 +4785,7 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
         plan = await runner._approval_responses.plan_pause(
             ((tool, "call-native", "native_confirmation", "general"),),
             requester_id="@user:localhost",
+            toolkit_owners={("general", "native_confirmation"): "test_toolkit"},
         )
 
     assert plan.calls[0].decision is None
@@ -4786,6 +4824,7 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         plan = await runner._approval_responses.plan_pause(
             ((tool, "call-exempt", function.name, "general"),),
             requester_id="@user:localhost",
+            toolkit_owners={("general", function.name): "test_toolkit"},
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
@@ -4838,6 +4877,7 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         plan = await runner._approval_responses.plan_pause(
             ((tool, "call-script", function.name, "general"),),
             requester_id="@user:localhost",
+            toolkit_owners={("general", function.name): "test_toolkit"},
         )
 
     assert plan.calls[0].decision is ApprovalDecision.APPROVED
@@ -5586,6 +5626,7 @@ async def test_suspension_rejects_missing_requester_before_persistence(tmp_path:
         session_id="session-1",
         run_id="run-1",
         tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+        toolkit_owners={("general", "dangerous"): "test_toolkit"},
     )
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -5756,6 +5797,7 @@ async def test_approval_suspension_is_not_logged_as_generation_failure(tmp_path:
             session_id="session-1",
             run_id="run-paused",
             tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         ),
     )
 
@@ -6019,6 +6061,7 @@ async def test_non_streaming_approval_pause_is_not_logged_as_response_error(tmp_
             session_id="session-1",
             run_id="run-paused",
             tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         ),
     )
 
@@ -6576,6 +6619,7 @@ async def test_streaming_approval_pause_reaches_outer_lifecycle(tmp_path: Path) 
             session_id="session-1",
             run_id="run-paused",
             tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", requires_confirmation=True),),
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         ),
     )
     finalize = AsyncMock()
@@ -7365,6 +7409,7 @@ async def test_approval_handoff_uses_visibility_frozen_for_the_turn(
             tools=(tool,),
             response_text=f"Before.{marker}" if turn_visibility else "Before.",
             tool_trace=(trace,),
+            toolkit_owners={("general", "inspect"): "test_toolkit"},
         ),
     )
     error.capture_presentation(

@@ -18,6 +18,7 @@ from openai import AsyncOpenAI
 
 from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.agents import create_agent
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
@@ -27,7 +28,7 @@ from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.openai_models import MindRoomOpenAIResponses
-from mindroom.response_turn import CompletedApprovalRun
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session, save_loaded_tools_for_session
@@ -159,11 +160,13 @@ async def test_saved_approval_restores_deferred_local_tool(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("becomes_unavailable", [False, True], ids=["restored", "unavailable-owner"])
+@pytest.mark.parametrize("replace_owner", ["none", "removed", "collision", "initial-collision"])
 async def test_saved_approval_restores_deferred_plugin_without_function_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     becomes_unavailable: bool,
+    replace_owner: str,
 ) -> None:
     """Existing plugins may expose real functions without declaring their names in metadata."""
     plugin_path = tmp_path / "approval-plugin"
@@ -217,9 +220,14 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
             tool_name="approval_calculator",
             plugin_path=plugin_path,
             before_resume=prepare_plugin_for_resume,
-            expect_unavailable=becomes_unavailable,
+            expect_unavailable=becomes_unavailable or replace_owner in {"removed", "collision"},
+            replacement_tool_name="calculator" if replace_owner in {"removed", "collision"} else None,
+            initial_collision=replace_owner == "initial-collision",
+            keep_original_owner=replace_owner == "collision",
         )
-        assert plugin_classes[0].executed_calls == ([] if becomes_unavailable else [(2, 3)])
+        assert plugin_classes[0].executed_calls == (
+            [] if becomes_unavailable or replace_owner in {"removed", "collision"} else [(2, 3)]
+        )
 
 
 @pytest.mark.asyncio
@@ -250,11 +258,13 @@ async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
     )
     (plugin_path / "tools.py").write_text(
         "from agno.tools import Toolkit\n"
+        "from pathlib import Path\n"
         "from mindroom.tool_system.declarations import ToolCategory\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class UnavailableTools(Toolkit):\n"
         + failing_method
+        + "        Path(__file__).with_name('constructed').touch()\n"
         + f"        raise {error_type}('Synthetic plugin unavailable')\n"
         "\n"
         "@register_tool_with_metadata(\n"
@@ -275,22 +285,28 @@ async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
             plugin_path=plugin_path,
             unrelated_tool_name="unavailable_plugin",
         )
+        assert not (plugin_path / "constructed").exists()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("restriction", ["removed", "include", "exclude"])
+@pytest.mark.parametrize("restriction", ["removed", "include", "exclude", "disabled"])
+@pytest.mark.parametrize("approved", [True, False], ids=["approved", "denied"])
 async def test_saved_approval_respects_current_tool_restrictions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     restriction: str,
+    *,
+    approved: bool,
 ) -> None:
     """An old approval cannot re-enable a removed or newly excluded remote function."""
-    await _exercise_saved_approval(tmp_path, monkeypatch, restriction=restriction)
+    await _exercise_saved_approval(tmp_path, monkeypatch, restriction=restriction, approved=approved)
 
 
 def _apply_current_tool_restriction(config: Config, tool_name: str, restriction: str | None) -> None:
     if restriction == "removed":
         config.agents["general"].tools = [entry for entry in config.agents["general"].tools if entry.name != tool_name]
+    elif restriction == "disabled":
+        config.mcp_servers["example"] = config.mcp_servers["example"].model_copy(update={"enabled": False})
     elif restriction is not None:
         overrides = {"include_tools": ["other"]} if restriction == "include" else {"exclude_tools": ["lookup"]}
         config.agents["general"].tools = [
@@ -343,7 +359,7 @@ def _observe_ordinary_calculator_calls(
     return calls
 
 
-async def _exercise_saved_approval(  # noqa: PLR0915
+async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -356,6 +372,14 @@ async def _exercise_saved_approval(  # noqa: PLR0915
     unrelated_tool_name: str | None = None,
     before_resume: Callable[[], None] = lambda: None,
     expect_unavailable: bool = False,
+    replacement_tool_name: str | None = None,
+    keep_original_owner: bool = False,
+    missing_origin: bool = False,
+    changed_call_name: str | None = None,
+    repeat_pause: bool = False,
+    mixed_decisions: bool = False,
+    retry_denied: bool = False,
+    initial_collision: bool = False,
 ) -> None:
     function_name = "example_lookup" if tool_name == "mcp_example" else "add"
     arguments = {} if tool_name == "mcp_example" else {"a": 2, "b": 3}
@@ -404,6 +428,8 @@ async def _exercise_saved_approval(  # noqa: PLR0915
         resolved_thread_id="$thread",
         session_id="approval-session",
     )
+    if initial_collision:
+        config.agents["general"].tools.append(ToolConfigEntry(name="calculator"))
     transport = _ScopedCatalogTransport()
     bind_mcp_server_manager(transport)  # type: ignore[arg-type]
     requests: list[dict[str, Any]] = []
@@ -412,6 +438,21 @@ async def _exercise_saved_approval(  # noqa: PLR0915
     def respond(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         requests.append(payload)
+        if payload.get("stream") and (repeat_pause or retry_denied) and len(requests) == 2:
+            call = {
+                "type": "function_call",
+                "id": "fc_second",
+                "call_id": "call_second",
+                "name": function_name,
+                "arguments": json.dumps(arguments),
+                "status": "completed",
+            }
+            events = _event("response.created", response={**_response([]), "status": "in_progress"})
+            events += _event("response.output_item.added", output_index=0, item={**call, "arguments": ""})
+            events += _event("response.function_call_arguments.delta", output_index=0, delta=json.dumps(arguments))
+            events += _event("response.output_item.done", output_index=0, item=call)
+            events += _event("response.completed", response=_response([call]))
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=events)
         if payload.get("stream"):
             events = _event("response.output_text.delta", delta="Ready", output_index=0, content_index=0)
             events += _event("response.completed", response=_response([_ANSWER]))
@@ -432,7 +473,10 @@ async def _exercise_saved_approval(  # noqa: PLR0915
             "arguments": '{"a":2,"b":3}',
             "status": "completed",
         }
-        return httpx.Response(200, json=_response([ordinary, call] if mixed_calls else [call]))
+        output = [ordinary, call] if mixed_calls else [call]
+        if mixed_decisions:
+            output.append({**call, "id": "fc_denied", "call_id": "call_denied"})
+        return httpx.Response(200, json=_response(output))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
         client = AsyncOpenAI(api_key="test-key", http_client=http_client)
@@ -484,6 +528,15 @@ async def _exercise_saved_approval(  # noqa: PLR0915
             metadata={"tools_schema": original_schema},
         )
         assert paused.status == RunStatus.paused
+        captured = paused_attempt_from_response(
+            paused,
+            fallback_session_id=identity.session_id,
+            fallback_run_id=paused.run_id,
+            toolkit_owners=toolkit_owners_for_agents([actor]),
+        )
+        assert captured is not None
+        assert captured.toolkit_owners is not None
+        assert captured.toolkit_owners[("general", function_name)] == tool_name
         assert transport.executed == []
         assert ordinary_calls == ([(2, 3)] if mixed_calls else [])
         requirement = (paused.requirements or [])[0]
@@ -511,6 +564,11 @@ async def _exercise_saved_approval(  # noqa: PLR0915
         cache_before = deepcopy(dynamic_toolkits._loaded_tools)
         _apply_current_tool_restriction(config, tool_name, restriction)
         before_resume()
+        if replacement_tool_name is not None:
+            config.agents["general"].tools = [
+                ToolConfigEntry(name=replacement_tool_name),
+                *(config.agents["general"].tools if keep_original_owner else []),
+            ]
         continuation = ApprovalContinuation(
             approval_id="approval-example",
             run_id=paused.run_id,
@@ -526,13 +584,22 @@ async def _exercise_saved_approval(  # noqa: PLR0915
             calls=(
                 ApprovalCall(
                     tool_call_id=tool_call_id,
-                    tool_name=function_name,
+                    tool_name=changed_call_name or function_name,
+                    toolkit_name=None if missing_origin else captured.toolkit_owners[("general", function_name)],
                     invoking_agent="general",
                     expires_at_ns=2**62,
                     human_approval_required=True,
                 ),
             ),
         )
+        if mixed_decisions:
+            continuation = replace(
+                continuation,
+                calls=(
+                    *continuation.calls,
+                    replace(continuation.calls[0], tool_call_id="fc_denied"),
+                ),
+            )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
         execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
         monkeypatch.setattr(
@@ -542,20 +609,25 @@ async def _exercise_saved_approval(  # noqa: PLR0915
         )
         monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
 
-        async def continue_saved_run() -> CompletedApprovalRun:
-            result = await execution.continue_run(
+        async def continue_saved_run() -> CompletedApprovalRun | PausedAttempt:
+            return await execution.continue_run(
                 continuation,
                 execution_identity=identity,
                 tool_dispatch=ToolDispatchContext(execution_identity=identity),
-                decisions={tool_call_id: approved},
-                denial_reasons={tool_call_id: None if approved else "Declined by requester"},
+                decisions={
+                    call.tool_call_id: approved and call.tool_call_id == tool_call_id for call in continuation.calls
+                },
+                denial_reasons={
+                    call.tool_call_id: None
+                    if approved and call.tool_call_id == tool_call_id
+                    else "Declined by requester"
+                    for call in continuation.calls
+                },
                 tool_trace_collector=[],
                 typing_log_context={},
             )
-            assert isinstance(result, CompletedApprovalRun)
-            return result
 
-        if restriction is not None or expect_unavailable:
+        if (restriction is not None or expect_unavailable) and approved:
             with pytest.raises((ValueError, RuntimeError), match=r"(?i)(tool|function|approval)"):
                 await continue_saved_run()
             assert transport.executed == []
@@ -566,27 +638,121 @@ async def _exercise_saved_approval(  # noqa: PLR0915
                 assert transport.discoveries == []
             return
         result = await continue_saved_run()
+        if repeat_pause:
+            assert isinstance(result, PausedAttempt)
+            assert result.toolkit_owners is not None
+            assert result.toolkit_owners[("general", function_name)] == tool_name
+            assert result.tools[0].tool_call_id == "fc_second"
+            tool_call_id = "fc_second"
+            continuation = replace(
+                continuation,
+                calls=(
+                    replace(
+                        continuation.calls[0],
+                        tool_call_id=tool_call_id,
+                        toolkit_name=result.toolkit_owners[("general", function_name)],
+                    ),
+                ),
+            )
+            result = await continue_saved_run()
         assert isinstance(result, CompletedApprovalRun)
         if tool_name == "mcp_example":
-            assert transport.executed == ([("example", "lookup", {})] if approved else [])
-            assert len(transport.discoveries) == 1
-            assert transport.discoveries[0][0] == "example"
-            assert transport.discoveries[0][1] is not None
-            assert transport.discoveries[0][2] == initial_discoveries[0][2]
+            assert transport.executed == ([("example", "lookup", {})] * (1 + repeat_pause) if approved else [])
+            assert len(transport.discoveries) == int(approved) * (1 + repeat_pause)
+            if approved:
+                assert transport.discoveries[0][0] == "example"
+                assert transport.discoveries[0][1] is not None
+                assert transport.discoveries[0][2] == initial_discoveries[0][2]
         else:
             assert transport.discoveries == []
             tool_results = [item for item in requests[-1]["input"] if item.get("type") == "function_call_output"]
             assert len(tool_results) == 1
             assert json.loads(tool_results[0]["output"]) == {"operation": "addition", "result": 5}
-        assert len(requests) == 2
-        assert dynamic_toolkits._loaded_tools == cache_before
-        assert (
-            get_loaded_tools_for_session(
-                agent_name="general",
-                config=config,
-                session_id=identity.session_id,
+        assert len(requests) == 2 + repeat_pause + retry_denied
+        if not approved:
+            assert all(
+                tool.get("name") != function_name for request in requests[1:] for tool in request.get("tools", [])
             )
-            == selection_before
-        )
+        if mixed_decisions:
+            denied_results = [
+                item
+                for item in requests[-1]["input"]
+                if item.get("type") == "function_call_output" and item.get("call_id") == "call_denied"
+            ]
+            assert len(denied_results) == 1
+            assert "Declined by requester" in denied_results[0]["output"]
+        assert dynamic_toolkits._loaded_tools == cache_before
+        if restriction is None:
+            assert (
+                get_loaded_tools_for_session(
+                    agent_name="general",
+                    config=config,
+                    session_id=identity.session_id,
+                )
+                == selection_before
+            )
         _assert_saved_run(config, paths, identity, paused.run_id, RunStatus.completed, original_schema)
         assert ordinary_calls == ([(2, 3)] if mixed_calls else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False], ids=["approved", "denied"])
+async def test_saved_approval_with_unknown_legacy_origin_requires_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    approved: bool,
+) -> None:
+    """Unknown historical owners cannot be reconstructed from today's catalogs."""
+    await _exercise_saved_approval(
+        tmp_path,
+        monkeypatch,
+        missing_origin=True,
+        expect_unavailable=approved,
+        approved=approved,
+    )
+
+
+@pytest.mark.asyncio
+async def test_saved_approval_must_match_persisted_function_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approving another function on the same toolkit cannot authorize the pending call."""
+    await _exercise_saved_approval(
+        tmp_path,
+        monkeypatch,
+        tool_name="calculator",
+        changed_call_name="multiply",
+        expect_unavailable=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_approval_pause_captures_rebuilt_toolkit_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second native pause retains its newly rebuilt owner and resumes exactly once."""
+    await _exercise_saved_approval(tmp_path, monkeypatch, repeat_pause=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False], ids=["mixed", "all-denied"])
+async def test_same_function_calls_keep_individual_approval_decisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    approved: bool,
+) -> None:
+    """Denying one same-name call cannot deny or execute its sibling."""
+    await _exercise_saved_approval(tmp_path, monkeypatch, mixed_decisions=True, approved=approved)
+
+
+@pytest.mark.asyncio
+async def test_denied_missing_tool_cannot_execute_on_followup_model_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native rejection leaves no executable or advertised placeholder behind."""
+    await _exercise_saved_approval(tmp_path, monkeypatch, approved=False, restriction="removed", retry_denied=True)

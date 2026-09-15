@@ -22,7 +22,12 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
-from mindroom.approval_tools import required_approval_tool_names
+from mindroom.approval_tools import (
+    install_approval_denial_handler,
+    required_approval_tool_names,
+    toolkit_owners_for_agents,
+    validate_approval_tool_owners,
+)
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
@@ -155,9 +160,10 @@ class AgentApprovalExecution:
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)
+        approved_calls = tuple(call for call in continuation.calls if decisions.get(call.tool_call_id))
         required_tool_names = await required_approval_tool_names(
             continuation.entity_name,
-            frozenset(call.tool_name for call in continuation.calls if call.invoking_agent == continuation.entity_name),
+            approved_calls,
             config=config,
             runtime_paths=self.runtime_paths,
             execution_identity=execution_identity,
@@ -210,11 +216,16 @@ class AgentApprovalExecution:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
             restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession", session))
+            install_approval_denial_handler(
+                agent,
+                tuple(call for call in continuation.calls if not decisions.get(call.tool_call_id)),
+            )
             requirements = apply_exact_approval_decisions(
                 [deepcopy(requirement) for requirement in persisted.requirements or ()],
                 decisions=decisions,
                 denial_reasons=denial_reasons,
             )
+            validate_approval_tool_owners([agent], approved_calls, requirements)
 
             async with typing_indicator(
                 self.client(),
@@ -255,6 +266,7 @@ class AgentApprovalExecution:
             response,
             fallback_session_id=continuation.session_id,
             fallback_run_id=continuation.run_id,
+            toolkit_owners=toolkit_owners_for_agents([agent]),
         )
         if paused is not None:
             return replace(

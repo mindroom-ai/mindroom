@@ -350,6 +350,7 @@ depends_on = ["mindroom.durable_write"]
 path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
+    "mindroom.approval_tools",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.credentials",
@@ -754,10 +755,7 @@ visibility = ["mindroom.response_runner"]
 [[modules]]
 path = "mindroom.approval_tools"
 depends_on = [
-    "mindroom.agents",
     "mindroom.credentials",
-    "mindroom.logging_config",
-    "mindroom.mcp.function_surface",
     "mindroom.mcp.registry",
     "mindroom.mcp.toolkit",
     "mindroom.runtime_resolution",
@@ -765,7 +763,7 @@ depends_on = [
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.worker_routing",
 ]
-visibility = ["mindroom.approval_execution", "mindroom.teams"]
+visibility = ["mindroom.ai", "mindroom.approval_execution", "mindroom.teams"]
 
 [[modules]]
 path = "mindroom.approval_receipt"
@@ -2435,7 +2433,6 @@ depends_on = [
 path = "mindroom.mcp.function_surface"
 depends_on = []
 visibility = [
-    "mindroom.approval_tools",
     "mindroom.mcp.surface_projection",
     "mindroom.mcp.toolkit",
 ]

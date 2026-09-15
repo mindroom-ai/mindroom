@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
-from .legacy_schema import upgrade_legacy_journal
+from .legacy_schema import upgrade_approval_toolkit_origins, upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import POSTGRES_DIALECT, render, schema_statements
 
@@ -136,6 +136,14 @@ class PostgresBackend:
             )
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'approval_continuation_calls'",
+            )
+            upgrade_approval_toolkit_origins(
+                _PostgresTransaction(cursor),
+                frozenset(str(row["column_name"]) for row in cursor.fetchall()),
+            )
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

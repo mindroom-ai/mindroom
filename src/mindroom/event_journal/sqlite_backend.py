@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
-from .legacy_schema import upgrade_legacy_journal
+from .legacy_schema import upgrade_approval_toolkit_origins, upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
 
@@ -201,6 +201,10 @@ class SqliteBackend:
             upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
+            upgrade_approval_toolkit_origins(
+                _SqliteTransaction(connection),
+                frozenset(str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")),
+            )
             connection.execute("COMMIT")
         except BaseException:
             connection.close()

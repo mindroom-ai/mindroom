@@ -65,3 +65,13 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
     # while empty membership/hydration tables require a fresh source baseline.
     transaction.execute("UPDATE journal_events SET membership_epoch = 0 WHERE membership_epoch != 0")
     transaction.execute("UPDATE visible_messages SET membership_epoch = 0 WHERE membership_epoch != 0")
+
+
+# Legacy format: Approval calls written before per-call toolkit origin persistence.
+# Last legacy release: v2026.9.137; replacement: per-call toolkit_name storage.
+# Handling: Preserve calls with unknown origins; approved execution requires a new request.
+# Coverage: tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_calls.
+def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozenset[str]) -> None:
+    """Add unknown historical origins inside the existing schema setup transaction."""
+    if "toolkit_name" not in columns:
+        transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN toolkit_name TEXT")

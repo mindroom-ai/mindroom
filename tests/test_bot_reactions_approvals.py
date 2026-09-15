@@ -1518,6 +1518,7 @@ class TestAgentBot(AgentBotTestBase):
             paused_response,
             fallback_session_id=target.session_id,
             fallback_run_id=paused_response.run_id,
+            toolkit_owners={},
         )
         assert paused is not None
         paused.tools[0].approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE

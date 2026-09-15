@@ -1372,6 +1372,12 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
+def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
+    """Attach the configured toolkit identity to its executable functions."""
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = authored_name
+
+
 def _assemble_agent_toolkits(
     agent_name: str,
     config: Config,
@@ -1488,6 +1494,7 @@ def _assemble_agent_toolkits(
             )
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
+                _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
                 tools.append(toolkit)
                 target_names = (
                     worker_routed_tool_names

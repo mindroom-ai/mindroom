@@ -97,6 +97,7 @@ class _ApprovalCase:
                 ),
             ),
             response_text="Reading updated document",
+            toolkit_owners={("general", "read_document"): "test_toolkit"},
         )
         with (
             patch.object(
@@ -329,6 +330,7 @@ async def _paused_case(  # noqa: PLR0915
         run_id="run-edit",
         tools=(tool,),
         response_text="Reading document",
+        toolkit_owners={("general", "read_document"): "test_toolkit"},
     )
     # Hide tool anchors to keep this test focused on durable revision ownership.
     bot.config.defaults.show_tool_calls = False
@@ -749,7 +751,7 @@ async def test_failed_pause_handoff_finalizes_visible_edited_response(  # noqa: 
         request=request,
     )
     progress = _DeliveryProgress(tracked_event_id="$waiting", stage_started=started)
-    pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=()))
+    pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
 
     async def fail_handoff(_paused: PausedAttempt) -> None:
         message = "Approval handoff failed"
