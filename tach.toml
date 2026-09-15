@@ -1502,6 +1502,7 @@ visibility = [
 [[modules]]
 path = "mindroom.custom_tools.matrix_message"
 depends_on = [
+    "mindroom.custom_tools.matrix_message_idempotency",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.custom_tools.matrix_helpers",
@@ -2615,6 +2616,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
+    "mindroom.custom_tools.matrix_message_idempotency",
     "mindroom.approval_transport",
     "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
@@ -5902,3 +5904,15 @@ visibility = [
 path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
 visibility = ["mindroom.event_journal"]
+
+[[modules]]
+path = "mindroom.custom_tools.matrix_message_idempotency"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.background_tasks",
+    "mindroom.durable_write",
+    "mindroom.file_locks",
+    "mindroom.matrix.client_delivery",
+    "mindroom.requester_identity",
+]
+visibility = ["mindroom.custom_tools.matrix_message"]
