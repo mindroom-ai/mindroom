@@ -1339,6 +1339,11 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
         correlation_id=authority.correlation_id or recovery.correlation_id,
         command_execution_started=authority.command_execution_started or recovery.command_execution_started,
         command_result_text=authority.command_result_text or recovery.command_result_text,
+        command_result_extra_content=(
+            authority.command_result_extra_content
+            if authority.command_result_text is not None
+            else recovery.command_result_extra_content
+        ),
         history_scope=authority.history_scope or recovery.history_scope,
         conversation_target=authority.conversation_target or recovery.conversation_target,
     )

@@ -11,6 +11,7 @@ from types import MappingProxyType
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_revision_replay import preserve_summary_provenance
 from mindroom.message_target import MessageTarget
+from mindroom.model_selection import CommandResultContent, freeze_command_result_content
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
@@ -187,6 +188,7 @@ class TurnRecord:
     correlation_id: str | None = None
     command_execution_started: bool = False
     command_result_text: str | None = None
+    command_result_extra_content: CommandResultContent | None = None
     history_scope: HistoryScope | None = None
     conversation_target: MessageTarget | None = None
     timestamp: float = 0.0
@@ -217,6 +219,7 @@ class TurnRecord:
         correlation_id: str | None = None,
         command_execution_started: bool = False,
         command_result_text: str | None = None,
+        command_result_extra_content: CommandResultContent | None = None,
         history_scope: HistoryScope | None = None,
         conversation_target: MessageTarget | None = None,
         timestamp: float = 0.0,
@@ -274,6 +277,11 @@ class TurnRecord:
             correlation_id=context.correlation_id,
             command_execution_started=command.command_execution_started,
             command_result_text=command.command_result_text,
+            command_result_extra_content=(
+                freeze_command_result_content(command_result_extra_content)
+                if command.command_result_text is not None
+                else None
+            ),
             history_scope=context.history_scope,
             conversation_target=context.conversation_target,
             timestamp=_canonical_timestamp(timestamp),
@@ -365,6 +373,7 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     correlation_id: str | None
     command_execution_started: bool
     command_result_text: str | None
+    command_result_extra_content: CommandResultContent | None
     history_scope: HistoryScope | None
     conversation_target: MessageTarget | None
     timestamp: float
@@ -399,6 +408,7 @@ def canonicalize_turn_record(
         correlation_id=candidate.correlation_id,
         command_execution_started=candidate.command_execution_started,
         command_result_text=candidate.command_result_text,
+        command_result_extra_content=candidate.command_result_extra_content,
         history_scope=candidate.history_scope,
         conversation_target=candidate.conversation_target,
         timestamp=candidate.timestamp,

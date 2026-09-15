@@ -48,6 +48,8 @@ interface RowDraft {
   modelName: string;
   provider: string;
   modelId: string;
+  displayName: string;
+  icon: string;
   baseUrl: string;
   contextWindow: string;
   apiKey: string;
@@ -71,6 +73,8 @@ interface KeyDisplayInfo {
 
 interface ModelRowData {
   modelName: string;
+  displayName: string | null;
+  icon: string | null;
   provider: string;
   providerName: string;
   modelId: string;
@@ -83,6 +87,8 @@ const EMPTY_DRAFT: RowDraft = {
   modelName: "",
   provider: "openrouter",
   modelId: "",
+  displayName: "",
+  icon: "",
   baseUrl: "",
   contextWindow: "",
   apiKey: "",
@@ -508,6 +514,8 @@ export function ModelConfig() {
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
+      displayName: row.displayName || "",
+      icon: row.icon || "",
       baseUrl: row.openAIBaseUrl || "",
       contextWindow: row.contextWindow != null ? String(row.contextWindow) : "",
       apiKey: "",
@@ -679,6 +687,19 @@ export function ModelConfig() {
       id: targetModelId,
     };
 
+    const normalizedDisplayName = rowDraft.displayName.trim();
+    const normalizedIcon = rowDraft.icon.trim();
+    if (normalizedDisplayName) {
+      nextModelConfig.display_name = normalizedDisplayName;
+    } else {
+      delete nextModelConfig.display_name;
+    }
+    if (normalizedIcon) {
+      nextModelConfig.icon = normalizedIcon;
+    } else {
+      delete nextModelConfig.icon;
+    }
+
     const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
     if (rowDraft.provider === "openai") {
       if (normalizedBaseUrl) {
@@ -784,12 +805,22 @@ export function ModelConfig() {
     const nextModelConfig: {
       provider: ProviderType;
       id: string;
+      display_name?: string;
+      icon?: string;
       context_window?: number;
       extra_kwargs?: Record<string, unknown>;
     } = {
       provider: newRowDraft.provider as ProviderType,
       id: modelId,
     };
+    const normalizedDisplayName = newRowDraft.displayName.trim();
+    const normalizedIcon = newRowDraft.icon.trim();
+    if (normalizedDisplayName) {
+      nextModelConfig.display_name = normalizedDisplayName;
+    }
+    if (normalizedIcon) {
+      nextModelConfig.icon = normalizedIcon;
+    }
     if (newRowDraft.provider === "openai" && normalizedBaseUrl) {
       nextModelConfig.extra_kwargs = { base_url: normalizedBaseUrl };
     }
@@ -848,6 +879,8 @@ export function ModelConfig() {
 
       return {
         modelName,
+        displayName: modelConfig.display_name?.trim() || null,
+        icon: modelConfig.icon?.trim() || null,
         provider: modelConfig.provider,
         providerName: getProviderInfo(modelConfig.provider).name,
         modelId: modelConfig.id,
@@ -1131,6 +1164,43 @@ export function ModelConfig() {
     );
   };
 
+  const renderMetadataEditor = (
+    draft: RowDraft,
+    setDraft: Dispatch<SetStateAction<RowDraft>>,
+  ) => {
+    return (
+      <div
+        className="grid gap-2 sm:grid-cols-2"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <label className="space-y-1 text-xs text-muted-foreground">
+          <span>Display name</span>
+          <Input
+            value={draft.displayName}
+            onChange={(event) => {
+              const displayName = event.target.value;
+              setDraft((current) => ({ ...current, displayName }));
+            }}
+            placeholder="Quick helper"
+            className="h-8 text-xs text-foreground"
+          />
+        </label>
+        <label className="space-y-1 text-xs text-muted-foreground">
+          <span>Icon</span>
+          <Input
+            value={draft.icon}
+            onChange={(event) => {
+              const icon = event.target.value;
+              setDraft((current) => ({ ...current, icon }));
+            }}
+            placeholder="icons/helper.png or mxc://server/media"
+            className="h-8 text-xs text-foreground"
+          />
+        </label>
+      </div>
+    );
+  };
+
   const columns: ColumnDef<ModelRowData>[] = [
     {
       accessorKey: "modelName",
@@ -1138,7 +1208,18 @@ export function ModelConfig() {
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
         if (!isEditing) {
-          return <span className="font-medium">{row.original.modelName}</span>;
+          return (
+            <div className="space-y-1">
+              <span className="font-medium">
+                {row.original.displayName || row.original.modelName}
+              </span>
+              {row.original.displayName && (
+                <code className="block text-xs text-muted-foreground">
+                  {row.original.modelName}
+                </code>
+              )}
+            </div>
+          );
         }
 
         return (
@@ -1265,6 +1346,10 @@ export function ModelConfig() {
               onClick={(event) => event.stopPropagation()}
               className="h-8 text-xs"
             />
+            {renderMetadataEditor(
+              rowDraft,
+              setRowDraft as Dispatch<SetStateAction<RowDraft>>,
+            )}
             {renderOpenAIEndpointEditor(
               rowDraft,
               setRowDraft as Dispatch<SetStateAction<RowDraft>>,
@@ -1496,6 +1581,7 @@ export function ModelConfig() {
                           className="h-8 text-xs"
                           placeholder="provider model id"
                         />
+                        {renderMetadataEditor(newRowDraft, setNewRowDraft)}
                         {renderOpenAIEndpointEditor(
                           newRowDraft,
                           setNewRowDraft,

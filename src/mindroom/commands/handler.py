@@ -17,7 +17,7 @@ from mindroom.commands.desktop_commands import (
     handle_desktop_command,
 )
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
-from mindroom.commands.model_commands import handle_model_command
+from mindroom.commands.model_commands import handle_model_command, handle_structured_model_command
 from mindroom.commands.parsing import Command, CommandType, get_command_help, get_compact_command_entries
 from mindroom.commands.room_model_commands import handle_room_model_command
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
@@ -29,6 +29,7 @@ from mindroom.entity_resolution import (
 from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.matrix.room_membership import cached_member_ids
+from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.scheduling import (
     SchedulingRuntime,
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.model_selection import CommandResultContent
     from mindroom.tool_system.plugins import PluginReloadResult
 
 logger = get_logger(__name__)
@@ -108,6 +110,13 @@ class _CommandResponseSender(Protocol):
         """Send a command response."""
 
 
+class _CommandResultRecorder(Protocol):
+    """Checkpoint readable text and optional structured metadata together."""
+
+    def __call__(self, response_text: str, *, extra_content: CommandResultContent | None = None) -> Awaitable[None]:
+        """Save one authoritative command result."""
+
+
 @dataclass(frozen=True)
 class CommandHandlerContext:
     """Dependencies required by command handling."""
@@ -119,7 +128,7 @@ class CommandHandlerContext:
     conversation_reader: ConversationReader
     stable_target: MessageTarget
     record_handled_turn: Callable[[TurnRecord], Awaitable[None]]
-    record_command_result: Callable[[str], Awaitable[None]]
+    record_command_result: _CommandResultRecorder
     send_response: _CommandResponseSender
     agent_reply_memberships: AgentReplyMembershipIndex
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
@@ -305,6 +314,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     effective_thread_id = context.stable_target.resolved_thread_id
 
     response_text = ""
+    result_extra_content = None
 
     if command.type == CommandType.HELP:
         topic = command.args.get("topic")
@@ -454,14 +464,28 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 return  # Exit early since we've handled the response
 
     elif command.type == CommandType.MODEL:
-        response_text = handle_model_command(
-            command.args.get("args_text", ""),
-            config=context.config,
-            runtime_paths=context.runtime_paths,
-            room_id=room.room_id,
-            thread_id=effective_thread_id,
-            requester_user_id=requester_user_id,
-        )
+        content = event.source.get("content", {})
+        if MODEL_SELECTION_CONTENT_KEY in content:
+            response_text, result_extra_content = await handle_structured_model_command(
+                content,
+                client=context.client,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                membership_index=context.agent_reply_memberships,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                requester_user_id=event.sender,
+                command_event_id=event.event_id,
+            )
+        else:
+            response_text = handle_model_command(
+                command.args.get("args_text", ""),
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                room_id=room.room_id,
+                thread_id=effective_thread_id,
+                requester_user_id=requester_user_id,
+            )
 
     elif command.type == CommandType.ROOM_MODEL:
         response_text = await handle_room_model_command(
@@ -505,7 +529,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
 
     if response_text:
         if command.type in COMMAND_TYPES_WITH_SIDE_EFFECTS:
-            await context.record_command_result(response_text)
+            if result_extra_content is None:
+                await context.record_command_result(response_text)
+            else:
+                await context.record_command_result(response_text, extra_content=result_extra_content)
         raw_response_event_id = await context.send_response(
             response_text,
             skip_mentions=True,
