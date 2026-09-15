@@ -3,23 +3,43 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import nio
 import pytest
 import typer
+from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
+from nio.durable import RecordKind, SyncBatch, SyncRecord
 from typer.testing import CliRunner
 
 import mindroom.cli.desktop as desktop_cli
 from mindroom.cli.desktop import desktop_app
 from mindroom.desktop.login_method import DesktopLoginMethod
+from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
 from mindroom.desktop.provider import DesktopProviderError
-from mindroom.desktop.session import DesktopMatrixSession, DesktopSessionError
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+from mindroom.desktop.session import DesktopMatrixSession
 
 runner = CliRunner()
+
+
+def test_native_helper_command_uses_explicit_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The CLI native entry shares the same runtime identity as setup and bridge commands."""
+    runtime_paths = SimpleNamespace(storage_root=tmp_path)
+    activate = MagicMock(return_value=runtime_paths)
+    serve = AsyncMock()
+    monkeypatch.setattr(desktop_cli, "_activate_desktop_runtime", activate)
+    monkeypatch.setattr("mindroom.desktop.native_host.run_native_stdio", serve)
+    result = runner.invoke(
+        desktop_app,
+        ["app", "--config", str(tmp_path / "config.yaml"), "--storage-path", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    activate.assert_called_once_with(tmp_path / "config.yaml", storage_path=tmp_path)
+    assert serve.await_args.args == (runtime_paths,)
 
 
 def test_desktop_runtime_default_is_independent_of_working_directory(
@@ -484,79 +504,95 @@ def test_run_command_preserves_unexpected_environment_errors(
     assert isinstance(result.exception, PermissionError)
 
 
-class _FakeBridgeClient:
-    def __init__(self) -> None:
-        self.to_device_callback: object | None = None
-        self.response_callback: object | None = None
-        self.sync_error: nio.SyncError | None = None
-        self.stopped = False
-
-    def add_to_device_callback(self, callback: object, _event_type: object) -> None:
-        self.to_device_callback = callback
-
-    def add_response_callback(self, callback: object, _response_type: object) -> None:
-        self.response_callback = callback
-
-    async def sync_forever(self, **_kwargs: object) -> None:
-        if self.sync_error is not None and self.response_callback is not None:
-            await self.response_callback(self.sync_error)  # type: ignore[operator]
-
-    def stop_sync_forever(self) -> None:
-        self.stopped = True
-
-    async def close(self) -> None:
-        return None
-
-
 @pytest.mark.asyncio
-async def test_bridge_pins_controller_before_consuming_initial_sync(
+async def test_bridge_pins_controller_before_consuming_durable_input(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Fresh stores can authenticate queued commands before the initial sync acknowledges them."""
-    client = _FakeBridgeClient()
-    bridge = SimpleNamespace(on_to_device_event=AsyncMock())
-    request_permissions = MagicMock(return_value=())
-    lifecycle: list[str] = []
-    controller_resolved = False
+    """CLI attaches durable admission before the transport runs and closes both owners."""
+    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+    lifecycle = []
+    admitted = asyncio.Event()
+    ready = asyncio.Event()
+    ready.set()
+    event = AuthenticatedToDeviceEvent(
+        source={"content": {}},
+        sender="@cloud:example.org",
+        type=DESKTOP_COMMAND_EVENT_TYPE,
+        authenticated_sender=AuthenticatedDevice("@cloud:example.org", "CLOUD", "curve", "fingerprint"),
+    )
+    batch = SyncBatch(uuid4(), 1, (SyncRecord(RecordKind.TO_DEVICE, None, event.source),))
 
-    async def open_client(*_args: object, **_kwargs: object) -> _FakeBridgeClient:
+    class Source:
+        async def run(self) -> None:
+            lifecycle.append("transport")
+            await asyncio.Event().wait()
+
+        async def wait_for_work(self) -> None:
+            await ready.wait()
+
+        async def next_batch(self) -> SyncBatch:
+            ready.clear()
+            return batch
+
+        async def dispatch(self, _record: SyncRecord) -> None:
+            await client._on_to_device(event)
+
+        async def ack(self, _batch: SyncBatch) -> None:
+            assert admitted.is_set()
+            lifecycle.append("ack")
+
+    async def close_owner() -> None:
+        lifecycle.append("owner_close")
+        await client.close()
+
+    owner = SimpleNamespace(client=client, source=Source(), close=close_owner)
+
+    class Bridge:
+        async def on_to_device_event(self, _event: object) -> None:
+            lifecycle.append("admit")
+            admitted.set()
+
+        async def run(self) -> None:
+            await admitted.wait()
+
+        async def wait_for_capacity(self) -> None:
+            msg = "unexpected capacity pressure"
+            raise AssertionError(msg)
+
+        async def stop(self) -> None:
+            lifecycle.append("stop")
+
+        def close(self) -> None:
+            lifecycle.append("bridge_close")
+
+    async def open_client(*_args: object, **_kwargs: object) -> object:
         lifecycle.append("open")
-        return client
+        return owner
 
-    async def prepare_client(preparing_client: _FakeBridgeClient) -> None:
+    async def prepare_client(_client: object) -> None:
+        assert client.to_device_callbacks
         lifecycle.append("prepare")
-        assert controller_resolved
-        assert preparing_client.to_device_callback is not None
-        event = AuthenticatedToDeviceEvent(
-            source={"content": {}},
-            sender="@cloud:example.org",
-            type="io.mindroom.desktop.command.v1",
-            authenticated_device_id="CLOUD",
-        )
-        preparing_client.to_device_callback(event)  # type: ignore[operator]
-        await asyncio.sleep(0)
 
     async def resolve_device(*_args: object, **_kwargs: object) -> None:
-        nonlocal controller_resolved
         lifecycle.append("resolve")
-        controller_resolved = True
+
+    bridge_options = {}
+
+    def make_bridge(**kwargs: object) -> Bridge:
+        bridge_options.update(kwargs)
+        return Bridge()
 
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
     monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", prepare_client)
     monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", resolve_device)
     monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
-    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", request_permissions)
-    monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", lambda **_kwargs: bridge)
+    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
+    monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", make_bridge)
 
     await desktop_cli._run_bridge(
         runtime_paths=SimpleNamespace(storage_root=tmp_path),
-        session=DesktopMatrixSession(
-            homeserver="https://matrix.example.org",
-            user_id="@desktop:example.org",
-            device_id="DESKTOP",
-            access_token="token",  # noqa: S106 - Test-only Matrix session fixture.
-        ),
+        session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
         controller_user_id="@cloud:example.org",
         controller_device_id="CLOUD",
         controller_ed25519="fingerprint",
@@ -569,18 +605,102 @@ async def test_bridge_pins_controller_before_consuming_initial_sync(
         jpeg_quality=80,
     )
 
-    assert lifecycle == ["open", "resolve", "prepare"]
-    request_permissions.assert_called_once_with()
-    bridge.on_to_device_event.assert_awaited_once()
+    assert lifecycle[:3] == ["open", "resolve", "prepare"]
+    assert lifecycle.index("admit") < lifecycle.index("ack")
+    assert lifecycle[-2:] == ["bridge_close", "owner_close"]
+    assert client.to_device_callbacks == []
+    assert bridge_options["journal_path"] == tmp_path / "desktop_bridge" / "commands.sqlite3"
+    assert bridge_options["legacy_journal_path"] == tmp_path / "desktop_bridge" / "command_journal.json"
 
 
 @pytest.mark.asyncio
-async def test_permanent_sync_error_stops_bridge_with_clear_failure() -> None:
-    """A revoked desktop token exits instead of spinning under an online banner."""
-    client = _FakeBridgeClient()
-    client.sync_error = nio.SyncError("Access token revoked", status_code="M_UNKNOWN_TOKEN")
+@pytest.mark.parametrize("shutdown", ["transport_failure", "cancellation"])
+async def test_cli_drains_native_work_before_releasing_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    shutdown: str,
+) -> None:
+    """Neither transport failure nor cancellation may release ownership over live input."""
+    from mindroom.desktop.bridge import DesktopBridge  # noqa: PLC0415
 
-    with pytest.raises(DesktopSessionError, match="permanent authentication failure"):
-        await desktop_cli._sync_desktop_client(client)
+    started = asyncio.Event()
+    shutdown_started = asyncio.Event()
+    fail_transport = asyncio.Event()
+    release_native = threading.Event()
+    native_finished = threading.Event()
+    owner_closed = False
+    client = nio.AsyncClient("https://matrix.example.org", config=nio.AsyncClientConfig(encryption_enabled=False))
+    loop = asyncio.get_running_loop()
 
-    assert client.stopped
+    def native_action() -> None:
+        loop.call_soon_threadsafe(started.set)
+        release_native.wait(5)
+        native_finished.set()
+
+    class ActiveBridge(DesktopBridge):
+        async def run(self) -> None:
+            async with self._execution_lock:
+                await asyncio.to_thread(native_action)
+            await asyncio.Event().wait()
+
+        async def stop(self) -> None:
+            shutdown_started.set()
+            await super().stop()
+
+    class Source:
+        async def run(self) -> None:
+            await fail_transport.wait()
+            msg = "transport failed"
+            raise RuntimeError(msg)
+
+        async def wait_for_work(self) -> None:
+            await asyncio.Event().wait()
+
+    async def close_owner() -> None:
+        nonlocal owner_closed
+        owner_closed = True
+        shutdown_started.set()
+        await client.close()
+
+    owner = SimpleNamespace(client=client, source=Source(), close=close_owner)
+    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", AsyncMock(return_value=owner))
+    monkeypatch.setattr("mindroom.desktop.session.prepare_desktop_client", AsyncMock())
+    monkeypatch.setattr("mindroom.matrix.olm_to_device.resolve_pinned_device", AsyncMock())
+    monkeypatch.setattr("mindroom.desktop.provider.PyAutoGuiDesktopProvider", lambda **_kwargs: object())
+    monkeypatch.setattr(desktop_cli, "_request_required_desktop_permissions", lambda: None)
+    monkeypatch.setattr("mindroom.desktop.bridge.DesktopBridge", ActiveBridge)
+    task = asyncio.create_task(
+        desktop_cli._run_bridge(
+            runtime_paths=SimpleNamespace(storage_root=tmp_path),
+            session=DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token"),
+            controller_user_id="@cloud:example.org",
+            controller_device_id="CLOUD",
+            controller_ed25519="fingerprint",
+            allow_requester=frozenset({"@alice:example.org"}),
+            allow_agent=frozenset({"computer"}),
+            allow_app=frozenset({"com.example.Editor"}),
+            allow_control=False,
+            lease_minutes=15,
+            max_screenshot_width=1600,
+            jpeg_quality=80,
+        ),
+    )
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        if shutdown == "cancellation":
+            task.cancel()
+        else:
+            fail_transport.set()
+        await asyncio.wait_for(shutdown_started.wait(), 2)
+        assert not owner_closed
+        assert not native_finished.is_set()
+        assert not task.done()
+        release_native.set()
+        expected = asyncio.CancelledError if shutdown == "cancellation" else RuntimeError
+        with pytest.raises(expected):
+            await task
+        assert native_finished.is_set()
+        assert owner_closed
+    finally:
+        release_native.set()
+        await asyncio.gather(task, return_exceptions=True)

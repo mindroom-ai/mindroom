@@ -98,7 +98,7 @@ _BROWSER_ACTION_TABLE = (
     {"action": "focus", "description": "Host target only: focus targetId; desktop does not support focus."},
     {
         "action": "close",
-        "description": "Close targetId or the active host tab; desktop closes its current extension tab.",
+        "description": "Host target only: close targetId or the active host tab.",
     },
     {"action": "snapshot", "description": "Capture a model-friendly page snapshot and element refs."},
     {
@@ -107,16 +107,19 @@ _BROWSER_ACTION_TABLE = (
     },
     {
         "action": "navigate",
-        "description": "Navigate targetId or the active host tab, or the current desktop extension tab, to targetUrl.",
+        "description": "Host target only: navigate targetId or the active tab to targetUrl.",
     },
     {"action": "console", "description": "Read collected console entries."},
-    {"action": "pdf", "description": "Save the current page as a PDF."},
+    {"action": "pdf", "description": "Host target only: save the selected page as a PDF."},
     {
         "action": "upload",
-        "description": "Upload paths through a host selector or ref, or through the active desktop file chooser.",
+        "description": "Host target only: upload paths through a selector or ref.",
     },
-    {"action": "dialog", "description": "Arm how the next browser dialog should be handled."},
-    {"action": "act", "description": "Run a browser interaction described by request.kind."},
+    {"action": "dialog", "description": "Host target only: arm how the next browser dialog should be handled."},
+    {
+        "action": "act",
+        "description": "Host target only: run request.kind; desktop control requires upstream stable targeting.",
+    },
     {"action": "help", "description": "Return this browser action and request-kind table."},
     {"action": "actions", "description": "Alias for help."},
 )
@@ -371,7 +374,7 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if target_id is not None:
         msg = (
             "Browser target=desktop does not support targetId because Playwright MCP tab indices can change; "
-            "operate the current tab or open a new one."
+            "existing-page control requires upstream stable targeting. Observation, start, stop, and open remain available."
         )
         raise ValueError(msg)
     if action in {"status", "start", "stop", "profiles", "tabs"}:
@@ -422,7 +425,7 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
             msg = "paths required for action=upload"
             raise ValueError(msg)
         if ref is not None or element is not None:
-            msg = "Browser target=desktop upload does not support ref or element; use the active file chooser."
+            msg = "Browser target=desktop upload does not support ref or element; page control requires upstream stable targeting."
             raise ValueError(msg)
         parameters: dict[str, object] = {"paths": paths}
         return parameters
@@ -439,7 +442,7 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
         if request.get("targetId") is not None:
             msg = (
                 "Browser target=desktop does not support request.targetId because Playwright MCP tab indices can "
-                "change; operate the current tab or open a new one."
+                "change; page control requires upstream stable targeting."
             )
             raise ValueError(msg)
         return {"request": request}
@@ -583,15 +586,16 @@ class BrowserTools(Toolkit):
         target_schema = dict(properties.get("target") or {})
         target_schema["description"] = (
             "Execution target. Use host for MindRoom's own browser profile or desktop for the pinned local "
-            "Playwright extension in the user's existing profile."
+            "Playwright extension in the user's existing profile. Desktop supports observation and start, stop, open; "
+            "existing-page control requires upstream stable targeting. Reconnecting or reselecting does not enable it."
         )
         target_schema["enum"] = ["host", "desktop"]
         properties["target"] = target_schema
 
         target_id_schema = dict(properties.get("targetId") or {})
         target_id_schema["description"] = (
-            "Opaque host-browser tab ID. The desktop target operates only the current tab and rejects targetId because "
-            "Playwright MCP exposes mutable numeric indices."
+            "Opaque host-browser tab ID. The desktop target rejects targetId because Playwright MCP exposes mutable "
+            "numeric indices, not stable page identity. Desktop observations refer to its current tab only."
         )
         properties["targetId"] = target_id_schema
 
@@ -659,7 +663,7 @@ class BrowserTools(Toolkit):
             node: Node id compatibility field; unsupported in MindRoom runtime.
             profile: Host-target browser profile name (defaults to ``mindroom``).
             targetUrl: URL for ``open`` and ``navigate`` actions.
-            targetId: Opaque host-browser tab id. Unsupported for the desktop target, which operates the current tab.
+            targetId: Opaque host-browser tab id. Desktop cannot bind existing-page control to stable identity.
             limit: Host-target snapshot item limit.
             maxChars: Snapshot text limit.
             mode: Host-target snapshot mode (supports ``efficient``).

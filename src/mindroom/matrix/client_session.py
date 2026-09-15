@@ -14,14 +14,11 @@ import nio
 from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
-from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
 
-    from nio.crypto import DeviceStore
 
 logger = get_logger(__name__)
 
@@ -33,22 +30,6 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
         "M_INVALID_USERNAME",
     },
 )
-
-
-def _log_custom_olm_rejection(
-    event: nio.UnknownToDeviceEvent,
-    reason: str,
-    **details: object,
-) -> None:
-    """Log why a security-sensitive custom event failed provenance checks."""
-    log_event = "call_key_olm_rejected" if event.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE else "custom_olm_rejected"
-    logger.warning(
-        log_event,
-        sender=event.sender,
-        event_type=event.type,
-        reason=reason,
-        **details,
-    )
 
 
 class PermanentMatrixStartupError(PermanentStartupError):
@@ -118,86 +99,6 @@ class MindRoomAsyncClient(nio.AsyncClient):
         )
         encrypted_content.update(encryption_visible_metadata(content))
         return encrypted_message_type, encrypted_content
-
-    def _handle_olm_events(
-        self,
-        response: object,
-    ) -> None:
-        """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
-        sync_response = cast("nio.SyncResponse", response)
-        super()._handle_olm_events(sync_response)
-        count = sync_response.device_key_count.signed_curve25519
-        if self.olm is not None and count is not None:
-            self.olm.uploaded_key_count = count
-
-    def _handle_decrypt_to_device(
-        self,
-        to_device_event: nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent,
-    ) -> nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent | None:
-        decrypted = super()._handle_decrypt_to_device(to_device_event)
-        if not isinstance(to_device_event, nio.OlmEvent):
-            return decrypted
-        return cast(
-            "nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent | None",
-            self.authenticate_to_device(to_device_event.source, decrypted),
-        )
-
-    def authenticate_to_device(self, source: dict[str, object], event: object) -> object:
-        """Authenticate fresh or restored custom events against current device keys."""
-        if not isinstance(event, nio.UnknownToDeviceEvent):
-            return event
-        result = authenticate_to_device_event(
-            source,
-            event,
-            device_store=self.olm.device_store if self.olm is not None else None,
-        )
-        if not isinstance(result, AuthenticatedToDeviceEvent):
-            if self.olm is not None:
-                self.olm.users_for_key_query.add(event.sender)
-            _log_custom_olm_rejection(event, "signed_device_authentication_failed")
-        elif result.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE:
-            logger.info(
-                "call_key_olm_authenticated",
-                sender=result.sender,
-                sender_device=result.authenticated_device_id,
-            )
-        return result
-
-
-def authenticate_to_device_event(  # noqa: PLR0911 - fail-closed identity checks
-    source: dict[str, object],
-    event: object,
-    *,
-    device_store: DeviceStore | None,
-) -> object:
-    """Pure post-decrypt authentication shared by live and durable replay paths."""
-    if not isinstance(event, nio.UnknownToDeviceEvent):
-        return event
-    if device_store is None or source.get("type") != "m.room.encrypted" or source.get("sender") != event.sender:
-        return event
-    content = source.get("content")
-    if not isinstance(content, dict):
-        return event
-    envelope = cast("dict[str, object]", content)
-    if envelope.get("algorithm") != "m.olm.v1.curve25519-aes-sha2":
-        return event
-    sender_key = envelope.get("sender_key")
-    matching = [device for device in device_store.active_user_devices(event.sender) if device.curve25519 == sender_key]
-    if len(matching) != 1:
-        return event
-    device = matching[0]
-    sender_device = event.source.get("sender_device")
-    sender_keys = event.source.get("keys")
-    if sender_device is not None and sender_device != device.id:
-        return event
-    if sender_keys is not None and (not isinstance(sender_keys, dict) or sender_keys.get("ed25519") != device.ed25519):
-        return event
-    return AuthenticatedToDeviceEvent(
-        source=event.source,
-        sender=event.sender,
-        type=event.type,
-        authenticated_device_id=device.id,
-    )
 
 
 def require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
@@ -537,7 +438,6 @@ __all__ = [
     "MatrixSyncStorage",
     "MindRoomAsyncClient",
     "PermanentMatrixStartupError",
-    "authenticate_to_device_event",
     "create_authenticated_client",
     "create_matrix_http_client",
     "login",

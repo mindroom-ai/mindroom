@@ -1,24 +1,17 @@
-"""Encrypted to-device transport for MatrixRTC media frame keys.
-
-Element Call distributes call frame keys as olm-encrypted
-``io.element.call.encryption_keys`` to-device events. nio has no public API
-for encrypting arbitrary to-device payloads, so this module drives the olm
-machine directly the same way nio's own room-key sharing does: claim one-time
-keys for devices without sessions, then olm-encrypt per target device.
-
-Receiving requires a mindroom-nio release that surfaces unknown decrypted olm
-events as ``UnknownToDeviceEvent`` (stock nio drops them); until then the bot
-can send its own key (participants hear it) but cannot decrypt inbound media.
-"""
+"""Encrypted MatrixRTC frame keys through public NIO transport and identity evidence."""
 
 from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING
 
-import nio
-
 from mindroom.logging_config import get_logger
+from mindroom.matrix.olm_to_device import (
+    OlmToDeviceError,
+    PinnedMatrixDevice,
+    authenticated_sender_is_current,
+    send_encrypted_to_device,
+)
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     build_key_to_device_content,
@@ -26,7 +19,9 @@ from mindroom.matrix_rtc.events import (
 )
 
 if TYPE_CHECKING:
-    from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+    import nio
+    from nio import AuthenticatedToDeviceEvent
+
     from mindroom.matrix_rtc.events import CallMember, ReceivedFrameKey
 
 logger = get_logger(__name__)
@@ -61,18 +56,6 @@ class ToDeviceFrameKeyTransport:
         if not recipients:
             return []
 
-        missing = olm.get_missing_sessions(sorted({t.user_id for t in recipients}))
-        if missing:
-            claim_response = await client.keys_claim(missing)
-            if isinstance(claim_response, nio.KeysClaimError):
-                # Targets without sessions are skipped individually below with
-                # their own warning; surface the claim failure itself too.
-                logger.warning(
-                    "call_key_otk_claim_failed",
-                    room_id=room_id,
-                    error=str(claim_response.message),
-                )
-
         content = build_key_to_device_content(
             key_base64=key_base64,
             key_index=key_index,
@@ -92,35 +75,20 @@ class ToDeviceFrameKeyTransport:
                     device_id=target.device_id,
                 )
                 continue
-            session = olm.session_store.get(device.curve25519)
-            if session is None:
-                logger.warning(
-                    "call_key_target_session_missing",
-                    room_id=room_id,
-                    user_id=target.user_id,
-                    device_id=target.device_id,
+            try:
+                await send_encrypted_to_device(
+                    client,
+                    PinnedMatrixDevice(target.user_id, target.device_id, device.ed25519),
+                    event_type=CALL_ENCRYPTION_KEYS_EVENT_TYPE,
+                    content=content,
                 )
-                continue
-            encrypted_content = olm._olm_encrypt(
-                session,
-                device,
-                CALL_ENCRYPTION_KEYS_EVENT_TYPE,
-                content,
-            )
-            message = nio.ToDeviceMessage(
-                type="m.room.encrypted",
-                recipient=target.user_id,
-                recipient_device=target.device_id,
-                content=encrypted_content,
-            )
-            response = await client.to_device(message)
-            if isinstance(response, nio.ToDeviceError):
+            except OlmToDeviceError as exc:
                 logger.warning(
                     "call_key_send_failed",
                     room_id=room_id,
                     user_id=target.user_id,
                     device_id=target.device_id,
-                    error=str(response.message),
+                    error=str(exc),
                 )
                 continue
             delivered.append(target)
@@ -140,7 +108,7 @@ class ToDeviceFrameKeyTransport:
         received_at_ms: int,
     ) -> tuple[str, ReceivedFrameKey] | None:
         """Parse a decrypted call-key event together with its target room."""
-        if event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE:
+        if event.type != CALL_ENCRYPTION_KEYS_EVENT_TYPE or not authenticated_sender_is_current(self._client, event):
             return None
         content = event.source.get("content")
         if not isinstance(content, dict):
@@ -154,6 +122,6 @@ class ToDeviceFrameKeyTransport:
             room_id=room_id,
             received_at_ms=received_at_ms,
         )
-        if received is None or received.claimed_device_id != event.authenticated_device_id:
+        if received is None or received.claimed_device_id != event.authenticated_sender.device_id:
             return None
         return room_id, received
