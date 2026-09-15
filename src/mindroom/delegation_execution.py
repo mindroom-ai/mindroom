@@ -722,16 +722,6 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     parent_requirement_id=requirement.id,
                 )
                 state.children.append(child)
-                await start_child_turn(
-                    child,
-                    parent_run_id=response.run_id,
-                    parent_delegation_id=_RUNNING_CHILD_ID.get(),
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    caller_execution_identity=caller_identity,
-                )
-                # The stable child ID lands before any child side effect.
-                await _persist(entity, response, state)
             if child.result is None:
                 if child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings):
                     msg = "Delegation storage scope changed while awaiting approval"
@@ -761,6 +751,17 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     decisions = None
                     pending_id = None
                 try:
+                    if fresh:
+                        await start_child_turn(
+                            child,
+                            parent_run_id=response.run_id,
+                            parent_delegation_id=_RUNNING_CHILD_ID.get(),
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            caller_execution_identity=caller_identity,
+                        )
+                        # Persist the child before execution, with startup covered by cleanup.
+                        await _persist(entity, response, state)
                     async with subagent_liveness(child, runtime_paths):
                         await reserve_child_turn(
                             child,

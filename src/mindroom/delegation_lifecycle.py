@@ -12,6 +12,7 @@ from agno.run.agent import RunCancelledEvent, RunErrorEvent, RunOutput
 from agno.run.base import RunStatus
 
 from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.delegation_audit import (
     child_audit_context,
     finish_child_record,
@@ -98,16 +99,20 @@ async def start_child_turn(
     caller_execution_identity: ToolExecutionIdentity | None,
     parent_delegation_id: str | None = None,
 ) -> None:
-    """Attach an audit locator to a newly prepared runtime-owned child."""
-    locator = await start_child_record(
-        child,
-        parent_run_id=parent_run_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=caller_execution_identity,
-        parent_delegation_id=parent_delegation_id,
-    )
-    child.record_locator = locator.to_dict()
+    """Create and bind the audit record before startup cancellation can propagate."""
+
+    async def create_record() -> None:
+        locator = await start_child_record(
+            child,
+            parent_run_id=parent_run_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            caller_execution_identity=caller_execution_identity,
+            parent_delegation_id=parent_delegation_id,
+        )
+        child.record_locator = locator.to_dict()
+
+    await run_coroutine_until_complete(create_record())
 
 
 async def settle_child_response(

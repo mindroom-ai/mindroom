@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation_execution import drive_delegations
+from mindroom.delegation_records import DelegationRecordOwner
 from mindroom.delegation_state import DelegationState
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
@@ -29,6 +32,9 @@ from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.delegation_records import DelegationMetadata, DelegationRecordHandle
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass
@@ -80,6 +86,115 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     receipts = list(tmp_path.glob("agents/leader/workspace/.mindroom/delegation_receipts/*/*.json"))
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text())["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native", [False, True])
+async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native: bool,
+) -> None:
+    """Cancelling a durable startup write cannot strand an audit without its locator."""
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child"),
+        },
+        defaults=DefaultsConfig(tools=[], learning=False),
+        memory={"backend": "none"},
+    )
+    paths = _runtime_paths(tmp_path)
+    identity = _identity()
+    toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
+    apply_tool_approval_capability(
+        toolkit,
+        config,
+        supports_native_tool_approval=native,
+        registered_tool_name="delegate",
+    )
+    storage = create_session_storage("leader", config, paths, identity)
+    parent = Agent(
+        name="leader",
+        db=storage,
+        tools=[toolkit],
+        model=DelegationModel(
+            id="test-parent",
+            responses=[
+                ModelResponse(tool_calls=[_call("run_subagent", "delegate", agent_name="child", task="Inspect")]),
+            ],
+        ),
+    )
+    created = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    original_start = DelegationRecordOwner._start
+
+    def delayed_start(
+        owner: DelegationRecordOwner,
+        metadata: DelegationMetadata,
+        *,
+        caller_execution_identity: ToolExecutionIdentity | None,
+        child_execution_identity: ToolExecutionIdentity | None,
+        delegation_id: str | None,
+    ) -> DelegationRecordHandle:
+        handle = original_start(
+            owner,
+            metadata,
+            caller_execution_identity=caller_execution_identity,
+            child_execution_identity=child_execution_identity,
+            delegation_id=delegation_id,
+        )
+        loop.call_soon_threadsafe(created.set)
+        if not release.wait(10):
+            msg = "Audit creation was not released by the test"
+            raise TimeoutError(msg)
+        return handle
+
+    monkeypatch.setattr(DelegationRecordOwner, "_start", delayed_start)
+    try:
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+            if native:
+                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
+                operation = drive_delegations(
+                    parent,
+                    response,
+                    run_child=run_delegated_child_response,
+                    agent_name="leader",
+                    config=config,
+                    runtime_paths=paths,
+                    execution_identity=identity,
+                )
+            else:
+                operation = toolkit.run_subagent(agent_name="child", task="Inspect")
+            task = asyncio.create_task(operation)
+            try:
+                await asyncio.wait_for(created.wait(), timeout=10)
+                task.cancel()
+            finally:
+                release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        run = _only_run(tmp_path)
+        assert run["status"] == "cancelled"
+        receipts = list(tmp_path.glob("agents/leader/workspace/.mindroom/delegation_receipts/*/*.json"))
+        assert len(receipts) == 1
+        assert json.loads(receipts[0].read_text())["status"] == "cancelled"
+        if native:
+            retained = storage.get_run(response.run_id)
+            assert isinstance(retained, RunOutput)
+            child = DelegationState.from_metadata(retained.metadata).children[0]
+            assert child.status == "cancelled"
+            assert child.record_locator
+        else:
+            handle_path = next((paths.storage_root / "subagent_sessions").glob("*.json"))
+            child_payload = json.loads(handle_path.read_text())["child"]
+            assert child_payload["status"] == "cancelled"
+            assert child_payload["record_locator"]
+    finally:
+        release.set()
+        storage.close()
 
 
 def _continuation_responses(continuation: str) -> list[ModelResponse]:
