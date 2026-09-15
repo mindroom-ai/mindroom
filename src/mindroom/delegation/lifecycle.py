@@ -124,6 +124,7 @@ async def settle_child_response(
     runtime_paths: RuntimePaths,
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
+    error_message: str | None = None,
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view."""
     if response.run_id != child.run_id or response.session_id != child.session_id:
@@ -137,7 +138,7 @@ async def settle_child_response(
         child.result = str(response.content or "Delegation cancelled.")
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
-        child.result = str(response.content or response.status)
+        child.result = error_message or str(response.content or response.status)
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
@@ -192,7 +193,18 @@ async def child_run_context(
         try:
             response = observation.response
             if response is not None and response.run_id == child.run_id:
-                await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
+                terminal = observation.terminal
+                await settle_child_response(
+                    child,
+                    response,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    error_message=(
+                        terminal[2]
+                        if terminal is not None and terminal[0] == response.run_id and terminal[1] == "failed"
+                        else None
+                    ),
+                )
             elif observation.terminal is not None and observation.terminal[0] == child.run_id:
                 _, status, reason = observation.terminal
                 await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
@@ -208,8 +220,8 @@ async def observe_child_event(event: object) -> None:
         if event.run_id == child.run_id and event.session_id == child.session_id:
             if isinstance(event, RunOutput):
                 # Failed outputs can retain stale text; keep the matching error event's details.
-                if event.status != RunStatus.error or observation.terminal is None:
-                    observation.response = event
+                observation.response = event
+                if event.status != RunStatus.error:
                     observation.terminal = None
             else:
                 observation.response = None

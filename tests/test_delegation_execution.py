@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from agno.agent import Agent
 from agno.exceptions import ModelProviderError
+from agno.metrics import RunMetrics
 from agno.models.response import ModelResponse
 from agno.run.agent import RunErrorEvent, RunOutput
 from agno.run.base import RunStatus
@@ -605,7 +606,10 @@ async def test_delegated_approval_preserves_redacted_provider_failure(
                 last_event = event
                 yield event
             if isinstance(last_event, RunErrorEvent):
-                yield await self.aget_run_output(last_event.run_id, session_id=last_event.session_id)
+                terminal = await self.aget_run_output(last_event.run_id, session_id=last_event.session_id)
+                assert terminal is not None
+                terminal.metrics = RunMetrics(input_tokens=17, output_tokens=3)
+                yield terminal
 
         monkeypatch.setattr(Agent, "acontinue_run", with_terminal_output)
     await test_child_approval_survives_parent_reconstruction(
@@ -617,6 +621,14 @@ async def test_delegated_approval_preserves_redacted_provider_failure(
         retry=False,
         team_parent=team_parent,
     )
+    if terminal_output and failed_entity == "child":
+        records = [
+            json.loads(path.read_text())
+            for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
+        ]
+        assert len(records) == 1
+        assert records[0]["usage"]["input_tokens"] == 17
+        assert records[0]["usage"]["output_tokens"] == 3
 
 
 @pytest.mark.asyncio
