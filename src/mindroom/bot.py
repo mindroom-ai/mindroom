@@ -61,6 +61,7 @@ from mindroom.matrix_delivery import TurnHandoff
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
+from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
@@ -1821,6 +1822,17 @@ class AgentBot:
                 client=client,
                 agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,
+                callback_wrapper=lambda callback: _create_best_effort_task_wrapper(
+                    callback,
+                    owner=self._runtime_view,
+                ),
+            )
+            register_model_catalog_receiver(
+                client=client,
+                agent_name=self.agent_name,
+                runtime_paths=self.runtime_paths,
+                config_getter=lambda: self.config,
+                membership_index=self._runtime_view.agent_reply_memberships,
                 callback_wrapper=lambda callback: _create_best_effort_task_wrapper(
                     callback,
                     owner=self._runtime_view,

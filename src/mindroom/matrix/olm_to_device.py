@@ -9,7 +9,7 @@ import nio
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from nio.crypto import OlmDevice
 
@@ -23,6 +23,8 @@ class OlmToDeviceError(RuntimeError):
 async def resolve_pinned_device(
     client: nio.AsyncClient,
     target: PinnedMatrixDevice,
+    *,
+    verify_device: bool = True,
 ) -> OlmDevice:
     """Resolve and locally verify one exact device, querying fresh keys when needed."""
     olm = client.olm
@@ -52,7 +54,7 @@ async def resolve_pinned_device(
     if device.blacklisted:
         msg = f"Pinned Matrix device {target.user_id} {target.device_id} is blocked."
         raise OlmToDeviceError(msg)
-    if not device.verified:
+    if verify_device and not device.verified:
         client.verify_device(device)
     return device
 
@@ -63,6 +65,8 @@ async def send_encrypted_to_device(
     *,
     event_type: str,
     content: Mapping[str, object],
+    verify_device: bool = True,
+    before_send: Callable[[], Awaitable[bool]] | None = None,
 ) -> None:
     """Olm-encrypt and send one custom event to an exact pinned device."""
     olm = client.olm
@@ -70,7 +74,7 @@ async def send_encrypted_to_device(
         msg = "Matrix Olm support is unavailable."
         raise OlmToDeviceError(msg)
 
-    device = await resolve_pinned_device(client, target)
+    device = await resolve_pinned_device(client, target, verify_device=verify_device)
     session = olm.session_store.get(device.curve25519)
     if session is None:
         missing_devices = olm.get_missing_sessions([target.user_id]).get(target.user_id, [])
@@ -84,6 +88,13 @@ async def send_encrypted_to_device(
         msg = f"Could not establish an Olm session with {target.user_id} {target.device_id}."
         raise OlmToDeviceError(msg)
 
+    if before_send is not None and not await before_send():
+        msg = "Encrypted Matrix delivery scope is no longer authorized."
+        raise OlmToDeviceError(msg)
+    current = olm.device_store[target.user_id].get(target.device_id)
+    if current is not device or device.blacklisted or device.ed25519 != target.ed25519:
+        msg = "Pinned Matrix device changed before encrypted delivery."
+        raise OlmToDeviceError(msg)
     encrypted_content = olm._olm_encrypt(session, device, event_type, dict(content))
     response = await client.to_device(
         nio.ToDeviceMessage(

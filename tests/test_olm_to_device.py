@@ -22,6 +22,54 @@ SENDER = "@cloud:example.org"
 RECIPIENT = "@desktop:example.org"
 
 
+@pytest.mark.asyncio
+async def test_catalog_transport_preserves_unverified_device_trust() -> None:
+    """An authenticated request permits a private reply without granting device trust."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sender, recipient, device = _olm_pair(tmp)
+        try:
+            sender.unverify_device(device)
+            client = AsyncMock(spec=nio.AsyncClient)
+            client.olm = sender
+            client.to_device.side_effect = lambda message: nio.ToDeviceResponse(message)
+            await send_encrypted_to_device(
+                client,
+                PinnedMatrixDevice(RECIPIENT, "DESKTOP", device.ed25519),
+                event_type="io.mindroom.test",
+                content={},
+                verify_device=False,
+            )
+            assert not device.verified
+            client.verify_device.assert_not_called()
+            assert client.to_device.call_args.args[0].recipient_device == "DESKTOP"
+        finally:
+            sender.store.database.close()
+            recipient.store.database.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_final_scope_guard_sends_nothing() -> None:
+    """Transport honors access revocation after session establishment."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sender, recipient, device = _olm_pair(tmp)
+        try:
+            client = AsyncMock(spec=nio.AsyncClient)
+            client.olm = sender
+            with pytest.raises(OlmToDeviceError, match="no longer authorized"):
+                await send_encrypted_to_device(
+                    client,
+                    PinnedMatrixDevice(RECIPIENT, "DESKTOP", device.ed25519),
+                    event_type="io.mindroom.test",
+                    content={},
+                    verify_device=False,
+                    before_send=AsyncMock(return_value=False),
+                )
+            client.to_device.assert_not_awaited()
+        finally:
+            sender.store.database.close()
+            recipient.store.database.close()
+
+
 @pytest.mark.parametrize("user_id", ["@:", "@:example.org", "@desktop:"])
 def test_pinned_matrix_device_rejects_empty_user_id_components(user_id: str) -> None:
     """Pinned identities require non-empty Matrix localpart and server components."""

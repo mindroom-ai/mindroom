@@ -2765,6 +2765,7 @@ visibility = [
 path = "mindroom.matrix.to_device"
 depends_on = []
 visibility = [
+    "mindroom.model_catalog_receiver",
     "mindroom.bot",
     "mindroom.cli.desktop",
     "mindroom.desktop.bridge",
@@ -3324,6 +3325,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.model_catalog_receiver",
     "mindroom.knowledge.utils",
     "mindroom.matrix.relation_lookup",
     "mindroom.agents",
@@ -5941,4 +5943,20 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_hydration",
+]
+
+[[modules]]
+path = "mindroom.model_catalog"
+depends_on = ["mindroom.logging_config", "mindroom.matrix.identity"]
+
+[[modules]]
+path = "mindroom.model_catalog_receiver"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.logging_config",
+    "mindroom.matrix.olm_to_device",
+    "mindroom.matrix.to_device",
+    "mindroom.model_catalog",
+    "mindroom.model_selection_scope",
+    "mindroom.thread_models",
 ]

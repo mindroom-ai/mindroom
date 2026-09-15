@@ -61,6 +61,11 @@ For `icon`, use either a path relative to the directory containing the active co
 Blank metadata uses the client's default presentation. A missing or unreadable relative image also falls back at presentation time and does not prevent the runtime from starting.
 These fields are presentation-only and are not passed to the model provider.
 
+The Matrix model picker publishes only model keys, display names, provider names, model IDs, and optional Matrix media URLs.
+Local icons must be valid PNG, JPEG, WebP, or GIF images no larger than 1 MiB. The runtime validates their bytes and uploads them to Matrix media; identical bytes reuse the upload within that runtime client. Changed bytes publish a new icon. Unsupported, missing, or unreadable images fall back to the client's provider icon.
+External image URLs are not fetched. Local paths, API keys, provider hosts, and extra provider settings never enter discovery responses.
+See [Matrix model selection protocol](../architecture/matrix.md#model-selection-protocol) for private discovery and confirmed thread changes.
+
 ## Hot Reload
 
 After a successful config reload, edits to a referenced definition under `models` apply to the next agent, team, or router response without restarting its Matrix bot.
