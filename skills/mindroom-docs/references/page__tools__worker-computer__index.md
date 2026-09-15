@@ -83,6 +83,14 @@ Assign exactly one browser provider to this scope. The existing `browser` action
 user desktop extension remain available separately.
 
 The full image installs `@playwright/mcp@0.0.78` with fixed `vision,pdf` capabilities at build time.
+The native provider uses that server's bundled Chromium `151.0.7922.10` (revision `1232`), installed
+under root-owned `/opt/mindroom-browser-mcp` with a fixed executable path and `browser-version.json`
+build metadata. Update and test the server and bundled browser together, including a fresh download after
+reopening a saved profile. System Chromium 152 can crash during that sequence with the pipe transport;
+the bundled browser preserves the existing sandbox, persistent profiles, and stdio process architecture.
+The action-based `browser` provider also defaults to this bundle when bound to a Computer worker display.
+Its existing operator `BROWSER_EXECUTABLE_PATH` override remains supported; custom browser versions need
+the same restart/download checks. Ordinary headless and connected desktop browser selection is unchanged.
 The native schemas are pinned and checked against the installed server on connection. Runtime calls cannot
 install packages, choose another server, add capabilities, or change launch/init settings.
 `browser_run_code_unsafe`, browser installation, and route mutation tools are excluded. Page-context

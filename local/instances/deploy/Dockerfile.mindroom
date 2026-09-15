@@ -7,6 +7,10 @@ FROM public.ecr.aws/docker/library/node:22-slim AS browser-mcp
 WORKDIR /opt/mindroom-browser-mcp
 COPY local/instances/deploy/browser-mcp/package*.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/mindroom-browser-mcp/browsers
+COPY local/instances/deploy/browser-mcp/package-browser.cjs ./package-browser.cjs
+RUN node node_modules/playwright/cli.js install chromium --no-shell \
+    && node package-browser.cjs
 COPY src/mindroom/worker_computer/browser_guard.cjs ./browser_guard.cjs
 
 # Builder stage with uv for dependencies

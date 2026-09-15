@@ -376,6 +376,15 @@ class Fixture:
             "primary_text": True,
         }
 
+    async def download(self, expected: str) -> None:
+        """Require the clicked download's expected bytes, not a stale earlier file."""
+        await self.browser(action="act", request={"kind": "click", "ref": "#download"})
+        async with asyncio.timeout(20):
+            while expected not in await self.shell(  # noqa: ASYNC110 - remote filesystem readiness
+                ["find", ".", "-name", "*fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
+            ):
+                await asyncio.sleep(0.1)
+
     async def evaluate(self, expression: str) -> Any:  # noqa: ANN401 - arbitrary page JSON
         """Read page state through the agent browser contract."""
         return (await self.browser(action="act", request={"kind": "evaluate", "fn": expression}))["result"]
@@ -414,7 +423,7 @@ if(req.url==='/active'){
 }
 if(req.url==='/download'){
  res.writeHead(200,{'Content-Type':'text/plain','Content-Disposition':'attachment; filename="fixture.txt"'});
- res.end('worker-shared-download-ok'); return;
+ res.end(fs.existsSync('download-after-restart')?'worker-restarted-download-ok':'worker-shared-download-ok'); return;
 }
 res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
 }).listen(8767,'127.0.0.1');""".replace("HTML", html)
@@ -560,7 +569,7 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
                 "-c",
                 "id; for p in /proc/[0-9]*; do "
                 "[ -r \"$p/cmdline\" ] || continue; c=$(tr '\\0' ' ' < \"$p/cmdline\"); "
-                'case "$c" in *chromium*|*sandbox_runner*) printf \'%s %s\\n\' "$p" "$c"; '
+                'case "$c" in *chromium*|*chrome*|*sandbox_runner*) printf \'%s %s\\n\' "$p" "$c"; '
                 "sed -n '/^Uid:/p;/^CapEff:/p;/^CapBnd:/p;/^NoNewPrivs:/p;/^Seccomp:/p' \"$p/status\";; esac; done",
             ],
         )
@@ -576,7 +585,7 @@ if(process.getuid()!==1000)throw Error('worker uid');
 for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){
  let cmd,status;try{cmd=fs.readFileSync('/proc/'+pid+'/cmdline','utf8');
  status=fs.readFileSync('/proc/'+pid+'/status','utf8')}catch{continue}
- if(!cmd.split('\0')[0].endsWith('/chromium'))continue;
+ if(!/\/(chromium|chrome)$/.test(cmd.split('\0')[0]))continue;
  const fields=Object.fromEntries(status.split('\n').filter(l=>/^(Uid|CapEff|NoNewPrivs|Seccomp):/.test(l)).map(l=>l.split(/:\s*/)));
  if(cmd.includes('--no-sandbox')||fields.CapEff!=='0000000000000000'||fields.NoNewPrivs!=='1'||fields.Seccomp!=='2')throw Error(JSON.stringify({pid,fields}));count++;
 }
@@ -586,11 +595,12 @@ if(count<2)throw Error('browser subprocesses absent');console.log('SECURITY_VERI
         )
         assert "SECURITY_VERIFIED" in process_check, process_check
         result["effective_browser_security"] = True
+        sandbox_executable = "/opt/mindroom-browser-mcp/chromium"
         sandbox_probe = """\
 from playwright.sync_api import sync_playwright
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(
-        executable_path="/usr/bin/chromium",
+        executable_path=BROWSER_EXECUTABLE,
         headless=True,
         chromium_sandbox=True,
     )
@@ -598,7 +608,7 @@ with sync_playwright() as playwright:
     page.goto("chrome://sandbox")
     print(page.locator("body").inner_text())
     browser.close()
-"""
+""".replace("BROWSER_EXECUTABLE", repr(sandbox_executable))
         sandbox_status = await fixture.shell(
             ["uv", "run", "--project", "/app", "--no-sync", "python", "-c", sandbox_probe],
         )
@@ -621,15 +631,11 @@ with sync_playwright() as playwright:
         else:
             result["same_target_across_requests"] = opened["targetId"]
         await fixture.evaluate(
-            "()=>{document.querySelector('#shared-input').focus();localStorage.setItem('persist','yes');}",
+            "()=>{document.querySelector('#shared-input').focus();localStorage.setItem('persist','yes');"
+            "document.cookie='persist=yes;max-age=3600;path=/';}",
         )
         await fixture.shell(["sh", "-c", "printf alice-only > isolation-marker.txt"])
-        await fixture.browser(action="act", request={"kind": "click", "ref": "#download"})
-        async with asyncio.timeout(20):
-            while "worker-shared-download-ok" not in await fixture.shell(  # noqa: ASYNC110 - remote filesystem readiness
-                ["find", ".", "-name", "*fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
-            ):
-                await asyncio.sleep(0.1)
+        await fixture.download("worker-shared-download-ok")
         result["download_read_through_shell"] = True
         await fixture.evaluate("()=>document.querySelector('#shared-input').focus()")
         async with async_playwright() as playwright:
@@ -799,10 +805,15 @@ with sync_playwright() as playwright:
                 assert new_session["session_id"] != session["session_id"]
                 await fixture.browser(action="open", targetUrl="http://127.0.0.1:8767/")
                 assert await fixture.evaluate("()=>localStorage.getItem('persist')") == "yes"
+                assert "persist=yes" in await fixture.evaluate("()=>document.cookie")
                 assert "worker-shared-download-ok" in await fixture.shell(
                     ["find", ".", "-name", "*fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
                 )
                 result["profile_and_download_after_restart"] = True
+                await fixture.shell(["touch", "download-after-restart"])
+                await fixture.download("worker-restarted-download-ok")
+                assert "Worker computer fixture" in json.dumps(await fixture.browser(action="snapshot"))
+                result["fresh_download_after_restart"] = True
                 await create("bob")
                 assert "isolated" in await fixture.shell(
                     ["sh", "-c", "test ! -e isolation-marker.txt && printf isolated"],
