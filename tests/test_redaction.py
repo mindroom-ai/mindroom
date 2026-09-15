@@ -777,6 +777,90 @@ def test_repeated_log_events_normalize_each_key_only_once(monkeypatch: pytest.Mo
     assert second_event_calls == 0
 
 
+def test_ordinary_mapping_keys_skip_dataclass_inspection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ordinary log keys must not pay for structured-object introspection."""
+    inspected_strings = 0
+    original = redaction.is_dataclass
+
+    def counting_is_dataclass(value: object) -> bool:
+        nonlocal inspected_strings
+        if type(value) is str:
+            inspected_strings += 1
+        return original(value)
+
+    monkeypatch.setattr(redaction, "is_dataclass", counting_is_dataclass)
+    payload = {"input_tokens": 100, "output_tokens": 20, "duration_ms": 1.5}
+
+    assert redact_sensitive_data(payload) == payload
+    assert inspected_strings == 0
+
+
+def test_dataclass_string_mapping_keys_stay_opaque() -> None:
+    """A string subclass can carry structured secrets and must not take the fast path."""
+
+    @dataclass(frozen=True, init=False)
+    class SecretKey(str):
+        __slots__ = ()
+        api_key: str = "structured-canary"
+
+    assert redact_sensitive_data({SecretKey("bare-canary"): "kept"}) == {
+        "<redacted structured key 0>": "kept",
+    }
+
+
+def test_ordinary_mapping_keys_do_not_need_a_second_structure_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Collision bookkeeping must not rescan ordinary keys on every log event."""
+    structure_checks = 0
+    original = redaction._is_structured_mapping_key
+
+    def counting_structure_check(value: object) -> bool:
+        nonlocal structure_checks
+        structure_checks += 1
+        return original(value)
+
+    monkeypatch.setattr(redaction, "_is_structured_mapping_key", counting_structure_check)
+    payload = {"input_tokens": 100, "output_tokens": 20, "duration_ms": 1.5}
+
+    assert redact_sensitive_data(payload) == payload
+    assert structure_checks <= len(payload)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("safe", "safe"), (100, 100), (1.5, 1.5), (True, True), (b"canary", "<bytes>"), (None, None)],
+)
+def test_builtin_scalars_skip_structured_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+    expected: object,
+) -> None:
+    """Scalar log values cannot contain cycles or fields that need normalization."""
+    normalization_calls = 0
+    original = redaction._normalized_structured_value
+
+    def counting_normalization(value: object) -> object:
+        nonlocal normalization_calls
+        normalization_calls += 1
+        return original(value)
+
+    monkeypatch.setattr(redaction, "_normalized_structured_value", counting_normalization)
+
+    assert redact_sensitive_data(value) == expected
+    assert normalization_calls == 0
+
+
+def test_dataclass_string_values_still_redact_declared_fields() -> None:
+    """Structured subclasses must retain field redaction when built-in scalars skip it."""
+
+    @dataclass(frozen=True, init=False)
+    class Diagnostic(str):
+        __slots__ = ()
+        api_key: str = "structured-canary"
+        status: str = "kept"
+
+    assert redact_sensitive_data(Diagnostic("plain display")) == {"api_key": REDACTED, "status": "kept"}
+
+
 def test_key_normalization_cache_is_bounded() -> None:
     """An unbounded cache keyed on arbitrary log keys would leak, so it must evict."""
     distinct_keys = 50_000
