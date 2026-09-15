@@ -4,18 +4,16 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT_DIR/dist/macos/desktop-helper"}
-PYINSTALLER_VERSION=${PYINSTALLER_VERSION:-6.16.0}
 UV_BINARY=${UV_BINARY:-$(command -v uv || true)}
-HELPER_PYTHON=${HELPER_PYTHON:-3.13}
-UNIVERSAL=false
+ARCHITECTURE=$(uname -m)
 
 usage() {
     cat <<'EOF'
-Usage: macos/build-desktop-helper.sh [--output DIR] [--universal]
+Usage: macos/build-desktop-helper.sh [--output DIR] [--arch arm64|x86_64]
 
 Build the fixed-identity Python desktop helper as a nested-app-ready onedir bundle.
-Set HELPER_PYTHON to a Python 3.13 executable; universal builds require both
-arm64 and x86_64 slices in that interpreter and every collected native library.
+Build one architecture with matching Python and dependency wheels.
+HELPER_PYTHON may override the matching managed Python 3.13 interpreter.
 EOF
 }
 
@@ -25,9 +23,9 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR=$2
             shift 2
             ;;
-        --universal)
-            UNIVERSAL=true
-            shift
+        --arch)
+            ARCHITECTURE=$2
+            shift 2
             ;;
         -h|--help)
             usage
@@ -50,31 +48,29 @@ if [[ -z "$UV_BINARY" || ! -x "$UV_BINARY" ]]; then
     exit 1
 fi
 
+case "$ARCHITECTURE" in
+    arm64) PYTHON_ARCHITECTURE=aarch64 ;;
+    x86_64) PYTHON_ARCHITECTURE=x86_64 ;;
+    *) echo "Unsupported desktop helper architecture: $ARCHITECTURE" >&2; exit 2 ;;
+esac
+HELPER_PYTHON=${HELPER_PYTHON:-"cpython-3.13-macos-${PYTHON_ARCHITECTURE}-none"}
+export MINDROOM_HELPER_TARGET_ARCH="$ARCHITECTURE"
+export MACOSX_DEPLOYMENT_TARGET=14.0
+
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR/dist" "$OUTPUT_DIR/work"
-if [[ "$UNIVERSAL" == true ]]; then
-    if ! command -v lipo >/dev/null 2>&1; then
-        echo "lipo is required to build a universal desktop helper." >&2
-        exit 1
-    fi
-    export MINDROOM_HELPER_TARGET_ARCH=universal2
-    HELPER_PYTHON_EXECUTABLE=$(UV_NO_SYNC=1 "$UV_BINARY" python find "$HELPER_PYTHON")
-    if ! lipo "$HELPER_PYTHON_EXECUTABLE" -verify_arch arm64 x86_64; then
-        echo "Universal helper builds require a Python runtime containing arm64 and x86_64 slices." >&2
-        echo "Set HELPER_PYTHON to a universal Python 3.13 executable and retry." >&2
-        exit 1
-    fi
-fi
 
-env -u UV_NO_SYNC "$UV_BINARY" run \
-    --isolated \
+HELPER_ENVIRONMENT="$OUTPUT_DIR/environment"
+env -u UV_NO_SYNC UV_PROJECT_ENVIRONMENT="$HELPER_ENVIRONMENT" "$UV_BINARY" sync \
     --locked \
     --project "$ROOT_DIR" \
-    --no-default-groups \
-    --extra desktop \
+    --only-group desktop-helper \
     --python "$HELPER_PYTHON" \
-    --with "pyinstaller==$PYINSTALLER_VERSION" \
-    pyinstaller \
+    --python-platform "${PYTHON_ARCHITECTURE}-apple-darwin"
+# Install local source and version metadata without the backend's dependency set.
+"$UV_BINARY" pip install --python "$HELPER_ENVIRONMENT/bin/python" --no-deps --editable "$ROOT_DIR"
+"$UV_BINARY" run --no-project --python "$HELPER_ENVIRONMENT/bin/python" \
+    /usr/bin/arch "-${ARCHITECTURE}" python -m PyInstaller \
     --clean \
     --noconfirm \
     --distpath "$OUTPUT_DIR/dist" \

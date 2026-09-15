@@ -2,8 +2,12 @@
 
 set -euo pipefail
 
-HELPER_APP=${1:?Usage: macos/verify-desktop-helper.sh HELPER_APP [--universal]}
-UNIVERSAL=${2:-}
+HELPER_APP=${1:?Usage: macos/verify-desktop-helper.sh HELPER_APP arm64|x86_64}
+ARCHITECTURE=${2:?Expected helper architecture is required}
+case "$ARCHITECTURE" in
+    arm64|x86_64) ;;
+    *) echo "Unsupported desktop helper architecture: $ARCHITECTURE" >&2; exit 2 ;;
+esac
 EXPECTED_ID="chat.mindroom.desktophelper"
 EXECUTABLE="$HELPER_APP/Contents/MacOS/MindRoom Desktop Helper"
 
@@ -22,12 +26,10 @@ if [[ -d "$HELPER_APP/Contents/Library/LaunchServices" ]]; then
 fi
 codesign --verify --deep --strict "$HELPER_APP"
 
-if [[ "$UNIVERSAL" == "--universal" ]]; then
-    while IFS= read -r -d '' binary; do
-        if file "$binary" | grep -q "Mach-O"; then
-            lipo "$binary" -verify_arch arm64 x86_64
-        fi
-    done < <(find "$HELPER_APP/Contents" -type f -print0)
-fi
+while IFS= read -r -d '' binary; do
+    if file "$binary" | grep -q "Mach-O"; then
+        lipo "$binary" -verify_arch "$ARCHITECTURE"
+    fi
+done < <(find "$HELPER_APP/Contents" -type f -print0)
 
 echo "Verified fixed desktop helper identity: $EXPECTED_ID"
