@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <title>Worker computer fixture</title>
+  <style>
+    body { background: #113355; color: white; font: 32px sans-serif; padding: 40px; }
+    input { font: 28px sans-serif; }
+  </style>
+  <h1>Agent computer</h1>
+  <p>Same worker. Same browser.</p>
+  <input id="shared-input" aria-label="Remote text">
+  <p><a id="download" href="/download" download>Download fixture</a></p>
+  <output id="typed-value" role="status"></output>
+  <script>
+    document.querySelector('#shared-input').addEventListener('input', (event) => {
+      document.querySelector('#typed-value').textContent = event.target.value;
+    });
+  </script>
+</html>

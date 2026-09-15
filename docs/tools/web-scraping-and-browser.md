@@ -36,6 +36,8 @@ Use these tools when you need lightweight text extraction, structured scraping A
 `spider` also needs credentials in practice even though the current MindRoom metadata marks it as `setup_type: none`, because the installed `spider-client` raises when `SPIDER_API_KEY` is missing.
 `jina` is the middle ground here, because the installed `JinaReaderTools` only adds an `Authorization` header when `api_key` is present, so public `read_url()` usage works without a key while authenticated plans can still set one.
 `browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window.
+For a visible, persistent browser inside a dedicated Docker or Kubernetes worker, see [Worker Computer](worker-computer.md).
+MindRoom Chat can watch or control that same browser while its downloads remain accessible to worker shell tools.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
 Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth.
 `crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser.

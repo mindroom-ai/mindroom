@@ -8,7 +8,7 @@ import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -30,13 +30,19 @@ from mindroom.message_target import MessageTarget
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.worker_computer.protocol import BrowserSession
+from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
+from tests.browser_lifecycle_helpers import LifecycleBrowser
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from playwright.async_api import Download as PlaywrightDownload
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 DESKTOP_MEDIA = EncryptedDesktopMedia(
@@ -1010,6 +1016,7 @@ class _FakeContext:
         self.new_page = AsyncMock(return_value=self.fresh_page)
         self.route = AsyncMock()
         self.close = AsyncMock()
+        self.on = MagicMock()
 
 
 def _install_fake_persistent_playwright(
@@ -1418,3 +1425,470 @@ async def test_screenshot_selector_uses_locator_screenshot(
     element_screenshot.assert_awaited_once()
     page_screenshot.assert_not_awaited()
     assert payload["selector"] == "#timeline"
+
+
+@pytest.mark.asyncio
+async def test_worker_display_rejects_desktop_routing_and_binds_outputs(tmp_path: Path) -> None:
+    """A managed computer must never escape to another browser target or workspace."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    workspace = tmp_path / "workspace"
+    browser.bind_worker_display(":99", workspace)
+    with pytest.raises(ValueError, match="desktop"):
+        await browser.browser("tabs", target="desktop")
+    assert browser._resolve_output_dir() == workspace / "browser"
+    await browser.aclose()
+
+
+def test_worker_display_rejects_output_outside_prepared_workspace(tmp_path: Path) -> None:
+    """Authored output paths cannot escape the prepared worker workspace."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths, output_dir=tmp_path / "other")
+    with pytest.raises(ValueError, match="workspace"):
+        browser.bind_worker_display(":99", tmp_path / "workspace")
+
+
+@pytest.mark.asyncio
+async def test_worker_download_survives_browser_stop(tmp_path: Path) -> None:
+    """Download copies live in the prepared workspace after browser context cleanup."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    workspace = tmp_path / "workspace"
+    browser.bind_worker_display(":99", workspace)
+
+    class Download:
+        """Filesystem-producing download adapter."""
+
+        suggested_filename = "../../document.txt"
+
+        async def save_as(self, path: str | Path) -> None:
+            """Persist bytes like Playwright save_as."""
+            Path(path).write_text("download bytes")
+
+    await browser._save_worker_download(cast("PlaywrightDownload", Download()))
+    await browser.aclose()
+    saved = list((workspace / "browser").iterdir())
+    assert len(saved) == 1
+    assert saved[0].name.endswith("-document.txt")
+    assert saved[0].read_text() == "download bytes"
+
+
+@pytest.mark.asyncio
+async def test_worker_browser_launch_uses_private_display_and_persistent_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed launches use headed Chromium without mutating the parent display environment."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    monkeypatch.setenv("DISPLAY", ":42")
+    launch, _ = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext())
+    await browser._ensure_profile("mindroom")
+    assert launch["headless"] is False
+    assert launch["env"]["DISPLAY"] == ":99"
+    assert os.environ["DISPLAY"] == ":42"
+    assert Path(str(launch["user_data_dir"])) == tmp_path / "state" / "browser-profiles" / "mindroom"
+    assert launch["downloads_path"] == str(tmp_path / "workspace" / "browser")
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+@pytest.mark.parametrize("action", ["focus", "navigate"])
+async def test_selected_worker_tab_is_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    managed: bool,
+    action: str,
+) -> None:
+    """Selecting an existing headed tab must change the visible native page."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    if managed:
+        browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser()
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    try:
+        opened = json.loads(await browser.browser("open", targetUrl="https://example.org"))
+        fixture_page = adapter.pages[-1]
+        fixture_page.foreground = False
+        adapter.add_native_page("chrome://newtab")
+
+        selected = json.loads(
+            await browser.browser(action, targetId=opened["targetId"], targetUrl="https://example.org/selected"),
+        )
+
+        assert selected["targetId"] == opened["targetId"]
+        assert fixture_page.foreground is managed
+    finally:
+        await browser.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["driver_start", "launch", "route", "new_page"])
+async def test_worker_cancelled_startup_releases_partial_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Cancellation cannot leave a driver/context outside the persistent owner's cleanup."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser(pause_at=phase)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    async def execute() -> object:
+        return await browser.browser("start")
+
+    task = asyncio.create_task(
+        runtime.run_browser_call("binding", lambda _: BrowserSession(execute, browser.aclose), [], {}),
+    )
+    await asyncio.wait_for(adapter.reached.wait(), timeout=1)
+    task.cancel()
+    if phase == "driver_start":
+        await asyncio.sleep(0)
+        adapter.proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await runtime.close()
+    assert adapter.live_resources == set()
+    assert json.loads(await browser.browser("status"))["running"] is False
+
+
+@pytest.mark.asyncio
+async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tabs opened during takeover become usable agent targets without duplicated event hooks."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    workspace = tmp_path / "workspace"
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", workspace)
+    adapter = LifecycleBrowser(initial_pages=True)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    async def execute(**kwargs: object) -> object:
+        return await browser.browser(**kwargs)
+
+    def factory(_display: str) -> BrowserSession:
+        return BrowserSession(execute, browser.aclose)
+
+    await runtime.run_browser_call("binding", factory, [], {"action": "start"})
+    generation = runtime.status()["generation"]
+    await runtime.attach_stream("viewer", generation)
+    await runtime.take_control("viewer")
+    native = adapter.add_native_page("https://example.org/native")
+    await runtime.release_control("viewer")
+    tabs = json.loads(await runtime.run_browser_call("binding", factory, [], {"action": "tabs"}))["tabs"]
+    assert len(tabs) == 2
+    target = next(tab["targetId"] for tab in tabs if tab["url"] == native.url)
+    await runtime.run_browser_call(
+        "binding",
+        factory,
+        [],
+        {"action": "navigate", "targetId": target, "targetUrl": "https://example.org/resumed"},
+    )
+    assert native.url == "https://example.org/resumed"
+    opened = json.loads(
+        await runtime.run_browser_call(
+            "binding",
+            factory,
+            [],
+            {"action": "open", "targetUrl": "https://example.org/tool"},
+        ),
+    )
+    tabs = json.loads(await runtime.run_browser_call("binding", factory, [], {"action": "tabs"}))["tabs"]
+    assert len(tabs) == 3
+    assert sum(tab["targetId"] == opened["targetId"] for tab in tabs) == 1
+
+    class Download:
+        """Native download with an observable file result."""
+
+        suggested_filename = "native.txt"
+
+        async def save_as(self, destination: str | Path) -> None:
+            """Save downloaded bytes through the real persistent handler."""
+            Path(destination).write_text("native download")
+
+    await native.emit("download", Download())
+    await adapter.pages[-1].emit("download", Download())
+    await runtime.close()
+    saved = list((workspace / "browser").iterdir())
+    assert len(saved) == 2
+    assert all(path.read_text() == "native download" for path in saved)
+
+
+@pytest.mark.asyncio
+async def test_native_page_creation_during_tab_listing_preserves_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native page events during title reads cannot invalidate an in-flight tab iterator."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser(initial_pages=True)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    await browser.browser("start")
+
+    async def title() -> str:
+        if len(adapter.pages) == 1:
+            adapter.add_native_page("https://example.org/new")
+        return "initial page"
+
+    monkeypatch.setattr(adapter.pages[0], "title", title)
+    first = json.loads(await browser.browser("tabs"))
+    second = json.loads(await browser.browser("tabs"))
+    assert len(first["tabs"]) == 1
+    assert len(second["tabs"]) == 2
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_driver_acquisition_closes_manager_owned_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An initial start failure still closes resources acquired by the manager."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    adapter = LifecycleBrowser(fail_start=True)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    with pytest.raises(RuntimeError, match="Driver startup failed"):
+        await browser.browser("start")
+    await browser.aclose()
+    assert adapter.live_resources == set()
+
+
+@pytest.mark.asyncio
+async def test_repeated_start_cancellation_keeps_cleanup_owned_until_runtime_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime close waits for acquisition cleanup even after repeated request cancellation."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser(pause_at="driver_start")
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    closing_browser = asyncio.Event()
+
+    async def close_browser() -> None:
+        closing_browser.set()
+        await browser.aclose()
+
+    async def execute() -> object:
+        return await browser.browser("start")
+
+    task = asyncio.create_task(
+        runtime.run_browser_call("binding", lambda _: BrowserSession(execute, close_browser), [], {}),
+    )
+    await asyncio.wait_for(adapter.reached.wait(), timeout=1)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    await asyncio.wait_for(closing_browser.wait(), timeout=1)
+    task.cancel()
+    closing = asyncio.create_task(runtime.close())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(closing), timeout=0.05)
+    assert not adapter.start_cancelled
+    adapter.proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(closing, timeout=1)
+    assert adapter.live_resources == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+@pytest.mark.parametrize("profiles", [1, 2])
+@pytest.mark.parametrize("entry", ["aclose", "profile_stop", "runtime_stop", "replacement"])
+async def test_established_browser_teardown_survives_repeated_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    profiles: int,
+    entry: str,
+) -> None:
+    """Cancelled teardown drains every owned resource before a later restart."""
+    initial_tasks = asyncio.all_tasks()
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    adapters = [LifecycleBrowser() for _ in range(profiles)]
+    pending = iter(adapters)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    async def execute(**kwargs: object) -> object:
+        return await browser.browser(**kwargs)
+
+    def factory(_display: str) -> BrowserSession:
+        return BrowserSession(execute, browser.aclose)
+
+    for index in range(profiles):
+        await runtime.run_browser_call("original", factory, [], {"action": "start", "profile": f"p{index}"})
+    adapters[0].pause_at = phase
+    if entry == "aclose":
+        operation = browser.aclose()
+    elif entry == "profile_stop":
+        operation = browser.browser("stop", profile="p0")
+    elif entry == "runtime_stop":
+        operation = runtime.stop()
+    else:
+        operation = runtime.run_browser_call("replacement", factory, [], {"action": "status"})
+    task = asyncio.create_task(operation)
+    await asyncio.wait_for(adapters[0].reached.wait(), timeout=1)
+    try:
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done(), "Caller escaped before owned teardown completed"
+        assert adapters[0].live_resources
+    finally:
+        adapters[0].proceed.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await runtime.close()
+    assert task.cancelled()
+    assert all(not adapter.live_resources for adapter in adapters)
+    assert not browser._profiles
+    assert not browser._startup_cleanup_tasks
+    await runtime.ensure_started()
+    await runtime.close()
+    assert not runtime.display.healthy()
+    assert not (asyncio.all_tasks() - initial_tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+async def test_cancelled_profile_stop_blocks_replacement_until_resources_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """A cancelled ordinary stop cannot unlock an occupied persistent profile."""
+    initial_tasks = asyncio.all_tasks()
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    old, new = LifecycleBrowser(), LifecycleBrowser()
+    pending = iter([old, new])
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    await browser.browser("start")
+    old.pause_at = phase
+    stopping = asyncio.create_task(browser.browser("stop"))
+    await asyncio.wait_for(old.reached.wait(), timeout=1)
+    restarting = asyncio.create_task(browser.browser("start"))
+    try:
+        for _ in range(3):
+            stopping.cancel()
+            await asyncio.sleep(0)
+        assert not restarting.done()
+        assert not new.live_resources, "Replacement acquired resources before old teardown drained"
+    finally:
+        old.proceed.set()
+        await asyncio.gather(stopping, restarting, return_exceptions=True)
+        await browser.aclose()
+    assert stopping.cancelled()
+    assert not old.live_resources
+    assert not new.live_resources
+    assert not (asyncio.all_tasks() - initial_tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+async def test_browser_cleanup_error_still_drains_other_profiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """One failing cleanup cannot strand other profiles or forget retry ownership."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    first, second = LifecycleBrowser(), LifecycleBrowser()
+    pending = iter([first, second])
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    for profile in ["first", "second"]:
+        await browser.browser("start", profile=profile)
+
+    async def fail_cleanup(at: str) -> None:
+        if at == phase:
+            msg = "cleanup failed"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(first, "checkpoint", fail_cleanup)
+    try:
+        with pytest.raises(ExceptionGroup, match="browser profiles"):
+            await browser.aclose()
+        assert not second.live_resources
+        assert "first" in browser._profiles
+    finally:
+        monkeypatch.undo()
+        await browser.aclose()
+    assert not first.live_resources
+    assert not browser._profiles
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["context_close", "driver_stop"])
+async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Ordinary operations never reuse an invalid context or overlap retained cleanup ownership."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    old, new = LifecycleBrowser(), LifecycleBrowser()
+    pending = iter([old, new])
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    await browser.browser("start")
+    checkpoint = old.checkpoint
+
+    async def fail_cleanup(at: str) -> None:
+        if at == phase:
+            message = "cleanup failed"
+            raise RuntimeError(message)
+
+    old.checkpoint = fail_cleanup
+    try:
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await browser.browser("stop")
+        assert old.live_resources
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            await browser.browser("start")
+        assert not new.live_resources
+        assert json.loads(await browser.browser("status"))["running"] is False
+        assert json.loads(await browser.browser("profiles"))["running_profiles"] == []
+        old.checkpoint = checkpoint
+        old.pause_at = phase
+        restarting = asyncio.create_task(browser.browser("start"))
+        await asyncio.wait_for(old.reached.wait(), timeout=1)
+        replacement = asyncio.create_task(browser.browser("start"))
+        try:
+            for _ in range(3):
+                restarting.cancel()
+                await asyncio.sleep(0)
+            assert not restarting.done()
+            assert not replacement.done()
+            assert not new.live_resources
+        finally:
+            old.proceed.set()
+            await asyncio.gather(restarting, replacement, return_exceptions=True)
+        assert restarting.cancelled()
+        assert not old.live_resources
+        assert new.live_resources == {"driver", "context"}
+        assert json.loads(await browser.browser("status"))["running"] is True
+    finally:
+        old.checkpoint = checkpoint
+        old.proceed.set()
+        await browser.aclose()
+    assert not old.live_resources
+    assert not new.live_resources

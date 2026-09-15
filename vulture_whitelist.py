@@ -380,3 +380,13 @@ response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 
 icon_url  # ModelCatalogEntry optional Matrix wire field, accessed through JSON dictionary keys.
+
+_.controller_session_id  # serialized TypedDict field (src/mindroom/worker_computer/protocol.py)
+control  # FastAPI endpoint (src/mindroom/api/worker_computer.py)
+
+# Computer routes are invoked by FastAPI; dataclass equality binds config identity.
+create_session  # FastAPI Computer endpoint
+session_status  # FastAPI Computer endpoint
+stream_ticket  # FastAPI Computer endpoint
+delete_session  # FastAPI Computer endpoint
+_.config_identity  # ComputerTarget dataclass equality field
