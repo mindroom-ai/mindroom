@@ -535,7 +535,7 @@ async def main() -> None:  # noqa: C901, PLR0915 - CLI setup and owned service l
                 f"http://127.0.0.1:{listener.getsockname()[1]}",
                 owned_matrix_id=owned_matrix["container_id"] if owned_matrix else None,
             )
-            server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning"))
+            server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning", ws="websockets-sansio"))
             await server.serve(sockets=[listener])
         finally:
             listener.close()
@@ -545,7 +545,7 @@ async def main() -> None:  # noqa: C901, PLR0915 - CLI setup and owned service l
                 await command("docker", "rm", "-f", owned_matrix["container_id"])
         return
     fixture = Fixture(args, f"http://127.0.0.1:{listener.getsockname()[1]}")
-    server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning", ws="websockets-sansio"))
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         async with asyncio.timeout(10):
