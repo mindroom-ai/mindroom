@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, LiteralString, cast
 import psycopg
 from psycopg.rows import dict_row
 
+from .legacy_response_attempts import migrate_response_attempts
 from .legacy_schema import upgrade_approval_toolkit_origins, upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import POSTGRES_DIALECT, render, schema_statements
@@ -130,10 +131,8 @@ class PostgresBackend:
             cursor.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()",
             )
-            upgrade_legacy_journal(
-                _PostgresTransaction(cursor),
-                frozenset(str(row["table_name"]) for row in cursor.fetchall()),
-            )
+            existing_tables = frozenset(str(row["table_name"]) for row in cursor.fetchall())
+            upgrade_legacy_journal(_PostgresTransaction(cursor), existing_tables)
             for statement in schema_statements(POSTGRES_DIALECT):
                 cursor.execute(cast("LiteralString", statement))
             cursor.execute(
@@ -144,6 +143,7 @@ class PostgresBackend:
                 _PostgresTransaction(cursor),
                 frozenset(str(row["column_name"]) for row in cursor.fetchall()),
             )
+            migrate_response_attempts(_PostgresTransaction(cursor), existing_tables)
         self._writer.commit()
 
     async def write[T](self, operation: Operation[T]) -> T:

@@ -11,14 +11,15 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.history.types import HistoryScope
 from mindroom.legacy_approval_payloads import resolve_legacy_visibility
+from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
-from . import journal, membership_state, outbox, turn_records
+from . import journal, membership_state, outbox, response_attempts, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Mapping
 
     from mindroom.turn_record import TurnRecord
 
@@ -146,7 +147,7 @@ class ApprovalContinuation:
     thread_id: str | None
     requester_id: str
     response_event_id: str
-    source_event_ids: tuple[str, ...]
+    sources: ResponseSources
     calls: tuple[ApprovalCall, ...]
     state: ApprovalContinuationState
     response_text: str = ""
@@ -178,6 +179,11 @@ class ApprovalContinuation:
     generation: int = 0
     prepared_edit_record: TurnRecord | None = None
 
+    @property
+    def source_event_ids(self) -> tuple[str, ...]:
+        """Return the captured pending sources owned by this continuation."""
+        return self.sources.pending_event_ids
+
 
 def _context(continuation: ApprovalContinuation) -> dict[str, object]:
     """Return the opaque response snapshot stored beside normalized routing facts."""
@@ -185,10 +191,8 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "run_id": continuation.run_id,
         "session_id": continuation.session_id,
         "entity_kind": continuation.entity_kind,
-        "room_id": continuation.room_id,
         "thread_id": continuation.thread_id,
         "requester_id": continuation.requester_id,
-        "response_event_id": continuation.response_event_id,
         "response_text": continuation.response_text,
         "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
         "response_presentation_state": continuation.response_presentation_state,
@@ -262,15 +266,27 @@ def get(
         """,
         (principal_id, approval_id, int(row["generation"])),
     )
-    return _from_rows(row, source_rows, call_rows)
+    pending = tuple(str(source["event_id"]) for source in source_rows)
+    attempt = response_attempts.load_response_attempt(transaction, principal_id, pending[0]) if pending else None
+    return _from_rows(row, call_rows, pending, attempt)
 
 
 def _from_rows(
     row: Row,
-    source_rows: tuple[Row, ...],
     call_rows: tuple[Row, ...],
+    pending: tuple[str, ...],
+    attempt: response_attempts.StoredResponseAttempt | None,
 ) -> ApprovalContinuation:
     """Decode one normalized continuation aggregate."""
+    if attempt is None or attempt.response_event_id is None:
+        message = "Approval continuation has no response attempt identity"
+        raise ValueError(message)
+    sources = ResponseSources(
+        pending,
+        attempt.logical_source_event_ids,
+        attempt.discovery_event_ids,
+        attempt.edit_receipt_order,
+    )
     context = json.loads(str(row["context_json"]))
     if not isinstance(context, dict):
         msg = f"Approval continuation {row['approval_id']!r} has a non-object context"
@@ -297,12 +313,12 @@ def _from_rows(
         run_id=cast("str", stored["run_id"]),
         session_id=cast("str", stored["session_id"]),
         entity_kind=cast("Literal['agent', 'team']", stored["entity_kind"]),
-        entity_name=str(row["entity_name"]),
-        room_id=cast("str", stored["room_id"]),
+        entity_name=attempt.entity_name,
+        room_id=attempt.room_id,
         thread_id=cast("str | None", stored.get("thread_id")),
         requester_id=cast("str", stored["requester_id"]),
-        response_event_id=cast("str", stored["response_event_id"]),
-        source_event_ids=tuple(str(source["event_id"]) for source in source_rows),
+        response_event_id=attempt.response_event_id,
+        sources=sources,
         calls=calls,
         state=cast("ApprovalContinuationState", row["state"]),
         response_text=cast("str", stored.get("response_text", "")),
@@ -400,7 +416,12 @@ def create(
         return None
     # Admission and approval creation must agree which owner receives a
     # concurrent source redaction, on PostgreSQL as well as SQLite.
-    if membership_state.claim_active_membership_epoch(transaction, principal_id, room_id=continuation.room_id) is None:
+    membership_epoch = membership_state.claim_active_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=continuation.room_id,
+    )
+    if membership_epoch is None:
         return None
     initial = outbox.load(
         transaction,
@@ -444,6 +465,14 @@ def create(
     if inserted is None:
         existing = get(transaction, principal_id, approval_id=continuation.approval_id)
         return existing if existing == continuation else None
+    response_attempts.register_response_attempt(
+        transaction,
+        principal_id,
+        attempt=ResponseAttempt(continuation.entity_name, continuation.sources),
+        room_id=continuation.room_id,
+        membership_epoch=membership_epoch,
+        response_event_id=continuation.response_event_id,
+    )
     for ordinal, event_id in enumerate(continuation.source_event_ids):
         transaction.execute(
             """
@@ -506,71 +535,6 @@ def for_entities(
     return _load_owners(transaction, rows)
 
 
-def edited_sources_for_user_stop(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    room_id: str,
-    response_event_id: str,
-    source_event_id: str,
-    stop_receipt_order: int,
-) -> tuple[str, ...]:
-    """Find exact edited approval owners before STOP, including already-finished FINALs."""
-    rows = transaction.fetchall(
-        """
-        SELECT continuations.* FROM approval_continuations AS continuations
-        JOIN approval_continuation_sources AS sources
-          ON sources.principal_id = continuations.principal_id
-         AND sources.approval_id = continuations.approval_id AND sources.source_ordinal = 0
-        JOIN journal_events AS events
-          ON events.principal_id = sources.principal_id AND events.event_id = sources.event_id
-        WHERE continuations.principal_id = ? AND events.room_id = ? AND events.receipt_order <= ?
-        ORDER BY events.receipt_order
-        """,
-        (principal_id, room_id, stop_receipt_order),
-    )
-    source_ids = [
-        continuation.source_event_ids[0]
-        for _, continuation in _load_owners(transaction, rows)
-        if continuation.room_id == room_id
-        and continuation.response_event_id == response_event_id
-        and (prepared := continuation.prepared_edit_record) is not None
-        and source_event_id in prepared.indexed_event_ids
-        and prepared.latest_edit_receipt_order is not None
-        and prepared.latest_edit_receipt_order <= stop_receipt_order
-    ]
-    finals = transaction.fetchall(
-        """
-        SELECT delivery.delivery_id, delivery.result_json FROM matrix_delivery_outbox AS delivery
-        JOIN journal_events AS events
-          ON events.principal_id = delivery.principal_id AND events.event_id = delivery.delivery_id
-        WHERE delivery.principal_id = ? AND delivery.room_id = ?
-          AND delivery.stage = 'final' AND delivery.edits_event_id = ?
-          AND delivery.acknowledged_event_id IS NOT NULL AND delivery.result_json IS NOT NULL
-          AND events.receipt_order <= ?
-        ORDER BY events.receipt_order
-        """,
-        (principal_id, room_id, response_event_id, stop_receipt_order),
-    )
-    for final, prepared in _prepared_delivery_snapshots(finals, source_event_id):
-        if (
-            source_event_id in prepared.indexed_event_ids
-            and prepared.latest_edit_receipt_order is not None
-            and prepared.latest_edit_receipt_order <= stop_receipt_order
-        ):
-            source_ids.append(str(final["delivery_id"]))
-    return tuple(dict.fromkeys(source_ids))
-
-
-def _prepared_delivery_snapshots(rows: tuple[Row, ...], source_event_id: str) -> Iterator[tuple[Row, TurnRecord]]:
-    """Yield persisted edit snapshots decoded at the caller's exact source index."""
-    for row in rows:
-        result = json.loads(str(row["result_json"]))
-        prepared = TurnRecordCodec._from_ledger_record(source_event_id, result.get("prepared_edit_record"))
-        if prepared is not None:
-            yield row, prepared
-
-
 def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple[str, ApprovalContinuation], ...]:
     """Load one page's normalized children without one query per owner."""
     if not rows:
@@ -600,23 +564,29 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         """,  # noqa: S608 - placeholders are fixed markers; values remain bound parameters
         approval_ids,
     )
-    sources_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
+    pending_by_approval: dict[str, list[str]] = {approval_id: [] for approval_id in approval_ids}
     for source in source_rows:
-        sources_by_approval[str(source["approval_id"])].append(source)
+        pending_by_approval[str(source["approval_id"])].append(str(source["event_id"]))
     calls_by_approval: dict[str, list[Row]] = {approval_id: [] for approval_id in approval_ids}
     for call in call_rows:
         calls_by_approval[str(call["approval_id"])].append(call)
-    return tuple(
-        (
-            str(row["principal_id"]),
-            _from_rows(
-                row,
-                tuple(sources_by_approval[str(row["approval_id"])]),
-                tuple(calls_by_approval[str(row["approval_id"])]),
-            ),
-        )
-        for row in rows
+    attempts = response_attempts.load_response_attempts(
+        transaction,
+        tuple(
+            (str(row["principal_id"]), pending[0])
+            for row in rows
+            if (pending := pending_by_approval[str(row["approval_id"])])
+        ),
     )
+    owners = []
+    for row in rows:
+        principal_id = str(row["principal_id"])
+        approval_id = str(row["approval_id"])
+        pending = tuple(pending_by_approval[approval_id])
+        attempt = attempts.get((principal_id, pending[0])) if pending else None
+        continuation = _from_rows(row, tuple(calls_by_approval[approval_id]), pending, attempt)
+        owners.append((principal_id, continuation))
+    return tuple(owners)
 
 
 def all_owners(
@@ -862,121 +832,39 @@ def retire_superseded_failure_for_source(
     return continuation is not None and _settle_superseded_failure_delivery(transaction, principal_id, continuation)
 
 
-def _owns_approval_response(record: TurnRecord, continuation: ApprovalContinuation) -> bool:
-    """Match the complete source set and exact visible response owner."""
-    prepared = continuation.prepared_edit_record
-    return (
-        (
-            set(record.source_event_ids) == set(continuation.source_event_ids)
-            if prepared is None
-            else record.source_event_ids == prepared.source_event_ids
-        )
-        and record.response_owner == continuation.entity_name
-        and record.conversation_target is not None
-        and record.conversation_target.room_id == continuation.room_id
-        and record.response_event_id == continuation.response_event_id
-    )
-
-
-def _newer_answer_is_acknowledged(
-    transaction: Transaction,
-    principal_id: str,
-    continuation: ApprovalContinuation,
-    selected_order: int,
-) -> bool:
-    """Prove a later selected edit delivered a result to this same response and membership."""
-    rows = transaction.fetchall(
-        """
-        SELECT delivery.delivery_id, delivery.result_json FROM matrix_delivery_outbox AS delivery
-        JOIN journal_events AS source
-          ON source.principal_id = delivery.principal_id AND source.event_id = ?
-         AND source.room_id = delivery.room_id AND source.membership_epoch = delivery.membership_epoch
-        WHERE delivery.principal_id = ? AND delivery.room_id = ? AND delivery.edits_event_id = ?
-          AND delivery.stage = 'final' AND delivery.acknowledged_event_id IS NOT NULL
-          AND delivery.result_json IS NOT NULL AND delivery.retired = 0
-          AND delivery.permanent_failure_reason IS NULL
-        """,
-        (continuation.source_event_ids[0], principal_id, continuation.room_id, continuation.response_event_id),
-    )
-    source_ids = (
-        continuation.source_event_ids
-        if continuation.prepared_edit_record is None
-        else continuation.prepared_edit_record.source_event_ids
-    )
-    for row, prepared in _prepared_delivery_snapshots(rows, source_ids[0]):
-        if (
-            _owns_approval_response(prepared, continuation)
-            and (prepared.latest_edit_receipt_order or 0) > selected_order
-            and str(row["delivery_id"])
-            in {revision[1] for revision in (prepared.source_event_revisions or {}).values()}
-        ):
-            return True
-    return False
-
-
-def _settle_superseded_failure_delivery(  # noqa: PLR0911
+def _settle_superseded_failure_delivery(
     transaction: Transaction,
     principal_id: str,
     continuation: ApprovalContinuation,
 ) -> bool:
-    """Settle obsolete failures while preserving every result-bearing frozen FINAL."""
-    prepared = continuation.prepared_edit_record
+    """Apply the shared exact disposition while retaining frozen successful debt."""
     if continuation.state != "failing":
         return False
-    source_ids = continuation.source_event_ids if prepared is None else prepared.source_event_ids
-    if prepared is None:
-        receipt = transaction.fetchone(
-            """
-            SELECT MAX(events.receipt_order) AS receipt_order FROM approval_continuation_sources AS sources
-            JOIN journal_events AS events
-              ON events.principal_id = sources.principal_id AND events.event_id = sources.event_id
-            WHERE sources.principal_id = ? AND sources.approval_id = ?
-            """,
-            (principal_id, continuation.approval_id),
-        )
-        selected_order = None if receipt is None or receipt["receipt_order"] is None else int(receipt["receipt_order"])
-    else:
-        selected_order = prepared.latest_edit_receipt_order
-    if selected_order is None:
+    attempt = response_attempts.load_response_attempt(transaction, principal_id, continuation.source_event_ids[0])
+    if attempt is None:
         return False
-    final = outbox.load(
+    current = turn_records.load_record(transaction, attempt.entity_name, attempt.logical_source_event_ids[0])
+    disposition = response_attempts.approval_failure_disposition(
         transaction,
         principal_id,
-        delivery_id=continuation.source_event_ids[0],
+        attempt=attempt,
+        current_record=current,
+        failure_reason=continuation.failure_reason,
+    )
+    if disposition is not response_attempts.ApprovalFailureDisposition.RETIRE:
+        return False
+    final = outbox.load(transaction, principal_id, delivery_id=attempt.driving_event_id, stage=DeliveryStage.FINAL)
+    if final is None:
+        return True
+    retired = outbox.retire(
+        transaction,
+        principal_id,
+        delivery_id=final.delivery_id,
         stage=DeliveryStage.FINAL,
+        room_id=final.room_id,
+        membership_epoch=final.membership_epoch,
     )
-    if final is not None and (
-        final.result is not None
-        or final.room_id != continuation.room_id
-        or final.edits_event_id != continuation.response_event_id
-    ):
-        return False
-    current = turn_records.load_record(transaction, continuation.entity_name, source_ids[0])
-    if current is None or not _owns_approval_response(current, continuation):
-        return False
-    stopped_before_newer_edit = (
-        continuation.failure_reason == "cancelled_by_user"
-        and selected_order <= (current.user_stop_receipt_order or 0)
-        and (current.latest_edit_receipt_order or 0) > (current.user_stop_receipt_order or 0)
-    )
-    if not stopped_before_newer_edit and not _newer_answer_is_acknowledged(
-        transaction,
-        principal_id,
-        continuation,
-        selected_order,
-    ):
-        return False
-    if final is not None:
-        retired = outbox.retire(
-            transaction,
-            principal_id,
-            delivery_id=final.delivery_id,
-            stage=DeliveryStage.FINAL,
-            room_id=final.room_id,
-            membership_epoch=final.membership_epoch,
-        )
-        return retired is not None and (retired.retired or retired.acknowledged_event_id is not None)
-    return True
+    return retired is not None and (retired.retired or retired.acknowledged_event_id is not None)
 
 
 def discard_unavailable(

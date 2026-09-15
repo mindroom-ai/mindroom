@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, cast
 
 from agno.agent._tools import reject_tool_call
@@ -20,7 +21,7 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 
     from agno.agent import Agent
     from agno.run.requirement import RunRequirement
@@ -79,27 +80,32 @@ def record_approval_denials(
         tool.tool_call_error = True
 
 
-def install_approval_denial_handler(actor: Agent, calls: Sequence[ApprovalCall]) -> None:
-    """Consume member/agent denials after Agno binds the canonical continued run.
+@contextmanager
+def approval_denial_context(actor: Agent, calls_by_run: Mapping[str, Sequence[ApprovalCall]]) -> Iterator[None]:
+    """Apply exact run denials while Agno owns this approval continuation.
 
-    Agno resolves a Function even to reject a removed tool. Continuation invokes
-    aget_tools after binding decisions but before copying messages, so record
-    native rejection results there. No placeholder enters the model tool surface.
+    Agno resolves a Function even to reject a removed tool. It calls aget_tools
+    after binding the canonical run and before copying messages. A team may continue
+    several paused runs on one member, and retries may bind a run again, so keep
+    the exact run map until the entire continuation exits. No placeholder enters
+    the model tool surface.
     """
-    if not calls:
+    if not any(calls_by_run.values()):
+        yield
         return
     original = cast("Callable[..., Awaitable[list[object]]]", actor.aget_tools)
 
     async def tools_after_denials(*args: object, **kwargs: object) -> list[object]:
         run = kwargs.get("run_response")
-        if isinstance(run, RunOutput):
-            # This reconstructed actor consumes one canonical continuation. A
-            # later member run must never reuse these run-scoped denied IDs.
-            actor.__dict__["aget_tools"] = original
+        if isinstance(run, RunOutput) and run.run_id is not None and (calls := calls_by_run.get(run.run_id)):
             record_approval_denials(actor, run, calls)
         return await original(*args, **kwargs)
 
     actor.__dict__["aget_tools"] = tools_after_denials
+    try:
+        yield
+    finally:
+        actor.__dict__["aget_tools"] = original
 
 
 def validate_approval_tool_owners(

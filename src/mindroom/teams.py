@@ -43,7 +43,7 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
-    install_approval_denial_handler,
+    approval_denial_context,
     record_approval_denials,
     required_approval_tool_names,
     toolkit_owners_for_agents,
@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.metrics import RunMetrics
     from agno.models.response import ToolExecution
+    from agno.run.requirement import RunRequirement
 
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
@@ -2506,6 +2507,25 @@ def _continued_team_pause(
     )
 
 
+def _member_approval_denials(
+    member_id: str | None,
+    calls: Mapping[str, ApprovalCall],
+    requirements: Sequence[RunRequirement],
+) -> dict[str, list[ApprovalCall]]:
+    """Bind denied member calls to their persisted native run identities."""
+    calls_by_run: dict[str, list[ApprovalCall]] = {}
+    for requirement in requirements:
+        tool = requirement.tool_execution
+        call = calls.get(tool.tool_call_id or "") if tool is not None else None
+        if call is None or call.invoking_agent != member_id:
+            continue
+        if not requirement.member_run_id:
+            msg = "Saved member approval has no paused run identity; retry the request"
+            raise RuntimeError(msg)
+        calls_by_run.setdefault(requirement.member_run_id, []).append(call)
+    return calls_by_run
+
+
 async def continue_paused_team_run(
     *,
     member_names: tuple[str, ...],
@@ -2559,17 +2579,6 @@ async def continue_paused_team_run(
         active_model_names=member_model_names,
         required_tool_names=required_tool_names,
     )
-    for member in members.agents:
-        install_approval_denial_handler(
-            member,
-            tuple(
-                call
-                for call in approval_calls
-                if call.invoking_agent == member.id and not decisions.get(call.tool_call_id)
-            ),
-        )
-        if member.model is not None:
-            install_approval_receipt_hooks(member.model, member.fallback_config)
     stack = ExitStack()
     scope: ScopeSessionContext | None = None
     team: Team | None = None
@@ -2613,6 +2622,13 @@ async def continue_paused_team_run(
             denial_reasons=denial_reasons,
         )
         validate_approval_tool_owners(members.agents, approved_calls, requirements)
+        denied_calls = {call.tool_call_id: call for call in approval_calls if not decisions.get(call.tool_call_id)}
+        for member in members.agents:
+            stack.enter_context(
+                approval_denial_context(member, _member_approval_denials(member.id, denied_calls, requirements)),
+            )
+            if member.model is not None:
+                install_approval_receipt_hooks(member.model, member.fallback_config)
         presentation = _TeamStreamPresentation.restore(
             config_names=member_names,
             show_tool_calls=show_tool_calls,
@@ -2674,17 +2690,17 @@ async def continue_paused_team_run(
             ),
         )
     finally:
-        _register_team_notice_storage(
-            scope_context=scope,
-            session_id=session_id,
-            entity_name=configured_team_name,
-        )
-        close_team_runtime_state_dbs(
-            agents=members.agents,
-            team_db=cast("BaseDb | None", team.db) if team is not None else None,
-            shared_scope_storage=scope.storage if scope is not None else None,
-        )
-        stack.close()
+        with stack:
+            _register_team_notice_storage(
+                scope_context=scope,
+                session_id=session_id,
+                entity_name=configured_team_name,
+            )
+            close_team_runtime_state_dbs(
+                agents=members.agents,
+                team_db=cast("BaseDb | None", team.db) if team is not None else None,
+                shared_scope_storage=scope.storage if scope is not None else None,
+            )
 
 
 async def prepare_materialized_team_execution(

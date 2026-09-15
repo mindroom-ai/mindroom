@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.models import MatrixDelivery, TerminalTurnWrite
     from mindroom.event_journal.projection import ProjectedEvent
     from mindroom.event_journal.views import MatrixDeliveryView
+    from mindroom.response_sources import ResponseAttempt
 
 logger = get_logger(__name__)
 
@@ -154,6 +155,7 @@ class MatrixDeliveryWorker:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
+        response_attempt: ResponseAttempt | None = None,
         edits_event_id: str | None = None,
         permanent_failure_reason: str | None = None,
     ) -> str | None:
@@ -191,6 +193,7 @@ class MatrixDeliveryWorker:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
+                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 permanent_failure_reason=permanent_failure_reason,
             )
@@ -205,6 +208,7 @@ class MatrixDeliveryWorker:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None,
+        response_attempt: ResponseAttempt | None,
         edits_event_id: str | None,
         permanent_failure_reason: str | None,
     ) -> _FlushOutcome:
@@ -228,6 +232,7 @@ class MatrixDeliveryWorker:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
+                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=handed_over,
                 permanent_failure_reason=permanent_failure_reason,

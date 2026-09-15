@@ -64,6 +64,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
@@ -1127,6 +1128,7 @@ class TestAgentBot(AgentBotTestBase):
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_direct_response_admission(bot)
         # A threaded turn now reads through the projection, and a strict read
         # hydrates first. A bare AsyncMock returns a mock from room_get_event,
         # so hydration fails and the turn ends silently with no response.
@@ -1610,6 +1612,7 @@ class TestAgentBot(AgentBotTestBase):
             rooms=["!test:localhost"],
             enable_streaming=enable_streaming,
         )
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
 
         # Mock orchestrator with agent_bots

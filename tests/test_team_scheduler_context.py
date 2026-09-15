@@ -21,6 +21,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.runtime import SYNC_RESTART_CANCEL_MSG
 from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.access_schema_support import with_current_room_member_access
@@ -143,6 +144,10 @@ async def test_team_non_streaming_has_scheduler_context(tmp_path: Path) -> None:
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please coordinate and schedule a reminder",
                 user_id="@user:localhost",
@@ -191,6 +196,10 @@ async def test_team_non_streaming_cancellation_edits_placeholder(tmp_path: Path)
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please coordinate and schedule a reminder",
                 user_id="@user:localhost",
@@ -243,6 +252,10 @@ async def test_team_non_streaming_sync_restart_edits_placeholder_with_restart_no
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please coordinate and schedule a reminder",
                 user_id="@user:localhost",
@@ -308,6 +321,10 @@ async def test_team_streaming_has_scheduler_context(tmp_path: Path) -> None:
     ):
         await bot._response_runner.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$user_event",),
+                    logical_source_event_ids=("$user_event",),
+                ),
                 thread_history=[],
                 prompt="Please collaborate and schedule a reminder",
                 user_id="@user:localhost",
@@ -352,6 +369,10 @@ async def test_team_late_cancellation_during_post_effects_propagates(tmp_path: P
         task = asyncio.create_task(
             bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$user_event",),
+                        logical_source_event_ids=("$user_event",),
+                    ),
                     thread_history=[],
                     prompt="Please coordinate and schedule a reminder",
                     user_id="@user:localhost",

@@ -28,6 +28,7 @@ from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system import dynamic_toolkits
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -579,7 +580,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
             thread_id=identity.thread_id,
             requester_id=identity.requester_id,
             response_event_id="$waiting",
-            source_event_ids=("$source",),
+            sources=ResponseSources(("$source",), ("$source",)),
             state="claimed",
             calls=(
                 ApprovalCall(

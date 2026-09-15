@@ -45,6 +45,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import (
     ResponseRequest,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import (
@@ -444,6 +445,10 @@ def _response_request(
         msg = "Test response envelope target does not match the source response coordinates"
         raise ValueError(msg)
     return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(response_envelope.source_event_id,),
+            logical_source_event_ids=(response_envelope.source_event_id,),
+        ),
         thread_history=thread_history,
         prompt=prompt,
         model_prompt=model_prompt,

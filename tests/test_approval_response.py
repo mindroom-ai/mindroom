@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,7 +17,7 @@ from agno.session.agent import AgentSession
 
 from mindroom.approval_execution import _collect_agent_continuation
 from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
-from mindroom.approval_tools import install_approval_denial_handler
+from mindroom.approval_tools import approval_denial_context
 from mindroom.event_journal import ApprovalCall
 from mindroom.response_turn import PausedAttempt
 from mindroom.synthetic_model import SyntheticModel
@@ -392,12 +394,13 @@ async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, own
 
 
 @pytest.mark.asyncio
-async def test_denial_handler_does_not_follow_call_id_into_another_run() -> None:
-    """Run-scoped denied IDs are consumed once even when the member actor is reused."""
+@pytest.mark.parametrize("exit_error", [None, RuntimeError, asyncio.CancelledError])
+async def test_denial_context_matches_run_identity_and_restores_lookup(exit_error: type[BaseException] | None) -> None:
+    """Exact denials survive retries but cannot affect other runs or outlive the continuation."""
     actor = Agent(id="general", model=SyntheticModel(id="synthetic"), tools=[], telemetry=False)
     call = ApprovalCall(tool_call_id="reused-id", tool_name="missing", invoking_agent="general", expires_at_ns=2**62)
-    install_approval_denial_handler(actor, (call,))
-    for run_id in ("continued-run", "later-run"):
+
+    async def lookup_twice(run_id: str) -> tuple[RunOutput, ToolExecution]:
         tool = ToolExecution(
             tool_call_id="reused-id",
             tool_name="missing",
@@ -406,15 +409,30 @@ async def test_denial_handler_does_not_follow_call_id_into_another_run() -> None
             confirmation_note="Declined by requester",
         )
         run = RunOutput(run_id=run_id, session_id="session", messages=[], tools=[tool])
-        await actor.aget_tools(
-            run_response=run,
-            run_context=RunContext(run_id=run_id, session_id="session"),
-            session=AgentSession(session_id="session"),
-        )
-        if run_id == "continued-run":
-            assert len(run.messages or []) == 1
-            assert run.messages[0].tool_call_error is True
-            assert tool.requires_confirmation is False
-        else:
-            assert run.messages == []
-            assert tool.requires_confirmation is True
+        for _ in range(2):
+            await actor.aget_tools(
+                run_response=run,
+                run_context=RunContext(run_id=run_id, session_id="session"),
+                session=AgentSession(session_id="session"),
+            )
+        return run, tool
+
+    with (
+        pytest.raises(exit_error) if exit_error is not None else nullcontext(),
+        approval_denial_context(actor, {"continued-run": (call,)}),
+    ):
+        for run_id in ("earlier-run", "continued-run", "later-run", "continued-run"):
+            run, tool = await lookup_twice(run_id)
+            if run_id == "continued-run":
+                assert len(run.messages or []) == 1
+                assert run.messages[0].tool_call_error is True
+                assert tool.requires_confirmation is False
+            else:
+                assert run.messages == []
+                assert tool.requires_confirmation is True
+        if exit_error is not None:
+            raise exit_error
+
+    run, tool = await lookup_twice("continued-run")
+    assert run.messages == []
+    assert tool.requires_confirmation is True

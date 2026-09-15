@@ -47,6 +47,8 @@ __all__ = (
     "OPENAI_GPT_LUNA",
     "OPENAI_GPT_TERRA",
     "OPENAI_IMAGE",
+    "OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES",
+    "OPENAI_IMAGE_PATCH_MODEL_PREFIXES",
     "OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES",
     "OPENAI_REALTIME",
     "OPENAI_TOOL_SEARCH_MIN_GPT_VERSION",
@@ -118,6 +120,10 @@ CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 KIMI_K3 = "k3"
 _OPENAI_GPT = "gpt-6-astra"
 OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (_OPENAI_GPT,)
+# Original detail preserves patch coverage on these models; the provider's
+# separate rejection limit and maximum pixel dimension still apply.
+OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES = ("gpt-6", "gpt-5.6")
+OPENAI_IMAGE_PATCH_MODEL_PREFIXES = (*OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, "gpt-5.5", "gpt-5.4")
 # OpenAI's Responses-API tool_search tool requires gpt-5.4 or newer; gating
 # parses the gpt-N.M version from the model id so new releases take the
 # native tool-search path without a list update.

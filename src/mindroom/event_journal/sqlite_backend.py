@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
+from .legacy_response_attempts import migrate_response_attempts
 from .legacy_schema import upgrade_approval_toolkit_origins, upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
@@ -205,6 +206,7 @@ class SqliteBackend:
                 _SqliteTransaction(connection),
                 frozenset(str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuation_calls)")),
             )
+            migrate_response_attempts(_SqliteTransaction(connection), existing_tables)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()

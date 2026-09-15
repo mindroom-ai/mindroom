@@ -54,6 +54,7 @@ from mindroom.matrix.large_messages import (
 from mindroom.matrix_delivery import MatrixDeliveryWorker, PermanentDeliveryError, RecoveryOutcome, TurnHandoff
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRunner
+from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.tool_system.events import ToolTraceEntry
@@ -122,6 +123,26 @@ def _identity(
             source_kind=source_kind,
         ),
         correlation_id="c1",
+        sources=ResponseSources(
+            (
+                request_envelope(
+                    room_id=_ROOM_ID,
+                    reply_to_event_id=source_event_id,
+                    prompt="Test response request",
+                    agent_name="agent",
+                    source_kind=source_kind,
+                ).source_event_id,
+            ),
+            (
+                request_envelope(
+                    room_id=_ROOM_ID,
+                    reply_to_event_id=source_event_id,
+                    prompt="Test response request",
+                    agent_name="agent",
+                    source_kind=source_kind,
+                ).source_event_id,
+            ),
+        ),
     )
 
 
@@ -301,6 +322,26 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                     source_kind=SILENT_SCHEDULE_SOURCE_KIND,
                 ),
                 correlation_id="c1",
+                sources=ResponseSources(
+                    (
+                        request_envelope(
+                            room_id=_ROOM_ID,
+                            reply_to_event_id="$cause",
+                            prompt="Check the inbox",
+                            agent_name="agent",
+                            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                        ).source_event_id,
+                    ),
+                    (
+                        request_envelope(
+                            room_id=_ROOM_ID,
+                            reply_to_event_id="$cause",
+                            prompt="Check the inbox",
+                            agent_name="agent",
+                            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+                        ).source_event_id,
+                    ),
+                ),
             ),
         )
 
@@ -1586,6 +1627,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
 
@@ -1627,6 +1669,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
 
@@ -1666,6 +1709,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
         answer = "x" * 125_000
@@ -1728,6 +1772,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
         answer = "x" * 125_000
@@ -1779,6 +1824,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
         answer = "x" * 125_000
@@ -1821,6 +1867,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_edit(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
 
@@ -1855,6 +1902,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_send(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
 
@@ -1906,6 +1954,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         terminal = gateway._durable_terminal_send(
             "$cause",
             MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
         )
         assert terminal is not None
 
@@ -2274,7 +2323,11 @@ class TestAnEndedMembershipStopsTheAnswer:
         outbox = FakeOutbox()
         outbox.ended_membership_turn_ids.add("$cause")
         gateway = _gateway(tmp_path, outbox)
-        terminal = gateway._durable_terminal_edit("$cause", self._target())
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            self._target(),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
+        )
         assert terminal is not None
 
         with patch("mindroom.delivery_gateway.edit_message_outcome", AsyncMock()) as edit:
@@ -2497,7 +2550,11 @@ class TestTheFrozenEditSpeaksOneAnswer:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        terminal = gateway._durable_terminal_edit("$cause", self._target())
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            self._target(),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
+        )
         assert terminal is not None
         answer = "the whole answer"
         delivered = DeliveredMatrixEvent("$sent", {})
@@ -2525,7 +2582,11 @@ class TestTheFrozenEditSpeaksOneAnswer:
         """
         outbox = FakeOutbox()
         gateway = _gateway(tmp_path, outbox)
-        terminal = gateway._durable_terminal_edit("$cause", self._target())
+        terminal = gateway._durable_terminal_edit(
+            "$cause",
+            self._target(),
+            ResponseAttempt("agent", ResponseSources(("$cause",), ("$cause",))),
+        )
         assert terminal is not None
         delivered = DeliveredMatrixEvent("$sent", {})
 
@@ -4007,6 +4068,7 @@ class TestTurnDeliverySerialization:
             thread_id: str | None,
             payload: Mapping[str, object],
             result: Mapping[str, object] | None = None,
+            response_attempt: ResponseAttempt | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
             permanent_failure_reason: str | None = None,
@@ -4019,6 +4081,7 @@ class TestTurnDeliverySerialization:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
+                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,
@@ -4079,6 +4142,7 @@ class TestTurnDeliverySerialization:
             thread_id: str | None,
             payload: Mapping[str, object],
             result: Mapping[str, object] | None = None,
+            response_attempt: ResponseAttempt | None = None,
             edits_event_id: str | None = None,
             settle_source_event_ids: tuple[str, ...] = (),
             permanent_failure_reason: str | None = None,
@@ -4091,6 +4155,7 @@ class TestTurnDeliverySerialization:
                 thread_id=thread_id,
                 payload=payload,
                 result=result,
+                response_attempt=response_attempt,
                 edits_event_id=edits_event_id,
                 settle_source_event_ids=settle_source_event_ids,
                 permanent_failure_reason=permanent_failure_reason,

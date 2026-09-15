@@ -18,6 +18,7 @@ from openai import AsyncOpenAI
 
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, _TeamStreamPresentation, continue_paused_team_run
@@ -62,7 +63,7 @@ async def _resume_approval(
             response_event_id="$waiting",
             calls=calls,
             execution_identity={},
-            source_event_ids=("$source",),
+            sources=ResponseSources(("$source",), ("$source",)),
             state="claimed",
         )
         runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)

@@ -4,27 +4,40 @@ from __future__ import annotations
 
 import asyncio
 import json
+from copy import deepcopy
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from agno.run.base import RunStatus
+from agno.agent import Agent
+from agno.models.message import Message
+from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput
+from agno.run.base import RunContext, RunStatus
+from agno.run.requirement import RunRequirement
+from agno.run.team import TeamRunOutput
+from agno.session.team import TeamSession
+from agno.team import Team
+from agno.team._run import _aroute_requirements_to_members_stream
 from agno.tools.calculator import CalculatorTools
+from agno.tools.function import Function
 from openai import AsyncOpenAI
 
-from mindroom.approval_tools import toolkit_owners_for_agents
+from mindroom.approval_tools import approval_denial_context, toolkit_owners_for_agents
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal.approval_continuations import ApprovalDecision
 from mindroom.history.session_context import close_team_runtime_state_dbs, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.openai_models import MindRoomOpenAIResponses
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_response
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.teams import (
     TeamMode,
     _attach_team_pause_presentation,
+    _member_approval_denials,
     build_materialized_team_instance,
     continue_paused_team_run,
     materialize_exact_team_members,
@@ -39,8 +52,6 @@ from tests.test_openai_native_compaction import _ANSWER, _event, _response
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
-
-    from agno.agent import Agent
 
 
 class _MemberAssemblyObservedError(Exception):
@@ -87,7 +98,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         thread_id=target.resolved_thread_id,
         requester_id=identity.requester_id,
         response_event_id="$waiting",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=calls,
         state="claimed",
         execution_identity=serialize_tool_execution_identity(identity),
@@ -459,3 +470,131 @@ async def test_real_team_member_pause_reopens_with_exact_toolkit_owner(  # noqa:
                 assert all(tool.get("name") != "add" for tool in requests[2].get("tools", []))
         assert executed == ([(2, 3)] if scenario == "approved" else [])
         assert dynamic_toolkits._loaded_tools == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier_run", ["none", "ordinary", "approved", "reused_call_id"])
+async def test_member_denials_survive_other_runs_on_the_same_actor(earlier_run: str) -> None:
+    """One rebuilt member must reject each saved run after its toolkit is removed."""
+    executed: list[str] = []
+
+    def harmless() -> str:
+        executed.append("harmless")
+        return "Harmless result"
+
+    model = SyntheticModel(
+        id="synthetic",
+        min_response_chars=2,
+        max_response_chars=2,
+        chars_per_second=0,
+        tool_call_probability=0,
+    )
+    member = Agent(
+        id="alpha",
+        name="Alpha",
+        model=model,
+        tools=[Function(name="harmless", entrypoint=harmless)],
+        telemetry=False,
+    )
+    team = Team(id="research", members=[member], model=model, telemetry=False)
+    requirements: list[RunRequirement] = []
+    runs: list[RunOutput] = []
+    calls: list[ApprovalCall] = []
+    for number in (0, 1, 2) if earlier_run == "approved" else (1, 2):
+        call_id = f"call-{number}"
+        tool_name = "harmless" if number == 0 else "removed_tool"
+        tool = ToolExecution(
+            tool_call_id=call_id,
+            tool_name=tool_name,
+            tool_args={},
+            requires_confirmation=True,
+        )
+        requirement = RunRequirement(tool)
+        requirement.member_agent_id = "alpha"
+        requirement.member_run_id = f"member-run-{number}"
+        if number == 0:
+            requirement.confirm()
+        else:
+            requirement.reject("Declined by requester")
+            calls.append(
+                ApprovalCall(
+                    tool_call_id=call_id,
+                    tool_name=tool_name,
+                    invoking_agent="alpha",
+                    toolkit_name="removed",
+                    expires_at_ns=2**62,
+                ),
+            )
+        requirements.append(requirement)
+        runs.append(
+            RunOutput(
+                run_id=requirement.member_run_id,
+                agent_id="alpha",
+                session_id="team-session",
+                status=RunStatus.paused,
+                tools=[tool],
+                requirements=[requirement],
+                messages=[
+                    Message(role="user", content="Do task"),
+                    Message(
+                        role="assistant",
+                        tool_calls=[
+                            {"id": call_id, "type": "function", "function": {"name": tool_name, "arguments": "{}"}},
+                        ],
+                    ),
+                ],
+            ),
+        )
+    parent = TeamRunOutput(
+        run_id="team-run",
+        team_id="research",
+        session_id="team-session",
+        status=RunStatus.paused,
+        requirements=requirements,
+    )
+    session = TeamSession(session_id="team-session", team_id="research", runs=[parent, *runs])
+    context = RunContext(run_id="team-run", session_id="team-session", session_state={})
+    denied_calls = {call.tool_call_id: call for call in calls}
+    with approval_denial_context(member, _member_approval_denials(member.id, denied_calls, requirements)):
+        if earlier_run == "ordinary":
+            unrelated = await member.arun("Another task", session_id="other-session")
+            assert unrelated.status == RunStatus.completed
+            assert not any(message.role == "tool" for message in unrelated.messages or [])
+
+        if earlier_run == "reused_call_id":
+            unrelated = deepcopy(runs[0])
+            unrelated.run_id = "unrelated-run"
+            for requirement in unrelated.requirements or []:
+                requirement.member_run_id = unrelated.run_id
+            with pytest.raises(ValueError, match="Function call not found"):
+                await member.acontinue_run(run_response=unrelated)
+            assert not any(message.role == "tool" for message in unrelated.messages or [])
+
+        async for _ in _aroute_requirements_to_members_stream(team, parent, session, [], context):
+            pass
+
+    for run in runs:
+        assert run.status == RunStatus.completed
+        results = [message for message in run.messages or [] if message.role == "tool"]
+        assert len(results) == 1
+        assert results[0].tool_call_id == (run.tools or [])[0].tool_call_id
+        if run.run_id == "member-run-0":
+            assert results[0].content == "Harmless result"
+        else:
+            assert "Declined by requester" in results[0].get_content_string()
+            assert (run.tools or [])[0].tool_call_error is True
+    assert executed == (["harmless"] if earlier_run == "approved" else [])
+
+
+def test_member_denial_requires_persisted_run_identity() -> None:
+    """A saved denial cannot be rebound to a guessed member run."""
+    requirement = RunRequirement(ToolExecution(tool_call_id="call-1", tool_name="removed_tool"))
+    requirement.member_agent_id = "alpha"
+    call = ApprovalCall(
+        tool_call_id="call-1",
+        tool_name="removed_tool",
+        invoking_agent="alpha",
+        expires_at_ns=2**62,
+    )
+    with pytest.raises(RuntimeError, match="no paused run identity"):
+        _member_approval_denials("alpha", {"call-1": call}, [requirement])

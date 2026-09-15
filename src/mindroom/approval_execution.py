@@ -23,7 +23,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
-    install_approval_denial_handler,
+    approval_denial_context,
     required_approval_tool_names,
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
@@ -216,10 +216,6 @@ class AgentApprovalExecution:
                 msg = f"Paused run {continuation.run_id!r} is no longer available"
                 raise RuntimeError(msg)
             restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession", session))
-            install_approval_denial_handler(
-                agent,
-                tuple(call for call in continuation.calls if not decisions.get(call.tool_call_id)),
-            )
             requirements = apply_exact_approval_decisions(
                 [deepcopy(requirement) for requirement in persisted.requirements or ()],
                 decisions=decisions,
@@ -227,23 +223,31 @@ class AgentApprovalExecution:
             )
             validate_approval_tool_owners([agent], approved_calls, requirements)
 
-            async with typing_indicator(
-                self.client(),
-                continuation.room_id,
-                log_context=typing_log_context,
-            ):
-                response, presentation = await self.tool_runtime.run_in_context(
-                    tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-                    operation=lambda: run_with_tool_execution_identity(
-                        tool_dispatch.execution_identity,
-                        operation=lambda: _continue_persisted_agent(
-                            agent,
-                            continuation,
-                            persisted,
-                            requirements,
-                        ),
+            with approval_denial_context(
+                agent,
+                {
+                    continuation.run_id: tuple(
+                        call for call in continuation.calls if not decisions.get(call.tool_call_id)
                     ),
-                )
+                },
+            ):
+                async with typing_indicator(
+                    self.client(),
+                    continuation.room_id,
+                    log_context=typing_log_context,
+                ):
+                    response, presentation = await self.tool_runtime.run_in_context(
+                        tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+                        operation=lambda: run_with_tool_execution_identity(
+                            tool_dispatch.execution_identity,
+                            operation=lambda: _continue_persisted_agent(
+                                agent,
+                                continuation,
+                                persisted,
+                                requirements,
+                            ),
+                        ),
+                    )
         finally:
             try:
                 ai_runtime.register_queued_notice_storage(
