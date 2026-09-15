@@ -123,7 +123,9 @@ MindRoom stores only a hash of the capability in durable state and removes the r
 ## Complete Watcher Example
 
 This watcher polls a controlled text endpoint and wakes the same Matrix agent once per observed value change.
-Replace the URL and full Matrix user ID with values for your deployment.
+Replace the URL and configured agent name with values for your deployment.
+Start this watcher from a human-requester turn: background calls retain that requester, and Matrix self-messaging requires a human requester.
+For a fresh self-run from another requester context, use `run_subagent` in the agent runtime when self-delegation is allowed; the background-script gateway does not grant delegation tools.
 
 ```python
 from __future__ import annotations
