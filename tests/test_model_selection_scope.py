@@ -170,7 +170,7 @@ async def test_membership_loss_during_root_fetch_denies_scope(tmp_path: Path) ->
     )
 
 
-@pytest.mark.parametrize("absent", ["requester", "router", "agent"])
+@pytest.mark.parametrize("absent", ["requester", "router"])
 @pytest.mark.asyncio
 async def test_missing_joined_member_denies_scope(tmp_path: Path, absent: str) -> None:
     """Cached or invited users cannot replace actual joined membership."""

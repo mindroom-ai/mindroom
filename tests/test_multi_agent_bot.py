@@ -484,7 +484,6 @@ class TestAgentBot(AgentBotTestBase):
             account_id: str,
             after_sync: object,
             after_ack: object,
-            authenticate_to_device: object,
             wait_for_work: object,
             wake_semantic_dispatch: object,
             wait_for_delivery_projection: object,
@@ -495,7 +494,6 @@ class TestAgentBot(AgentBotTestBase):
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
             assert after_ack == bot._ingestion_admission_progress.set
-            assert callable(authenticate_to_device)
             assert before_admission == bot._before_ingestion_admission
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection
             assert after_admission == bot._after_ingestion_admission

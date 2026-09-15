@@ -8,6 +8,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private let runner = MindRoomCommandRunner.shared
     private let appUpdater = AppUpdater.shared
     private let loginItemController = LoginItemController.shared
+    private let desktopControl = DesktopControlStore.shared
     private let menu = NSMenu()
     private var statusItem: NSStatusItem?
     private var statusRefreshTimer: Timer?
@@ -49,8 +50,23 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.removeAllItems()
 
         menu.addItem(disabledItem("Status: \(runner.serviceStatus.message)"))
+        menu.addItem(disabledItem("Desktop: \(desktopControl.desktopStatusLabel)"))
         if let runningTitle = runner.runningCommandTitle {
             menu.addItem(disabledItem("Running \(runningTitle)..."))
+        }
+        menu.addItem(.separator())
+
+        menu.addItem(actionItem(
+            "Open Desktop Control…",
+            symbolName: "display",
+            action: #selector(openDesktopControl)
+        ))
+        if desktopControl.status.authority.controlAvailable {
+            menu.addItem(actionItem(
+                "Revoke Desktop Control",
+                symbolName: "hand.raised.fill",
+                action: #selector(revokeDesktopControl)
+            ))
         }
         menu.addItem(.separator())
 
@@ -229,6 +245,15 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     @objc private func installRuntime() {
         runner.run(.installRuntime)
+    }
+
+    @objc private func openDesktopControl() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
+
+    @objc private func revokeDesktopControl() {
+        desktopControl.revokeControl()
     }
 
     @objc private func updateRuntime() {

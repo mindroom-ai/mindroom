@@ -1,0 +1,24 @@
+name: macOS tests
+
+on:
+  pull_request:
+    paths:
+      - "macos/MindRoom/**"
+      - ".github/workflows/macos-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "macos/MindRoom/**"
+      - ".github/workflows/macos-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  swift-tests:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and test native app
+        run: swift test --package-path macos/MindRoom

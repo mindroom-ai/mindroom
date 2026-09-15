@@ -10,22 +10,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
+import nio
+
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import (
     PinnedMatrixDevice,
+    authenticated_sender_is_current,
     authenticated_sender_matches,
     send_encrypted_to_device,
 )
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.model_catalog import ModelCatalog
 from mindroom.model_selection_scope import validate_model_picker_scope
 from mindroom.thread_models import resolve_thread_model_override
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-    import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
@@ -53,7 +53,7 @@ class _Request:
 
 
 def _parse(event: object) -> _Request | None:
-    if not isinstance(event, AuthenticatedToDeviceEvent) or event.type != _REQUEST_TYPE:
+    if not isinstance(event, nio.AuthenticatedToDeviceEvent) or event.type != _REQUEST_TYPE:
         return None
     raw = event.source.get("content")
     if not isinstance(raw, Mapping):
@@ -93,16 +93,13 @@ class _Receiver:
         self.active: dict[tuple[str, str, _Request], tuple[float, PinnedMatrixDevice]] = {}
         self.rates: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
 
-    def _target(self, event: AuthenticatedToDeviceEvent) -> PinnedMatrixDevice | None:
-        olm = self.client.olm
-        if olm is None:
+    def _target(self, event: nio.AuthenticatedToDeviceEvent) -> PinnedMatrixDevice | None:
+        if not authenticated_sender_is_current(self.client, event):
             return None
-        device = olm.device_store[event.sender].get(event.authenticated_device_id)
-        if device is None or device.blacklisted:
-            return None
-        return PinnedMatrixDevice(event.sender, event.authenticated_device_id, device.ed25519)
+        identity = event.authenticated_sender
+        return PinnedMatrixDevice(identity.user_id, identity.device_id, identity.ed25519)
 
-    def admit(self, event: AuthenticatedToDeviceEvent) -> bool:
+    def admit(self, event: nio.AuthenticatedToDeviceEvent) -> bool:
         """Reserve bounded work synchronously, before the task wrapper queues it."""
         request = _parse(event)
         if request is None:
@@ -110,13 +107,13 @@ class _Receiver:
         target = self._target(event)
         if target is None:
             return False
-        key = (event.sender, event.authenticated_device_id, request)
+        key = (event.sender, event.authenticated_sender.device_id, request)
         if key in self.active or len(self.active) >= _MAX_IN_FLIGHT:
             return False
         now = time.monotonic()
         while self.rates and next(iter(self.rates.values()))[-1] <= now - _DEADLINE_SECONDS:
             self.rates.popitem(last=False)
-        device_key = (event.sender, event.authenticated_device_id)
+        device_key = (event.sender, event.authenticated_sender.device_id)
         if device_key not in self.rates and len(self.rates) >= _MAX_RATE_DEVICES:
             return False
         recent = [stamp for stamp in self.rates.get(device_key, []) if stamp > now - _DEADLINE_SECONDS]
@@ -129,7 +126,7 @@ class _Receiver:
 
     async def _scope(
         self,
-        event: AuthenticatedToDeviceEvent,
+        event: nio.AuthenticatedToDeviceEvent,
         request: _Request,
         config: Config,
     ) -> ModelPickerScope | None:
@@ -164,7 +161,12 @@ class _Receiver:
             ],
         }
 
-    async def _respond(self, event: AuthenticatedToDeviceEvent, request: _Request, target: PinnedMatrixDevice) -> None:
+    async def _respond(
+        self,
+        event: nio.AuthenticatedToDeviceEvent,
+        request: _Request,
+        target: PinnedMatrixDevice,
+    ) -> None:
         config = self.config_getter()
         if len(config.models) > _MAX_MODELS or not authenticated_sender_matches(self.client, event, target):
             return
@@ -191,30 +193,26 @@ class _Receiver:
         if len(json.dumps(content).encode("utf-8")) > _MAX_RESPONSE_BYTES:
             return
 
-        async def before_send() -> bool:
-            return (
-                self.config_getter() is config
-                and await self._scope(event, request, config) == scope
-                and self.config_getter() is config
-                and authenticated_sender_matches(self.client, event, target)
-            )
-
-        if not await before_send():
+        # Authorize at the NIO handoff; NIO owns preparation and delivery retries.
+        if (
+            self.config_getter() is not config
+            or await self._scope(event, request, config) != scope
+            or self.config_getter() is not config
+            or not authenticated_sender_matches(self.client, event, target)
+        ):
             return
         await send_encrypted_to_device(
             self.client,
             target,
             event_type=_RESPONSE_TYPE,
             content=content,
-            verify_device=False,
-            before_send=before_send,
         )
 
-    async def on_event(self, event: AuthenticatedToDeviceEvent) -> None:
+    async def on_event(self, event: nio.AuthenticatedToDeviceEvent) -> None:
         request = _parse(event)
         if request is None:
             return
-        key = (event.sender, event.authenticated_device_id, request)
+        key = (event.sender, event.authenticated_sender.device_id, request)
         admitted = self.active.get(key)
         if admitted is None:
             return
@@ -238,7 +236,7 @@ def register_model_catalog_receiver(
     config_getter: Callable[[], Config],
     membership_index: AgentReplyMembershipIndex,
     callback_wrapper: Callable[
-        [Callable[[AuthenticatedToDeviceEvent], Awaitable[None]]],
+        [Callable[[nio.AuthenticatedToDeviceEvent], Awaitable[None]]],
         Callable[..., Awaitable[None]],
     ],
 ) -> None:
@@ -253,8 +251,8 @@ def register_model_catalog_receiver(
     )
     wrapped = callback_wrapper(receiver.on_event)
 
-    async def on_event(event: AuthenticatedToDeviceEvent) -> None:
+    async def on_event(event: nio.AuthenticatedToDeviceEvent) -> None:
         if receiver.admit(event):
             await wrapped(event)
 
-    client.add_to_device_callback(on_event, AuthenticatedToDeviceEvent)
+    client.add_to_device_callback(on_event, nio.AuthenticatedToDeviceEvent)

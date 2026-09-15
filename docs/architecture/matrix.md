@@ -364,9 +364,12 @@ Models are sorted by stable key; the SHA-256 revision covers only published entr
 Display names may repeat and fall back to the key.
 Icons use Matrix `mxc://` URIs only; local raster publication follows the [model configuration rules](../configuration/models.md).
 Catalogs exceeding 256 models or 64 KiB UTF-8 JSON are unavailable rather than truncated.
-Processing expires after 12 seconds.
+Application processing expires after 12 seconds; cancellation does not retract a send already retained by NIO.
 Admission caps queued/in-flight requests at eight and accepts at most eight fresh requests per device in 12 seconds; concurrent duplicate requests share the active request.
-Scope and device access are rechecked after awaited work before sending.
+Immediately before handing the response to NIO, MindRoom rechecks current scope, captured device identity, and config identity, including after the final awaited scope check.
+NIO then owns device validation, encryption, persistence, and delivery retries.
+A requester who loses room access during NIO preparation or retry can still receive that already-authorized catalog.
+Clients must independently enforce current joined-agent eligibility and discard expired responses.
 
 Clients register their response listener before sending, correlate request, room, thread, and actual authenticated runtime device, and independently check returned agent membership.
 Candidate runtime accounts are hints; clients require an owner-signed runtime device.

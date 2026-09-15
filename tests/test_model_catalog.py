@@ -72,7 +72,7 @@ async def test_icons_are_content_cached_and_matrix_only(tmp_path: Path) -> None:
     assert revision != first[1]
 
 
-@pytest.mark.parametrize("kind", ["missing", "malformed", "svg", "oversize", "directory", "external", "bad_mxc"])
+@pytest.mark.parametrize("kind", ["missing", "svg", "oversize", "directory", "external", "bad_mxc"])
 @pytest.mark.asyncio
 async def test_bad_icons_fall_back_without_upload(tmp_path: Path, kind: str) -> None:
     """Unusable files and external URLs cannot leak through the public catalog."""

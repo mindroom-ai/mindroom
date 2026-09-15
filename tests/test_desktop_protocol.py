@@ -11,9 +11,30 @@ from mindroom.desktop.protocol import (
     DesktopPairingClaim,
     DesktopProtocolError,
     DesktopResponse,
+    DesktopSetupDescriptor,
     EncryptedDesktopMedia,
     desktop_pairing_verification,
 )
+
+
+def test_native_setup_descriptor_preserves_exact_pairing_scope() -> None:
+    """Native setup imports one explicit controller and requester-agent scope."""
+    descriptor = DesktopSetupDescriptor(
+        homeserver="https://matrix.example.org",
+        user_id="@alice:example.org",
+        code="pairing-code",
+        controller_user_id="@computer:example.org",
+        controller_device_id="CLOUD",
+        controller_ed25519="fingerprint",
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        cloudflare_access=False,
+    )
+    content = descriptor.to_content()
+    assert DesktopSetupDescriptor.from_content(content) == descriptor
+    for change in ({"v": True}, {"kind": "another_setup"}, {"unknown": "value"}, {"cloudflare_access": "false"}):
+        with pytest.raises(DesktopProtocolError):
+            DesktopSetupDescriptor.from_content({**content, **change})
 
 
 def test_pairing_claim_contains_only_protocol_version_and_token() -> None:

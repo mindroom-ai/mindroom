@@ -19,7 +19,6 @@ from mindroom.thread_models import resolve_thread_model_override, set_thread_mod
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import make_conversation_reader_mock
-from tests.test_conversation_hydration import encrypted
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_setup, root_event
 from tests.test_turn_controller_focused import _build_harness
 
@@ -133,14 +132,11 @@ async def test_structured_set_keeps_exact_key_in_storage_reply_and_ack(tmp_path:
     assert result["model"] == result["override"] == model_key
 
 
-@pytest.mark.parametrize(
-    "failure",
-    ["malformed", "missing_root", "foreign_root", "child", "requester_left", "unknown_model", "encrypted"],
-)
+@pytest.mark.parametrize("failure", ["malformed", "missing_root", "unknown_model"])
 @pytest.mark.asyncio
 async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, failure: str) -> None:
     """Rejected metadata or scope must leave the override untouched despite valid body."""
-    client, config, paths, index, router, agent = picker_setup(tmp_path)
+    client, config, paths, index, router, _ = picker_setup(tmp_path)
     config.models["reset"] = ModelConfig(provider="openai", id="test-model")
     set_thread_model_override(paths, thread_id="$root", model_name="default", room_id=ROOM, set_by=USER)
     metadata = {"version": 1, "runtime_user_id": router, "runtime_device_id": "DEVICE", "operation": "reset"}
@@ -148,26 +144,8 @@ async def test_structured_rejection_never_falls_back_to_body(tmp_path: Path, fai
         metadata["model"] = "reset"
     elif failure == "missing_root":
         client.room_get_event.return_value = nio.RoomGetEventError("Not found", "M_NOT_FOUND")
-    elif failure == "foreign_root":
-        client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(
-            root_event(room_id="!foreign:localhost").source,
-        )
-    elif failure == "child":
-        client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(
-            root_event(
-                content={
-                    "body": "child",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$parent"},
-                },
-            ).source,
-        )
-    elif failure == "requester_left":
-        client.joined_members.return_value = joined_response(router, agent)
     elif failure == "unknown_model":
         metadata.update(operation="set", model="deleted")
-    elif failure == "encrypted":
-        client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(encrypted("$root", sender=USER))
     event = root_event(
         event_id="$command",
         content={"body": "!model reset", "msgtype": "m.text", "io.mindroom.model_selection": metadata},

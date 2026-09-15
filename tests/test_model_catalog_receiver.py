@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -14,12 +15,12 @@ from nio.crypto.device import TrustState
 from PIL import Image
 
 from mindroom.config.models import ModelConfig
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
 from tests.conftest import runtime_paths_for
 from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_setup
+from tests.test_olm_to_device import olm_transport
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,15 +28,15 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 
-def request(**changes: object) -> AuthenticatedToDeviceEvent:
+def request(**changes: object) -> nio.AuthenticatedToDeviceEvent:
     """Build the authenticated transport event with no claimed device fields."""
     content = {"version": 1, "request_id": "request-1", "room_id": ROOM, "thread_id": "$root"}
     content.update(changes)
-    return AuthenticatedToDeviceEvent(
+    return nio.AuthenticatedToDeviceEvent(
         source={"content": content},
         sender=USER,
         type="io.mindroom.models.request",
-        authenticated_device_id="REQUESTER",
+        authenticated_sender=nio.AuthenticatedDevice(USER, "REQUESTER", "curve", "fingerprint"),
     )
 
 
@@ -66,7 +67,6 @@ async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monke
     await callback(request())
     reply = sent.call_args.kwargs
     assert reply["event_type"] == "io.mindroom.models.response"
-    assert reply["verify_device"] is False
     assert sent.call_args.args[1].device_id == "REQUESTER"
     content = reply["content"]
     assert content["agent_user_ids"] == [agent]
@@ -109,7 +109,18 @@ async def test_malformed_requests_receive_nothing(
 
 @pytest.mark.parametrize(
     "denial",
-    ["plaintext", "blocked", "unknown_device", "requester_left", "agent_left", "wrong_thread", "wrong_room"],
+    [
+        "plaintext",
+        "blocked",
+        "deleted",
+        "historical_fingerprint",
+        "historical_curve",
+        "unknown_device",
+        "requester_left",
+        "agent_left",
+        "wrong_thread",
+        "wrong_room",
+    ],
 )
 @pytest.mark.asyncio
 async def test_unauthorized_requests_receive_nothing(
@@ -124,8 +135,14 @@ async def test_unauthorized_requests_receive_nothing(
         event = nio.UnknownToDeviceEvent(source=event.source, sender=USER, type=event.type)
     elif denial == "blocked":
         client.olm.device_store[USER]["REQUESTER"].trust_state = TrustState.blacklisted
+    elif denial == "deleted":
+        client.olm.device_store[USER]["REQUESTER"].deleted = True
+    elif denial == "historical_fingerprint":
+        event.authenticated_sender = replace(event.authenticated_sender, ed25519="previous")
+    elif denial == "historical_curve":
+        event.authenticated_sender = replace(event.authenticated_sender, curve25519="previous")
     elif denial == "unknown_device":
-        event.authenticated_device_id = "OTHER"
+        event.authenticated_sender = replace(event.authenticated_sender, device_id="OTHER")
     elif denial == "requester_left":
         client.joined_members.return_value = joined_response(router, agent)
     elif denial == "agent_left":
@@ -279,7 +296,7 @@ async def test_rate_limit_survives_completed_requests(tmp_path: Path, monkeypatc
 async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Device replacement after admission cannot redirect the authenticated reply."""
     client, config, paths, index, _, _ = picker_setup(tmp_path)
-    device = OlmDevice(USER, "REQUESTER", {"ed25519": "original", "curve25519": "curve"})
+    device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
     client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
     sent = AsyncMock()
     monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
@@ -312,27 +329,32 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
 
 @pytest.mark.parametrize("change", ["blocked", "left", "config"])
 @pytest.mark.asyncio
-async def test_final_transport_guard_rechecks_after_session_work(
+async def test_final_authorization_rechecks_after_selection_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     change: str,
 ) -> None:
-    """Session establishment cannot leave stale access or configuration authorized."""
+    """Awaited selection preparation cannot authorize stale access at NIO handoff."""
     callback, client, current, sent, router, agent = receiver_setup(tmp_path, monkeypatch)
-    guards = []
+    to_thread = asyncio.to_thread
+    prepared = False
 
-    async def session_work(*_args: object, **kwargs: object) -> None:
+    async def selection_work(*args: object, **kwargs: object) -> object:
+        nonlocal prepared
+        result = await to_thread(*args, **kwargs)
+        prepared = True
         if change == "blocked":
             client.olm.device_store[USER]["REQUESTER"].trust_state = TrustState.blacklisted
         elif change == "left":
             client.joined_members.return_value = joined_response(router, agent)
         else:
             current[0] = current[0].model_copy(deep=True)
-        guards.append(await kwargs["before_send"]())
+        return result
 
-    sent.side_effect = session_work
+    monkeypatch.setattr(asyncio, "to_thread", selection_work)
     await callback(request())
-    assert guards == [False]
+    assert prepared
+    sent.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -340,28 +362,65 @@ async def test_config_reload_during_final_scope_await_prevents_delivery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The last transport guard must reject config replaced inside its awaited scope."""
+    """Final application scope validation must reject config replaced while awaiting membership."""
     callback, client, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
     original_config = current[0]
     membership = client.joined_members.return_value
-    in_transport = False
-    delivered = []
+    membership_reads = 0
 
     async def joined_members(*_args: object) -> nio.JoinedMembersResponse:
-        if in_transport and current[0] is original_config:
+        nonlocal membership_reads
+        membership_reads += 1
+        # Each scope proof reads membership before and after the root event.
+        if membership_reads == 5:
             await asyncio.sleep(0)
             current[0] = original_config.model_copy(deep=True)
         return membership
 
-    async def transport(*_args: object, **kwargs: object) -> None:
-        nonlocal in_transport
-        in_transport = True
-        if await kwargs["before_send"]():
-            delivered.append(kwargs["content"])
-
     client.joined_members.side_effect = joined_members
-    sent.side_effect = transport
     await callback(request())
-    assert in_transport
+    assert membership_reads == 6
     assert current[0] is not original_config
-    assert delivered == []
+    sent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_catalog_receiver_delivers_through_public_nio_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported send arguments must not silently drop an authorized catalog."""
+    scope_client, config, paths, index, router, agent = picker_setup(tmp_path)
+    async with olm_transport(sender=router, recipient=USER) as (client, peer, requests, _):
+        assert peer.olm is not None
+        peer_keys = peer.olm.share_keys()["device_keys"]
+        await client.receive_response(nio.KeysQueryResponse({USER: {"DESKTOP": peer_keys}}, {}))
+        client.rooms.update(scope_client.rooms)
+        monkeypatch.setattr(client, "joined_members", scope_client.joined_members)
+        monkeypatch.setattr(client, "room_get_event", scope_client.room_get_event)
+        registered = MagicMock(wraps=client.add_to_device_callback)
+        monkeypatch.setattr(client, "add_to_device_callback", registered)
+        register_model_catalog_receiver(
+            client=client,
+            agent_name="router",
+            runtime_paths=paths,
+            config_getter=lambda: config,
+            membership_index=index,
+            callback_wrapper=lambda callback: callback,
+        )
+        event = request()
+        event.authenticated_sender = nio.AuthenticatedDevice(
+            USER,
+            "DESKTOP",
+            peer_keys["keys"]["curve25519:DESKTOP"],
+            peer_keys["keys"]["ed25519:DESKTOP"],
+        )
+        await registered.call_args.args[0](event)
+        assert scope_client.joined_members.await_count == 6
+        deliveries = [item for item in requests if "/sendToDevice/" in item["path"]]
+        assert len(deliveries) == 1
+        messages = deliveries[0]["body"]["messages"]
+        assert set(messages) == {USER}
+        assert set(messages[USER]) == {"DESKTOP"}
+        assert agent not in str(messages)
+        assert messages[USER]["DESKTOP"]["algorithm"] == "m.olm.v1.curve25519-aes-sha2"

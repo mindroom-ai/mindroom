@@ -13,6 +13,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.credentials import CredentialsManager
 from mindroom.custom_tools.desktop import DesktopTools
+from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
@@ -714,3 +715,55 @@ async def test_list_apps_needs_no_screenshot(monkeypatch: pytest.MonkeyPatch) ->
 
     assert json.loads(result.content)["status"] == "ok"
     assert result.images is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_tree_result_is_success_without_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Intentional semantic observations are usable results, not failed screenshots."""
+    context = SimpleNamespace(
+        session_id="matrix-conversation",
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        client=object(),
+    )
+    request = AsyncMock(
+        return_value=DesktopResponse(
+            "request-1",
+            "session-1",
+            True,
+            result={"observation": {"mode": "tree"}, "state": {"state_id": "state-1", "elements": []}},
+        ),
+    )
+    monkeypatch.setattr("mindroom.custom_tools.desktop.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = _configured_tool(monkeypatch)
+    result = await tool.desktop("get_app_state", app="com.example.Editor", observation="tree")
+    assert json.loads(result.content)["status"] == "ok"
+    assert not result.images
+    assert request.await_args.args[1].parameters["observation"] == "tree"
+
+
+@pytest.mark.asyncio
+async def test_timeout_returns_identity_for_request_status_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent can recover a timed-out request instead of repeating input."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    request = AsyncMock(side_effect=DesktopRequestError("Timed out", request_id="original-request"))
+    monkeypatch.setattr("mindroom.custom_tools.desktop.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = _configured_tool(monkeypatch)
+    result = await tool.desktop("get_app_state", app="com.example.Editor")
+    payload = json.loads(result.content)
+    assert payload["request_id"] == "original-request"
+    assert payload["action_outcome"] == "unknown"
+    assert payload["recovery_action"] == "request_status"
+    request.side_effect = None
+    request.return_value = DesktopResponse("query", "session", True, result={"state": "completed"})
+    result = await tool.desktop("request_status", request_id="original-request")
+    assert json.loads(result.content)["status"] == "ok"
+    assert request.await_args.args[1].parameters == {"request_id": "original-request"}

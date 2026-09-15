@@ -8,6 +8,8 @@ import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from nio import AuthenticatedToDeviceEvent
+
 from mindroom.desktop.protocol import (
     DESKTOP_BROWSER_ACTIONS,
     DESKTOP_COMMAND_EVENT_TYPE,
@@ -19,11 +21,11 @@ from mindroom.desktop.protocol import (
     event_content,
 )
 from mindroom.matrix.olm_to_device import (
+    OlmToDeviceError,
     PinnedMatrixDevice,
     authenticated_sender_matches,
     send_encrypted_to_device,
 )
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 
 if TYPE_CHECKING:
     import nio
@@ -31,6 +33,11 @@ if TYPE_CHECKING:
 
 class DesktopRequestError(RuntimeError):
     """One remote desktop request failed before producing a valid result."""
+
+    def __init__(self, message: str, *, request_id: str | None = None) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.action_outcome = "unknown" if request_id is not None else "not_sent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +99,13 @@ class DesktopResponseRouter:
                     return await future
             except TimeoutError as exc:
                 msg = _timeout_message(command, timeout_seconds=timeout_seconds)
-                raise DesktopRequestError(msg) from exc
+                raise DesktopRequestError(msg, request_id=command.request_id) from exc
+            except OlmToDeviceError as exc:
+                msg = (
+                    f"Desktop delivery failed: {exc}. The action outcome is unknown; do not repeat automatically. "
+                    f"Query request_status with request_id={command.request_id!r}."
+                )
+                raise DesktopRequestError(msg, request_id=command.request_id) from exc
         finally:
             self._pending.pop(command.request_id, None)
             self._targets_in_flight.discard(target)
@@ -122,6 +135,7 @@ def _timeout_message(command: DesktopCommand, *, timeout_seconds: float) -> str:
     message = (
         f"Desktop device did not answer within {timeout_seconds:g} seconds. "
         "Ensure the local `mindroom desktop run` process is running; do not guess another command name or flags."
+        f" Query request_status with request_id={command.request_id!r} to recover the recorded outcome."
     )
     if command.action not in DESKTOP_CONTROL_ACTIONS:
         return message

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Literal, cast
+
+from mindroom.desktop.input import DESKTOP_SAFE_KEYS
 
 DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
@@ -19,6 +21,7 @@ _PAIRING_VERIFICATION_HEX_CHARS = 16
 
 type DesktopAction = Literal[
     "status",
+    "request_status",
     "list_apps",
     "launch_app",
     "get_app_state",
@@ -28,6 +31,9 @@ type DesktopAction = Literal[
     "scroll_element",
     "perform_action",
     "click",
+    "double_click",
+    "hover",
+    "drag",
     "type_text",
     "scroll",
     "keypress",
@@ -43,6 +49,9 @@ DESKTOP_CONTROL_ACTIONS = frozenset(
         "scroll_element",
         "perform_action",
         "click",
+        "double_click",
+        "hover",
+        "drag",
         "type_text",
         "scroll",
         "keypress",
@@ -53,30 +62,82 @@ DESKTOP_BROWSER_ACTIONS = frozenset({"browser_observe", "browser_control"})
 DESKTOP_APP_ACTIONS = frozenset(
     {"get_app_state", "screenshot", *(DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS)},
 )
-DESKTOP_SAFE_KEYS = frozenset(
-    {
-        "backspace",
-        "delete",
-        "down",
-        "end",
-        "enter",
-        "esc",
-        "escape",
-        "home",
-        "left",
-        "pagedown",
-        "pageup",
-        "return",
-        "right",
-        "tab",
-        "up",
-    },
-)
-_DESKTOP_ACTIONS = frozenset({"status", "list_apps", *DESKTOP_APP_ACTIONS, *DESKTOP_BROWSER_ACTIONS})
+_DESKTOP_ACTIONS = frozenset({"status", "request_status", "list_apps", *DESKTOP_APP_ACTIONS, *DESKTOP_BROWSER_ACTIONS})
+
+
+type DesktopObservationMode = Literal["tree", "screenshot", "both"]
+
+
+def desktop_observation_mode(action: str, value: object = "both") -> DesktopObservationMode:
+    """Validate explicit native observation choices before any local operation."""
+    if not isinstance(value, str) or value not in {"tree", "screenshot", "both"}:
+        msg = "Desktop observation must be tree, screenshot, or both."
+        raise DesktopProtocolError(msg)
+    if value != "both" and action not in DESKTOP_APP_ACTIONS:
+        msg = "Desktop observation selection requires an application action."
+        raise DesktopProtocolError(msg)
+    if action == "screenshot" and value == "tree":
+        msg = "The screenshot action requires a screenshot observation."
+        raise DesktopProtocolError(msg)
+    return cast("DesktopObservationMode", value)
 
 
 class DesktopProtocolError(ValueError):
     """One desktop wire payload is malformed or unsupported."""
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopSetupDescriptor:
+    """Copyable setup data requiring local identity confirmation before pairing."""
+
+    homeserver: str
+    user_id: str
+    code: str
+    controller_user_id: str
+    controller_device_id: str
+    controller_ed25519: str
+    requester_id: str
+    agent_name: str
+    cloudflare_access: bool
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize transient setup data, including the short-lived pairing code."""
+        return {"v": 1, "kind": "mindroom_desktop_setup", **asdict(self)}
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopSetupDescriptor:
+        """Validate the exact descriptor shape before showing its identity locally."""
+        content = _object_mapping(raw, "setup")
+        fields = {
+            "homeserver",
+            "user_id",
+            "code",
+            "controller_user_id",
+            "controller_device_id",
+            "controller_ed25519",
+            "requester_id",
+            "agent_name",
+            "cloudflare_access",
+        }
+        if (
+            set(content) != fields | {"v", "kind"}
+            or _required_int(content, "v", "setup") != 1
+            or content.get("kind") != "mindroom_desktop_setup"
+            or not isinstance(content["cloudflare_access"], bool)
+        ):
+            msg = "Desktop setup descriptor has unsupported fields, version, or type."
+            raise DesktopProtocolError(msg)
+        return cls(
+            homeserver=_bounded_str(content, "homeserver", "setup", max_length=2048),
+            user_id=_bounded_str(content, "user_id", "setup", max_length=512),
+            code=_bounded_str(content, "code", "setup", max_length=256),
+            controller_user_id=_bounded_str(content, "controller_user_id", "setup", max_length=512),
+            controller_device_id=_bounded_str(content, "controller_device_id", "setup", max_length=256),
+            controller_ed25519=_bounded_str(content, "controller_ed25519", "setup", max_length=256),
+            requester_id=_bounded_str(content, "requester_id", "setup", max_length=512),
+            agent_name=_bounded_str(content, "agent_name", "setup", max_length=256),
+            cloudflare_access=content["cloudflare_access"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,11 +448,14 @@ __all__ = [
     "MAX_SCREENSHOT_BYTES",
     "DesktopAction",
     "DesktopCommand",
+    "DesktopObservationMode",
     "DesktopPairingAccepted",
     "DesktopPairingClaim",
     "DesktopProtocolError",
     "DesktopResponse",
+    "DesktopSetupDescriptor",
     "EncryptedDesktopMedia",
+    "desktop_observation_mode",
     "desktop_pairing_verification",
     "event_content",
 ]

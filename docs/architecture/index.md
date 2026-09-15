@@ -103,6 +103,19 @@ MindRoom's architecture consists of several key components working together.
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |
+| `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
+| `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
+| `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
+| `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
+| `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
+| `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |
+| `desktop/macos_input.py` | Sends bounded Quartz pointer input in global logical coordinates |
+| `desktop/macos_capture.py` | Captures verified windows and displays through ScreenCaptureKit |
+| `desktop/native_config.py` | Validates and persists private native-helper configuration |
+| `desktop/native_protocol.py` | Parses and bounds requests on the local NDJSON channel |
+| `desktop/native_host.py` | Owns helper setup, runtime lifecycle, local control, and stdio dispatch |
+| `desktop/native_entry.py` | Starts the packaged native desktop helper |
 
 ## Storage upgrade boundaries
 

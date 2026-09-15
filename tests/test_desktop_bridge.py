@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
+from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.accessibility import (
     AccessibilityElement,
@@ -17,7 +18,7 @@ from mindroom.desktop.accessibility import (
     DesktopApp,
     DesktopRect,
 )
-from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
+from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy, _DesktopBridgeStoppedError
 from mindroom.desktop.command_journal import DesktopCommandJournalError
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.playwright_mcp import (
@@ -33,8 +34,7 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
 )
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, ScreenCapture
-from mindroom.matrix.olm_to_device import PinnedMatrixDevice
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -197,6 +197,18 @@ class FakeProvider:
         """Record fallback keypress."""
         self.calls.append(("keypress", (app_id, state_id, keys)))
 
+    def double_click(self, **parameters: object) -> None:
+        """Record a double click."""
+        self.calls.append(("double_click", parameters))
+
+    def hover(self, **parameters: object) -> None:
+        """Record a hover."""
+        self.calls.append(("hover", parameters))
+
+    def drag(self, **parameters: object) -> None:
+        """Record a drag."""
+        self.calls.append(("drag", parameters))
+
 
 @dataclass
 class FakeBrowserProvider:
@@ -250,7 +262,12 @@ def _event(command: DesktopCommand) -> AuthenticatedToDeviceEvent:
         source={"content": command.to_content()},
         sender=CONTROLLER.user_id,
         type=DESKTOP_COMMAND_EVENT_TYPE,
-        authenticated_device_id=CONTROLLER.device_id,
+        authenticated_sender=AuthenticatedDevice(
+            CONTROLLER.user_id,
+            CONTROLLER.device_id,
+            "controller-curve-key",
+            CONTROLLER.ed25519,
+        ),
     )
 
 
@@ -275,6 +292,7 @@ def _response(send: AsyncMock) -> DesktopResponse:
 def transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Accept the exact controller identity while capturing encrypted responses."""
     monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", lambda *_args: True)
+    monkeypatch.setattr("mindroom.desktop.bridge.resolve_pinned_device", AsyncMock())
     monkeypatch.setattr(
         "mindroom.desktop.bridge.upload_encrypted_screenshot",
         AsyncMock(return_value=MEDIA),
@@ -284,13 +302,120 @@ def transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return send
 
 
+async def _handle(bridge: DesktopBridge, event: AuthenticatedToDeviceEvent) -> None:
+    """Drive stages with the preobserved state assumed by the fake OS provider."""
+    command = DesktopCommand.from_content(event.source["content"])
+    state_id = command.parameters.get("state_id")
+    if isinstance(state_id, str):
+        bridge._observations.remember(replace(STATE, state_id=state_id), command)
+    await bridge.on_to_device_event(event)
+    await bridge.execute_pending()
+    await bridge.deliver_pending()
+
+
+@pytest.mark.asyncio
+async def test_request_status_reports_queued_work_without_executing_it(transport: AsyncMock) -> None:
+    """Recovery queries bypass a blocked action executor without repeating work."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(object(), provider, _policy(), clock=lambda: NOW_SECONDS)
+    bridge._journal._max_entries = 1
+    await bridge.on_to_device_event(_event(_command()))
+    query = _command("request_status", request_id="query", sequence=2, parameters={"request_id": "request-1"})
+    await bridge.on_to_device_event(_event(query))
+    await bridge.deliver_pending()
+    assert _response(transport).result == {"request_id": "request-1", "state": "queued"}
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_status_restores_completed_result_for_original_caller(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """A new command session can recover its caller's persisted outcome."""
+    provider = FakeProvider()
+    path = tmp_path / "commands.sqlite3"
+    bridge = DesktopBridge(object(), provider, _policy(), clock=lambda: NOW_SECONDS, journal_path=path)
+    await _handle(bridge, _event(_command("status")))
+    original = _response(transport)
+    bridge.close()
+    bridge = DesktopBridge(object(), provider, _policy(), clock=lambda: NOW_SECONDS, journal_path=path)
+    query = replace(
+        _command("request_status", request_id="query", sequence=2, parameters={"request_id": "request-1"}),
+        session_id="recovery-session",
+    )
+    bridge._journal._max_entries = 1
+    await bridge.on_to_device_event(_event(query))
+    await bridge.deliver_pending()
+    result = _response(transport).result
+    assert result == {"request_id": "request-1", "state": "completed", "response": original.to_content()}
+    assert provider.calls == [("status", None)]
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_request_status_hides_another_allowed_callers_receipt(transport: AsyncMock) -> None:
+    """Being allowlisted does not grant access to another caller's result."""
+    policy = replace(_policy(), allowed_requester_ids=frozenset({"@alice:example.org", "@bob:example.org"}))
+    bridge = DesktopBridge(object(), FakeProvider(), policy, clock=lambda: NOW_SECONDS)
+    await bridge.on_to_device_event(_event(_command()))
+    query = _command(
+        "request_status",
+        request_id="query",
+        sequence=2,
+        requester_id="@bob:example.org",
+        parameters={"request_id": "request-1"},
+    )
+    await bridge.on_to_device_event(_event(query))
+    await bridge.deliver_pending()
+    assert _response(transport).result == {"request_id": "request-1", "state": "not_found"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "parameters"),
+    [
+        ("double_click", {"x": 100, "y": 200, "button": "left"}),
+        ("hover", {"x": 100, "y": 200}),
+        ("drag", {"start_x": 100, "start_y": 200, "end_x": 400, "end_y": 500, "duration_ms": 500}),
+        ("keypress", {"keys": ["command", "a"]}),
+    ],
+)
+async def test_extended_inputs_keep_app_state_and_local_lease(
+    transport: AsyncMock,
+    action: str,
+    parameters: dict[str, object],
+) -> None:
+    """New inputs use the same state-bound execution and fresh observation path."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(object(), provider, _policy(allow_control=True), clock=lambda: NOW_SECONDS)
+    await _handle(
+        bridge,
+        _event(
+            _command(
+                action,
+                parameters={
+                    "app": APP_ID,
+                    "state_id": "state-1",
+                    "observation": "tree",
+                    **parameters,
+                },
+            ),
+        ),
+    )
+    assert _response(transport).ok
+    assert provider.calls[0][0] == action
+    assert provider.calls[-1] == ("get_app_state", APP_ID)
+    assert _response(transport).screenshot is None
+
+
 @pytest.mark.asyncio
 async def test_observe_only_bridge_returns_state_and_window_screenshot(transport: AsyncMock) -> None:
     """Observation returns semantic state and captures only that app window."""
     provider = FakeProvider()
     bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
-    await bridge.on_to_device_event(_event(_command()))
+    await _handle(bridge, _event(_command()))
 
     response = _response(transport)
     assert response.ok
@@ -310,7 +435,7 @@ async def test_bridge_rejects_command_from_unpinned_sender(monkeypatch: pytest.M
     monkeypatch.setattr("mindroom.desktop.bridge.send_encrypted_to_device", send)
     bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
-    await bridge.on_to_device_event(_event(_command()))
+    await _handle(bridge, _event(_command()))
 
     assert provider.calls == []
     send.assert_not_awaited()
@@ -327,10 +452,10 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(_event(_command("list_apps")))
-    assert _response(transport).result == {"apps": [DesktopApp(APP_ID, "Editor", True).to_result()]}
+    await _handle(bridge, _event(_command("list_apps")))
+    assert _response(transport).result["apps"] == [DesktopApp(APP_ID, "Editor", True).to_result()]
 
-    await bridge.on_to_device_event(_event(_command("status", request_id="request-2", sequence=2)))
+    await _handle(bridge, _event(_command("status", request_id="request-2", sequence=2)))
     assert _response(transport).result["bridge"] == {
         "mode": "control",
         "control_available": True,
@@ -338,6 +463,8 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "allowed_app_count": 1,
         "browser_enabled": False,
         "control_lease_expires_at_ms": 20_000,
+        "observation_modes": ["tree", "screenshot", "both"],
+        "durable_commands": True,
     }
 
 
@@ -352,7 +479,7 @@ async def test_launch_app_requires_control_and_returns_fresh_state(transport: As
         clock=lambda: NOW_SECONDS,
     )
 
-    await observe_bridge.on_to_device_event(_event(_command("launch_app")))
+    await _handle(observe_bridge, _event(_command("launch_app")))
 
     assert _response(transport).error == "Desktop control is disabled; this bridge is observe-only."
     assert provider.calls == []
@@ -364,7 +491,7 @@ async def test_launch_app_requires_control_and_returns_fresh_state(transport: As
         clock=lambda: NOW_SECONDS,
     )
 
-    await control_bridge.on_to_device_event(_event(_command("launch_app")))
+    await _handle(control_bridge, _event(_command("launch_app")))
 
     response = _response(transport)
     assert response.ok
@@ -392,7 +519,7 @@ async def test_browser_observation_uses_optional_provider_without_control_lease(
         parameters={"browser_action": "snapshot", "browser_parameters": {}},
     )
 
-    await bridge.on_to_device_event(_event(command))
+    await _handle(bridge, _event(command))
 
     response = _response(transport)
     assert response.ok
@@ -412,7 +539,8 @@ async def test_rejected_browser_tab_selection_does_not_upgrade_observation_to_co
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "browser_control",
@@ -441,7 +569,7 @@ async def test_browser_control_requires_same_local_lease_as_accessibility(transp
         clock=lambda: NOW_SECONDS,
     )
 
-    await observe_only.on_to_device_event(_event(_command("browser_control", parameters=parameters)))
+    await _handle(observe_only, _event(_command("browser_control", parameters=parameters)))
 
     assert _response(transport).error == "Desktop control is disabled; this bridge is observe-only."
     assert browser.calls == []
@@ -454,7 +582,7 @@ async def test_browser_control_requires_same_local_lease_as_accessibility(transp
         browser_provider=browser,
         clock=lambda: NOW_SECONDS,
     )
-    await controlled.on_to_device_event(_event(_command("browser_control", parameters=parameters)))
+    await _handle(controlled, _event(_command("browser_control", parameters=parameters)))
 
     assert _response(transport).ok
     assert browser.calls == [("act", {"request": {"kind": "click", "ref": "e3"}})]
@@ -473,7 +601,8 @@ async def test_browser_control_honors_pointer_emergency_stop(transport: AsyncMoc
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "browser_control",
@@ -501,7 +630,8 @@ async def test_browser_control_failure_requires_fresh_observation(transport: Asy
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "browser_control",
@@ -516,6 +646,55 @@ async def test_browser_control_failure_requires_fresh_observation(transport: Asy
     warning = str(response.result["warning"])
     assert "outcome is unknown" in warning
     assert "browser(action='tabs' or 'snapshot', target='desktop')" in warning
+
+
+@pytest.mark.asyncio
+async def test_active_browser_request_keeps_original_response_owner(transport: AsyncMock) -> None:
+    """An active request ignores exact replays while rejecting changed content."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingBrowserProvider(FakeBrowserProvider):
+        async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
+            entered.set()
+            await release.wait()
+            return await super().execute(action, parameters)
+
+    browser = BlockingBrowserProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(allow_control=True, browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+    command = _command(
+        "browser_control",
+        parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.org"}},
+    )
+    task = asyncio.create_task(_handle(bridge, _event(command)))
+
+    try:
+        await entered.wait()
+        await _handle(bridge, _event(command))
+        transport.assert_not_awaited()
+
+        changed_command = _command(
+            "browser_control",
+            parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.net"}},
+        )
+        await _handle(bridge, _event(changed_command))
+        assert len(transport.await_args_list) == 1
+        assert "reused with different command content" in (_response(transport).error or "")
+    finally:
+        release.set()
+        await task
+
+    responses = [DesktopResponse.from_content(call.kwargs["content"]) for call in transport.await_args_list]
+    assert len(responses) == 2
+    assert responses[-1].ok
+    assert responses[-1].result.get("action_outcome") != "unknown"
+    assert browser.calls == [("navigate", {"targetUrl": "https://example.org"})]
 
 
 @pytest.mark.asyncio
@@ -535,7 +714,8 @@ async def test_browser_screenshot_is_uploaded_as_encrypted_matrix_media(transpor
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "browser_observe",
@@ -562,7 +742,7 @@ async def test_disallowed_app_is_rejected_before_provider_access(transport: Asyn
     provider = FakeProvider()
     bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
-    await bridge.on_to_device_event(_event(_command(parameters={"app": "com.example.Secret"})))
+    await _handle(bridge, _event(_command(parameters={"app": "com.example.Secret"})))
 
     response = _response(transport)
     assert not response.ok
@@ -589,7 +769,7 @@ async def test_command_time_window_is_enforced(
     bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
     command = replace(_command(), issued_at_ms=issued_at_ms, expires_at_ms=expires_at_ms)
 
-    await bridge.on_to_device_event(_event(command))
+    await _handle(bridge, _event(command))
 
     assert expected_error in (_response(transport).error or "")
     assert provider.calls == []
@@ -601,7 +781,7 @@ async def test_get_state_survives_window_screenshot_failure(transport: AsyncMock
     provider = FakeProvider(screenshot_error=True)
     bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
-    await bridge.on_to_device_event(_event(_command("get_app_state")))
+    await _handle(bridge, _event(_command("get_app_state")))
 
     response = _response(transport)
     assert response.ok
@@ -616,7 +796,7 @@ async def test_screenshot_action_still_requires_pixels(transport: AsyncMock) -> 
     provider = FakeProvider(screenshot_error=True)
     bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
-    await bridge.on_to_device_event(_event(_command("screenshot")))
+    await _handle(bridge, _event(_command("screenshot")))
 
     response = _response(transport)
     assert not response.ok
@@ -633,7 +813,7 @@ async def test_control_is_denied_without_local_lease(transport: AsyncMock) -> No
         parameters={"app": APP_ID, "state_id": "state-1", "element_index": 0},
     )
 
-    await bridge.on_to_device_event(_event(command))
+    await _handle(bridge, _event(command))
 
     response = _response(transport)
     assert not response.ok
@@ -657,7 +837,8 @@ async def test_control_lease_uses_monotonic_deadline(transport: AsyncMock) -> No
     wall_clock[0] = 5.0
     monotonic_clock[0] = 111.0
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "click",
@@ -693,7 +874,7 @@ async def test_control_lease_expires_across_system_sleep(transport: AsyncMock) -
         expires_at_ms=22_000,
     )
 
-    await bridge.on_to_device_event(_event(command))
+    await _handle(bridge, _event(command))
 
     assert _response(transport).error == "Local desktop control lease has expired."
     assert provider.calls == []
@@ -710,7 +891,8 @@ async def test_semantic_action_returns_fresh_state_and_window_capture(transport:
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "click_element",
@@ -740,7 +922,8 @@ async def test_bridge_allows_empty_semantic_value_but_rejects_shortcut_chord(tra
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "set_value",
@@ -753,7 +936,8 @@ async def test_bridge_allows_empty_semantic_value_but_rejects_shortcut_chord(tra
     assert ("set_value", (APP_ID, "state-1", 0, "")) in provider.calls
     transport.reset_mock()
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "keypress",
@@ -766,7 +950,7 @@ async def test_bridge_allows_empty_semantic_value_but_rejects_shortcut_chord(tra
 
     response = _response(transport)
     assert not response.ok
-    assert "locally safe" in (response.error or "")
+    assert "not allowed" in (response.error or "")
     assert all(call[0] != "keypress" for call in provider.calls)
 
 
@@ -781,7 +965,8 @@ async def test_stale_state_is_a_safe_rejection_not_unknown_input(transport: Asyn
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "click",
@@ -806,7 +991,8 @@ async def test_completed_action_is_partial_when_follow_up_state_fails(transport:
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "click_element",
@@ -834,7 +1020,8 @@ async def test_completed_action_is_partial_when_follow_up_capture_fails(transpor
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "click_element",
@@ -861,7 +1048,8 @@ async def test_unexpected_control_failure_reports_unknown_outcome(transport: Asy
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "click",
@@ -894,7 +1082,8 @@ async def test_completed_action_is_partial_when_upload_fails(
         clock=lambda: NOW_SECONDS,
     )
 
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(
             _command(
                 "click_element",
@@ -915,26 +1104,26 @@ async def test_requester_agent_replay_and_sequence_are_enforced(transport: Async
     provider = FakeProvider()
     bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
 
-    await bridge.on_to_device_event(_event(_command(requester_id="@mallory:example.org")))
+    await _handle(bridge, _event(_command(requester_id="@mallory:example.org")))
     assert not _response(transport).ok
     assert provider.calls == []
 
-    await bridge.on_to_device_event(_event(_command(request_id="bad-agent", agent_name="other")))
+    await _handle(bridge, _event(_command(request_id="bad-agent", agent_name="other")))
     assert not _response(transport).ok
     assert provider.calls == []
 
     first = _command(request_id="request-2", sequence=2)
-    await bridge.on_to_device_event(_event(first))
+    await _handle(bridge, _event(first))
     first_response_content = transport.await_args.kwargs["content"]
-    await bridge.on_to_device_event(_event(first))
+    await _handle(bridge, _event(first))
     assert transport.await_args.kwargs["content"] == first_response_content
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
 
-    await bridge.on_to_device_event(_event(_command("status", request_id="request-2", sequence=2)))
+    await _handle(bridge, _event(_command("status", request_id="request-2", sequence=2)))
     assert "reused with different command content" in (_response(transport).error or "")
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
 
-    await bridge.on_to_device_event(_event(_command(request_id="request-3", sequence=2)))
+    await _handle(bridge, _event(_command(request_id="request-3", sequence=2)))
     assert "sequence" in (_response(transport).error or "")
 
 
@@ -961,7 +1150,7 @@ async def test_started_control_is_not_repeated_after_bridge_restart(
     monkeypatch.setattr(first_bridge, "_execute_safely", AsyncMock(side_effect=asyncio.CancelledError))
 
     with pytest.raises(asyncio.CancelledError):
-        await first_bridge.on_to_device_event(_event(command))
+        await _handle(first_bridge, _event(command))
 
     transport.assert_not_awaited()
     restarted_bridge = DesktopBridge(
@@ -971,7 +1160,7 @@ async def test_started_control_is_not_repeated_after_bridge_restart(
         clock=lambda: NOW_SECONDS,
         journal_path=journal_path,
     )
-    await restarted_bridge.on_to_device_event(_event(command))
+    await _handle(restarted_bridge, _event(command))
 
     response = _response(transport)
     assert response.ok
@@ -992,7 +1181,7 @@ async def test_completed_response_is_replayed_after_bridge_restart(tmp_path: Pat
         clock=lambda: NOW_SECONDS,
         journal_path=journal_path,
     )
-    await first_bridge.on_to_device_event(_event(command))
+    await _handle(first_bridge, _event(command))
     first_response_content = transport.await_args.kwargs["content"]
 
     restarted_bridge = DesktopBridge(
@@ -1002,7 +1191,7 @@ async def test_completed_response_is_replayed_after_bridge_restart(tmp_path: Pat
         clock=lambda: NOW_SECONDS,
         journal_path=journal_path,
     )
-    await restarted_bridge.on_to_device_event(_event(command))
+    await _handle(restarted_bridge, _event(command))
 
     assert transport.await_args.kwargs["content"] == first_response_content
     assert provider.calls == [("get_app_state", APP_ID), ("screenshot", (APP_ID, "state-1"))]
@@ -1020,7 +1209,7 @@ async def test_bridge_refuses_permissive_command_journal(tmp_path: Path, transpo
         clock=lambda: NOW_SECONDS,
         journal_path=journal_path,
     )
-    await bridge.on_to_device_event(_event(_command()))
+    await _handle(bridge, _event(_command()))
     transport.assert_awaited_once()
     journal_path.chmod(0o644)
 
@@ -1046,13 +1235,264 @@ async def test_emergency_stop_latches_control_off_until_local_restart(transport:
     )
     parameters = {"app": APP_ID, "state_id": "state-1", "x": 10, "y": 20, "button": "left"}
 
-    await bridge.on_to_device_event(_event(_command("click", parameters=parameters)))
+    await _handle(bridge, _event(_command("click", parameters=parameters)))
 
     assert "emergency stop" in (_response(transport).error or "")
     provider.emergency_stop = False
-    await bridge.on_to_device_event(
+    await _handle(
+        bridge,
         _event(_command("click", request_id="request-2", sequence=2, parameters=parameters)),
     )
 
     assert "latched" in (_response(transport).error or "")
     assert provider.calls == [("click", (APP_ID, "state-1", 10, 20, "left"))]
+
+
+@pytest.mark.asyncio
+async def test_admission_persists_without_running_the_desktop(transport: AsyncMock, tmp_path: Path) -> None:
+    """The sync consumer can acknowledge an admitted command before desktop work starts."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        journal_path=tmp_path / "commands.sqlite3",
+    )
+    await bridge.on_to_device_event(_event(_command("status")))
+    assert provider.calls == []
+    transport.assert_not_awaited()
+
+    await bridge.execute_pending()
+    assert provider.calls == [("status", None)]
+    transport.assert_not_awaited()
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+
+
+@pytest.mark.asyncio
+async def test_failed_response_delivery_retries_without_repeating_action(
+    transport: AsyncMock,
+    tmp_path: Path,
+) -> None:
+    """An unavailable Matrix connection leaves an exact result pending for a later send."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+        journal_path=tmp_path / "commands.sqlite3",
+    )
+    await bridge.on_to_device_event(_event(_command("status")))
+    await bridge.execute_pending()
+    transport.side_effect = OlmToDeviceError("offline")
+    await bridge.deliver_pending()
+    first_content = transport.await_args.kwargs["content"]
+    transport.side_effect = None
+    await bridge.deliver_pending()
+    assert transport.await_args.kwargs["content"] == first_content
+    assert provider.calls == [("status", None)]
+    assert _response(transport).ok
+
+
+@pytest.mark.asyncio
+async def test_queued_command_rechecks_expiry_before_execution(transport: AsyncMock) -> None:
+    """Admission does not grant permission to act after the command expires."""
+    now = NOW_SECONDS
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: now)
+    await bridge.on_to_device_event(_event(_command("status")))
+    now += 120
+    await bridge.execute_pending()
+    await bridge.deliver_pending()
+    assert provider.calls == []
+    assert not _response(transport).ok
+    assert "expired" in (_response(transport).error or "")
+
+
+@pytest.mark.asyncio
+async def test_slow_action_does_not_block_new_durable_admission(transport: AsyncMock) -> None:
+    """The Matrix consumer can retain new commands while a browser action is running."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowBrowser(FakeBrowserProvider):
+        async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
+            entered.set()
+            await release.wait()
+            return await super().execute(action, parameters)
+
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(allow_control=True, browser_enabled=True),
+        browser_provider=SlowBrowser(),
+        clock=lambda: NOW_SECONDS,
+    )
+    first = _command(
+        "browser_control",
+        parameters={"browser_action": "navigate", "browser_parameters": {"url": "https://example.org"}},
+    )
+    await bridge.on_to_device_event(_event(first))
+    worker = asyncio.create_task(bridge.execute_pending())
+    try:
+        await entered.wait()
+        await bridge.on_to_device_event(_event(first))
+        await bridge.on_to_device_event(_event(_command("status", request_id="request-2", sequence=2)))
+        assert [entry.command.request_id for entry in bridge._journal.queued()] == ["request-2"]
+        transport.assert_not_awaited()
+    finally:
+        release.set()
+        await worker
+    await bridge.execute_pending()
+    await bridge.deliver_pending()
+    assert transport.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_controller_revocation_between_admission_and_execution_blocks_action(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued command must not use a device identity revoked after its admission."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    await bridge.on_to_device_event(_event(_command("status")))
+    monkeypatch.setattr(
+        "mindroom.desktop.bridge.resolve_pinned_device",
+        AsyncMock(side_effect=OlmToDeviceError("Controller identity changed.")),
+    )
+    await bridge.execute_pending()
+    await bridge.deliver_pending()
+    assert provider.calls == []
+    assert not _response(transport).ok
+
+
+@pytest.mark.asyncio
+async def test_tree_observation_skips_pixels_and_returns_fresh_semantics(transport: AsyncMock) -> None:
+    """A semantic-only read must not capture or upload the desktop."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(client=object(), provider=provider, policy=_policy(), clock=lambda: NOW_SECONDS)
+    await _handle(bridge, _event(_command("get_app_state", parameters={"app": APP_ID, "observation": "tree"})))
+    response = _response(transport)
+    assert response.ok
+    assert response.screenshot is None
+    assert response.result["state"]["state_id"] == "state-1"
+    assert response.result["observation"]["mode"] == "tree"
+    assert response.result["metrics"]["screenshot_bytes"] == 0
+    assert provider.calls == [("get_app_state", APP_ID)]
+
+
+@pytest.mark.asyncio
+async def test_tree_followup_preserves_completed_action_without_capture(transport: AsyncMock) -> None:
+    """Semantic control returns fresh state without an unnecessary image round trip."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    await _handle(
+        bridge,
+        _event(
+            _command(
+                "click_element",
+                parameters={"app": APP_ID, "state_id": "state-1", "element_index": 0, "observation": "tree"},
+            ),
+        ),
+    )
+    response = _response(transport)
+    assert response.ok
+    assert response.result["action_completed"] is True
+    assert response.screenshot is None
+    assert response.result["state"]["state_id"] == "state-1"
+    assert provider.calls == [("click_element", (APP_ID, "state-1", 0)), ("get_app_state", APP_ID)]
+
+
+def test_local_control_grant_expiry_and_revocation() -> None:
+    """Only explicit local grants create a bounded lease, and revocation is immediate."""
+    now = 10.0
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(),
+        clock=lambda: now,
+        monotonic_clock=lambda: now,
+    )
+    assert bridge.local_status()["control_available"] is False
+    assert bridge.grant_local_control(60)["lease_remaining_seconds"] == 60
+    now += 61
+    assert bridge.local_status()["control_available"] is False
+    bridge.grant_local_control(60)
+    assert bridge.revoke_local_control()["control_available"] is False
+    for duration in (True, 0, 3601):
+        with pytest.raises(ValueError, match="duration"):
+            bridge.grant_local_control(duration)
+
+
+@pytest.mark.asyncio
+async def test_local_stop_fences_admission_without_consuming_command(transport: AsyncMock) -> None:
+    """A shutting-down helper cannot silently acknowledge unexecuted commands."""
+    bridge = DesktopBridge(client=object(), provider=FakeProvider(), policy=_policy(), clock=lambda: NOW_SECONDS)
+    await bridge.stop()
+    with pytest.raises(_DesktopBridgeStoppedError):
+        await bridge.on_to_device_event(_event(_command("status")))
+    transport.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_observed_opaque_ref_drives_exact_semantic_target(transport: AsyncMock) -> None:
+    """A ref returned through the wire must resolve before the provider receives input."""
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=_policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+    )
+    await _handle(bridge, _event(_command("get_app_state", parameters={"app": APP_ID, "observation": "tree"})))
+    observed = _response(transport).result["state"]
+    command = _command(
+        "click_element",
+        request_id="next",
+        sequence=2,
+        parameters={
+            "app": APP_ID,
+            "state_id": observed["state_id"],
+            "element_ref": observed["elements"][0]["ref"],
+            "observation": "tree",
+        },
+    )
+    await bridge.on_to_device_event(_event(command))
+    await bridge.execute_pending()
+    await bridge.deliver_pending()
+    assert _response(transport).ok
+    assert ("click_element", (APP_ID, "state-1", 0)) in provider.calls
+    assert _response(transport).result["state"]["state_id"] == "state-2"
+
+
+@pytest.mark.asyncio
+async def test_bridge_rejects_reference_observed_by_another_allowed_requester(transport: AsyncMock) -> None:
+    """Being allowlisted does not grant access to another caller's observed targets."""
+    provider = FakeProvider()
+    policy = replace(
+        _policy(allow_control=True),
+        allowed_requester_ids=frozenset({"@alice:example.org", "@bob:example.org"}),
+    )
+    bridge = DesktopBridge(client=object(), provider=provider, policy=policy, clock=lambda: NOW_SECONDS)
+    await _handle(bridge, _event(_command("get_app_state", parameters={"app": APP_ID, "observation": "tree"})))
+    command = _command(
+        "click_element",
+        request_id="next",
+        sequence=2,
+        requester_id="@bob:example.org",
+        parameters={"app": APP_ID, "state_id": "state-1", "element_index": 0},
+    )
+    await bridge.on_to_device_event(_event(command))
+    await bridge.execute_pending()
+    await bridge.deliver_pending()
+    assert not _response(transport).ok
+    assert "scope" in _response(transport).error
+    assert provider.calls == [("get_app_state", APP_ID)]

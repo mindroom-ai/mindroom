@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sqlite3
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from mindroom.desktop.pairing import (
     confirm_desktop_pairing,
     create_desktop_pairing,
 )
+from mindroom.desktop.protocol import DesktopSetupDescriptor
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -90,9 +92,23 @@ def _setup_response(scope: DesktopCommandScope) -> str:
     if cloudflare_access:
         setup_parts.append("--cloudflare-access")
     setup_command = " ".join(setup_parts)
+    descriptor = DesktopSetupDescriptor(
+        homeserver=homeserver,
+        user_id=scope.requester_id,
+        code=pairing.token,
+        controller_user_id=controller.user_id,
+        controller_device_id=controller.device_id,
+        controller_ed25519=controller.ed25519,
+        requester_id=scope.requester_id,
+        agent_name=scope.agent_name,
+        cloudflare_access=cloudflare_access,
+    )
     return (
         "🔐 **Desktop pairing started**\n\n"
-        "On your computer, run this command. It logs in if needed, then claims the pairing:\n\n"
+        "In the MindRoom macOS app, open Desktop Control and import this setup data. "
+        "Confirm the displayed controller and choose the applications it may use:\n\n"
+        f"```json\n{json.dumps(descriptor.to_content(), indent=2)}\n```\n\n"
+        "For terminal setup, run this command on your computer. It logs in if needed, then claims the pairing:\n\n"
         f"```bash\n{setup_command}\n```\n\n"
         "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
         "Current Desktop target remains unchanged until confirmation."

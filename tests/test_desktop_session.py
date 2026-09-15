@@ -1,33 +1,38 @@
 """Tests for private local desktop Matrix sessions."""
 
+# ruff: noqa: S106 - These are test-only credential values.
+
 from __future__ import annotations
 
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import aiohttp
+import nio
 import pytest
 
 from mindroom.desktop.session import (
     DesktopLoginMethod,
     DesktopMatrixSession,
     DesktopSessionError,
-    _prepare_crypto,
+    _open_owned_session,
+    _transport_binding,
+    desktop_transport_binding_path,
     load_desktop_http_headers,
     load_desktop_session,
     login_desktop_client,
     open_desktop_client,
+    prepare_desktop_client,
     resolve_desktop_login_method,
     save_desktop_session,
 )
-from mindroom.matrix.client_session import (
-    MatrixSyncStorage,
-    PermanentMatrixStartupError,
-    matrix_client_config,
-)
+from tests.conftest import test_runtime_paths as make_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -38,7 +43,7 @@ def _session() -> DesktopMatrixSession:
         homeserver="https://matrix.example.org",
         user_id="@desktop:example.org",
         device_id="DESKTOP",
-        access_token="secret-access-token",  # noqa: S106 - Test-only persisted token fixture.
+        access_token="secret-access-token",
     )
 
 
@@ -62,7 +67,7 @@ def test_session_round_trip_remembers_interactive_access_transport(
         homeserver="https://matrix.example.org",
         user_id="@desktop:example.org",
         device_id="DESKTOP",
-        access_token="secret-access-token",  # noqa: S106 - Test-only persisted token fixture.
+        access_token="secret-access-token",
         cloudflare_access=True,
     )
 
@@ -249,186 +254,194 @@ async def test_auto_login_method_translates_network_failure(
 
 
 @pytest.mark.asyncio
-async def test_initial_crypto_sync_does_not_announce_bridge_online() -> None:
-    """Presence stays offline until the command callback is registered and sync-forever starts."""
-    client = SimpleNamespace(
-        sync=AsyncMock(return_value=object()),
-        should_upload_keys=False,
-        olm=object(),
-    )
+async def test_crypto_preparation_uploads_keys_without_sync() -> None:
+    """Preparing encryption must not consume commands outside durable admission."""
+    client = SimpleNamespace(sync=AsyncMock(), should_upload_keys=True, keys_upload=AsyncMock(), olm=object())
 
-    await _prepare_crypto(client)
+    await prepare_desktop_client(client)
 
-    client.sync.assert_awaited_once_with(
-        timeout=0,
-        full_state=False,
-        set_presence="offline",
-    )
+    client.sync.assert_not_awaited()
+    client.keys_upload.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_login_translates_expected_matrix_authentication_failure(
+@pytest.mark.parametrize("token_login", [False, True])
+async def test_login_acquires_credentials_without_crypto_store(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    token_login: bool,
 ) -> None:
-    """Bad desktop credentials become one actionable session-domain error."""
-    runtime_paths = SimpleNamespace()
-    matrix_login = AsyncMock(
-        side_effect=PermanentMatrixStartupError("invalid credentials"),
-    )
-    monkeypatch.setattr(
-        "mindroom.desktop.session.login",
-        matrix_login,
-    )
+    """Credential exchange cannot adopt a store before the exact device is known."""
+    calls = []
 
+    async def credential_login(
+        client: nio.AsyncClient,
+        password: str | None = None,
+        **kwargs: object,
+    ) -> nio.LoginResponse:
+        assert not client.config.encryption_enabled
+        assert client.store is None
+        assert client.store_path is None
+        assert client.config.custom_headers == {"X-Access-Client": "test-secret"}
+        calls.append({**kwargs, "password": password})
+        return nio.LoginResponse(user_id="@desktop:example.org", device_id="DESKTOP", access_token="issued-token")
+
+    async def reject_sync(*_args: object, **_kwargs: object) -> None:
+        msg = "ordinary sync consumed desktop input"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(nio.AsyncClient, "login", credential_login)
+    monkeypatch.setattr(nio.AsyncClient, "sync", reject_sync)
+    monkeypatch.setattr(nio.AsyncClient, "keys_upload", AsyncMock())
+    monkeypatch.setattr("mindroom.desktop.session.ensure_agent_cross_signing", AsyncMock())
+    owner, session = await login_desktop_client(
+        homeserver="https://matrix.example.org",
+        user_id=None if token_login else "@desktop:example.org",
+        password=None if token_login else "password",
+        login_token="sso-token" if token_login else None,
+        http_headers={"X-Access-Client": "test-secret"},
+        runtime_paths=make_runtime_paths(tmp_path),
+    )
+    try:
+        assert session.user_id == "@desktop:example.org"
+        assert session.device_id == "DESKTOP"
+        assert owner.client.olm is not None
+        assert owner.client.store is not None
+        assert owner.client.config.custom_headers == {"X-Access-Client": "test-secret"}
+        assert owner.source.cursor is None
+        assert calls[0]["token" if token_login else "password"] == ("sso-token" if token_login else "password")
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_login_translates_expected_authentication_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Credential rejection becomes an actionable session error without opening crypto."""
+    monkeypatch.setattr(
+        nio.AsyncClient,
+        "login",
+        AsyncMock(return_value=nio.LoginError("invalid credentials", "M_FORBIDDEN")),
+    )
     with pytest.raises(DesktopSessionError, match="invalid credentials"):
         await login_desktop_client(
             homeserver="https://matrix.example.org",
             user_id="@desktop:example.org",
-            password="wrong-password",  # noqa: S106 - Test-only invalid credential.
-            runtime_paths=runtime_paths,
-            http_headers={"X-Access-Client": "test-secret"},
+            password="wrong",
+            runtime_paths=make_runtime_paths(tmp_path),
         )
 
-    matrix_login.assert_awaited_once_with(
-        "https://matrix.example.org",
-        "@desktop:example.org",
-        "wrong-password",
-        runtime_paths,
-        http_headers={"X-Access-Client": "test-secret"},
-        sync_storage=MatrixSyncStorage(store_tokens=True),
-    )
-
 
 @pytest.mark.asyncio
-async def test_password_login_uses_desktop_upstream_sync_configuration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Desktop password login persists its ordinary Classic sync cursor."""
-    client = SimpleNamespace(
-        user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        access_token="matrix-access-token",  # noqa: S106 - Test-only access token.
-        close=AsyncMock(),
-    )
-    matrix_login = AsyncMock(return_value=client)
-    monkeypatch.setattr("mindroom.desktop.session.login", matrix_login)
-    monkeypatch.setattr("mindroom.desktop.session._prepare_crypto", AsyncMock())
+async def test_login_translates_network_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Credential network failures are reported without opening a persistent store."""
     monkeypatch.setattr(
-        "mindroom.desktop.session.ensure_agent_cross_signing",
-        AsyncMock(),
-    )
-
-    await login_desktop_client(
-        homeserver="https://matrix.example.org",
-        user_id="@desktop:example.org",
-        password="correct-password",  # noqa: S106 - Test-only password.
-        runtime_paths=SimpleNamespace(),
-    )
-
-    sync_storage = matrix_login.await_args.kwargs["sync_storage"]
-    assert sync_storage == MatrixSyncStorage(store_tokens=True)
-    config = matrix_client_config(sync_storage=sync_storage)
-    assert config.store_sync_tokens is True
-
-
-@pytest.mark.asyncio
-async def test_login_translates_network_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Desktop login reports exhausted transport retries without a traceback."""
-    monkeypatch.setattr(
-        "mindroom.desktop.session.login_with_token",
+        nio.AsyncClient,
+        "login",
         AsyncMock(side_effect=aiohttp.ClientConnectionError("connection refused")),
     )
-
-    with pytest.raises(
-        DesktopSessionError,
-        match=r"Desktop Matrix login failed.*connection refused",
-    ):
+    with pytest.raises(DesktopSessionError, match="connection refused"):
         await login_desktop_client(
             homeserver="https://matrix.example.org",
             user_id=None,
-            login_token="short-lived-token",  # noqa: S106 - Test-only login token.
-            runtime_paths=SimpleNamespace(),
+            login_token="sso-token",
+            runtime_paths=make_runtime_paths(tmp_path),
         )
 
 
 @pytest.mark.asyncio
-async def test_sso_login_uses_returned_identity_without_password(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """SSO token exchange owns user identity and still prepares one encrypted device."""
-    client = SimpleNamespace(
-        user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        access_token="matrix-access-token",  # noqa: S106 - Test-only access token.
-        close=AsyncMock(),
-    )
-    token_login = AsyncMock(return_value=client)
-    prepare = AsyncMock()
-    cross_sign = AsyncMock()
-    monkeypatch.setattr("mindroom.desktop.session.login_with_token", token_login)
-    monkeypatch.setattr("mindroom.desktop.session._prepare_crypto", prepare)
-    monkeypatch.setattr(
-        "mindroom.desktop.session.ensure_agent_cross_signing",
-        cross_sign,
-    )
-    runtime_paths = SimpleNamespace()
-
-    returned_client, session = await login_desktop_client(
-        homeserver="https://matrix.example.org",
-        user_id=None,
-        login_token="short-lived-token",  # noqa: S106 - Test-only login token.
-        runtime_paths=runtime_paths,
-        http_headers={"X-Access-Client": "test-secret"},
-        cloudflare_access=True,
-    )
-
-    assert returned_client is client
-    assert session == DesktopMatrixSession(
-        homeserver="https://matrix.example.org",
-        user_id="@desktop:example.org",
-        device_id="DESKTOP",
-        access_token="matrix-access-token",  # noqa: S106 - Test-only access token.
-        cloudflare_access=True,
-    )
-    token_login.assert_awaited_once_with(
-        "https://matrix.example.org",
-        "short-lived-token",
-        runtime_paths,
-        expected_user_id=None,
-        http_headers={"X-Access-Client": "test-secret"},
-        sync_storage=MatrixSyncStorage(store_tokens=True),
-    )
-    prepare.assert_awaited_once_with(client)
-    cross_sign.assert_not_awaited()
+async def test_saved_session_requires_existing_crypto_store(tmp_path: Path) -> None:
+    """Restore cannot silently replace the established encryption identity."""
+    with pytest.raises(DesktopSessionError, match="encryption store is missing"):
+        await open_desktop_client(_session(), runtime_paths=make_runtime_paths(tmp_path))
 
 
 @pytest.mark.asyncio
-async def test_restore_translates_expected_revoked_session_failure(
+async def test_owned_session_preserves_binding_and_identity_across_reopen(tmp_path: Path) -> None:
+    """The same consumer, stream, and Olm account survive the owner lifecycle."""
+    runtime_paths = make_runtime_paths(tmp_path)
+    owner = await _open_owned_session(_session(), runtime_paths=runtime_paths, allow_create=True)
+    fingerprint = owner.client.olm.account.identity_keys["ed25519"]
+    stream = owner.source.stream_id
+    assert owner.source.config.to_device_only is True
+    assert owner.source.config.sync_filter is None
+    await owner.close()
+    restored = await open_desktop_client(_session(), runtime_paths=runtime_paths)
+    try:
+        assert restored.source.stream_id == stream
+        assert restored.client.olm.account.identity_keys["ed25519"] == fingerprint
+    finally:
+        await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["user_id", "device_id", "stream_id"])
+async def test_owned_session_rejects_mismatched_binding(tmp_path: Path, field: str) -> None:
+    """Account, device, and stream substitutions fail before desktop consumption."""
+    runtime_paths = make_runtime_paths(tmp_path)
+    owner = await _open_owned_session(_session(), runtime_paths=runtime_paths, allow_create=True)
+    await owner.close()
+    path = desktop_transport_binding_path(runtime_paths, _session())
+    payload = json.loads(path.read_text())
+    payload[field] = "00000000-0000-0000-0000-000000000001" if field == "stream_id" else "different"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(DesktopSessionError, match="binding"):
+        await open_desktop_client(_session(), runtime_paths=runtime_paths)
+
+
+def test_concurrent_first_open_preserves_one_consumer_binding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent processes must not persist competing consumer identities before adoption."""
+    from mindroom.desktop import session as session_module  # noqa: PLC0415
+
+    write = session_module.write_json_file_durable
+    start = Barrier(8)
+
+    def delayed_write(*args: object, **kwargs: object) -> None:
+        # Enlarge the competing read/write window without replacing filesystem persistence.
+        time.sleep(0.01)
+        write(*args, **kwargs)
+
+    def create() -> dict[str, object]:
+        start.wait()
+        return _transport_binding(tmp_path / "binding.json", _session())
+
+    monkeypatch.setattr(session_module, "write_json_file_durable", delayed_write)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        bindings = list(executor.map(lambda _index: create(), range(8)))
+    assert len({binding["consumer_id"] for binding in bindings}) == 1
+    assert json.loads((tmp_path / "binding.json").read_text()) == bindings[0]
+
+
+@pytest.mark.asyncio
+async def test_token_login_revokes_unexpected_account_before_adoption(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """A revoked saved access token becomes one actionable session-domain error."""
-    monkeypatch.setattr(
-        "mindroom.desktop.session.olm_store_exists",
-        lambda *_args: True,
-    )
-    matrix_restore = AsyncMock(
-        side_effect=PermanentMatrixStartupError("access token revoked"),
-    )
-    monkeypatch.setattr(
-        "mindroom.desktop.session.restore_login",
-        matrix_restore,
-    )
+    """The owned login path cannot enroll an account other than the requested one."""
+    revoked = []
 
-    with pytest.raises(DesktopSessionError, match="access token revoked"):
-        await open_desktop_client(
-            _session(),
-            runtime_paths=SimpleNamespace(),
-            http_headers={"X-Access-Client": "test-secret"},
+    async def login(client: nio.AsyncClient, **_kwargs: object) -> nio.LoginResponse:
+        response = nio.LoginResponse("@wrong:example.org", "WRONG", "issued-token")
+        await client.receive_response(response)
+        return response
+
+    async def logout(client: nio.AsyncClient) -> nio.LogoutResponse:
+        revoked.append((client.user_id, client.device_id))
+        return nio.LogoutResponse()
+
+    monkeypatch.setattr(nio.AsyncClient, "login", login)
+    monkeypatch.setattr(nio.AsyncClient, "logout", logout)
+    monkeypatch.setattr(nio.AsyncClient, "keys_upload", AsyncMock())
+    runtime_paths = make_runtime_paths(tmp_path)
+    wrong_session = DesktopMatrixSession("https://matrix.example.org", "@wrong:example.org", "WRONG", "issued-token")
+    with pytest.raises(DesktopSessionError, match="different user"):
+        await login_desktop_client(
+            homeserver="https://matrix.example.org",
+            user_id="@desktop:example.org",
+            login_token="sso-token",
+            runtime_paths=runtime_paths,
         )
-
-    assert matrix_restore.await_args.kwargs == {
-        "http_headers": {"X-Access-Client": "test-secret"},
-        "sync_storage": MatrixSyncStorage(store_tokens=True),
-    }
+    assert revoked == [("@wrong:example.org", "WRONG")]
+    assert not desktop_transport_binding_path(runtime_paths, wrong_session).exists()

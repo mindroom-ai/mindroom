@@ -10,7 +10,7 @@ from uuid import UUID
 
 import nio
 import pytest
-from nio import TimelineEventProvenance
+from nio import AuthenticatedToDeviceEvent, TimelineEventProvenance
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 from nio.durable.model import OwnMembership
 
@@ -43,7 +43,6 @@ from mindroom.hooks import (
 )
 from mindroom.matrix.durable_ingestion import validate_ingestion_batch
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
