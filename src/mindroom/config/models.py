@@ -623,6 +623,7 @@ class ModelConfig(BaseModel):
 
         try:
             parsed = urlsplit(normalized)
+            parsed_port = parsed.port
         except ValueError as exc:
             msg = "Model icon must be a config-relative path or Matrix mxc URI"
             raise ValueError(msg) from exc
@@ -631,6 +632,10 @@ class ModelConfig(BaseModel):
             valid_mxc = (
                 parsed.scheme.lower() == "mxc"
                 and bool(parsed.netloc)
+                and bool(parsed.hostname)
+                and parsed.username is None
+                and parsed.password is None
+                and not (parsed_port is None and ":" in parsed.netloc.rsplit("]", maxsplit=1)[-1])
                 and parsed.path.startswith("/")
                 and parsed.path.count("/") == 1
                 and len(parsed.path) > 1
@@ -643,7 +648,8 @@ class ModelConfig(BaseModel):
                 raise ValueError(msg)
             return normalized
 
-        if PurePath(normalized).is_absolute() or PureWindowsPath(normalized).is_absolute():
+        windows_path = PureWindowsPath(normalized)
+        if PurePath(normalized).is_absolute() or windows_path.is_absolute() or bool(windows_path.root):
             msg = "Model icon filesystem path must be relative to the config file"
             raise ValueError(msg)
         return normalized

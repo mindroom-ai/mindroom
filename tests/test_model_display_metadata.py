@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 
 def test_metadata_survives_config_roundtrip() -> None:
+    """Authored presentation metadata should be trimmed and serialized."""
     model = ModelConfig(
         provider="openai",
         id="test-model",
@@ -30,14 +31,26 @@ def test_metadata_survives_config_roundtrip() -> None:
 
 
 def test_blank_metadata_uses_default_presentation() -> None:
+    """Blank presentation metadata should normalize to an absent value."""
     model = ModelConfig(provider="openai", id="test-model", display_name="  ", icon=" ")
 
     assert model.display_name is None
     assert model.icon is None
 
 
-@pytest.mark.parametrize("icon", ["icons/helper.png", "images/models/helper.svg", "mxc://server/media-id"])
+@pytest.mark.parametrize(
+    "icon",
+    [
+        "icons/helper.png",
+        "images/models/helper.svg",
+        "mxc://server/media-id",
+        "mxc://server:8448/media-id",
+        "mxc://[2001:db8::1]/media-id",
+        "mxc://[2001:db8::1]:8448/media-id",
+    ],
+)
 def test_icon_accepts_supported_authored_locations(icon: str) -> None:
+    """Config-relative paths and structurally valid Matrix URIs should pass."""
     model = ModelConfig(provider="openai", id="test-model", icon=icon)
 
     assert model.icon == icon
@@ -48,6 +61,7 @@ def test_icon_accepts_supported_authored_locations(icon: str) -> None:
     [
         "/icons/helper.png",
         r"C:\icons\helper.png",
+        r"\icons\helper.png",
         "https://example.com/helper.png",
         "http://example.com/helper.png",
         "file://icons/helper.png",
@@ -56,14 +70,21 @@ def test_icon_accepts_supported_authored_locations(icon: str) -> None:
         "mxc:///media-id",
         "mxc://server/media-id/extra",
         "mxc://server/media-id?download=1",
+        "mxc://user@server/media-id",
+        "mxc://user:password@server/media-id",
+        "mxc://server:bad/media-id",
+        "mxc://server:70000/media-id",
+        "mxc://server:/media-id",
     ],
 )
 def test_icon_rejects_unsupported_authored_locations(icon: str) -> None:
+    """Remote, rooted, and malformed authored icon locations should fail."""
     with pytest.raises(ValidationError):
         ModelConfig(provider="openai", id="test-model", icon=icon)
 
 
 def test_display_metadata_is_not_forwarded_to_model_provider(tmp_path: Path) -> None:
+    """Presentation metadata should remain outside provider constructor kwargs."""
     config = bind_runtime_paths(
         Config(
             models={
