@@ -40,6 +40,8 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
+    from playwright.async_api import Download
+
     from mindroom.constants import RuntimePaths
 
 _DEFAULT_PROFILE = "mindroom"
@@ -552,12 +554,45 @@ class BrowserTools(Toolkit):
         self._command_session_id = uuid4().hex
         self._command_sequences = count()
         self._profiles: dict[str, _BrowserProfileState] = {}
+        self._worker_display: str | None = None
+        self._worker_workspace: Path | None = None
         self._lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
         self._describe_browser_schema()
+
+    def bind_worker_display(self, display: str, workspace: Path) -> str:
+        """Bind a fresh controller to its prepared workspace and return its config key."""
+        if self._profiles:
+            msg = "Bind the worker display before starting browser profiles."
+            raise ValueError(msg)
+        if self._default_target != "host":
+            msg = "Worker computer does not support default_target=desktop."
+            raise ValueError(msg)
+        workspace = workspace.resolve()
+        output_dir = self._configured_output_dir or workspace / "browser"
+        if not output_dir.is_relative_to(workspace):
+            msg = "Worker browser output_dir must stay inside the prepared workspace."
+            raise ValueError(msg)
+        self._worker_display = display
+        self._worker_workspace = workspace
+        self._configured_output_dir = output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return json.dumps(
+            {
+                "output_dir": str(output_dir),
+                "allow_private_networks": self._allow_private_networks,
+                "default_target": self._default_target,
+                "timeout_seconds": self._timeout_seconds,
+            },
+            sort_keys=True,
+        )
+
+    async def aclose(self) -> None:
+        """Close persistent browser resources on their owning event loop."""
+        await self._close_profiles()
 
     def _describe_browser_schema(self) -> None:
         """Attach explicit model-facing descriptions for browser action routing."""
@@ -885,7 +920,11 @@ class BrowserTools(Toolkit):
 
     def _resolve_target(self, *, target: str | None, node: str | None) -> str:
         self._validate_target(target=target, node=node)
-        return _clean_str(target) or self._default_target
+        resolved = _clean_str(target) or self._default_target
+        if self._worker_display is not None and resolved != "host":
+            msg = "Worker computer does not support desktop browser routing."
+            raise ValueError(msg)
+        return resolved
 
     @staticmethod
     def _validated_default_target(default_target: str) -> str:
@@ -1509,7 +1548,19 @@ class BrowserTools(Toolkit):
                 return state
 
             playwright = await async_playwright().start()
-            launch_kwargs = _persistent_launch_kwargs(self._runtime_paths, profile_name, headless=True)
+            launch_kwargs = _persistent_launch_kwargs(
+                self._runtime_paths,
+                profile_name,
+                headless=self._worker_display is None,
+            )
+            if self._worker_display is not None:
+                launch_kwargs["env"] = {
+                    **os.environ,
+                    **self._runtime_paths.process_env,
+                    "DISPLAY": self._worker_display,
+                }
+                launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+                launch_kwargs["downloads_path"] = str(self._resolve_output_dir())
             user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
             _clear_stale_singleton_locks(user_data_dir)
             try:
@@ -1578,7 +1629,15 @@ class BrowserTools(Toolkit):
         page.on("console", lambda message: self._record_console(tab, message))
         page.on("dialog", lambda dialog: asyncio.create_task(self._handle_dialog(tab, dialog)))
         page.on("close", lambda _: self._remove_tab(state, target_id))
+        if self._worker_display is not None:
+            page.on("download", self._save_worker_download)
         return target_id
+
+    async def _save_worker_download(self, download: Download) -> None:
+        """Copy completed downloads out of Playwright's context-owned temporary files."""
+        filename = Path(download.suggested_filename).name or "download"
+        destination = self._resolve_output_dir() / f"{uuid4().hex}-{filename}"
+        await download.save_as(destination)
 
     @staticmethod
     def _record_console(tab: _BrowserTabState, message: ConsoleMessage) -> None:
@@ -1637,6 +1696,8 @@ class BrowserTools(Toolkit):
             roots = [(self._runtime_paths.storage_root / "browser").resolve()]
         if context is not None and context.storage_path is not None:
             roots.append(context.storage_path.resolve())
+        if self._worker_workspace is not None:
+            roots.append(self._worker_workspace)
         return tuple(roots)
 
     def _resolve_upload_path(self, path: str) -> Path:

@@ -52,6 +52,7 @@ roomDefaults:
 matrixAutoJoinRoomKeys: []
 matrixHomeserverStartupTimeoutSeconds: 0  # 0 means wait forever for Matrix at startup.
 workerBackend: static_runner  # `static_runner` keeps the shared sidecar; `kubernetes` creates dedicated worker pods
+workerComputerEnabled: false
 workerCleanupIntervalSeconds: 30
 controlPlaneNodeName: ""  # Optional explicit node pin for the control plane and dedicated workers when using shared ReadWriteOnce storage.
 kubernetesWorkerImage: ""  # Defaults to mindroom_image when empty

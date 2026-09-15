@@ -8,7 +8,7 @@ import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -37,6 +37,8 @@ from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from playwright.async_api import Download as PlaywrightDownload
 
 TEST_RUNTIME_PATHS = resolve_primary_runtime_paths(config_path=Path("config.yaml"))
 DESKTOP_MEDIA = EncryptedDesktopMedia(
@@ -1418,3 +1420,69 @@ async def test_screenshot_selector_uses_locator_screenshot(
     element_screenshot.assert_awaited_once()
     page_screenshot.assert_not_awaited()
     assert payload["selector"] == "#timeline"
+
+
+@pytest.mark.asyncio
+async def test_worker_display_rejects_desktop_routing_and_binds_outputs(tmp_path: Path) -> None:
+    """A managed computer must never escape to another browser target or workspace."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    workspace = tmp_path / "workspace"
+    browser.bind_worker_display(":99", workspace)
+    with pytest.raises(ValueError, match="desktop"):
+        await browser.browser("tabs", target="desktop")
+    assert browser._resolve_output_dir() == workspace / "browser"
+    await browser.aclose()
+
+
+def test_worker_display_rejects_output_outside_prepared_workspace(tmp_path: Path) -> None:
+    """Authored output paths cannot escape the prepared worker workspace."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths, output_dir=tmp_path / "other")
+    with pytest.raises(ValueError, match="workspace"):
+        browser.bind_worker_display(":99", tmp_path / "workspace")
+
+
+@pytest.mark.asyncio
+async def test_worker_download_survives_browser_stop(tmp_path: Path) -> None:
+    """Download copies live in the prepared workspace after browser context cleanup."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    workspace = tmp_path / "workspace"
+    browser.bind_worker_display(":99", workspace)
+
+    class Download:
+        """Filesystem-producing download adapter."""
+
+        suggested_filename = "../../document.txt"
+
+        async def save_as(self, path: str | Path) -> None:
+            """Persist bytes like Playwright save_as."""
+            Path(path).write_text("download bytes")
+
+    await browser._save_worker_download(cast("PlaywrightDownload", Download()))
+    await browser.aclose()
+    saved = list((workspace / "browser").iterdir())
+    assert len(saved) == 1
+    assert saved[0].name.endswith("-document.txt")
+    assert saved[0].read_text() == "download bytes"
+
+
+@pytest.mark.asyncio
+async def test_worker_browser_launch_uses_private_display_and_persistent_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Managed launches use headed Chromium without mutating the parent display environment."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    monkeypatch.setenv("DISPLAY", ":42")
+    launch, _ = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext())
+    await browser._ensure_profile("mindroom")
+    assert launch["headless"] is False
+    assert launch["env"]["DISPLAY"] == ":99"
+    assert os.environ["DISPLAY"] == ":42"
+    assert Path(str(launch["user_data_dir"])) == tmp_path / "state" / "browser-profiles" / "mindroom"
+    assert launch["downloads_path"] == str(tmp_path / "workspace" / "browser")
+    await browser.aclose()

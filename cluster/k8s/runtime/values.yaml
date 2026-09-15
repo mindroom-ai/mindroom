@@ -292,6 +292,7 @@ probes:
     failureThreshold: 6
 
 workers:
+  computerEnabled: false
   # static_runner keeps a sandbox-runner sidecar in this pod.
   # kubernetes lets the MindRoom runtime create worker Deployments on demand.
   backend: static_runner

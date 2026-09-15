@@ -1360,6 +1360,8 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.worker_computer.runtime",
+    "mindroom.worker_computer.protocol",
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_forkserver",
@@ -1386,6 +1388,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_runner_app"
 depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.worker_computer",
+    "mindroom.worker_computer.display",
+    "mindroom.worker_computer.runtime",
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_runner_scripts",
 ]
@@ -5902,3 +5908,29 @@ visibility = [
 path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
 visibility = ["mindroom.event_journal"]
+
+
+[[modules]]
+path = "mindroom.worker_computer.protocol"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.display"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.rfb"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.runtime"
+depends_on = ["mindroom.worker_computer.protocol"]
+
+[[modules]]
+path = "mindroom.api.worker_computer"
+depends_on = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.worker_computer.protocol",
+    "mindroom.worker_computer.rfb",
+    "mindroom.worker_computer.runtime",
+]

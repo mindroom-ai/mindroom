@@ -28,6 +28,7 @@ __all__ = [
     "SHARED_CREDENTIALS_PATH_ENV",
     "VENDOR_TELEMETRY_ENV_VALUES",
     "VERTEXAI_CLAUDE_ENV_BY_KEY",
+    "WORKER_COMPUTER_ENABLED_ENV",
     "WORKER_EGRESS_PROXY_ENV_BY_KEY",
     "credentials_encryption_key_from_env",
     "credentials_encryption_key_value",
@@ -246,8 +247,11 @@ _ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset(
         *_VENDOR_TELEMETRY_ENV_NAMES,
     },
 )
+WORKER_COMPUTER_ENABLED_ENV = "MINDROOM_WORKER_COMPUTER_ENABLED"
+
 _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES = frozenset(
     {
+        WORKER_COMPUTER_ENABLED_ENV,
         SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"],
         SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
@@ -268,6 +272,7 @@ _WORKER_EXTRA_ENV_SANDBOX_ENV_NAMES = frozenset(
 )
 _SANDBOX_RUNNER_STARTUP_ENV_NAMES = frozenset(
     {
+        WORKER_COMPUTER_ENABLED_ENV,
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"],
         SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"],

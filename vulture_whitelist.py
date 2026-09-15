@@ -376,3 +376,5 @@ _collections_to_query  # Agno calls this hook to resolve the exact published rea
 
 response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
+_.controller_session_id  # serialized TypedDict field (src/mindroom/worker_computer/protocol.py)
+control  # FastAPI endpoint (src/mindroom/api/worker_computer.py)
