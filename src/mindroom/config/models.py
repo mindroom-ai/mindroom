@@ -18,6 +18,7 @@ from mindroom.constants import (
 )
 from mindroom.credential_policy import credential_service_policy
 from mindroom.credentials import validate_service_name
+from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
@@ -636,6 +637,7 @@ class ModelConfig(BaseModel):
                 and parsed.username is None
                 and parsed.password is None
                 and not (parsed_port is None and ":" in parsed.netloc.rsplit("]", maxsplit=1)[-1])
+                and valid_matrix_server_name(parsed.netloc)
                 and parsed.path.startswith("/")
                 and parsed.path.count("/") == 1
                 and len(parsed.path) > 1
@@ -646,7 +648,7 @@ class ModelConfig(BaseModel):
             if not valid_mxc:
                 msg = "Model icon must be a config-relative path or Matrix mxc URI"
                 raise ValueError(msg)
-            return normalized
+            return f"mxc{normalized[3:]}"
 
         windows_path = PureWindowsPath(normalized)
         if PurePath(normalized).is_absolute() or windows_path.is_absolute() or bool(windows_path.root):

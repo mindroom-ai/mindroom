@@ -45,6 +45,8 @@ def test_blank_metadata_uses_default_presentation() -> None:
         "images/models/helper.svg",
         "mxc://server/media-id",
         "mxc://server:8448/media-id",
+        "mxc://192.0.2.1/media-id",
+        "mxc://192.0.2.1:8448/media-id",
         "mxc://[2001:db8::1]/media-id",
         "mxc://[2001:db8::1]:8448/media-id",
     ],
@@ -75,12 +77,22 @@ def test_icon_accepts_supported_authored_locations(icon: str) -> None:
         "mxc://server:bad/media-id",
         "mxc://server:70000/media-id",
         "mxc://server:/media-id",
+        "mxc://server_name/media-id",
+        "mxc://server%20name/media-id",
+        r"mxc://server\name/media-id",
     ],
 )
 def test_icon_rejects_unsupported_authored_locations(icon: str) -> None:
     """Remote, rooted, and malformed authored icon locations should fail."""
     with pytest.raises(ValidationError):
         ModelConfig(provider="openai", id="test-model", icon=icon)
+
+
+def test_icon_canonicalizes_mixed_case_matrix_scheme() -> None:
+    """Accepted Matrix icon URIs should use a consistent lowercase scheme."""
+    model = ModelConfig(provider="openai", id="test-model", icon="MXC://Server.Example/media-id")
+
+    assert model.icon == "mxc://Server.Example/media-id"
 
 
 def test_display_metadata_is_not_forwarded_to_model_provider(tmp_path: Path) -> None:

@@ -2221,7 +2221,21 @@ visibility = [
 # ARCH-B memory enforcement slice: keep public memory config types owned by config.
 [[modules]]
 path = "mindroom.config.memory"
-depends_on = ["mindroom.path_globs"]
+depends_on = ["mindroom.config.models", "mindroom.path_globs"]
+
+[[modules]]
+path = "mindroom.config.models"
+depends_on = [
+    "mindroom.config.access",
+    "mindroom.config.legacy_fields",
+    "mindroom.config.validation",
+    "mindroom.constants",
+    "mindroom.credential_policy",
+    "mindroom.credentials",
+    "mindroom.matrix.identity",
+    "mindroom.model_defaults",
+    "mindroom.tool_system.worker_routing",
+]
 
 [[modules]]
 path = "mindroom.config.entity_view"
@@ -3902,6 +3916,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.dynamic_toolkits"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.declarations",
     "mindroom.delegation.lifecycle",
@@ -4596,6 +4611,10 @@ from = ["mindroom.ai"]
 [[interfaces]]
 expose = ["get_model_instance"]
 from = ["mindroom.model_loading"]
+
+[[interfaces]]
+expose = ["valid_matrix_server_name"]
+from = ["mindroom.matrix.identity"]
 
 [[interfaces]]
 expose = [
