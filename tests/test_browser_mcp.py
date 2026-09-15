@@ -207,6 +207,7 @@ def test_worker_launch_has_fixed_sandbox_and_workspace(tmp_path: Path) -> None:
     provider = WorkerBrowserMCP(display=":77", workspace=tmp_path / "workspace", storage_root=tmp_path / "storage")
     parameters = provider._server_parameters()
     assert parameters.args[0] == "/opt/mindroom-browser-mcp/node_modules/@playwright/mcp/cli.js"
+    assert parameters.args[parameters.args.index("--executable-path") + 1] == "/opt/mindroom-browser-mcp/chromium"
     assert "--sandbox" in parameters.args
     assert "--headless" not in parameters.args
     assert "--no-sandbox" not in parameters.args

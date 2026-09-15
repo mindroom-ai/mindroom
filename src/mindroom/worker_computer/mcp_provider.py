@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from agno.tools.function import ToolResult
 
 _SERVER = "/opt/mindroom-browser-mcp/node_modules/@playwright/mcp/cli.js"
-_BROWSER = "/usr/bin/chromium"
+_BROWSER = "/opt/mindroom-browser-mcp/chromium"
 
 
 class WorkerBrowserMCP:
