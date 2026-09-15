@@ -14,6 +14,7 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 
 from mindroom.hooks.enrichment import render_transient_context
+from mindroom.json_utils import object_with_unique_keys
 from mindroom.logging_config import get_logger
 from mindroom.participation import ParticipationDecision, ParticipationGate
 from mindroom.provider_tool_policy import without_provider_tools
@@ -39,15 +40,7 @@ Return only a JSON object with action (respond or stay_silent) and a brief reaso
 
 def _parse_decision(content: str) -> ParticipationDecision:
     """Accept one decision object with prose or fences, rejecting ambiguous output."""
-
-    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result = dict(pairs)
-        if len(result) != len(pairs):
-            msg = "Participation decision must not contain duplicate JSON keys"
-            raise ValueError(msg)
-        return result
-
-    decoder = json.JSONDecoder(object_pairs_hook=unique_object)
+    decoder = json.JSONDecoder(object_pairs_hook=object_with_unique_keys)
     values = []
     end = 0
     # Skip prose brackets, but let malformed JSON fail instead of extracting its children.
@@ -119,25 +112,22 @@ def participation_model(model: Model | None, gate: ParticipationGate | None, *, 
     model_attributes = vars(model)
     saved = {name: model_attributes.get(name) for name in ("ainvoke", "ainvoke_stream", "cache_response")}
 
-    def owns_request(kwargs: Mapping[str, object]) -> bool:
+    async def allow_request(messages: list[Message], kwargs: Mapping[str, object]) -> bool:
         response = kwargs.get("run_response")
-        return isinstance(response, RunOutput) and response.run_id == run_id
+        return (
+            not isinstance(response, RunOutput)
+            or response.run_id != run_id
+            or _active_decision.get() is gate
+            or await gate.check(lambda: _request_decision(model, gate, original_invoke, messages, kwargs))
+        )
 
     async def invoke(messages: list[Message], **kwargs: object) -> ModelResponse:
-        if (
-            owns_request(kwargs)
-            and _active_decision.get() is not gate
-            and not await gate.check(lambda: _request_decision(model, gate, original_invoke, messages, kwargs))
-        ):
+        if not await allow_request(messages, kwargs):
             return ModelResponse(content="")
         return await original_invoke(messages=messages, **kwargs)
 
     async def stream(messages: list[Message], **kwargs: object) -> AsyncIterator[ModelResponse]:
-        if (
-            owns_request(kwargs)
-            and _active_decision.get() is not gate
-            and not await gate.check(lambda: _request_decision(model, gate, original_invoke, messages, kwargs))
-        ):
+        if not await allow_request(messages, kwargs):
             return
         async for chunk in original_stream(messages=messages, **kwargs):
             yield chunk

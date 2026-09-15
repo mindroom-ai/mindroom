@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Never, Protocol
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from mindroom.json_utils import object_with_unique_keys
 from mindroom.mcp_gateway.accounts import (
     AccountConflictError,
     AccountNotFoundError,
@@ -115,15 +116,6 @@ def _list(resources: list[dict[str, Any]], *, total: int | None = None, start: i
     }
 
 
-def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise AccountValidationError
-        result[key] = value
-    return result
-
-
 def _reject_constant(_value: str) -> Never:
     raise AccountValidationError
 
@@ -140,7 +132,11 @@ async def _body(request: Request, schema: str) -> dict[str, Any]:
             raise _ScimError(413, "Request body exceeds the supported limit.", "tooLarge")
         body.extend(chunk)
     try:
-        value = json.loads(body.decode("utf-8"), object_pairs_hook=_object, parse_constant=_reject_constant)
+        value = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=object_with_unique_keys,
+            parse_constant=_reject_constant,
+        )
         fields = canonical_fields(value)
     except (ValueError, RecursionError) as error:
         raise AccountValidationError from error

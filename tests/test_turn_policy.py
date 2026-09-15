@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
+    from mindroom.turn_policy import _ResponderAvailability
 
 _ROOM_ID = "!test:localhost"
 _SENDER = "@user:localhost"
@@ -662,6 +663,7 @@ async def test_adaptive_participation_counts_current_sender(
     config: Config,
     history_sender: str,
     active_follow_up: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only an actual second human makes an untagged turn adaptive."""
     config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
@@ -679,9 +681,19 @@ async def test_adaptive_participation_counts_current_sender(
             dispatch,
             envelope=replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND),
         )
+    snapshots = 0
+    original_snapshot = TurnPolicy.responder_availability
+
+    def snapshot(policy: TurnPolicy) -> _ResponderAvailability:
+        nonlocal snapshots
+        snapshots += 1
+        return original_snapshot(policy)
+
+    monkeypatch.setattr(TurnPolicy, "responder_availability", snapshot)
     plan = await _plan(_policy_for(config, "general"), room, dispatch)
     assert plan.kind == "respond"
     assert (plan.response_action.participation is not None) == (history_sender != _SENDER)
+    assert snapshots == 1, "One dispatch must reuse its responder liveness snapshot"
 
 
 @pytest.mark.asyncio

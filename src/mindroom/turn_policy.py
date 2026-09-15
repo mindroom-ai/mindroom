@@ -311,10 +311,17 @@ class TurnPolicy:
             require_resolved_membership=True,
         )
 
-    def _is_adaptive_thread_context(self, context: MessageContext, requester_user_id: str) -> bool:
-        """Require proven untagged context with at least two actual human participants."""
-        return (
-            context.is_thread
+    def _adaptive_thread_participation(
+        self,
+        context: MessageContext,
+        room_id: str,
+        requester_user_id: str,
+    ) -> RoomParticipationConfig | None:
+        """Resolve room participation for proven untagged multi-human context."""
+        participation = self.deps.runtime.config.get_room_participation(room_id, self.deps.runtime_paths)
+        if (
+            participation is not None
+            and context.is_thread
             and not context.planning_thread_history_unavailable
             and not context.mentioned_agents
             and not context.am_i_mentioned
@@ -325,7 +332,9 @@ class TurnPolicy:
                 self.deps.runtime_paths,
                 current_sender_id=requester_user_id,
             )
-        )
+        ):
+            return participation
+        return None
 
     def adaptive_participation(
         self,
@@ -335,12 +344,8 @@ class TurnPolicy:
         requester_user_id: str,
     ) -> RoomParticipationConfig | None:
         """Select an authorized designated agent for a proven multi-human thread."""
-        participation = self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths)
-        if (
-            participation is None
-            or participation.agent != self.deps.agent_name
-            or not self._is_adaptive_thread_context(context, requester_user_id)
-        ):
+        participation = self._adaptive_thread_participation(context, room.room_id, requester_user_id)
+        if participation is None or participation.agent != self.deps.agent_name:
             return None
         candidates = classify_responder_candidates_from_cached_room(
             room,
@@ -681,10 +686,7 @@ class TurnPolicy:
         elif (
             context.mentioned_agents
             or context.has_non_agent_mentions
-            or (
-                self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths) is not None
-                and self._is_adaptive_thread_context(context, requester_user_id)
-            )
+            or self._adaptive_thread_participation(context, room.room_id, requester_user_id) is not None
         ):
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         elif context.planning_thread_history_unavailable:
@@ -757,24 +759,21 @@ class TurnPolicy:
         self,
         dispatch: PreparedDispatch,
         room: nio.MatrixRoom,
+        available_responders: list[MatrixID],
     ) -> ResponseAction | None:
         """Select participation for ambient turns, including coalesced active follow-ups."""
-        context = dispatch.context
-        requester_user_id = dispatch.requester_user_id
-        if dispatch.envelope.origin.may_answer_interactive_prompt:
-            participation = self.adaptive_participation(
-                context=context,
-                room=room,
-                requester_user_id=requester_user_id,
-            )
-            if participation is not None:
-                return ResponseAction(kind="individual", participation=participation)
-            if self.deps.runtime.config.get_room_participation(
-                room.room_id,
-                self.deps.runtime_paths,
-            ) is not None and self._is_adaptive_thread_context(context, requester_user_id):
-                return ResponseAction(kind="skip")
-        return None
+        if not dispatch.envelope.origin.may_answer_interactive_prompt:
+            return None
+        participation = self._adaptive_thread_participation(
+            dispatch.context,
+            room.room_id,
+            dispatch.requester_user_id,
+        )
+        if participation is None:
+            return None
+        if participation.agent != self.deps.agent_name or self.deps.matrix_id not in available_responders:
+            return ResponseAction(kind="skip")
+        return ResponseAction(kind="individual", participation=participation)
 
     async def _resolve_response_action(  # noqa: PLR0911
         self,
@@ -841,6 +840,7 @@ class TurnPolicy:
         participation_action = self._adaptive_response_action(
             dispatch,
             room,
+            available_responders_in_room,
         )
         if participation_action is not None:
             return participation_action

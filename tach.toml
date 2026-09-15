@@ -105,6 +105,7 @@ path = "mindroom.private_instance_identity_store"
 depends_on = [
     "mindroom.durable_write",
     "mindroom.file_locks",
+    "mindroom.json_utils",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
@@ -3738,6 +3739,7 @@ depends_on = [
 path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
+    "mindroom.provider_media_fallback",
     "mindroom.delegation.execution",
     "mindroom.ai",
     "mindroom.response_turn",
@@ -3745,6 +3747,15 @@ visibility = [
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.provider_media_fallback"
+depends_on = [
+    "mindroom.error_handling",
+    "mindroom.logging_config",
+    "mindroom.redaction",
+    "mindroom.tool_system.context_bound_streams",
 ]
 
 [[modules]]
@@ -5410,7 +5421,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.mcp_scim"
-depends_on = ["mindroom.mcp_gateway.accounts"]
+depends_on = ["mindroom.mcp_gateway.accounts", "mindroom.json_utils"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.accounts"
@@ -5876,8 +5887,13 @@ visibility = ["mindroom.agno_participation", "mindroom.response_runner", "mindro
 
 [[modules]]
 path = "mindroom.agno_participation"
-depends_on = ["mindroom.participation", "mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy"]
+depends_on = ["mindroom.participation", "mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy", "mindroom.json_utils"]
 visibility = ["mindroom.ai"]
+
+[[modules]]
+path = "mindroom.json_utils"
+depends_on = []
+visibility = ["mindroom.agno_participation", "mindroom.private_instance_identity_store", "mindroom.api.mcp_scim"]
 
 [[modules]]
 path = "mindroom.provider_tool_policy"

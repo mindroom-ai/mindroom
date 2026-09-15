@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator as AsyncGeneratorABC
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from mindroom.error_handling import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.context_bound_streams import close_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Mapping
@@ -83,11 +83,6 @@ _ADAPTER_OMITTED_MEDIA: dict[str, frozenset[MediaKind]] = {
     "agno.models.groq.groq": frozenset({"audio", "file", "video"}),
     "agno.models.cerebras.cerebras": frozenset({"audio", "image", "file", "video"}),
 }
-
-
-@runtime_checkable
-class _AsyncClosableIterator(Protocol):
-    async def aclose(self) -> None: ...
 
 
 def install_provider_media_fallback(model: Model, *, fallback_prompt: str) -> None:
@@ -555,9 +550,7 @@ async def _next_stream_response(
 
 
 async def _close_stream(model: Model, stream: AsyncIterator[ModelResponse]) -> None:
-    if isinstance(stream, (AsyncGeneratorABC, _AsyncClosableIterator)):
-        with _active_model(model):
-            await stream.aclose()
+    await close_async_stream(stream, context_factory=lambda: _active_model(model))
 
 
 def _log_retry(model: Model, error: Exception) -> None:
