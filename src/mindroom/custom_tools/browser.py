@@ -1071,7 +1071,7 @@ class BrowserTools(Toolkit):
     async def _tab_list(self, state: _BrowserProfileState) -> list[dict[str, Any]]:
         payload_tabs: list[dict[str, Any]] = []
         stale: list[str] = []
-        for target_id, tab in state.tabs.items():
+        for target_id, tab in list(state.tabs.items()):
             if tab.page.is_closed():
                 stale.append(target_id)
                 continue
@@ -1541,57 +1541,65 @@ class BrowserTools(Toolkit):
         payload.update(extra)
         return payload
 
-    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:
+    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901 - one startup ownership boundary
         async with self._lock:
             state = self._profiles.get(profile_name)
             if state is not None:
                 return state
 
             playwright = await async_playwright().start()
-            launch_kwargs = _persistent_launch_kwargs(
-                self._runtime_paths,
-                profile_name,
-                headless=self._worker_display is None,
-            )
-            if self._worker_display is not None:
-                launch_kwargs["env"] = {
-                    **os.environ,
-                    **self._runtime_paths.process_env,
-                    "DISPLAY": self._worker_display,
-                }
-                launch_kwargs["viewport"] = {"width": 1280, "height": 800}
-                launch_kwargs["downloads_path"] = str(self._resolve_output_dir())
-            user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
-            _clear_stale_singleton_locks(user_data_dir)
+            context: BrowserContext | None = None
             try:
+                launch_kwargs = _persistent_launch_kwargs(
+                    self._runtime_paths,
+                    profile_name,
+                    headless=self._worker_display is None,
+                )
+                if self._worker_display is not None:
+                    launch_kwargs["env"] = {
+                        **os.environ,
+                        **self._runtime_paths.process_env,
+                        "DISPLAY": self._worker_display,
+                    }
+                    launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+                    launch_kwargs["downloads_path"] = str(self._resolve_output_dir())
+                user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
+                _clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
-            except PlaywrightError as exc:
-                await playwright.stop()
-                friendly_message = _friendly_playwright_browser_error_message(exc)
-                if friendly_message is not None:
-                    raise RuntimeError(friendly_message) from exc
-                raise
-            except Exception:
-                await playwright.stop()
-                raise
-            await context.route(
-                "**/*",
-                lambda route: continue_or_abort_browser_fetch(
-                    route,
-                    allow_private_networks=self._allow_private_networks,
-                ),
-            )
-            state = _BrowserProfileState(playwright=playwright, context=context)
-            self._profiles[profile_name] = state
+                await context.route(
+                    "**/*",
+                    lambda route: continue_or_abort_browser_fetch(
+                        route,
+                        allow_private_networks=self._allow_private_networks,
+                    ),
+                )
+                state = _BrowserProfileState(playwright=playwright, context=context)
 
-            for page in context.pages:
-                target_id = self._register_tab(state, page)
+                def register_page(page: Page) -> None:
+                    self._register_tab(state, page)
+
+                context.on("page", register_page)
+                for page in context.pages:
+                    target_id = self._register_tab(state, page)
+                    if state.active_target_id is None:
+                        state.active_target_id = target_id
                 if state.active_target_id is None:
-                    state.active_target_id = target_id
-            if state.active_target_id is None:
-                page = await context.new_page()
-                target_id = self._register_tab(state, page)
-                state.active_target_id = target_id
+                    page = await context.new_page()
+                    state.active_target_id = self._register_tab(state, page)
+            except BaseException as exc:
+                # The persistent owner cannot rely on a per-call child exiting.
+                # Cover cancellation until all startup resources are registered.
+                try:
+                    if context is not None:
+                        await context.close()
+                finally:
+                    await playwright.stop()
+                if isinstance(exc, PlaywrightError):
+                    friendly_message = _friendly_playwright_browser_error_message(exc)
+                    if friendly_message is not None:
+                        raise RuntimeError(friendly_message) from exc
+                raise
+            self._profiles[profile_name] = state
             return state
 
     async def _stop_profile(self, profile_name: str) -> None:
@@ -1599,8 +1607,10 @@ class BrowserTools(Toolkit):
             state = self._profiles.pop(profile_name, None)
             if state is None:
                 return
-            await state.context.close()
-            await state.playwright.stop()
+            try:
+                await state.context.close()
+            finally:
+                await state.playwright.stop()
 
     async def _resolve_tab(
         self,
@@ -1623,6 +1633,9 @@ class BrowserTools(Toolkit):
         return candidate_id, state.tabs[candidate_id]
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
+        for tab in state.tabs.values():
+            if tab.page is page:
+                return tab.target_id
         target_id = uuid4().hex[:8]
         tab = _BrowserTabState(target_id=target_id, page=page)
         state.tabs[target_id] = tab

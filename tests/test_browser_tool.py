@@ -30,10 +30,14 @@ from mindroom.message_target import MessageTarget
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.worker_computer.protocol import BrowserSession
+from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
+from tests.browser_lifecycle_helpers import LifecycleBrowser
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
+from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1012,6 +1016,7 @@ class _FakeContext:
         self.new_page = AsyncMock(return_value=self.fresh_page)
         self.route = AsyncMock()
         self.close = AsyncMock()
+        self.on = MagicMock()
 
 
 def _install_fake_persistent_playwright(
@@ -1485,4 +1490,125 @@ async def test_worker_browser_launch_uses_private_display_and_persistent_profile
     assert os.environ["DISPLAY"] == ":42"
     assert Path(str(launch["user_data_dir"])) == tmp_path / "state" / "browser-profiles" / "mindroom"
     assert launch["downloads_path"] == str(tmp_path / "workspace" / "browser")
+    await browser.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["launch", "route", "new_page"])
+async def test_worker_cancelled_startup_releases_partial_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Cancellation cannot leave a driver/context outside the persistent owner's cleanup."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser(pause_at=phase)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    async def execute() -> object:
+        return await browser.browser("start")
+
+    task = asyncio.create_task(
+        runtime.run_browser_call("binding", lambda _: BrowserSession(execute, browser.aclose), [], {}),
+    )
+    await asyncio.wait_for(adapter.reached.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await runtime.close()
+    assert adapter.live_resources == set()
+    assert json.loads(await browser.browser("status"))["running"] is False
+
+
+@pytest.mark.asyncio
+async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tabs opened during takeover become usable agent targets without duplicated event hooks."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    workspace = tmp_path / "workspace"
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", workspace)
+    adapter = LifecycleBrowser(initial_pages=True)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    async def execute(**kwargs: object) -> object:
+        return await browser.browser(**kwargs)
+
+    def factory(_display: str) -> BrowserSession:
+        return BrowserSession(execute, browser.aclose)
+
+    await runtime.run_browser_call("binding", factory, [], {"action": "start"})
+    generation = runtime.status()["generation"]
+    await runtime.attach_stream("viewer", generation)
+    await runtime.take_control("viewer")
+    native = adapter.add_native_page("https://example.org/native")
+    await runtime.release_control("viewer")
+    tabs = json.loads(await runtime.run_browser_call("binding", factory, [], {"action": "tabs"}))["tabs"]
+    assert len(tabs) == 2
+    target = next(tab["targetId"] for tab in tabs if tab["url"] == native.url)
+    await runtime.run_browser_call(
+        "binding",
+        factory,
+        [],
+        {"action": "navigate", "targetId": target, "targetUrl": "https://example.org/resumed"},
+    )
+    assert native.url == "https://example.org/resumed"
+    opened = json.loads(
+        await runtime.run_browser_call(
+            "binding",
+            factory,
+            [],
+            {"action": "open", "targetUrl": "https://example.org/tool"},
+        ),
+    )
+    tabs = json.loads(await runtime.run_browser_call("binding", factory, [], {"action": "tabs"}))["tabs"]
+    assert len(tabs) == 3
+    assert sum(tab["targetId"] == opened["targetId"] for tab in tabs) == 1
+
+    class Download:
+        """Native download with an observable file result."""
+
+        suggested_filename = "native.txt"
+
+        async def save_as(self, destination: str | Path) -> None:
+            """Save downloaded bytes through the real persistent handler."""
+            Path(destination).write_text("native download")
+
+    await native.emit("download", Download())
+    await adapter.pages[-1].emit("download", Download())
+    await runtime.close()
+    saved = list((workspace / "browser").iterdir())
+    assert len(saved) == 2
+    assert all(path.read_text() == "native download" for path in saved)
+
+
+@pytest.mark.asyncio
+async def test_native_page_creation_during_tab_listing_preserves_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native page events during title reads cannot invalidate an in-flight tab iterator."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser(initial_pages=True)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    await browser.browser("start")
+
+    async def title() -> str:
+        if len(adapter.pages) == 1:
+            adapter.add_native_page("https://example.org/new")
+        return "initial page"
+
+    monkeypatch.setattr(adapter.pages[0], "title", title)
+    first = json.loads(await browser.browser("tabs"))
+    second = json.loads(await browser.browser("tabs"))
+    assert len(first["tabs"]) == 1
+    assert len(second["tabs"]) == 2
     await browser.aclose()

@@ -1675,7 +1675,7 @@ async def _execute_computer_browser(
         or not sandbox_exec.runner_uses_dedicated_worker(runtime_paths)
         or payload.worker_key is None
         or resolved_worker_key_scope(payload.worker_key) != "user_agent"
-        or payload.worker_scope not in (None, "user_agent")
+        or payload.worker_scope != "user_agent"
     ):
         raise HTTPException(
             status_code=400,

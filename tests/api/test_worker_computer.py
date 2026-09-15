@@ -53,9 +53,11 @@ def test_internal_routes_require_runner_token_and_preserve_stopped_status(tmp_pa
         assert client.get("/computer", headers=headers).json()["state"] == "stopped"
 
 
+@pytest.mark.parametrize("worker_scope", ["user_agent", None])
 def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    worker_scope: str | None,
 ) -> None:
     """Intercept only validated browser calls; preserve the dedicated subprocess fallback."""
     identity = ToolExecutionIdentity(
@@ -109,9 +111,16 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
         "private_agent_names": [],
         "kwargs": {"action": "open"},
     }
+    if worker_scope is None:
+        payload.pop("worker_scope")
     headers = {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}
     with TestClient(app) as client:
         first = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
+        if worker_scope is None:
+            assert first.status_code == 400, first.text
+            assert "user_agent" in first.json()["detail"]
+            assert not pages
+            return
         assert first.status_code == 200, first.text
         assert json.loads(first.json()["result"])["targetId"] == "target-one"
         payload["kwargs"] = {"action": "tabs", "targetId": "target-one"}
