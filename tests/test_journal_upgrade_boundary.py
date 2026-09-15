@@ -15,7 +15,9 @@ import psycopg
 import pytest
 
 from mindroom.event_journal import (
+    ApprovalDecision,
     ApprovalDecisionMetadata,
+    DeliveryStage,
     EventClass,
     EventJournalStore,
     EventKind,
@@ -296,18 +298,36 @@ async def test_concurrent_startups_share_one_upgrade(legacy_database: _LegacyDat
 
 
 @pytest.mark.asyncio
-async def test_approval_toolkit_upgrade_preserves_calls(legacy_database: _LegacyDatabase) -> None:
-    """Adding provenance preserves unknown calls, history and cards across reopen and refresh."""
+@pytest.mark.parametrize("drop_column", [True, False])
+@pytest.mark.parametrize("state", ["waiting", "ready", "claimed"])
+async def test_approval_toolkit_upgrade_fences_unresumable_calls(
+    legacy_database: _LegacyDatabase,
+    state: str,
+    *,
+    drop_column: bool,
+) -> None:
+    """Old calls become cleanup work before a click can approve an unresumable run."""
     store = legacy_database.open()
     principal = store.principal("agent@alice")
     await _ApprovalContinuations.admit_sources(principal)
     original = replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="runtime-a")
     assert await principal.create_approval_continuation(original) == original
     await _ApprovalContinuations.remember_card(principal)
+    if state != "waiting":
+        await principal.resolve_continuation_approval_card(
+            card_event_id="$approval",
+            requested_status="approved",
+            reason=None,
+            metadata=ApprovalDecisionMetadata(),
+        )
+    if state == "claimed":
+        assert await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a") is not None
     original = await principal.approval_continuation("approval-1")
     assert original is not None
+    assert original.state == state
     await store.close()
-    legacy_database.execute("ALTER TABLE approval_continuation_calls DROP COLUMN toolkit_name")
+    if drop_column:
+        legacy_database.execute("ALTER TABLE approval_continuation_calls DROP COLUMN toolkit_name")
     rows_before = legacy_database.query("SELECT event_id, state FROM journal_events ORDER BY event_id")
     cards_before = legacy_database.query("SELECT * FROM approval_cards")
 
@@ -315,8 +335,14 @@ async def test_approval_toolkit_upgrade_preserves_calls(legacy_database: _Legacy
         store = legacy_database.open()
         principal = store.principal("agent@alice")
         loaded = await principal.approval_continuation("approval-1")
-        assert loaded == original
-        assert await store.approval_continuations() == (("agent@alice", original),)
+        assert loaded is not None
+        assert loaded.state == "failing"
+        assert loaded.failure_reason is not None
+        assert "older version" in loaded.failure_reason
+        assert "new request" in loaded.failure_reason
+        assert replace(loaded, state=original.state, failure_reason=original.failure_reason) == original
+        assert await store.approval_continuations() == (("agent@alice", loaded),)
+        assert [event.event_id for event in await principal.pending(runtime_generation="runtime-a")] == ["$source-1"]
         assert legacy_database.query("SELECT toolkit_name FROM approval_continuation_calls") == [(None,)]
         assert legacy_database.query("SELECT event_id, state FROM journal_events ORDER BY event_id") == rows_before
         assert legacy_database.query("SELECT * FROM approval_cards") == cards_before
@@ -324,29 +350,104 @@ async def test_approval_toolkit_upgrade_preserves_calls(legacy_database: _Legacy
 
     store = legacy_database.open()
     principal = store.principal("agent@alice")
-    await principal.resolve_continuation_approval_card(
-        card_event_id="$approval",
-        requested_status="approved",
-        reason=None,
-        metadata=ApprovalDecisionMetadata(),
-    )
-    await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
-    next_call = replace(original.calls[0], tool_call_id="call-2", toolkit_name="shell")
-    advanced = await principal.advance_approval_continuation(
-        "approval-1",
-        claimant_generation=0,
-        run_id="run-2",
-        session_id="session-1",
-        calls=(next_call,),
-    )
-    assert advanced is not None
-    await store.close()
-    store = legacy_database.open()
     try:
-        assert await store.principal("agent@alice").approval_continuation("approval-1") == advanced
-        assert await store.approval_continuations() == (("agent@alice", advanced),)
+        if state == "waiting":
+            clicked = await principal.resolve_continuation_approval_card(
+                card_event_id="$approval",
+                requested_status="approved",
+                reason=None,
+                metadata=ApprovalDecisionMetadata(),
+            )
+            assert clicked.recorded
+            assert not clicked.continuation_ready
+            assert clicked.resolution is not None
+            assert clicked.resolution["status"] == "denied"
+            assert clicked.resolution["resolution_reason"] == loaded.failure_reason
+        assert await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-b") is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["known", "denied", "expired", "later_generation", "already_failing"])
+async def test_approval_toolkit_upgrade_preserves_compatible_work(
+    legacy_database: _LegacyDatabase,
+    case: str,
+) -> None:
+    """History with unknown origins cannot invalidate executable work or replace a STOP reason."""
+    store = legacy_database.open()
+    principal = store.principal("agent@alice")
+    await _ApprovalContinuations.admit_sources(principal)
+    original = _ApprovalContinuations.continuation()
+    call = original.calls[0]
+    if case == "known":
+        original = replace(original, calls=(replace(call, toolkit_name="shell"),))
+    elif case in {"denied", "expired"}:
+        original = replace(original, calls=(replace(call, decision=ApprovalDecision(case)),))
+    elif case == "already_failing":
+        original = replace(original, state="failing", failure_reason="cancelled_by_user")
+    assert await principal.create_approval_continuation(original) == original
+    if case == "later_generation":
+        assert await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a") is not None
+        advanced = await principal.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=0,
+            run_id="run-2",
+            session_id="session-1",
+            calls=(replace(call, tool_call_id="call-2", toolkit_name="shell"),),
+        )
+        assert advanced is not None
+        original = advanced
+    await store.close()
+
+    for _ in range(2):
+        store = legacy_database.open()
+        try:
+            assert await store.principal("agent@alice").approval_continuation("approval-1") == original
+        finally:
+            await store.close()
+    if case == "later_generation":
         assert legacy_database.query(
             "SELECT toolkit_name FROM approval_continuation_calls ORDER BY generation",
         ) == [(None,), ("shell",)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permanent_failure", [False, True])
+async def test_approval_toolkit_upgrade_preserves_frozen_final(
+    legacy_database: _LegacyDatabase,
+    *,
+    permanent_failure: bool,
+) -> None:
+    """Recoverable FINAL debt wins over legacy cleanup; permanently failed delivery does not."""
+    store = legacy_database.open()
+    principal = store.principal("agent@alice")
+    await _ApprovalContinuations.admit_sources(principal)
+    original = _ApprovalContinuations.continuation()
+    assert await principal.create_approval_continuation(original) == original
+    claimed = await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+    assert claimed is not None
+    await principal.enqueue_matrix_delivery(
+        delivery_id="$source-1",
+        stage=DeliveryStage.FINAL,
+        room_id=original.room_id,
+        thread_id=original.thread_id,
+        payload={"body": "Completed answer"},
+        edits_event_id=original.response_event_id,
+    )
+    await store.close()
+    legacy_database.execute("ALTER TABLE approval_continuation_calls DROP COLUMN toolkit_name")
+    if permanent_failure:
+        legacy_database.execute("UPDATE matrix_delivery_outbox SET permanent_failure_reason = 'too_large'")
+    frozen = legacy_database.query("SELECT * FROM matrix_delivery_outbox")
+    store = legacy_database.open()
+    try:
+        loaded = await store.principal("agent@alice").approval_continuation("approval-1")
+        assert loaded is not None
+        if permanent_failure:
+            assert loaded.state == "failing"
+        else:
+            assert loaded == claimed
+        assert legacy_database.query("SELECT * FROM matrix_delivery_outbox") == frozen
     finally:
         await store.close()
