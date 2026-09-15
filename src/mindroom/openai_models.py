@@ -136,6 +136,15 @@ class MindRoomLlamaCpp(OpenAIChatProviderCompat, LlamaCpp):
     """llama.cpp server model that can replay tool calls from other providers."""
 
 
+# AGNO_COMPAT: Byte-only image dimension parsing is exposed only as a private helper.
+# Reason: Agno's higher-level image helper can fetch URLs or open files; the
+# private header parser supplies dimensions without I/O or pixel decoding.
+# Upstream issue: No matching public byte-only dimension API issue identified.
+# Upstream PR: None identified; the missing public utility remains untracked.
+# Remove when: Agno exposes a public byte-only parser; retain bounded header
+# decoding, unknown-format fallback, and MindRoom's visual token budgeting.
+# Coverage: tests/test_native_compaction_history.py::test_responses_image_budget_reads_only_bounded_header_bytes;
+# tests/test_native_compaction_history.py::test_responses_image_header_dimensions_keep_nonzero_visual_budget.
 def _embedded_image_dimensions(source: object) -> tuple[int, int] | None:
     """Read known image headers locally, with no URL fetch or pixel decoding."""
     if not isinstance(source, str) or not source.startswith("data:image/") or ";base64," not in source:
@@ -147,7 +156,6 @@ def _embedded_image_dimensions(source: object) -> tuple[int, int] | None:
         image_type = get_image_type(data)
         if image_type == "webp" and data[12:16] not in {b"VP8X", b"VP8 ", b"VP8L"}:
             return None
-        # Agno's higher-level image helper can fetch URLs; use only its header parser.
         if image_type in {"png", "gif", "jpeg", "webp"}:
             width, height = _parse_image_dimensions_from_bytes(data, image_type)
             if width > 0 and height > 0:

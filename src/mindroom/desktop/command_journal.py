@@ -9,12 +9,12 @@ import sqlite3
 import stat
 from contextlib import closing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
+from mindroom.desktop.legacy_command_journal import parse_legacy_records
 from mindroom.desktop.protocol import DesktopCommand, DesktopResponse
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
     from pathlib import Path
 
 _MAX_ENTRIES = 1024
@@ -325,7 +325,7 @@ class DesktopCommandJournal:
         if not path.exists():
             return
         try:
-            entries, sequences = _legacy_records(json.loads(path.read_text(encoding="utf-8")))
+            entries, sequences = parse_legacy_records(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
             msg = "Desktop legacy command journal is malformed."
             raise DesktopCommandJournalError(msg) from exc
@@ -366,74 +366,6 @@ def _require_private(path: Path) -> None:
     if os.name != "nt" and stat.S_IMODE(mode) & 0o077:
         msg = "Desktop command journal must not grant permissions to group or other users."
         raise DesktopCommandJournalError(msg)
-
-
-def _legacy_records(
-    payload: object,
-) -> tuple[list[tuple[str, str, DesktopResponse | None]], list[tuple[str, int]]]:
-    record = _legacy_mapping(payload)
-    if record.get("v") != 1:
-        msg = "Unsupported legacy journal."
-        raise ValueError(msg)
-    raw_entries, raw_sequences = record.get("entries"), record.get("sequence_high_watermarks")
-    if not isinstance(raw_entries, list) or not isinstance(raw_sequences, list):
-        msg = "Malformed legacy records."
-        raise TypeError(msg)
-    if len(raw_entries) > _MAX_ENTRIES or len(raw_sequences) > _MAX_SESSIONS:
-        msg = "Legacy journal exceeds bounds."
-        raise ValueError(msg)
-    return _legacy_entries(raw_entries), _legacy_sequences(raw_sequences)
-
-
-def _legacy_entries(raw_entries: Sequence[object]) -> list[tuple[str, str, DesktopResponse | None]]:
-    entries: list[tuple[str, str, DesktopResponse | None]] = []
-    request_ids: set[str] = set()
-    for raw in raw_entries:
-        entry = _legacy_mapping(raw)
-        request_id = _legacy_identifier(entry.get("request_id"))
-        fingerprint = entry.get("command_fingerprint")
-        if request_id in request_ids or not isinstance(fingerprint, str) or len(fingerprint) != 64:
-            msg = "Malformed legacy identity."
-            raise ValueError(msg)
-        if any(character not in "0123456789abcdef" for character in fingerprint):
-            msg = "Malformed legacy fingerprint."
-            raise ValueError(msg)
-        response = DesktopResponse.from_content(entry["response"]) if entry.get("response") is not None else None
-        if response is not None and response.request_id != request_id:
-            msg = "Legacy response identifies a different request."
-            raise ValueError(msg)
-        entries.append((request_id, fingerprint, response))
-        request_ids.add(request_id)
-    return entries
-
-
-def _legacy_sequences(raw_sequences: Sequence[object]) -> list[tuple[str, int]]:
-    sequences: list[tuple[str, int]] = []
-    session_ids: set[str] = set()
-    for raw in raw_sequences:
-        entry = _legacy_mapping(raw)
-        session_id = _legacy_identifier(entry.get("session_id"))
-        sequence = entry.get("sequence")
-        if type(sequence) is not int or sequence < 0 or session_id in session_ids:
-            msg = "Malformed legacy sequence."
-            raise ValueError(msg)
-        sequences.append((session_id, sequence))
-        session_ids.add(session_id)
-    return sequences
-
-
-def _legacy_mapping(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        msg = "Malformed legacy record."
-        raise TypeError(msg)
-    return cast("dict[str, object]", value)
-
-
-def _legacy_identifier(value: object) -> str:
-    if not isinstance(value, str) or not value or len(value) > 128:
-        msg = "Malformed legacy identifier."
-        raise ValueError(msg)
-    return value
 
 
 __all__ = [

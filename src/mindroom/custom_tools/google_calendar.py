@@ -71,9 +71,16 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
             defer_to_original_auth=defer_to_original_auth,
         )
 
-        # Agno's toolkit still validates its legacy broad scope markers during
-        # construction. Those markers are not used for MindRoom's OAuth flow:
-        # the credentials injected below carry the provider's granular scopes.
+        # AGNO_COMPAT: Calendar construction rejects granular OAuth scope combinations.
+        # Reason: Agno requires calendar/calendar.readonly in its scope list even
+        # when granular scopes cover the registered operations. Keep its default
+        # construction markers and inject MindRoom's narrowly scoped credentials.
+        # Upstream issue: No matching granular Calendar scope validation issue identified.
+        # Upstream PR: None identified; operation-aware scope validation remains untracked.
+        # Remove when: Agno accepts sufficient granular scopes during construction;
+        # retain MindRoom's scope selection, credential ownership, and tool permissions.
+        # Coverage: tests/test_google_calendar_oauth_tool.py::test_google_calendar_default_config_enables_write_methods;
+        # tests/test_google_calendar_oauth_tool.py::test_google_calendar_provider_uses_narrow_scopes_for_every_tool_operation.
         super().__init__(**kwargs)
         self.creds = creds
 

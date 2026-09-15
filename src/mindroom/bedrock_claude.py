@@ -14,6 +14,15 @@ from mindroom.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+# AGNO_COMPAT: Bedrock Claude hard-codes pre-Mantle SDK client construction.
+# Reason: Agno constructs AnthropicBedrock clients and exposes client parameters
+# only through a private helper. Selecting Mantle requires local client factories.
+# Upstream issue: No matching Bedrock Mantle client support issue identified.
+# Upstream PR: None identified; Mantle support or injectable factories remain untracked.
+# Remove when: Agno supports Mantle clients or public typed client factories;
+# retain AWS credential resolution and the owner's async model-lifetime client.
+# Coverage: tests/test_model_loading.py::test_bedrock_current_claude_uses_mantle_endpoint;
+# tests/test_extra_kwargs.py::test_session_backed_bedrock_async_client_is_retained.
 @dataclass
 class MindRoomBedrockClaude(ClaudeProviderCompat, AwsBedrockClaude):
     """Bedrock Claude model using the current Mantle Messages endpoint."""
