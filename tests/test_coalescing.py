@@ -1858,3 +1858,76 @@ async def test_drain_all_flushes_pending_debounced_work_and_idles_gate() -> None
     assert result.completed is True
     assert [list(batch.handled_turn.source_event_ids) for batch in batches] == [["$pending:localhost"]]
     assert _coalescing_gate_is_idle(gate)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mention", [False, True])
+async def test_adaptive_text_burst_waits_and_mention_flushes(mention: bool) -> None:
+    """Opted-in text coalesces; an ordinary explicit turn ends its pause."""
+    batches: list[PreparedTurn] = []
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch)
+
+    gate = CoalescingGate(dispatch_turn=dispatch_batch, debounce_seconds=lambda: 0, is_shutting_down=lambda: False)
+    key = requester_coalescing_key("!room:localhost", "$thread:localhost", "@user:localhost")
+    first = _pending(_text_event("$first:localhost", "first", 1_000_000))
+    first.text_debounce_seconds = 0.1
+    await _admit_ready(gate, key, first)
+    await asyncio.sleep(0.02)
+    assert batches == []
+    second = _pending(_text_event("$second:localhost", "@helper help" if mention else "second", 1_000_100))
+    second.text_debounce_seconds = 0 if mention else 0.1
+    await _admit_ready(gate, key, second)
+    if not mention:
+        await asyncio.sleep(0.02)
+        assert batches == []
+    await _wait_for(lambda: bool(batches), deadline_seconds=0.05 if mention else 0.3)
+    assert len(batches) == 1
+    assert batches[0].handled_turn.source_event_ids == ("$first:localhost", "$second:localhost")
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backlog", [False, True])
+@pytest.mark.parametrize(
+    ("delays", "immediate_ids"),
+    [
+        ([0, 60], ("$0:localhost",)),
+        ([60, 0, 60], ("$0:localhost", "$1:localhost")),
+        ([0, 0, 60], ("$0:localhost", "$1:localhost")),
+    ],
+)
+async def test_later_adaptive_text_cannot_delay_an_immediate_prefix(
+    delays: list[float],
+    immediate_ids: tuple[str, ...],
+    backlog: bool,
+) -> None:
+    """Live text retains its immediate boundary; active-response backlogs still flush together."""
+    batches: list[tuple[str, ...]] = []
+    dispatched = asyncio.Event()
+
+    async def dispatch_batch(batch: PreparedTurn) -> None:
+        batches.append(batch.handled_turn.source_event_ids)
+        dispatched.set()
+
+    gate = CoalescingGate(dispatch_turn=dispatch_batch, debounce_seconds=lambda: 0, is_shutting_down=lambda: False)
+    key = (
+        active_follow_up_coalescing_key("!room:localhost", "$thread:localhost")
+        if backlog
+        else requester_coalescing_key("!room:localhost", "$thread:localhost", "@user:localhost")
+    )
+    event_ids = tuple(f"${index}:localhost" for index in range(len(delays)))
+    try:
+        # All admissions precede the drain's first chance to select a window.
+        for event_id, delay in zip(event_ids, delays, strict=True):
+            pending = _pending(_text_event(event_id, "message", 1_000_000))
+            pending.text_debounce_seconds = delay
+            await _admit_ready(gate, key, pending)
+
+        await asyncio.wait_for(dispatched.wait(), timeout=1)
+        assert batches == [event_ids if backlog else immediate_ids]
+    finally:
+        await gate.drain_all()
+
+    assert batches == ([event_ids] if backlog else [immediate_ids, event_ids[len(immediate_ids) :]])

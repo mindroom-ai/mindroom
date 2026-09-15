@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Final, NoReturn, cast
 
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
+from mindroom.json_utils import DuplicateJSONKeyError, object_with_unique_keys
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     WorkerScope,
@@ -219,18 +220,11 @@ def load_private_instance_record_payload(record_path: Path, *, max_bytes: int = 
         if descriptor != -1:
             os.close(descriptor)
     try:
-        return json.loads(raw_payload, object_pairs_hook=_object_with_unique_keys)
+        return json.loads(raw_payload, object_pairs_hook=object_with_unique_keys)
+    except DuplicateJSONKeyError:
+        _raise_invalid_record("contains duplicate JSON fields")
     except json.JSONDecodeError as error:
         _raise_unreadable_record(error)
-
-
-def _object_with_unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    payload: dict[str, object] = {}
-    for key, value in pairs:
-        if key in payload:
-            _raise_invalid_record("contains duplicate JSON fields")
-        payload[key] = value
-    return payload
 
 
 def _trusted_scope_root(base_storage_path: Path, scope_root: Path, *, create: bool) -> Path:
