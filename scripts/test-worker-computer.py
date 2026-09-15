@@ -72,9 +72,10 @@ async def command(*args: str) -> str:
 class Fixture:
     """Local authorization boundary around the real gateway and Docker manager."""
 
-    def __init__(self, args: argparse.Namespace, origin: str) -> None:
+    def __init__(self, args: argparse.Namespace, origin: str, *, owned_matrix_id: str | None = None) -> None:
         self.args = args
         self.origin = origin
+        self.owned_matrix_id = owned_matrix_id
         self.token = secrets.token_urlsafe(32)
         self.container_ids: set[str] = set()
         self.matrix = json.loads(args.matrix_fixture.read_text()) if args.matrix_fixture else None
@@ -206,6 +207,20 @@ class Fixture:
         """Read page state through the agent browser contract."""
         return (await self.browser(action="act", request={"kind": "evaluate", "fn": expression}))["result"]
 
+    async def remove_owned_matrix(self) -> None:
+        """Remove only the Matrix server created by this run, before signal re-raising."""
+        if self.owned_matrix_id is None:
+            return
+        container_id = self.owned_matrix_id
+        await command("docker", "rm", "-f", container_id)
+        remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+        assert container_id not in remaining
+        self.owned_matrix_id = None
+        (self.args.output / "matrix-cleanup.json").write_text(
+            json.dumps({"container_id": container_id, "absent": True}) + "\n",
+        )
+        print(f"Exact fixture Matrix removed: {container_id}", flush=True)
+
     async def shell(self, args: list[str], *, background: bool = False, user: str | None = None) -> str:
         """Run commands in the exact worker used by the browser."""
         kwargs: dict[str, Any] = {"args": args}
@@ -267,16 +282,22 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
                 print(f"Chat fixture ready: {path}", flush=True)
             yield
         finally:
-            if state.computer_sessions is not None:
-                state.computer_sessions.close_all()
-            await asyncio.to_thread(shutdown_primary_worker_manager)
-            # Verify exact IDs, never delete by a name prefix or global prune.
-            remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
-            for container_id in sorted(self.container_ids & remaining):
-                await command("docker", "rm", "-f", container_id)
-            remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
-            assert not self.container_ids & remaining
-            print("Exact fixture workers removed.", flush=True)
+            # Uvicorn re-raises shutdown signals after lifespan exit, before main's
+            # outer finally can reliably run. Retire Matrix here, even if later
+            # worker shutdown waits on a local browser driver handshake.
+            try:
+                await self.remove_owned_matrix()
+            finally:
+                if state.computer_sessions is not None:
+                    state.computer_sessions.close_all()
+                await asyncio.to_thread(shutdown_primary_worker_manager)
+                # Verify exact IDs, never delete by a name prefix or global prune.
+                remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+                for container_id in sorted(self.container_ids & remaining):
+                    await command("docker", "rm", "-f", container_id)
+                remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+                assert not self.container_ids & remaining
+                print("Exact fixture workers removed.", flush=True)
 
     def app(self) -> FastAPI:
         """Expose actual public routes plus loopback-only fixture helpers."""
@@ -301,7 +322,10 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
         @app.get("/fixture/text")
         async def text_value() -> JSONResponse:
             # Test-only readback route; this fixture binds only to loopback.
-            return JSONResponse({"value": await self.evaluate("()=>document.querySelector('#shared-input').value")})
+            value = await self.evaluate("()=>document.querySelector('#shared-input').value")
+            snapshot = await self.browser(action="snapshot")
+            (self.args.output / "agent-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
+            return JSONResponse({"value": value, "snapshot": snapshot["snapshot"]})
 
         return app
 
@@ -399,9 +423,17 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
                 assert "control" in json.dumps(blocked).lower(), blocked
                 await control("release")
                 await page.wait_for_function("window.probe.disconnected")
-                assert await fixture.evaluate("()=>document.querySelector('#shared-input').value") == "y"
+                async with asyncio.timeout(10):
+                    while await fixture.evaluate("()=>document.querySelector('#shared-input').value") != "y":  # noqa: ASYNC110 - remote browser input readiness
+                        await asyncio.sleep(0.05)
+                snapshot = await fixture.browser(action="snapshot")
+                assert ": y" in snapshot["snapshot"], snapshot
+                (fixture.args.output / "agent-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
+                result["agent_snapshot_sees_typed_text"] = True
                 result["takeover_and_release"] = True
                 await connect(page, session)
+                await page.wait_for_function(FRAMEBUFFER)
+                await page.screenshot(path=str(fixture.args.output / "typed-visible.png"))
 
                 for action in ("focus", "navigate"):
                     await control("take")
@@ -455,7 +487,7 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
     return result
 
 
-async def main() -> None:  # noqa: PLR0915 - CLI setup and owned service lifetime
+async def main() -> None:  # noqa: C901, PLR0915 - CLI setup and owned service lifetime
     """Run acceptance once or keep a loopback Chat fixture alive until interrupted."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="mindroom-worker-computer-test:local")
@@ -493,16 +525,23 @@ async def main() -> None:  # noqa: PLR0915 - CLI setup and owned service lifetim
     listener.bind(("127.0.0.1", 0))
     if args.serve:
         owned_matrix = None
+        fixture = None
         try:
             if not args.matrix_fixture:
                 owned_matrix = await asyncio.to_thread(create_matrix_fixture, args.output, args.matrix_image)
                 args.matrix_fixture = args.output / "matrix-fixture.json"
-            fixture = Fixture(args, f"http://127.0.0.1:{listener.getsockname()[1]}")
+            fixture = Fixture(
+                args,
+                f"http://127.0.0.1:{listener.getsockname()[1]}",
+                owned_matrix_id=owned_matrix["container_id"] if owned_matrix else None,
+            )
             server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning"))
             await server.serve(sockets=[listener])
         finally:
             listener.close()
-            if owned_matrix:
+            if fixture is not None:
+                await fixture.remove_owned_matrix()
+            elif owned_matrix:
                 await command("docker", "rm", "-f", owned_matrix["container_id"])
         return
     fixture = Fixture(args, f"http://127.0.0.1:{listener.getsockname()[1]}")

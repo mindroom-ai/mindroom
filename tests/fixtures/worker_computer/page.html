@@ -9,4 +9,10 @@
   <p>Same worker. Same browser.</p>
   <input id="shared-input" aria-label="Remote text">
   <p><a id="download" href="/download" download>Download fixture</a></p>
+  <output id="typed-value" role="status"></output>
+  <script>
+    document.querySelector('#shared-input').addEventListener('input', (event) => {
+      document.querySelector('#typed-value').textContent = event.target.value;
+    });
+  </script>
 </html>
