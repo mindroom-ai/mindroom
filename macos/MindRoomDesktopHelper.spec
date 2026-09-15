@@ -4,11 +4,11 @@
 import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 root = Path(SPECPATH).parent
 hiddenimports = collect_submodules("mindroom.desktop") + collect_submodules("mindroom.matrix")
-datas = []
+datas = copy_metadata("mindroom")
 binaries = []
 for package in ("mcp", "nio", "olm", "pyautogui", "PIL"):
     package_datas, package_binaries, package_hidden = collect_all(package)

@@ -341,13 +341,14 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-echo "Building fixed-identity desktop helper..."
-HELPER_BUILD_ARGS=(--output "$HELPER_BUILD_DIR")
+HELPER_ARCHITECTURES=("$(uname -m)")
 if [[ "$UNIVERSAL" == true ]]; then
-    HELPER_BUILD_ARGS+=(--universal)
+    HELPER_ARCHITECTURES=(arm64 x86_64)
 fi
-UV_BINARY="$UV_BINARY" "$HELPER_BUILD_SCRIPT" "${HELPER_BUILD_ARGS[@]}"
-HELPER_APP="$HELPER_BUILD_DIR/dist/MindRoom Desktop Helper.app"
+for architecture in "${HELPER_ARCHITECTURES[@]}"; do
+    echo "Building fixed-identity desktop helper for $architecture..."
+    UV_BINARY="$UV_BINARY" "$HELPER_BUILD_SCRIPT" --output "$HELPER_BUILD_DIR/$architecture" --arch "$architecture"
+done
 
 echo "Building app icon..."
 build_app_icon
@@ -374,13 +375,16 @@ cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
 cp "$APP_ICON_ICNS" "$APP_DIR/Contents/Resources/MindRoom.icns"
-ditto "$HELPER_APP" "$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app"
+for architecture in "${HELPER_ARCHITECTURES[@]}"; do
+    mkdir -p "$APP_DIR/Contents/Helpers/$architecture"
+    ditto "$HELPER_BUILD_DIR/$architecture/dist/MindRoom Desktop Helper.app" \
+        "$APP_DIR/Contents/Helpers/$architecture/MindRoom Desktop Helper.app"
+done
 chmod 755 "$APP_DIR/Contents/MacOS/$APP_NAME" "$APP_DIR/Contents/Resources/bin/uv"
 
 if [[ "$UNIVERSAL" == true ]]; then
     UNIVERSAL_BINARIES=(
         "$APP_DIR/Contents/MacOS/$APP_NAME"
-        "$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
         "$APP_DIR/Contents/Resources/bin/uv"
         "$APP_DIR/Contents/Frameworks/Sparkle.framework/Sparkle"
         "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate"
@@ -399,18 +403,17 @@ if ! otool -l "$APP_DIR/Contents/MacOS/$APP_NAME" | grep -q '@executable_path/..
 fi
 
 stamp_info_plist
-HELPER_INFO="$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app/Contents/Info.plist"
 HELPER_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist")
 HELPER_BUILD_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_DIR/Contents/Info.plist")
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $HELPER_VERSION" "$HELPER_INFO"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $HELPER_BUILD_VERSION" "$HELPER_INFO"
 sign_executable "$APP_DIR/Contents/Resources/bin/uv"
-sign_app "$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app"
-VERIFY_ARGS=("$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app")
-if [[ "$UNIVERSAL" == true ]]; then
-    VERIFY_ARGS+=(--universal)
-fi
-"$HELPER_VERIFY_SCRIPT" "${VERIFY_ARGS[@]}"
+for architecture in "${HELPER_ARCHITECTURES[@]}"; do
+    HELPER_APP="$APP_DIR/Contents/Helpers/$architecture/MindRoom Desktop Helper.app"
+    HELPER_INFO="$HELPER_APP/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $HELPER_VERSION" "$HELPER_INFO"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $HELPER_BUILD_VERSION" "$HELPER_INFO"
+    sign_app "$HELPER_APP"
+    "$HELPER_VERIFY_SCRIPT" "$HELPER_APP" "$architecture"
+done
 sign_app "$APP_DIR"
 
 echo "Built $APP_DIR"
