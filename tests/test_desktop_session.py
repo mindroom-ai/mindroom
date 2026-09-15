@@ -22,13 +22,13 @@ from mindroom.desktop.session import (
     DesktopMatrixSession,
     DesktopSessionError,
     _open_owned_session,
-    _prepare_crypto,
     _transport_binding,
     desktop_transport_binding_path,
     load_desktop_http_headers,
     load_desktop_session,
     login_desktop_client,
     open_desktop_client,
+    prepare_desktop_client,
     resolve_desktop_login_method,
     save_desktop_session,
 )
@@ -258,7 +258,7 @@ async def test_crypto_preparation_uploads_keys_without_sync() -> None:
     """Preparing encryption must not consume commands outside durable admission."""
     client = SimpleNamespace(sync=AsyncMock(), should_upload_keys=True, keys_upload=AsyncMock(), olm=object())
 
-    await _prepare_crypto(client)
+    await prepare_desktop_client(client)
 
     client.sync.assert_not_awaited()
     client.keys_upload.assert_awaited_once()
@@ -282,6 +282,7 @@ async def test_login_acquires_credentials_without_crypto_store(
         assert not client.config.encryption_enabled
         assert client.store is None
         assert client.store_path is None
+        assert client.config.custom_headers == {"X-Access-Client": "test-secret"}
         calls.append({**kwargs, "password": password})
         return nio.LoginResponse(user_id="@desktop:example.org", device_id="DESKTOP", access_token="issued-token")
 
@@ -298,6 +299,7 @@ async def test_login_acquires_credentials_without_crypto_store(
         user_id=None if token_login else "@desktop:example.org",
         password=None if token_login else "password",
         login_token="sso-token" if token_login else None,
+        http_headers={"X-Access-Client": "test-secret"},
         runtime_paths=make_runtime_paths(tmp_path),
     )
     try:
@@ -305,6 +307,7 @@ async def test_login_acquires_credentials_without_crypto_store(
         assert session.device_id == "DESKTOP"
         assert owner.client.olm is not None
         assert owner.client.store is not None
+        assert owner.client.config.custom_headers == {"X-Access-Client": "test-secret"}
         assert owner.source.cursor is None
         assert calls[0]["token" if token_login else "password"] == ("sso-token" if token_login else "password")
     finally:
@@ -409,3 +412,36 @@ def test_concurrent_first_open_preserves_one_consumer_binding(tmp_path: Path, mo
         bindings = list(executor.map(lambda _index: create(), range(8)))
     assert len({binding["consumer_id"] for binding in bindings}) == 1
     assert json.loads((tmp_path / "binding.json").read_text()) == bindings[0]
+
+
+@pytest.mark.asyncio
+async def test_token_login_revokes_unexpected_account_before_adoption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The owned login path cannot enroll an account other than the requested one."""
+    revoked = []
+
+    async def login(client: nio.AsyncClient, **_kwargs: object) -> nio.LoginResponse:
+        response = nio.LoginResponse("@wrong:example.org", "WRONG", "issued-token")
+        await client.receive_response(response)
+        return response
+
+    async def logout(client: nio.AsyncClient) -> nio.LogoutResponse:
+        revoked.append((client.user_id, client.device_id))
+        return nio.LogoutResponse()
+
+    monkeypatch.setattr(nio.AsyncClient, "login", login)
+    monkeypatch.setattr(nio.AsyncClient, "logout", logout)
+    monkeypatch.setattr(nio.AsyncClient, "keys_upload", AsyncMock())
+    runtime_paths = make_runtime_paths(tmp_path)
+    wrong_session = DesktopMatrixSession("https://matrix.example.org", "@wrong:example.org", "WRONG", "issued-token")
+    with pytest.raises(DesktopSessionError, match="different user"):
+        await login_desktop_client(
+            homeserver="https://matrix.example.org",
+            user_id="@desktop:example.org",
+            login_token="sso-token",
+            runtime_paths=runtime_paths,
+        )
+    assert revoked == [("@wrong:example.org", "WRONG")]
+    assert not desktop_transport_binding_path(runtime_paths, wrong_session).exists()

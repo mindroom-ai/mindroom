@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import MindRoom
@@ -72,5 +73,115 @@ final class DesktopBridgeProtocolTests: XCTestCase {
             #"{"v":1,"type":"response","request_id":"expired","ok":true,"result":{}}"#.data(using: .utf8)!
         )
         XCTAssertEqual(disposition, .ignoredExpiredResponse)
+    }
+
+    func testOversizedRequestIsRejectedBeforeLaunch() async {
+        let helper = DesktopBridgeProcess()
+
+        do {
+            _ = try await helper.request(
+                action: "configure",
+                parameters: ["payload": String(repeating: "x", count: desktopBridgeMaximumRequestBytes)]
+            )
+            XCTFail("Oversized request unexpectedly succeeded")
+        } catch DesktopBridgeProcessError.requestTooLarge {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testBlockedHelperInputDoesNotBlockMainActor() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("MindRoom.app", isDirectory: true)
+        let executable = bundle.appendingPathComponent(
+            "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+        )
+        try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let script = """
+        #!/bin/sh
+        exec /usr/bin/yes '{"v":1,"type":"hello"}'
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let runtime = MindRoomRuntime(homeURL: root, bundleURL: bundle, environment: [:])
+        let helper = DesktopBridgeProcess(runtime: runtime)
+        try helper.launchIfNeeded()
+        let parameters = ["payload": String(repeating: "x", count: 60_000)]
+        let requests = (0 ..< desktopBridgeMaximumPendingRequests).map { _ in
+            Task { try await helper.request(action: "configure", parameters: parameters, timeout: .seconds(10)) }
+        }
+        for _ in 0 ..< desktopBridgeMaximumPendingRequests * 2 {
+            await Task.yield()
+        }
+        let responsive = expectation(description: "main actor remained responsive while helper input was blocked")
+        DispatchQueue.main.async { responsive.fulfill() }
+
+        await fulfillment(of: [responsive], timeout: 1)
+
+        do {
+            _ = try await helper.request(action: "configure", parameters: parameters, timeout: .seconds(1))
+            XCTFail("Request beyond the pending-write limit unexpectedly succeeded")
+        } catch DesktopBridgeProcessError.tooManyRequests {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let stopped = expectation(description: "blocked fixture helper stopped")
+        XCTAssertTrue(helper.shutdown(gracePeriod: 0.1, forcedTerminationPeriod: 1) { stopped.fulfill() })
+        await fulfillment(of: [stopped], timeout: 3)
+        for request in requests {
+            request.cancel()
+            _ = await request.result
+        }
+    }
+
+    func testOrderedReaderHydratesBrowserOnlyAfterLiveStatus() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("MindRoom.app", isDirectory: true)
+        let executable = bundle.appendingPathComponent(
+            "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+        )
+        try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let statusObject = try JSONSerialization.jsonObject(with: Self.completeStatusData)
+        let compactStatus = try JSONSerialization.data(withJSONObject: statusObject)
+        let statusJSON = String(decoding: compactStatus, as: UTF8.self)
+        let script = """
+        #!/bin/sh
+        printf '%s' '{"v":1,"type":"status","sequence":1,"status":'
+        sleep 0.05
+        printf '%s' '\(statusJSON)'
+        sleep 0.05
+        printf '}\\n'
+        cat >/dev/null
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let runtime = MindRoomRuntime(homeURL: root, bundleURL: bundle, environment: [:])
+        let helper = DesktopBridgeProcess(runtime: runtime)
+        let store = DesktopControlStore(helper: helper)
+        XCTAssertFalse(store.canEditBrowserConfiguration)
+        let received = expectation(description: "fragmented helper status was decoded in order")
+        let subscription = store.$status.dropFirst().sink { status in
+            if status.helper.state == "running" {
+                received.fulfill()
+            }
+        }
+
+        try helper.launchIfNeeded()
+        await fulfillment(of: [received], timeout: 2)
+
+        XCTAssertTrue(store.canEditBrowserConfiguration)
+        XCTAssertTrue(store.browserEnabled)
+        XCTAssertEqual(store.browserExecutable, "/Applications/Browser.app/Contents/MacOS/Browser")
+        let stopped = expectation(description: "fixture helper stopped")
+        XCTAssertTrue(helper.shutdown(gracePeriod: 1, forcedTerminationPeriod: 1) { stopped.fulfill() })
+        await fulfillment(of: [stopped], timeout: 3)
+        withExtendedLifetime(subscription) {}
     }
 }

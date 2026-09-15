@@ -2,6 +2,8 @@ import CoreFoundation
 import Foundation
 
 let desktopBridgeProtocolVersion = 1
+let desktopBridgeMaximumRequestBytes = 65_536
+let desktopBridgeMaximumPendingRequests = 8
 let desktopBridgeMaximumOutputBytes = 262_144
 
 func isDesktopBridgeProtocolVersion(_ value: Any?) -> Bool {

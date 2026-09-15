@@ -66,10 +66,13 @@ if [[ "$UNIVERSAL" == true ]]; then
     fi
 fi
 
-UV_NO_SYNC=1 "$UV_BINARY" run \
+env -u UV_NO_SYNC "$UV_BINARY" run \
     --isolated \
+    --locked \
+    --project "$ROOT_DIR" \
+    --no-default-groups \
+    --extra desktop \
     --python "$HELPER_PYTHON" \
-    --with "$ROOT_DIR[desktop]" \
     --with "pyinstaller==$PYINSTALLER_VERSION" \
     pyinstaller \
     --clean \

@@ -55,6 +55,7 @@ app = BUNDLE(
     info_plist={
         "CFBundleDisplayName": "MindRoom Desktop Helper",
         "CFBundleName": "MindRoom Desktop Helper",
+        "CFBundleVersion": "1",
         "LSBackgroundOnly": True,
         "LSMinimumSystemVersion": "14.0",
         "NSAppleEventsUsageDescription": "MindRoom controls only the applications you explicitly allow.",

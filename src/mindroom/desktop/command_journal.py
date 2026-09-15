@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import stat
+from contextlib import closing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -26,6 +27,27 @@ class DesktopCommandJournalError(RuntimeError):
 
 class DesktopCommandJournalFullError(DesktopCommandJournalError):
     """Execution or delivery must progress before more work is admitted."""
+
+
+def check_controller_binding(path: Path, controller_key: str) -> None:
+    """Reject configuration incompatible with an existing journal without changing it."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
+        msg = "Desktop journal must be a regular file."
+        raise DesktopCommandJournalError(msg)
+    _require_private(path)
+    try:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as database:
+            existing = database.execute("SELECT value FROM metadata WHERE key='controller'").fetchone()
+    except sqlite3.DatabaseError as exc:
+        msg = "Desktop journal controller binding could not be read."
+        raise DesktopCommandJournalError(msg) from exc
+    if existing is None or existing[0] != controller_key:
+        msg = "Desktop journal belongs to a different controller."
+        raise DesktopCommandJournalError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,4 +441,5 @@ __all__ = [
     "DesktopCommandJournalEntry",
     "DesktopCommandJournalError",
     "DesktopCommandJournalFullError",
+    "check_controller_binding",
 ]

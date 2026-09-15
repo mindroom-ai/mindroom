@@ -5,6 +5,8 @@ enum DesktopBridgeProcessError: LocalizedError {
     case helperMissing
     case notRunning
     case malformedResponse
+    case requestTooLarge
+    case tooManyRequests
     case outputTooLarge
     case timedOut
     case helper(DesktopBridgeErrorPayload)
@@ -14,6 +16,8 @@ enum DesktopBridgeProcessError: LocalizedError {
         case .helperMissing: "The packaged Desktop Helper is missing."
         case .notRunning: "The Desktop Helper is not running."
         case .malformedResponse: "The Desktop Helper returned an invalid response."
+        case .requestTooLarge: "The Desktop Helper request is larger than 65,536 bytes."
+        case .tooManyRequests: "The Desktop Helper has too many pending requests."
         case .outputTooLarge: "The Desktop Helper returned an oversized response."
         case .timedOut: "The Desktop Helper did not respond in time."
         case let .helper(error): error.message
@@ -26,7 +30,6 @@ final class DesktopBridgeProcess: ObservableObject {
     typealias Response = [String: Any]
 
     @Published private(set) var status = DesktopStatus.stopped
-    @Published private(set) var stderrTail = ""
     var onExit: (() -> Void)?
 
     private let runtime: MindRoomRuntime
@@ -34,11 +37,16 @@ final class DesktopBridgeProcess: ObservableObject {
     private var input: FileHandle?
     private var outputBuffer = Data()
     private var pending: [String: CheckedContinuation<Response, Error>] = [:]
+    private let inputWriterQueue = DispatchQueue(label: "MindRoom.DesktopBridgeProcess.stdin")
+    private var queuedInputWrites = 0
     private let decoder = JSONDecoder()
     private var isShuttingDown = false
     private var shutdownCompletion: (() -> Void)?
     private var terminateFallback: DispatchWorkItem?
     private var killFallback: DispatchWorkItem?
+    private var stdoutHandle: FileHandle?
+    private var stderrHandle: FileHandle?
+    private var activeProcessID: UUID?
 
     init(runtime: MindRoomRuntime = MindRoomRuntime()) {
         self.runtime = runtime
@@ -63,25 +71,60 @@ final class DesktopBridgeProcess: ObservableObject {
         child.standardInput = stdinPipe
         child.standardOutput = stdoutPipe
         child.standardError = stderrPipe
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            Task { @MainActor in self?.receive(data) }
-        }
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            Task { @MainActor in self?.receiveStderr(data) }
-        }
+        let processID = UUID()
         child.terminationHandler = { [weak self] _ in
-            Task { @MainActor in self?.didExit() }
+            Task { @MainActor in self?.didExit(processID: processID) }
         }
         process = child
+        activeProcessID = processID
         input = stdinPipe.fileHandleForWriting
         do {
             try child.run()
+            startReaders(
+                stdout: stdoutPipe.fileHandleForReading,
+                stderr: stderrPipe.fileHandleForReading,
+                processID: processID
+            )
         } catch {
+            enqueueInputClose()
             process = nil
-            input = nil
+            activeProcessID = nil
             throw error
+        }
+    }
+
+    private func startReaders(stdout: FileHandle, stderr: FileHandle, processID: UUID) {
+        stdoutHandle = stdout
+        stderrHandle = stderr
+        stdout.readabilityHandler = { [weak self] handle in
+            do {
+                guard let data = try handle.read(upToCount: 65_536), !data.isEmpty else {
+                    handle.readabilityHandler = nil
+                    return
+                }
+                DispatchQueue.main.sync {
+                    MainActor.assumeIsolated {
+                        self?.receive(data, processID: processID)
+                    }
+                }
+            } catch {
+                handle.readabilityHandler = nil
+                DispatchQueue.main.sync {
+                    MainActor.assumeIsolated {
+                        self?.protocolReadFailed(processID: processID)
+                    }
+                }
+            }
+        }
+        stderr.readabilityHandler = { handle in
+            do {
+                guard let data = try handle.read(upToCount: 65_536), !data.isEmpty else {
+                    handle.readabilityHandler = nil
+                    return
+                }
+            } catch {
+                handle.readabilityHandler = nil
+            }
         }
     }
 
@@ -90,8 +133,6 @@ final class DesktopBridgeProcess: ObservableObject {
         parameters: [String: Any] = [:],
         timeout: Duration = .seconds(35)
     ) async throws -> Response {
-        try launchIfNeeded()
-        guard let input else { throw DesktopBridgeProcessError.notRunning }
         let requestID = UUID().uuidString.lowercased()
         let payload: [String: Any] = [
             "v": desktopBridgeProtocolVersion,
@@ -99,20 +140,47 @@ final class DesktopBridgeProcess: ObservableObject {
             "action": action,
             "parameters": parameters,
         ]
-        let body = try JSONSerialization.data(withJSONObject: payload)
+        var record = try JSONSerialization.data(withJSONObject: payload)
+        record.append(0x0A)
+        guard record.count <= desktopBridgeMaximumRequestBytes else {
+            throw DesktopBridgeProcessError.requestTooLarge
+        }
+        let requestRecord = record
+        try launchIfNeeded()
+        guard let input, let processID = activeProcessID else {
+            throw DesktopBridgeProcessError.notRunning
+        }
+        guard pending.count < desktopBridgeMaximumPendingRequests,
+              queuedInputWrites < desktopBridgeMaximumPendingRequests else {
+            throw DesktopBridgeProcessError.tooManyRequests
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending[requestID] = continuation
-                do {
-                    try input.write(contentsOf: body + Data([0x0A]))
-                } catch {
-                    pending.removeValue(forKey: requestID)
-                    continuation.resume(throwing: error)
-                    return
-                }
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(for: timeout)
                     self?.timeout(requestID)
+                }
+                if Task.isCancelled {
+                    timeout(requestID)
+                    return
+                }
+                queuedInputWrites += 1
+                inputWriterQueue.async { [weak self] in
+                    let succeeded: Bool
+                    do {
+                        try input.write(contentsOf: requestRecord)
+                        succeeded = true
+                    } catch {
+                        succeeded = false
+                    }
+                    Task { @MainActor [weak self] in
+                        self?.inputWriteFinished(
+                            requestID: requestID,
+                            processID: processID,
+                            succeeded: succeeded
+                        )
+                    }
                 }
             }
         } onCancel: {
@@ -130,8 +198,7 @@ final class DesktopBridgeProcess: ObservableObject {
         guard !isShuttingDown else { return true }
         isShuttingDown = true
         shutdownCompletion = completion
-        input?.closeFile()
-        input = nil
+        enqueueInputClose()
         let terminateFallback = DispatchWorkItem { [weak self, weak child] in
             guard let self, let child, self.process === child, child.isRunning else { return }
             child.terminate()
@@ -147,8 +214,8 @@ final class DesktopBridgeProcess: ObservableObject {
         return true
     }
 
-    private func receive(_ data: Data) {
-        guard !data.isEmpty else { return }
+    private func receive(_ data: Data, processID: UUID) {
+        guard activeProcessID == processID, !data.isEmpty else { return }
         outputBuffer.append(data)
         if outputBuffer.count > desktopBridgeMaximumOutputBytes,
            !outputBuffer.contains(0x0A) {
@@ -227,25 +294,26 @@ final class DesktopBridgeProcess: ObservableObject {
         return true
     }
 
-    private func receiveStderr(_ data: Data) {
-        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
-        stderrTail = String((stderrTail + text).suffix(16_384))
-    }
-
     private func timeout(_ requestID: String) {
         pending.removeValue(forKey: requestID)?.resume(throwing: DesktopBridgeProcessError.timedOut)
     }
 
-    private func didExit() {
+    private func didExit(processID: UUID) {
+        guard activeProcessID == processID else { return }
         let completion = shutdownCompletion
         shutdownCompletion = nil
         terminateFallback?.cancel()
         terminateFallback = nil
         killFallback?.cancel()
         killFallback = nil
+        stdoutHandle?.readabilityHandler = nil
+        stdoutHandle = nil
+        stderrHandle?.readabilityHandler = nil
+        stderrHandle = nil
+        activeProcessID = nil
         isShuttingDown = false
         process = nil
-        input = nil
+        enqueueInputClose()
         outputBuffer.removeAll(keepingCapacity: true)
         status = .stopped
         failAll(DesktopBridgeProcessError.notRunning)
@@ -254,9 +322,28 @@ final class DesktopBridgeProcess: ObservableObject {
     }
 
     private func terminateImmediately() {
-        input?.closeFile()
-        input = nil
+        enqueueInputClose()
         process?.terminate()
+    }
+
+    private func enqueueInputClose() {
+        guard let input else { return }
+        self.input = nil
+        inputWriterQueue.async {
+            input.closeFile()
+        }
+    }
+
+    private func inputWriteFinished(requestID: String, processID: UUID, succeeded: Bool) {
+        queuedInputWrites = max(0, queuedInputWrites - 1)
+        guard activeProcessID == processID, !succeeded else { return }
+        pending.removeValue(forKey: requestID)?.resume(throwing: DesktopBridgeProcessError.notRunning)
+    }
+
+    private func protocolReadFailed(processID: UUID) {
+        guard activeProcessID == processID, process?.isRunning == true else { return }
+        failAll(DesktopBridgeProcessError.malformedResponse)
+        terminateImmediately()
     }
 
     private func failAll(_ error: Error) {

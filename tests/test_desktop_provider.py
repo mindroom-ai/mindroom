@@ -12,7 +12,7 @@ import pytest
 from PIL import Image
 
 from mindroom.desktop.accessibility import AccessibilityCapture, AccessibilityState, DesktopRect
-from mindroom.desktop.displays import DisplayGeometry
+from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError
 from mindroom.desktop.provider import (
     DesktopEmergencyStopError,
     DesktopProviderError,
@@ -605,3 +605,17 @@ def test_window_replacement_during_screenshot_discards_pixels(monkeypatch: pytes
     )
     with pytest.raises(DesktopProviderError, match="window changed"):
         _capture_macos_window(42, DesktopRect(100, 50, 800, 600))
+
+
+def test_status_preserves_actionable_display_mapping_error() -> None:
+    """Display enumeration failures reach the bridge's public provider-error boundary."""
+    provider, _, _ = _provider()
+    provider._accessibility = SimpleNamespace(availability=dict)
+
+    def unavailable() -> tuple[DisplayGeometry, ...]:
+        msg = "macOS display mapping is unavailable; reconnect displays and request fresh app state."
+        raise DisplayMappingError(msg)
+
+    provider._display_geometry = unavailable
+    with pytest.raises(DesktopProviderError, match="reconnect displays and request fresh app state"):
+        provider.status()

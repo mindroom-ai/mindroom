@@ -78,6 +78,10 @@ final class DesktopControlStore: ObservableObject {
         set { confirmedIdentity = newValue ? currentIdentity : nil }
     }
 
+    var canEditBrowserConfiguration: Bool {
+        status.helper.state != "stopped"
+    }
+
     func refresh() {
         perform("status")
     }

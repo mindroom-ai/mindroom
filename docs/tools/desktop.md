@@ -162,6 +162,9 @@ Start in observe-only mode, then grant a bounded local lease when control is nee
 Stop and Revoke remain available while another setup operation is waiting.
 The menu displays the current mode, remaining lease, and active action without exposing its arguments.
 Changing configuration or restarting the app/helper does not renew control.
+Once a command journal exists, saving a different controller identity is rejected before settings change.
+Pending work remains bound to its original controller.
+Saving settings can repair malformed local configuration or restore private file permissions; revision checks still apply.
 
 Release builds package the existing Python provider inside a separately signed helper app with a fixed bundle identity.
 The menu app owns that foreground helper through inherited private standard-I/O pipes.
@@ -350,7 +353,8 @@ The process opens outbound HTTPS connections to Matrix and does not listen on a 
 Authenticated, unexpired commands received by the initial Matrix sync are dispatched during startup, including control commands when the new process has a valid local control lease.
 Wait until the terminal says `Desktop bridge online` before sending new work when the caller needs confirmation that startup and device pinning completed.
 The bridge durably journals an accepted command before local execution, so a Matrix redelivery after a crash returns the cached response or an unknown-outcome warning instead of repeating a started control.
-Completed journal records retain bounded desktop or browser response content and screenshot decryption metadata in `<storage>/desktop_bridge/command_journal.json`, which MindRoom requires to be owner-only (`0600`) before reading.
+Completed journal records retain bounded desktop or browser response content and screenshot decryption metadata in `<storage>/desktop_bridge/commands.sqlite3`, which MindRoom requires to be owner-only (`0600`) before reading.
+Existing `command_journal.json` files are imported as legacy receipts; current admission and delivery state lives in SQLite.
 
 To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
 
@@ -477,10 +481,11 @@ For stronger isolation, run the bridge in a dedicated operating-system account a
 
 Native semantic accessibility is implemented only for macOS in this version.
 Playwright extension mode is limited to Chromium-family browsers, so Safari and other unsupported browsers continue to use the accessibility and scoped-screenshot path.
-Screenshots and pixel fallback currently target the primary display, so an app window must fit fully on that display for a scoped screenshot to succeed.
-The bridge foregrounds and revalidates the allowed app before an on-screen window crop, but an always-on-top overlay inside those bounds can still appear in the screenshot.
+On macOS, window-bound screenshots and coordinate input support secondary displays when the window fits one unambiguous display.
+ScreenCaptureKit captures the selected window, with process and window identity revalidated around capture.
+Windows and Linux pixel operations currently target the primary display.
 Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
 The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
 Table and outline state prefers the rows that macOS reports as visible so off-screen Finder-style content does not crowd current controls out of the bounded tree.
-There is no MatrixRTC live screen stream, tray application, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
+There is no MatrixRTC live screen stream, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
 Commands and encrypted responses are Matrix to-device messages rather than persistent room events, while normal MindRoom tool traces and optional approval cards remain visible in the Matrix conversation.

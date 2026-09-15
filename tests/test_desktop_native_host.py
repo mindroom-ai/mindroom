@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
 
+import pytest
+
+from mindroom.desktop.command_journal import DesktopCommandJournal
 from mindroom.desktop.native_config import NativeDesktopConfig
 from mindroom.desktop.native_host import (
     NativeDesktopHost,
@@ -21,6 +24,7 @@ from mindroom.desktop.native_host import (
     supervise_native_tasks,
 )
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest
+from mindroom.desktop.protocol import DesktopCommand
 
 
 def _config_payload() -> dict[str, object]:
@@ -141,6 +145,124 @@ def test_host_status_returns_persisted_browser_settings(tmp_path: Path) -> None:
     assert browser["configured"] is True
     assert browser["executable_path"] == str(executable)
     assert browser["user_data_dir"] == str(profile)
+
+
+@pytest.mark.parametrize("existing_config", [False, True])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("user_id", "@other:example.org"), ("device_id", "OTHER"), ("ed25519", "other-key")],
+)
+def test_configure_rejects_controller_changes_without_altering_owned_work(
+    tmp_path: Path,
+    existing_config: bool,
+    field: str,
+    value: str,
+) -> None:
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+    )
+    config_path = tmp_path / "desktop_bridge" / "native_config.json"
+    if existing_config:
+        asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    original_config = config_path.read_bytes() if existing_config else None
+    journal_path = tmp_path / "desktop_bridge" / "commands.sqlite3"
+    journal = DesktopCommandJournal.load(
+        journal_path,
+        controller_key='["@controller:example.org", "DEVICE", "key"]',
+    )
+    command = DesktopCommand("request", "session", 1, 1000, 31000, "status", "@person:example.org", "assistant")
+    journal.admit(command, "a" * 64)
+    journal.close()
+    original_journal = journal_path.read_bytes()
+    payload = _config_payload()
+    payload["revision"] = int(existing_config)
+    cast("dict[str, str]", payload["controller"])[field] = value
+
+    with pytest.raises(NativeProtocolError, match="different controller") as caught:
+        asyncio.run(host.handle(_request("configure", expected_revision=int(existing_config), config=payload)))
+
+    assert caught.value.code == "invalid_request"
+    assert journal_path.read_bytes() == original_journal
+    assert config_path.exists() == existing_config
+    if existing_config:
+        assert config_path.read_bytes() == original_config
+    assert host.status()["config"]["revision"] == int(existing_config)
+
+
+def test_configure_same_controller_preserves_journal_and_saves_app_changes(tmp_path: Path) -> None:
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+    )
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    journal_path = tmp_path / "desktop_bridge" / "commands.sqlite3"
+    journal = DesktopCommandJournal.load(
+        journal_path,
+        controller_key='["@controller:example.org", "DEVICE", "key"]',
+    )
+    journal.close()
+    original_journal = journal_path.read_bytes()
+    payload = _config_payload()
+    payload.update(revision=1, allowed_app_ids=["com.example.Other"])
+
+    result = asyncio.run(host.handle(_request("configure", expected_revision=1, config=payload)))
+
+    assert result["status"]["config"]["revision"] == 2
+    assert result["status"]["config"]["allowed_app_ids"] == ["com.example.Other"]
+    assert journal_path.read_bytes() == original_journal
+
+
+@pytest.mark.parametrize("journal_kind", ["malformed", "directory", "symlink"])
+def test_configure_rejects_unreadable_journal_without_creating_configuration(tmp_path: Path, journal_kind: str) -> None:
+    journal_path = tmp_path / "desktop_bridge" / "commands.sqlite3"
+    journal_path.parent.mkdir()
+    if journal_kind == "directory":
+        journal_path.mkdir(mode=0o700)
+    elif journal_kind == "symlink":
+        journal_path.symlink_to(tmp_path / "missing.sqlite3")
+    else:
+        journal_path.write_bytes(b"broken journal")
+        journal_path.chmod(0o600)
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+    )
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+
+    assert caught.value.code == "invalid_request"
+    assert not (journal_path.parent / "native_config.json").exists()
+    if journal_kind == "malformed":
+        assert journal_path.read_bytes() == b"broken journal"
+    if journal_kind == "symlink":
+        assert journal_path.is_symlink()
+        assert not (tmp_path / "missing.sqlite3").exists()
+
+
+@pytest.mark.parametrize("kind", ["malformed", "exposed"])
+def test_configure_repairs_supported_files_using_reported_revision(tmp_path: Path, kind: str) -> None:
+    path = tmp_path / "desktop_bridge" / "native_config.json"
+    path.parent.mkdir()
+    revision = 4 if kind == "exposed" else 0
+    payload = _config_payload()
+    payload["revision"] = revision
+    path.write_text(json.dumps(payload) if kind == "exposed" else "{broken json")
+    path.chmod(0o644 if kind == "exposed" else 0o600)
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+    )
+    status = host.status()
+    assert status["config"]["state"] == "invalid"
+    assert status["config"]["revision"] == revision
+
+    result = asyncio.run(host.handle(_request("configure", expected_revision=revision, config=payload)))
+
+    assert result["status"]["config"]["state"] == "ready"
+    assert result["status"]["config"]["revision"] == revision + 1
+    assert json.loads(path.read_text())["revision"] == revision + 1
 
 
 def test_host_login_and_pair_never_echo_secrets(tmp_path: Path) -> None:

@@ -299,82 +299,6 @@ async def login(
     raise matrix_startup_error(msg, response=response)
 
 
-async def login_with_token(
-    homeserver: str,
-    login_token: str,
-    runtime_paths: RuntimePaths,
-    *,
-    expected_user_id: str | None = None,
-    http_headers: Mapping[str, str] | None = None,
-    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
-) -> nio.AsyncClient:
-    """Exchange one short-lived Matrix login token and restore its exact device."""
-    runtime_paths = require_runtime_paths_arg(runtime_paths)
-    login_client = _create_matrix_client(
-        homeserver,
-        runtime_paths,
-        http_headers=http_headers,
-        sync_storage=sync_storage,
-    )
-    try:
-        response = await login_client.login(
-            token=login_token,
-            device_name="MindRoom Desktop Bridge",
-        )
-        if not isinstance(response, nio.LoginResponse):
-            msg = f"Failed to exchange Matrix login token: {response}"
-            raise matrix_startup_error(msg, response=response)
-        if expected_user_id is not None and response.user_id != expected_user_id:
-            await _revoke_unexpected_login(
-                login_client,
-                expected_user_id=expected_user_id,
-                actual_user_id=response.user_id,
-            )
-            msg = f"Matrix SSO returned {response.user_id}, but {expected_user_id} was requested."
-            raise matrix_startup_error(msg, permanent=True)
-        credentials = (response.user_id, response.device_id, response.access_token)
-    finally:
-        await login_client.close()
-
-    user_id, device_id, access_token = credentials
-    logger.info("matrix_login_succeeded", user_id=user_id, login_method="token")
-    return create_authenticated_client(
-        homeserver,
-        user_id,
-        device_id,
-        access_token,
-        runtime_paths,
-        http_headers=http_headers,
-        sync_storage=sync_storage,
-    )
-
-
-async def _revoke_unexpected_login(
-    client: nio.AsyncClient,
-    *,
-    expected_user_id: str,
-    actual_user_id: str,
-) -> None:
-    """Best-effort revoke an SSO session issued for an unexpected identity."""
-    try:
-        response = await client.logout()
-    except Exception:
-        logger.warning(
-            "matrix_unexpected_sso_session_revoke_failed",
-            expected_user_id=expected_user_id,
-            actual_user_id=actual_user_id,
-            exc_info=True,
-        )
-        return
-    if isinstance(response, nio.ErrorResponse):
-        logger.warning(
-            "matrix_unexpected_sso_session_revoke_failed",
-            expected_user_id=expected_user_id,
-            actual_user_id=actual_user_id,
-            error=str(response),
-        )
-
-
 async def login_flows(
     homeserver: str,
     runtime_paths: RuntimePaths,
@@ -442,7 +366,6 @@ __all__ = [
     "create_matrix_http_client",
     "login",
     "login_flows",
-    "login_with_token",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",

@@ -4758,7 +4758,6 @@ expose = [
     "create_matrix_http_client",
     "login",
     "login_flows",
-    "login_with_token",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",
@@ -5917,7 +5916,7 @@ depends_on = ["mindroom.constants", "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.native_host"
-depends_on = ["mindroom.constants", "mindroom.desktop.bridge", "mindroom.desktop.cloudflare_access", "mindroom.desktop.login_method", "mindroom.desktop.native_config", "mindroom.desktop.native_protocol", "mindroom.desktop.pairing_client", "mindroom.desktop.playwright_mcp", "mindroom.desktop.protocol", "mindroom.desktop.provider", "mindroom.desktop.session", "mindroom.desktop.sso", "mindroom.desktop.transport", "mindroom.matrix.olm_to_device"]
+depends_on = ["mindroom.constants", "mindroom.desktop.bridge", "mindroom.desktop.cloudflare_access", "mindroom.desktop.command_journal", "mindroom.desktop.login_method", "mindroom.desktop.native_config", "mindroom.desktop.native_protocol", "mindroom.desktop.pairing_client", "mindroom.desktop.playwright_mcp", "mindroom.desktop.protocol", "mindroom.desktop.provider", "mindroom.desktop.session", "mindroom.desktop.sso", "mindroom.desktop.transport", "mindroom.matrix.olm_to_device"]
 
 [[modules]]
 path = "mindroom.desktop.native_protocol"

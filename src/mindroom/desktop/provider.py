@@ -234,11 +234,15 @@ class PyAutoGuiDesktopProvider:
         """Return coarse geometry without reading clipboard or disallowed applications."""
         screen = self._pyautogui.size()
         cursor = self._pyautogui.position()
+        try:
+            displays = [display.to_result() for display in self._display_geometry()]
+        except DisplayMappingError as exc:
+            raise DesktopProviderError(str(exc)) from exc
         return {
             "screen": {"width": int(screen.width), "height": int(screen.height)},
             "cursor": {"x": int(cursor.x), "y": int(cursor.y)},
             "accessibility": self._accessibility.availability(),
-            "displays": [display.to_result() for display in self._display_geometry()],
+            "displays": displays,
         }
 
     def check_emergency_stop(self) -> None:

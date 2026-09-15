@@ -33,9 +33,10 @@ _TOP_LEVEL_KEYS = frozenset(
 class NativeConfigError(ValueError):
     """Native helper configuration is missing, stale, exposed, or invalid."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, revision: int = 0) -> None:
         super().__init__(message)
         self.code = code
+        self.revision = revision
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,22 +174,43 @@ def native_config_path(storage_root: Path) -> Path:
 def load_native_config(path: Path) -> NativeDesktopConfig:
     """Load private native configuration."""
     try:
-        file_stat = path.stat()
+        file_stat = path.lstat()
     except FileNotFoundError as exc:
         raise NativeConfigError("configuration_missing", "Native desktop configuration is missing.") from exc
     except OSError as exc:
         raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
-    if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
-        raise NativeConfigError(
-            "invalid_request",
-            "Native desktop configuration must not be readable by group or other users.",
-        )
+    _require_owned_config_file(file_stat)
     try:
-        return NativeDesktopConfig.from_payload(json.loads(path.read_text(encoding="utf-8")))
+        flags = os.O_RDONLY | (os.O_NOFOLLOW | os.O_NONBLOCK if os.name != "nt" else 0)
+        with os.fdopen(os.open(path, flags), "r", encoding="utf-8") as source:
+            opened_stat = os.fstat(source.fileno())
+            _require_owned_config_file(opened_stat)
+            if (opened_stat.st_dev, opened_stat.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+                raise NativeConfigError("invalid_request", "Native desktop configuration changed while opening it.")
+            payload = json.load(source)
     except (UnicodeError, json.JSONDecodeError) as exc:
-        raise NativeConfigError("invalid_request", "Native desktop configuration is malformed.") from exc
+        raise NativeConfigError(
+            "configuration_repair_required",
+            "Native desktop configuration is malformed; save new settings to repair it.",
+        ) from exc
     except OSError as exc:
         raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
+    config = NativeDesktopConfig.from_payload(payload)
+    if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) & 0o077:
+        raise NativeConfigError(
+            "configuration_repair_required",
+            "Native desktop configuration must not be readable by group or other users; save settings to repair it.",
+            revision=config.revision,
+        )
+    return config
+
+
+def _require_owned_config_file(file_stat: os.stat_result) -> None:
+    if not stat.S_ISREG(file_stat.st_mode) or (os.name != "nt" and file_stat.st_uid != os.getuid()):
+        raise NativeConfigError(
+            "invalid_request",
+            "Native desktop configuration must be a regular file owned by this user.",
+        )
 
 
 def save_native_config(
@@ -203,9 +225,9 @@ def save_native_config(
     try:
         current_revision = load_native_config(path).revision
     except NativeConfigError as exc:
-        if exc.code != "configuration_missing":
+        if exc.code not in {"configuration_missing", "configuration_repair_required"}:
             raise
-        current_revision = 0
+        current_revision = exc.revision
     if current_revision != expected_revision:
         raise NativeConfigError("revision_conflict", "Native desktop configuration changed; reload it and try again.")
     if config.revision != expected_revision:

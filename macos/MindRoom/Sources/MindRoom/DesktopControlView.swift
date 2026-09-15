@@ -133,6 +133,11 @@ struct DesktopControlView: View {
 
     private var browserSection: some View {
         Section("Browser") {
+            if !store.canEditBrowserConfiguration {
+                Text("Loading saved browser settings…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             Toggle("Use browser extension", isOn: $store.browserEnabled)
             TextField("Browser executable path (optional)", text: $store.browserExecutable)
             TextField("Browser profile directory (optional)", text: $store.browserProfile)
@@ -150,6 +155,7 @@ struct DesktopControlView: View {
                     .disabled(store.isBusy)
             }
         }
+        .disabled(!store.canEditBrowserConfiguration)
     }
 
     private var bridgeSection: some View {

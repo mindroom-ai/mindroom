@@ -42,11 +42,8 @@ dependencies = [
   "mcp[cli]>=1.28.1,<2",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
-  # Pin the reviewed transport commit until NIO 1.1.0 is released.
-  """\
-  mindroom-nio[e2e] @ \
-  https://github.com/mindroom-ai/mindroom-nio/archive/aa7630ca73b6045daa3947e43005a67297d2fb64.tar.gz\
-  """,
+  # Owned to-device transport requires the durable NIO API.
+  "mindroom-nio[e2e]==1.1",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -483,8 +480,6 @@ packages = [ "src/mindroom" ]
 [tool.hatch.build.targets.wheel.force-include]
 skills = "mindroom/_bundled_skills"
 [tool.hatch.build.targets.wheel.hooks.custom]
-[tool.hatch.metadata]
-allow-direct-references = true
 [tool.hatch.version]
 source = "vcs"
 [tool.hatch.version.raw-options]
@@ -503,6 +498,9 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
+[tool.uv.sources]
+# Remove this development override after NIO 1.1.0 is released.
+mindroom-nio = { url = "https://github.com/mindroom-ai/mindroom-nio/archive/aa7630ca73b6045daa3947e43005a67297d2fb64.tar.gz" }
 
 [tool.ruff]
 target-version = "py312"

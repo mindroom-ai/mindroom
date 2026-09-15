@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 
+from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.native_config import (
     NativeConfigError,
     NativeDesktopConfig,
@@ -89,9 +91,11 @@ class NativeDesktopHost:
         self._pairing_state = "unpaired"
         self._pairing_details: dict[str, object] = {}
         self._config: NativeDesktopConfig | None = None
+        self._config_error_revision = 0
         try:
             self._config = load_native_config(native_config_path(runtime_paths.storage_root))
         except NativeConfigError as exc:
+            self._config_error_revision = exc.revision
             if exc.code != "configuration_missing":
                 self._last_error = _error_payload(exc.code, str(exc))
 
@@ -117,7 +121,7 @@ class NativeDesktopHost:
         return {
             "config": {
                 "state": "ready" if config is not None else ("invalid" if self._last_error else "missing"),
-                "revision": config.revision if config is not None else 0,
+                "revision": config.revision if config is not None else self._config_error_revision,
                 "enabled": config.enabled if config is not None else False,
                 "controller_user_id": config.controller.user_id if config is not None else None,
                 "controller_device_id": config.controller.device_id if config is not None else None,
@@ -208,6 +212,13 @@ class NativeDesktopHost:
             if self._runtime is not None:
                 raise NativeProtocolError("busy", "Stop the desktop bridge before changing its configuration.")
             config = NativeDesktopConfig.from_payload(parameters.get("config"))
+            try:
+                check_controller_binding(
+                    self._runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
+                    json.dumps([config.controller.user_id, config.controller.device_id, config.controller.ed25519]),
+                )
+            except DesktopCommandJournalError as exc:
+                raise NativeProtocolError("invalid_request", str(exc)) from exc
             self._config = save_native_config(
                 native_config_path(self._runtime_paths.storage_root),
                 config,

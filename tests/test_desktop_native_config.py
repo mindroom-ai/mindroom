@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -91,7 +92,7 @@ def test_load_native_config_rejects_permissive_mode(tmp_path: Path) -> None:
         load_native_config(path)
 
 
-@pytest.mark.parametrize("operation", ["stat", "read_text"])
+@pytest.mark.parametrize("operation", ["lstat", "open"])
 def test_load_native_config_reports_filesystem_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -104,7 +105,94 @@ def test_load_native_config_reports_filesystem_failures(
         raise PermissionError
 
     with monkeypatch.context() as patch:
-        patch.setattr(Path, operation, denied)
+        patch.setattr(Path if operation == "lstat" else os, operation, denied)
         with pytest.raises(NativeConfigError, match="could not be read") as caught:
             load_native_config(path)
     assert caught.value.code == "invalid_request"
+
+
+@pytest.mark.parametrize("content", [b"{", b"\xff"])
+def test_owned_malformed_config_can_be_repaired(tmp_path: Path, content: bytes) -> None:
+    path = native_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+    path.chmod(0o600)
+    with pytest.raises(NativeConfigError) as caught:
+        load_native_config(path)
+    assert caught.value.code == "configuration_repair_required"
+    assert caught.value.revision == 0
+    saved = save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
+    assert load_native_config(path) == saved
+    assert saved.revision == 1
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_exposed_config_repair_preserves_revision_and_rejects_stale_editor(tmp_path: Path) -> None:
+    path = native_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = json.dumps(_payload(revision=7))
+    path.write_text(original)
+    path.chmod(0o644)
+    with pytest.raises(NativeConfigError) as caught:
+        load_native_config(path)
+    assert caught.value.code == "configuration_repair_required"
+    assert caught.value.revision == 7
+    with pytest.raises(NativeConfigError, match="changed"):
+        save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
+    with pytest.raises(NativeConfigError, match="does not match the edit"):
+        save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=7)
+    assert path.read_text() == original
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    saved = save_native_config(path, NativeDesktopConfig.from_payload(_payload(revision=7)), expected_revision=7)
+    assert saved.revision == 8
+    assert load_native_config(path) == saved
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o644])
+def test_semantically_invalid_config_cannot_be_repaired(tmp_path: Path, mode: int) -> None:
+    path = native_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    original = json.dumps(_payload(v=2))
+    path.write_text(original)
+    path.chmod(mode)
+    with pytest.raises(NativeConfigError) as caught:
+        save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
+    assert caught.value.code == "invalid_request"
+    assert path.read_text() == original
+    assert stat.S_IMODE(path.stat().st_mode) == mode
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "foreign_owner", "unreadable"])
+def test_unsupported_config_path_cannot_be_repaired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    path = native_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    target = tmp_path / "untouched.json"
+    target.write_text("{")
+    target.chmod(0o600)
+    if kind == "symlink":
+        path.symlink_to(target)
+    elif kind == "directory":
+        path.mkdir(mode=0o700)
+    else:
+        path.write_text("{")
+        path.chmod(0o600)
+    before = path.lstat()
+    with monkeypatch.context() as patch:
+        if kind == "foreign_owner":
+            patch.setattr(os, "getuid", lambda: before.st_uid + 1)
+        if kind == "unreadable":
+
+            def denied(*_args: object, **_kwargs: object) -> None:
+                raise PermissionError
+
+            patch.setattr(os, "open", denied)
+        with pytest.raises(NativeConfigError) as caught:
+            save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
+    assert caught.value.code == "invalid_request"
+    assert path.lstat() == before
+    assert target.read_text() == "{"

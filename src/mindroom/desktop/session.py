@@ -270,22 +270,6 @@ async def login_desktop_client(
     return owner, session
 
 
-async def restore_desktop_client(
-    session: DesktopMatrixSession,
-    *,
-    runtime_paths: RuntimePaths,
-    http_headers: Mapping[str, str] | None = None,
-) -> DesktopOwnedSession:
-    """Restore and prepare one owned device without consuming Matrix input."""
-    owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
-    try:
-        await prepare_desktop_client(owner.client)
-    except BaseException:
-        await owner.close()
-        raise
-    return owner
-
-
 async def open_desktop_client(
     session: DesktopMatrixSession,
     *,
@@ -413,11 +397,6 @@ async def _open_owned_session(
 
 async def prepare_desktop_client(client: nio.AsyncClient) -> None:
     """Publish encryption keys without polling or acknowledging any commands."""
-    await _prepare_crypto(client)
-
-
-async def _prepare_crypto(client: nio.AsyncClient) -> None:
-    """Prepare an already-owned Olm identity without an ordinary sync."""
     if client.olm is None:
         msg = "Desktop Matrix client started without Olm encryption support."
         raise DesktopSessionError(msg)
@@ -453,6 +432,5 @@ __all__ = [
     "open_desktop_client",
     "prepare_desktop_client",
     "resolve_desktop_login_method",
-    "restore_desktop_client",
     "save_desktop_session",
 ]
