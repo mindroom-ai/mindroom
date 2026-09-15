@@ -1,208 +1,445 @@
-"""Durable replay state for locally executed Matrix desktop commands."""
+"""Durable desktop admission, execution receipts, and response delivery."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sqlite3
 import stat
-from collections import OrderedDict
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NoReturn, cast
+from contextlib import closing
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, cast
 
-from mindroom.desktop.protocol import DesktopProtocolError, DesktopResponse
-from mindroom.durable_write import write_json_file_durable
+from mindroom.desktop.protocol import DesktopCommand, DesktopResponse
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.desktop.protocol import DesktopCommand
-
-_JOURNAL_VERSION = 1
-_MAX_REPLAY_RESPONSES = 1024
-_MAX_TRACKED_SESSIONS = 128
+_MAX_ENTRIES = 1024
+_MAX_SESSIONS = 128
 
 
 class DesktopCommandJournalError(RuntimeError):
-    """The durable desktop command journal is malformed or unsupported."""
+    """The desktop journal cannot safely admit or recover work."""
+
+
+class DesktopCommandJournalFullError(DesktopCommandJournalError):
+    """Execution or delivery must progress before more work is admitted."""
+
+
+def check_controller_binding(path: Path, controller_key: str) -> None:
+    """Reject configuration incompatible with an existing journal without changing it."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
+        msg = "Desktop journal must be a regular file."
+        raise DesktopCommandJournalError(msg)
+    _require_private(path)
+    try:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as database:
+            existing = database.execute("SELECT value FROM metadata WHERE key='controller'").fetchone()
+    except sqlite3.DatabaseError as exc:
+        msg = "Desktop journal controller binding could not be read."
+        raise DesktopCommandJournalError(msg) from exc
+    if existing is None or existing[0] != controller_key:
+        msg = "Desktop journal belongs to a different controller."
+        raise DesktopCommandJournalError(msg)
 
 
 @dataclass(frozen=True, slots=True)
 class DesktopCommandJournalEntry:
-    """One started or completed desktop command."""
+    """Immutable command identity and its durable execution state."""
 
     command_fingerprint: str
     response: DesktopResponse | None
+    state: Literal["queued", "started", "completed"]
+    command: DesktopCommand | None
 
 
 @dataclass
 class DesktopCommandJournal:
-    """Bounded durable record preventing control replay after process restarts."""
+    """Bounded SQLite inbox/outbox plus at most 1024 fixed bodyless legacy receipts.
+
+    Legacy receipts cannot execute or consume new admission slots. Their missing
+    command bodies are never reconstructed; exact replay can only record an outcome.
+    """
 
     path: Path | None
-    entries: OrderedDict[str, DesktopCommandJournalEntry] = field(default_factory=OrderedDict)
-    sequence_high_watermarks: OrderedDict[str, int] = field(default_factory=OrderedDict)
+    _database: sqlite3.Connection
+    _max_entries: int = _MAX_ENTRIES
 
     @classmethod
-    def load(cls, path: Path | None) -> DesktopCommandJournal:
-        """Load a journal, or create an in-memory journal when no path is supplied."""
-        journal = cls(path=path)
-        if path is None:
-            return journal
+    def load(
+        cls,
+        path: Path | None,
+        *,
+        controller_key: str = "",
+        legacy_path: Path | None = None,
+        max_entries: int = _MAX_ENTRIES,
+    ) -> DesktopCommandJournal:
+        """Open a journal and import existing replay receipts once."""
+        if max_entries < 1:
+            msg = "Desktop journal capacity must be positive."
+            raise ValueError(msg)
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if os.name != "nt":
+                path.parent.chmod(0o700)
+            _require_private(path)
+            descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.close(descriptor)
+        database = sqlite3.connect(str(path) if path is not None else ":memory:")
+        journal = cls(path, database, max_entries)
         try:
-            with path.open(encoding="utf-8") as journal_file:
-                if os.name != "nt" and stat.S_IMODE(os.fstat(journal_file.fileno()).st_mode) & 0o077:
-                    msg = f"Desktop command journal {path} must not grant permissions to group or other users."
-                    raise DesktopCommandJournalError(msg)
-                raw = json.load(journal_file)
-        except FileNotFoundError:
-            return journal
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            msg = f"Desktop command journal {path} is unreadable or malformed."
-            raise DesktopCommandJournalError(msg) from exc
-        journal._load_payload(raw)
+            journal._initialize(controller_key)
+            if legacy_path is not None:
+                journal._import_legacy(legacy_path)
+        except BaseException:
+            database.close()
+            raise
         return journal
 
+    def close(self) -> None:
+        """Close after the executor and sender have stopped."""
+        self._database.close()
+
+    def _initialize(self, controller_key: str) -> None:
+        if self._database.execute("PRAGMA user_version").fetchone()[0] not in {0, 1}:
+            msg = "Desktop journal has an unsupported schema."
+            raise DesktopCommandJournalError(msg)
+        self._database.execute("PRAGMA synchronous=FULL")
+        self._database.executescript("""
+            CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS responses (
+                delivery_id TEXT PRIMARY KEY, response TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS commands (
+                ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL UNIQUE, fingerprint TEXT NOT NULL,
+                command TEXT, state TEXT NOT NULL CHECK(state IN ('queued','started','completed')),
+                delivery_id TEXT REFERENCES responses(delivery_id)
+            );
+            CREATE TABLE IF NOT EXISTS sequences (
+                ordinal INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE, sequence INTEGER NOT NULL
+            );
+            PRAGMA user_version=1;
+        """)
+        with self._database:
+            existing = self._database.execute("SELECT value FROM metadata WHERE key='controller'").fetchone()
+            if existing is not None and existing[0] != controller_key:
+                msg = "Desktop journal belongs to a different controller."
+                raise DesktopCommandJournalError(msg)
+            self._database.execute("INSERT OR IGNORE INTO metadata VALUES('controller',?)", (controller_key,))
+
     def get(self, request_id: str) -> DesktopCommandJournalEntry | None:
-        """Return one previously started command without mutating replay order."""
-        return self.entries.get(request_id)
+        """Read original identity without changing replay order."""
+        row = self._database.execute(
+            "SELECT c.fingerprint,r.response,c.state,c.command FROM commands c "
+            "LEFT JOIN responses r USING(delivery_id) WHERE c.request_id=?",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return DesktopCommandJournalEntry(
+            row[0],
+            DesktopResponse.from_content(json.loads(row[1])) if row[1] is not None else None,
+            row[2],
+            DesktopCommand.from_content(json.loads(row[3])) if row[3] is not None else None,
+        )
+
+    def _commands_in_state(self, state: str) -> list[DesktopCommandJournalEntry]:
+        entries = [
+            self.get(row[0])
+            for row in self._database.execute(
+                "SELECT request_id FROM commands WHERE state=? AND command IS NOT NULL ORDER BY ordinal",
+                (state,),
+            )
+        ]
+        return [entry for entry in entries if entry is not None]
+
+    def queued(self) -> list[DesktopCommandJournalEntry]:
+        """Read admitted commands in admission order."""
+        return self._commands_in_state("queued")
+
+    def started(self) -> list[DesktopCommandJournalEntry]:
+        """Read started commands with bodies available for recovery."""
+        return self._commands_in_state("started")
 
     def sequence_error(self, command: DesktopCommand) -> str | None:
-        """Return the replay error for a non-increasing command sequence."""
-        previous = self.sequence_high_watermarks.get(command.session_id)
-        if previous is not None and command.sequence <= previous:
+        """Reject non-increasing sequences for new work."""
+        row = self._database.execute(
+            "SELECT sequence FROM sequences WHERE session_id=?",
+            (command.session_id,),
+        ).fetchone()
+        if row is not None and command.sequence <= row[0]:
             return "Desktop command sequence was already used or arrived out of order."
         return None
 
+    def _require_same(self, command: DesktopCommand, fingerprint: str) -> DesktopCommandJournalEntry | None:
+        existing = self.get(command.request_id)
+        if existing is not None and existing.command_fingerprint != fingerprint:
+            msg = "Desktop request ID was journaled with different command content."
+            raise DesktopCommandJournalError(msg)
+        return existing
+
+    def admit(self, command: DesktopCommand, command_fingerprint: str) -> None:
+        """Commit a queued body and reserve its sequence atomically."""
+        with self._database:
+            if self._require_same(command, command_fingerprint) is not None:
+                return
+            error = self.sequence_error(command)
+            if error is not None:
+                raise DesktopCommandJournalError(error)
+            self._make_room()
+            self._database.execute(
+                "INSERT INTO commands(request_id,fingerprint,command,state) VALUES(?,?,?,'queued')",
+                (command.request_id, command_fingerprint, _encode(command.to_content())),
+            )
+            self._database.execute(
+                "INSERT INTO sequences(session_id,sequence) VALUES(?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET sequence=excluded.sequence,ordinal=excluded.ordinal",
+                (command.session_id, command.sequence),
+            )
+            self._prune_sequences()
+
     def remember_started(self, command: DesktopCommand, command_fingerprint: str) -> None:
-        """Durably record accepted work before any local side effect can begin."""
-        self.entries[command.request_id] = DesktopCommandJournalEntry(
-            command_fingerprint=command_fingerprint,
-            response=None,
-        )
-        self.entries.move_to_end(command.request_id)
-        self.sequence_high_watermarks[command.session_id] = command.sequence
-        self.sequence_high_watermarks.move_to_end(command.session_id)
-        self._prune()
-        self._persist()
+        """Commit a start receipt before any local side effect."""
+        with self._database:
+            existing = self._require_same(command, command_fingerprint)
+            if existing is None or existing.state != "queued":
+                msg = "Desktop command must be queued before it can start."
+                raise DesktopCommandJournalError(msg)
+            self._database.execute("UPDATE commands SET state='started' WHERE request_id=?", (command.request_id,))
 
-    def remember_response(
-        self,
-        command: DesktopCommand,
-        command_fingerprint: str,
-        response: DesktopResponse,
-    ) -> None:
-        """Durably record the exact response returned for a command."""
-        existing = self.entries.get(command.request_id)
-        if existing is not None and existing.command_fingerprint != command_fingerprint:
-            msg = f"Desktop request ID {command.request_id} was journaled with different command content."
+    def remember_response(self, command: DesktopCommand, command_fingerprint: str, response: DesktopResponse) -> None:
+        """Commit the immutable outcome and pending response together."""
+        if response.request_id != command.request_id or response.session_id != command.session_id:
+            msg = "Desktop response does not identify its command."
             raise DesktopCommandJournalError(msg)
-        self.entries[command.request_id] = DesktopCommandJournalEntry(
-            command_fingerprint=command_fingerprint,
-            response=response,
+        with self._database:
+            existing = self._require_same(command, command_fingerprint)
+            if existing is None:
+                self._make_room()
+                self._database.execute(
+                    "INSERT INTO commands(request_id,fingerprint,command,state) VALUES(?,?,?,'completed')",
+                    (command.request_id, command_fingerprint, _encode(command.to_content())),
+                )
+            elif existing.response is not None and _encode(existing.response.to_content()) != _encode(
+                response.to_content(),
+            ):
+                msg = "Desktop command already has a different outcome."
+                raise DesktopCommandJournalError(msg)
+            delivery_id = self._queue_response(response)
+            self._database.execute(
+                "UPDATE commands SET state='completed',delivery_id=? WHERE request_id=?",
+                (delivery_id, command.request_id),
+            )
+
+    def _queue_response(self, response: DesktopResponse) -> str:
+        encoded = _encode(response.to_content())
+        delivery_id = hashlib.sha256(encoded.encode()).hexdigest()
+        self._database.execute(
+            "INSERT INTO responses(delivery_id,response) VALUES(?,?) "
+            "ON CONFLICT(delivery_id) DO UPDATE SET delivered=0",
+            (delivery_id, encoded),
         )
-        self.entries.move_to_end(command.request_id)
-        self._prune()
-        self._persist()
+        return delivery_id
 
-    def _prune(self) -> None:
-        while len(self.entries) > _MAX_REPLAY_RESPONSES:
-            self.entries.popitem(last=False)
-        while len(self.sequence_high_watermarks) > _MAX_TRACKED_SESSIONS:
-            self.sequence_high_watermarks.popitem(last=False)
+    def queue_response(self, response: DesktopResponse) -> None:
+        """Queue a rejection or replay without altering the original command."""
+        with self._database:
+            delivery_id = hashlib.sha256(_encode(response.to_content()).encode()).hexdigest()
+            existing = self._database.execute(
+                "SELECT delivered FROM responses WHERE delivery_id=?",
+                (delivery_id,),
+            ).fetchone()
+            pending = self._database.execute("SELECT COUNT(*) FROM responses WHERE delivered=0").fetchone()[0]
+            if (existing is None or existing[0]) and pending >= self._max_entries:
+                msg = "Desktop response journal reached capacity; delivery must resume."
+                raise DesktopCommandJournalFullError(msg)
+            self._queue_response(response)
 
-    def _persist(self) -> None:
-        if self.path is None:
+    def pending_responses(self) -> list[tuple[str, DesktopResponse]]:
+        """Read pending outcomes even after their command deadlines."""
+        return [
+            (row[0], DesktopResponse.from_content(json.loads(row[1])))
+            for row in self._database.execute(
+                "SELECT delivery_id,response FROM responses WHERE delivered=0 ORDER BY rowid",
+            )
+        ]
+
+    def mark_delivered(self, delivery_id: str) -> None:
+        """Record successful transport while retaining the action receipt."""
+        with self._database:
+            self._database.execute("UPDATE responses SET delivered=1 WHERE delivery_id=?", (delivery_id,))
+            self._prune_delivered_responses()
+
+    def _prune_delivered_responses(self) -> None:
+        self._database.execute(
+            "DELETE FROM responses WHERE delivered=1 AND delivery_id NOT IN "
+            "(SELECT delivery_id FROM commands WHERE delivery_id IS NOT NULL)",
+        )
+
+    def _prune_sequences(self) -> None:
+        count = self._database.execute("SELECT COUNT(*) FROM sequences").fetchone()[0]
+        if count <= _MAX_SESSIONS:
             return
-        payload = {
-            "v": _JOURNAL_VERSION,
-            "entries": [
-                {
-                    "request_id": request_id,
-                    "command_fingerprint": entry.command_fingerprint,
-                    "response": entry.response.to_content() if entry.response is not None else None,
-                }
-                for request_id, entry in self.entries.items()
-            ],
-            "sequence_high_watermarks": [
-                {"session_id": session_id, "sequence": sequence}
-                for session_id, sequence in self.sequence_high_watermarks.items()
-            ],
-        }
-        write_json_file_durable(self.path, payload, indent=2, sort_keys=True, trailing_newline=True)
-        self.path.chmod(0o600)
+        self._database.execute(
+            "DELETE FROM sequences WHERE ordinal IN "
+            "(SELECT ordinal FROM sequences WHERE session_id NOT IN "
+            "(SELECT json_extract(c.command,'$.session_id') FROM commands c LEFT JOIN responses r USING(delivery_id) "
+            "WHERE c.command IS NOT NULL AND (c.state!='completed' OR r.delivered=0)) "
+            "ORDER BY ordinal LIMIT ?)",
+            (count - _MAX_SESSIONS,),
+        )
+        if self._database.execute("SELECT COUNT(*) FROM sequences").fetchone()[0] > _MAX_SESSIONS:
+            msg = "Desktop session journal reached capacity; pending work must finish."
+            raise DesktopCommandJournalFullError(msg)
 
-    def _load_payload(self, raw: object) -> None:
-        payload = self._string_keyed_object(raw)
-        if payload.get("v") != _JOURNAL_VERSION:
-            self._raise_malformed()
-        raw_entries = payload.get("entries")
-        raw_sequences = payload.get("sequence_high_watermarks")
-        if not isinstance(raw_entries, list) or not isinstance(raw_sequences, list):
-            self._raise_malformed()
-        if len(raw_entries) > _MAX_REPLAY_RESPONSES or len(raw_sequences) > _MAX_TRACKED_SESSIONS:
-            self._raise_malformed()
+    def _make_room(self) -> None:
+        count = self._database.execute("SELECT COUNT(*) FROM commands WHERE command IS NOT NULL").fetchone()[0]
+        if count < self._max_entries:
+            return
+        self._database.execute(
+            "DELETE FROM commands WHERE ordinal IN "
+            "(SELECT c.ordinal FROM commands c JOIN responses r USING(delivery_id) "
+            "WHERE c.command IS NOT NULL AND c.state='completed' AND r.delivered=1 ORDER BY c.ordinal LIMIT ?)",
+            (count - self._max_entries + 1,),
+        )
+        self._prune_delivered_responses()
+        if (
+            self._database.execute("SELECT COUNT(*) FROM commands WHERE command IS NOT NULL").fetchone()[0]
+            >= self._max_entries
+        ):
+            msg = "Desktop command journal reached capacity; pending work must finish."
+            raise DesktopCommandJournalFullError(msg)
 
-        self._load_entries(raw_entries)
-        self._load_sequences(raw_sequences)
+    def _import_legacy(self, path: Path) -> None:
+        if self._database.execute("SELECT 1 FROM metadata WHERE key='legacy_imported'").fetchone():
+            return
+        _require_private(path)
+        if not path.exists():
+            return
+        try:
+            entries, sequences = _legacy_records(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
+            msg = "Desktop legacy command journal is malformed."
+            raise DesktopCommandJournalError(msg) from exc
+        with self._database:
+            for request_id, fingerprint, response in entries:
+                existing = self.get(request_id)
+                if existing is not None:
+                    if existing.command_fingerprint != fingerprint:
+                        msg = "Desktop legacy receipt has a different command identity."
+                        raise DesktopCommandJournalError(msg)
+                    continue
+                delivery_id = self._queue_response(response) if response is not None else None
+                if delivery_id is not None:
+                    self._database.execute("UPDATE responses SET delivered=1 WHERE delivery_id=?", (delivery_id,))
+                self._database.execute(
+                    "INSERT INTO commands(request_id,fingerprint,state,delivery_id) VALUES(?,?,?,?)",
+                    (request_id, fingerprint, "completed" if response is not None else "started", delivery_id),
+                )
+            for session_id, sequence in sequences:
+                self._database.execute(
+                    "INSERT INTO sequences(session_id,sequence) VALUES(?,?) "
+                    "ON CONFLICT(session_id) DO UPDATE SET sequence=MAX(sequence,excluded.sequence)",
+                    (session_id, sequence),
+                )
+            self._prune_sequences()
+            self._database.execute("INSERT INTO metadata VALUES('legacy_imported','1')")
 
-    def _load_entries(self, raw_entries: Sequence[object]) -> None:
-        for raw_entry in raw_entries:
-            entry = self._string_keyed_object(raw_entry)
-            request_id = self._bounded_identifier(entry.get("request_id"))
-            fingerprint = entry.get("command_fingerprint")
-            if (
-                not isinstance(fingerprint, str)
-                or len(fingerprint) != 64
-                or any(character not in "0123456789abcdef" for character in fingerprint)
-                or request_id in self.entries
-            ):
-                self._raise_malformed()
-            response_raw = entry.get("response")
-            try:
-                response = DesktopResponse.from_content(response_raw) if response_raw is not None else None
-            except DesktopProtocolError as exc:
-                self._raise_malformed(exc)
-            if response is not None and response.request_id != request_id:
-                self._raise_malformed()
-            self.entries[request_id] = DesktopCommandJournalEntry(fingerprint, response)
 
-    def _load_sequences(self, raw_sequences: Sequence[object]) -> None:
-        for raw_sequence in raw_sequences:
-            sequence_record = self._string_keyed_object(raw_sequence)
-            session_id = self._bounded_identifier(sequence_record.get("session_id"))
-            sequence = sequence_record.get("sequence")
-            if (
-                isinstance(sequence, bool)
-                or not isinstance(sequence, int)
-                or sequence < 0
-                or session_id in self.sequence_high_watermarks
-            ):
-                self._raise_malformed()
-            self.sequence_high_watermarks[session_id] = sequence
+def _encode(value: dict[str, object]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
-    @staticmethod
-    def _string_keyed_object(value: object) -> dict[str, object]:
-        if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
-            DesktopCommandJournal._raise_malformed()
-        return cast("dict[str, object]", value)
 
-    @staticmethod
-    def _bounded_identifier(value: object) -> str:
-        if not isinstance(value, str) or not value or len(value) > 128:
-            DesktopCommandJournal._raise_malformed()
-        return value
+def _require_private(path: Path) -> None:
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return
+    if os.name != "nt" and stat.S_IMODE(mode) & 0o077:
+        msg = "Desktop command journal must not grant permissions to group or other users."
+        raise DesktopCommandJournalError(msg)
 
-    @staticmethod
-    def _raise_malformed(cause: Exception | None = None) -> NoReturn:
-        msg = "Desktop command journal has an unsupported or malformed payload."
-        if cause is None:
-            raise DesktopCommandJournalError(msg)
-        raise DesktopCommandJournalError(msg) from cause
+
+def _legacy_records(
+    payload: object,
+) -> tuple[list[tuple[str, str, DesktopResponse | None]], list[tuple[str, int]]]:
+    record = _legacy_mapping(payload)
+    if record.get("v") != 1:
+        msg = "Unsupported legacy journal."
+        raise ValueError(msg)
+    raw_entries, raw_sequences = record.get("entries"), record.get("sequence_high_watermarks")
+    if not isinstance(raw_entries, list) or not isinstance(raw_sequences, list):
+        msg = "Malformed legacy records."
+        raise TypeError(msg)
+    if len(raw_entries) > _MAX_ENTRIES or len(raw_sequences) > _MAX_SESSIONS:
+        msg = "Legacy journal exceeds bounds."
+        raise ValueError(msg)
+    return _legacy_entries(raw_entries), _legacy_sequences(raw_sequences)
+
+
+def _legacy_entries(raw_entries: Sequence[object]) -> list[tuple[str, str, DesktopResponse | None]]:
+    entries: list[tuple[str, str, DesktopResponse | None]] = []
+    request_ids: set[str] = set()
+    for raw in raw_entries:
+        entry = _legacy_mapping(raw)
+        request_id = _legacy_identifier(entry.get("request_id"))
+        fingerprint = entry.get("command_fingerprint")
+        if request_id in request_ids or not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            msg = "Malformed legacy identity."
+            raise ValueError(msg)
+        if any(character not in "0123456789abcdef" for character in fingerprint):
+            msg = "Malformed legacy fingerprint."
+            raise ValueError(msg)
+        response = DesktopResponse.from_content(entry["response"]) if entry.get("response") is not None else None
+        if response is not None and response.request_id != request_id:
+            msg = "Legacy response identifies a different request."
+            raise ValueError(msg)
+        entries.append((request_id, fingerprint, response))
+        request_ids.add(request_id)
+    return entries
+
+
+def _legacy_sequences(raw_sequences: Sequence[object]) -> list[tuple[str, int]]:
+    sequences: list[tuple[str, int]] = []
+    session_ids: set[str] = set()
+    for raw in raw_sequences:
+        entry = _legacy_mapping(raw)
+        session_id = _legacy_identifier(entry.get("session_id"))
+        sequence = entry.get("sequence")
+        if type(sequence) is not int or sequence < 0 or session_id in session_ids:
+            msg = "Malformed legacy sequence."
+            raise ValueError(msg)
+        sequences.append((session_id, sequence))
+        session_ids.add(session_id)
+    return sequences
+
+
+def _legacy_mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        msg = "Malformed legacy record."
+        raise TypeError(msg)
+    return cast("dict[str, object]", value)
+
+
+def _legacy_identifier(value: object) -> str:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        msg = "Malformed legacy identifier."
+        raise ValueError(msg)
+    return value
 
 
 __all__ = [
     "DesktopCommandJournal",
     "DesktopCommandJournalEntry",
     "DesktopCommandJournalError",
+    "DesktopCommandJournalFullError",
+    "check_controller_binding",
 ]

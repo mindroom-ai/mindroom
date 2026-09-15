@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from collections import UserList
+from collections import OrderedDict, UserList
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -68,6 +69,8 @@ class FakeMacServices:
 
     kAXErrorSuccess = 0
     kAXFocusedWindowAttribute = "focused_window"
+    kAXFocusedAttribute = "focused"
+    kAXFocusedUIElementAttribute = "focused_element"
     kAXWindowsAttribute = "windows"
     kAXMinimizedAttribute = "minimized"
     kAXPositionAttribute = "position"
@@ -87,6 +90,7 @@ class FakeMacServices:
 
     def __init__(self) -> None:
         self.window = "window-1"
+        self.focused_element = None
         self.collection_count = 0
         self.collection_hook: Callable[[int], None] | None = None
         self.attributes: dict[object, dict[str, object]] = {
@@ -145,6 +149,8 @@ class FakeMacServices:
                 return 0, self.window
             if attribute == self.kAXWindowsAttribute:
                 return 0, UserList([self.window])
+            if attribute == self.kAXFocusedUIElementAttribute:
+                return 0, self.focused_element
         value = self.attributes.get(reference, {}).get(attribute)
         return (0, value) if value is not None else (1, None)
 
@@ -162,7 +168,7 @@ class FakeMacServices:
         _unused: object,
     ) -> tuple[int, bool]:
         settable = self.attributes.get(reference, {}).get("settable") is True
-        return 0, settable and attribute == self.kAXValueAttribute
+        return 0, settable and attribute in {self.kAXValueAttribute, self.kAXFocusedAttribute}
 
     def AXUIElementPerformAction(self, reference: object, action: str) -> int:
         self.performed_actions.append((reference, action))
@@ -171,6 +177,8 @@ class FakeMacServices:
     def AXUIElementSetAttributeValue(self, reference: object, attribute: str, value: object) -> int:
         if self.apply_value_updates:
             self.attributes[reference][attribute] = value
+            if attribute == self.kAXFocusedAttribute and value is True:
+                self.focused_element = reference
         return 0
 
 
@@ -183,7 +191,7 @@ def _fake_mac_backend() -> tuple[MacAccessibilityBackend, FakeMacServices, FakeW
     backend._screen_size = lambda: (1920, 1080)
     backend._services = services
     backend._workspace = workspace
-    backend._states = {}
+    backend._states = OrderedDict()
     return backend, services, workspace
 
 
@@ -211,7 +219,13 @@ def test_accessibility_state_serializes_bounded_semantic_fields() -> None:
         False,
     )
 
-    assert state.to_result() == {
+    result = state.to_result()
+    element_ref = result["elements"][0].pop("ref")
+    assert isinstance(element_ref, str)
+    assert element_ref
+    assert element_ref == state.to_result()["elements"][0]["ref"]
+    assert element_ref != replace(state, state_id="state-2").to_result()["elements"][0]["ref"]
+    assert result == {
         "state_id": "state-1",
         "app": {"id": "com.example.Editor", "name": "Editor"},
         "window": {"x": 0, "y": 0, "width": 800, "height": 600},
@@ -229,6 +243,7 @@ def test_accessibility_state_serializes_bounded_semantic_fields() -> None:
             },
         ],
         "truncated": False,
+        "stability": "stable",
     }
 
 
@@ -293,6 +308,7 @@ def test_mac_truncated_state_skips_costly_stabilization() -> None:
     state = backend.get_app_state("com.example.Editor")
 
     assert state.truncated
+    assert state.to_result()["stability"] == "truncated"
     assert len(state.elements) == 128
     assert services.collection_count == 1
     target = next(element for element in state.elements if element.name == "button-0")
@@ -552,6 +568,180 @@ def test_mac_state_pins_exact_process_and_window(replacement: str) -> None:
         backend.prepare_capture(state.app_id, state.state_id)
 
 
+@pytest.mark.parametrize("operation", ["click", "capture", "fallback"])
+def test_mac_retains_interleaved_observations(operation: str) -> None:
+    """A second read cannot revoke an unchanged first observation."""
+    backend, services, _ = _fake_mac_backend()
+    first = backend.get_app_state("com.example.Editor")
+    backend.get_app_state(first.app_id)
+
+    if operation == "click":
+        backend.click_element(first.app_id, first.state_id, 1)
+        assert services.performed_actions == [("button", "AXPress")]
+    elif operation == "capture":
+        assert backend.prepare_capture(first.app_id, first.state_id).process_id == 42
+    else:
+        assert backend.prepare_fallback(first.app_id, first.state_id).state_id == first.state_id
+
+
+@pytest.mark.parametrize("operation", ["click", "capture", "fallback"])
+def test_mac_retained_observation_expires(monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
+    """Every action path rejects observations after the monotonic lifetime."""
+    backend, services, _ = _fake_mac_backend()
+    clock = [10.0]
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.monotonic", lambda: clock[0])
+    state = backend.get_app_state("com.example.Editor")
+    clock[0] = 130.0
+
+    if operation == "click":
+        with pytest.raises(AccessibilityError, match="stale"):
+            backend.click_element(state.app_id, state.state_id, 1)
+    elif operation == "capture":
+        with pytest.raises(AccessibilityError, match="stale"):
+            backend.prepare_capture(state.app_id, state.state_id)
+    else:
+        with pytest.raises(AccessibilityError, match="stale"):
+            backend.prepare_fallback(state.app_id, state.state_id)
+    assert services.performed_actions == []
+
+
+def test_mac_retained_observations_evict_oldest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cache pressure revokes the oldest snapshot while preserving newer ones."""
+    backend, services, _ = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    first = backend.get_app_state("com.example.Editor")
+    second = backend.get_app_state(first.app_id)
+    for _ in range(127):
+        backend.get_app_state(first.app_id)
+
+    with pytest.raises(AccessibilityError, match="stale"):
+        backend.click_element(first.app_id, first.state_id, 1)
+    backend.click_element(second.app_id, second.state_id, 1)
+    assert services.performed_actions == [("button", "AXPress")]
+
+
+@pytest.mark.parametrize("role", ["AXStaticText", "AXProgressIndicator"])
+def test_mac_passive_updates_allow_observation_and_fallback(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    """Continuously changing passive text must not starve observations or pixel input."""
+    backend, services, _ = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    services.attributes["window-1"]["children"] = UserList(["button", "status"])
+    services.attributes["status"] = {"role": role}
+
+    def update_status(count: int) -> None:
+        services.attributes["status"].update(title=f"Progress {count}", value=count)
+
+    services.collection_hook = update_status
+    state = backend.get_app_state("com.example.Editor")
+
+    assert state.to_result()["stability"] == "stable"
+    assert backend.prepare_fallback(state.app_id, state.state_id).state_id == state.state_id
+
+
+def test_mac_unstable_observation_rejects_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A changing actionable label remains readable but cannot authorize pixel input."""
+    backend, services, _ = _fake_mac_backend()
+    monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
+    services.collection_hook = lambda count: services.attributes["button"].update(title=f"Save {count}")
+
+    state = backend.get_app_state("com.example.Editor")
+
+    assert state.to_result()["stability"] == "unstable"
+    services.collection_hook = None
+    with pytest.raises(AccessibilityError, match="stable"):
+        backend.prepare_fallback(state.app_id, state.state_id)
+
+
+@pytest.mark.parametrize("during_activation", [False, True])
+def test_mac_semantic_action_rejects_replaced_target(during_activation: bool) -> None:
+    """Identical visible fields cannot authorize a different OS element."""
+    backend, services, workspace = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+
+    def replace_target() -> None:
+        services.attributes["replacement"] = dict(services.attributes["button"])
+        services.actions["replacement"] = services.actions["button"]
+        services.attributes["window-1"]["children"] = UserList(["replacement", "password"])
+
+    if during_activation:
+        workspace.applications[0].activation_hook = replace_target
+    else:
+        replace_target()
+    with pytest.raises(AccessibilityError, match="target element changed"):
+        backend.click_element(state.app_id, state.state_id, 1)
+    assert services.performed_actions == []
+
+
+@pytest.mark.parametrize("operation", ["click", "value", "element"])
+@pytest.mark.parametrize("during_activation", [False, True])
+def test_mac_semantic_target_survives_unrelated_insertion(operation: str, during_activation: bool) -> None:
+    """Index remapping must still select the original OS target on both activation checks."""
+    backend, services, workspace = _fake_mac_backend()
+    services.attributes["button"].update(settable=True)
+    state = backend.get_app_state("com.example.Editor")
+
+    def insert_status() -> None:
+        services.attributes["status"] = {"role": "AXStaticText", "title": "Synced"}
+        services.attributes["window-1"]["children"] = UserList(["status", "button", "password"])
+
+    if during_activation:
+        workspace.applications[0].activation_hook = insert_status
+    else:
+        insert_status()
+    if operation == "click":
+        backend.click_element(state.app_id, state.state_id, 1)
+        assert services.performed_actions == [("button", "AXPress")]
+    elif operation == "value":
+        backend.set_value(state.app_id, state.state_id, 1, "published")
+        assert services.attributes["button"]["value"] == "published"
+    else:
+        assert backend.element_for_action(state.app_id, state.state_id, 1).name == "Save"
+
+
+@pytest.mark.parametrize("change", ["title", "value", "geometry", "parent"])
+@pytest.mark.parametrize("during_activation", [False, True])
+def test_mac_semantic_target_rejects_changed_identity_fields(change: str, during_activation: bool) -> None:
+    """Clipped text and omitted wrappers must not hide a change to the exact target."""
+    backend, services, workspace = _fake_mac_backend()
+    services.attributes["button"].update(title="x" * 160 + "old", value="y" * 160 + "old")
+    services.attributes["window-1"]["children"] = UserList(["wrapper"])
+    services.attributes["wrapper"] = {"role": "AXGroup", "children": UserList(["button"])}
+    state = backend.get_app_state("com.example.Editor")
+
+    def change_target() -> None:
+        if change == "title":
+            services.attributes["button"]["title"] = "x" * 160 + "new"
+        elif change == "value":
+            services.attributes["button"]["value"] = "y" * 160 + "new"
+        elif change == "geometry":
+            services.attributes["window-1"]["position"] = SimpleNamespace(x=20, y=30)
+        else:
+            services.attributes["replacement-wrapper"] = dict(services.attributes["wrapper"])
+            services.attributes["window-1"]["children"] = UserList(["replacement-wrapper"])
+
+    if during_activation:
+        workspace.applications[0].activation_hook = change_target
+    else:
+        change_target()
+    with pytest.raises(AccessibilityError, match="target element changed"):
+        backend.click_element(state.app_id, state.state_id, 1)
+    assert services.performed_actions == []
+
+
+def test_mac_launch_invalidates_all_retained_app_observations() -> None:
+    """Launching or foregrounding an app revokes every snapshot for that app."""
+    backend, services, _ = _fake_mac_backend()
+    first = backend.get_app_state("com.example.Editor")
+    second = backend.get_app_state(first.app_id)
+
+    backend.launch_app(first.app_id)
+
+    for state in (first, second):
+        with pytest.raises(AccessibilityError, match="stale"):
+            backend.click_element(state.app_id, state.state_id, 1)
+    assert services.performed_actions == []
+
+
 def test_screenshot_only_backend_requires_explicit_primary_screen_allowlist() -> None:
     """Portable pixel mode cannot pretend to provide semantic access to an arbitrary app."""
     backend = ScreenshotOnlyAccessibilityBackend(
@@ -609,3 +799,80 @@ def test_screenshot_only_backend_rejects_semantic_actions() -> None:
 
     with pytest.raises(AccessibilityError, match="unavailable"):
         backend.click_element(PRIMARY_SCREEN_APP_ID, state.state_id, 0)
+
+
+def test_element_typing_guard_tracks_exact_focus_after_each_chunk() -> None:
+    """Typing can continue after its own value edit, but never after focus moves."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["button"].update(role="AXTextField", settable=True)
+    state = backend.get_app_state("com.example.Editor")
+    guard = backend.prepare_typing(state.app_id, state.state_id, 1)
+    assert services.focused_element == "button"
+    services.attributes["button"]["value"] = "typed chunk"
+    guard()
+    services.focused_element = "password"
+    with pytest.raises(AccessibilityActionOutcomeUnknownError, match="focus"):
+        guard()
+
+
+def test_element_typing_rejects_secure_target_before_focus() -> None:
+    """Secure field input is denied before focus or keyboard emission."""
+    backend, services, _ = _fake_mac_backend()
+    state = backend.get_app_state("com.example.Editor")
+    with pytest.raises(AccessibilityError, match="Secure"):
+        backend.prepare_typing(state.app_id, state.state_id, 2)
+    assert services.focused_element is None
+
+
+def test_element_typing_revalidates_target_after_focus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An AX focus operation cannot replace the originally selected field."""
+    backend, services, _ = _fake_mac_backend()
+    services.attributes["button"].update(role="AXTextField", settable=True)
+    state = backend.get_app_state("com.example.Editor")
+    original = services.AXUIElementSetAttributeValue
+
+    def focus_replaces_target(reference: object, attribute: str, value: object) -> int:
+        result = original(reference, attribute, value)
+        services.attributes["replacement"] = dict(services.attributes["button"])
+        services.attributes["window-1"]["children"] = ["replacement", "password"]
+        return result
+
+    monkeypatch.setattr(services, "AXUIElementSetAttributeValue", focus_replaces_target)
+    with pytest.raises(AccessibilityActionOutcomeUnknownError):
+        backend.prepare_typing(state.app_id, state.state_id, 1)
+
+
+@pytest.mark.parametrize("during_activation", [False, True])
+@pytest.mark.parametrize("change", ["identifier", "title", "value", "reference", "ancestor", "actions"])
+def test_fallback_rejects_hidden_actionable_identity_changes(change: str, during_activation: bool) -> None:
+    """Coordinate/key fallback must reject target changes hidden by the public tree."""
+    backend, services, workspace = _fake_mac_backend()
+    services.attributes["button"].update(identifier="record-A", title="x" * 160 + "old", value="y" * 160 + "old")
+    services.attributes["wrapper"] = {"role": "AXGroup", "children": ["button"]}
+    services.attributes["window-1"]["children"] = ["wrapper"]
+    services.actions["button"] = [*(f"AXAction{index}" for index in range(8)), "AXZOld"]
+    state = backend.get_app_state("com.example.Editor")
+
+    def change_identity() -> None:
+        if change == "identifier":
+            services.attributes["button"]["identifier"] = "record-B"
+        elif change == "title":
+            services.attributes["button"]["title"] = "x" * 160 + "new"
+        elif change == "value":
+            services.attributes["button"]["value"] = "y" * 160 + "new"
+        elif change == "reference":
+            services.attributes["replacement"] = dict(services.attributes["button"])
+            services.actions["replacement"] = services.actions["button"]
+            services.attributes["wrapper"]["children"] = ["replacement"]
+        elif change == "ancestor":
+            services.attributes["replacement-wrapper"] = dict(services.attributes["wrapper"])
+            services.attributes["window-1"]["children"] = ["replacement-wrapper"]
+        else:
+            services.actions["button"][-1] = "AXZNew"
+
+    if during_activation:
+        workspace.applications[0].activation_hook = change_identity
+    else:
+        change_identity()
+    with pytest.raises(AccessibilityError, match="state changed"):
+        backend.prepare_fallback(state.app_id, state.state_id)

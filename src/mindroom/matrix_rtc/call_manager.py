@@ -20,6 +20,7 @@ from weakref import WeakValueDictionary
 import aiohttp
 import httpx
 import nio
+from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.config.voice import normalize_speech_base_url
@@ -28,7 +29,7 @@ from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix_rtc.call_session import (
     CallJoinError,
     CallSession,
@@ -118,6 +119,12 @@ _LIVE_VOICE_INSTRUCTIONS = (
     "it executes the tool workflows described above. Relay its answer conversationally. Never claim to have "
     "checked information or completed work until the agent returns the result."
 )
+
+
+@dataclass(frozen=True)
+class _PendingFrameKey:
+    received: ReceivedFrameKey
+    event: AuthenticatedToDeviceEvent
 
 
 _JoinResult = Literal["joined", "retry", "skip"]
@@ -246,7 +253,7 @@ class CallManager:
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
         self._starting_calls: dict[str, _StartingCall] = {}
-        self._pending_keys: dict[str, dict[tuple[str, str, int], ReceivedFrameKey]] = {}
+        self._pending_keys: dict[str, dict[tuple[str, str, int], _PendingFrameKey]] = {}
         self._observed_rooms: dict[str, nio.MatrixRoom] = {}
         self._departed_rooms: set[str] = set()
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -339,7 +346,7 @@ class CallManager:
             logger.warning(
                 "call_frame_key_rejected",
                 sender=event.sender,
-                authenticated_device_id=event.authenticated_device_id,
+                authenticated_device_id=event.authenticated_sender.device_id,
                 reason="invalid_matrixrtc_payload",
             )
             return
@@ -381,7 +388,7 @@ class CallManager:
         session = self._sessions.get(room_id)
         if session is not None and session.on_key_received(received):
             return
-        self._queue_pending_key(room_id, received)
+        self._queue_pending_key(room_id, received, event)
         room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
         if room is not None:
             await self._reconcile(room)
@@ -634,30 +641,35 @@ class CallManager:
             )
         )
 
-    def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey) -> None:
+    def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey, event: AuthenticatedToDeviceEvent) -> None:
         """Retain a bounded, deduplicated key set while a session is starting."""
         pending = self._pending_keys.setdefault(room_id, {})
         cutoff = received.received_at_ms - _PENDING_KEY_TTL_MS
         for identity, queued in list(pending.items()):
-            if queued.received_at_ms < cutoff:
+            if queued.received.received_at_ms < cutoff:
                 pending.pop(identity)
         identity = (received.user_id, received.claimed_device_id, received.key_index)
         pending.pop(identity, None)
         if len(pending) >= _MAX_PENDING_KEYS_PER_ROOM:
             pending.pop(next(iter(pending)))
-        pending[identity] = received
+        pending[identity] = _PendingFrameKey(received, event)
 
     def _replay_pending_keys(self, room_id: str, session: CallSession) -> None:
         """Replay bounded keys after the session receives an authoritative roster."""
         pending = self._pending_keys.get(room_id, {})
         if not pending:
             return
-        retained: dict[tuple[str, str, int], ReceivedFrameKey] = {}
+        retained: dict[tuple[str, str, int], _PendingFrameKey] = {}
         cutoff = self._clock_ms() - _PENDING_KEY_TTL_MS
-        for identity, received in pending.items():
-            if received.received_at_ms < cutoff or session.on_key_received(received):
+        for identity, queued in pending.items():
+            received = queued.received
+            if (
+                received.received_at_ms < cutoff
+                or not authenticated_sender_is_current(self._client, queued.event)
+                or session.on_key_received(received)
+            ):
                 continue
-            retained[identity] = received
+            retained[identity] = queued
             logger.warning(
                 "call_frame_key_waiting_for_membership",
                 room_id=room_id,

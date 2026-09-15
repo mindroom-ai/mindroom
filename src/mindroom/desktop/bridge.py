@@ -6,15 +6,17 @@ import asyncio
 import hashlib
 import json
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, cast
 
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityError,
 )
 from mindroom.desktop.command_journal import DesktopCommandJournal
+from mindroom.desktop.input import normalize_key_chord
 from mindroom.desktop.media import DesktopMediaError, upload_encrypted_screenshot
+from mindroom.desktop.observations import DesktopObservations
 from mindroom.desktop.playwright_mcp import (
     BrowserImage,
     BrowserProvider,
@@ -28,11 +30,12 @@ from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
     DESKTOP_CONTROL_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
-    DESKTOP_SAFE_KEYS,
     DesktopCommand,
+    DesktopObservationMode,
     DesktopProtocolError,
     DesktopResponse,
     EncryptedDesktopMedia,
+    desktop_observation_mode,
     event_content,
 )
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
@@ -41,6 +44,7 @@ from mindroom.matrix.olm_to_device import (
     OlmToDeviceError,
     PinnedMatrixDevice,
     authenticated_sender_matches,
+    resolve_pinned_device,
     send_encrypted_to_device,
 )
 
@@ -49,14 +53,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
-
-    from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+    from nio import AuthenticatedToDeviceEvent
 
 logger = get_logger(__name__)
 
 _MAX_FUTURE_SKEW_MS = 30_000
 _MAX_PARAMETER_TEXT_LENGTH = 2_000
 _MAX_PARAMETER_IDENTIFIER_LENGTH = 256
+
+
+class _DesktopBridgeStoppedError(RuntimeError):
+    """Admission is fenced while the local bridge is stopping."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,15 +130,35 @@ class DesktopBridge:
     clock: Callable[[], float] = time.time
     monotonic_clock: Callable[[], float] = time.monotonic
     journal_path: Path | None = None
+    legacy_journal_path: Path | None = None
     _journal: DesktopCommandJournal = field(init=False)
+    _observations: DesktopObservations = field(init=False)
     _in_flight: set[str] = field(default_factory=set, init=False)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _work_available: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _response_available: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _capacity_available: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _stopped: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _accepting: bool = field(default=True, init=False)
+    _active_action: str | None = field(default=None, init=False)
     _control_revoked: bool = field(default=False, init=False)
     _control_lease_deadline: float | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Convert the wall-clock lease label into a rollback-safe local deadline."""
-        self._journal = DesktopCommandJournal.load(self.journal_path)
+        self._observations = DesktopObservations(clock=self.monotonic_clock)
+        self._journal = DesktopCommandJournal.load(
+            self.journal_path,
+            controller_key=json.dumps(
+                [
+                    self.policy.controller.user_id,
+                    self.policy.controller.device_id,
+                    self.policy.controller.ed25519,
+                ],
+            ),
+            legacy_path=self.legacy_journal_path,
+        )
         if self.policy.browser_enabled != (self.browser_provider is not None):
             msg = "Desktop browser policy and local browser provider must be enabled together."
             raise ValueError(msg)
@@ -141,87 +168,277 @@ class DesktopBridge:
         self._control_lease_deadline = self.monotonic_clock() + remaining_seconds
 
     async def on_to_device_event(self, event: AuthenticatedToDeviceEvent) -> None:
-        """Handle one authenticated custom to-device event without trusting its payload."""
+        """Persist authenticated admission before the durable sync consumer acknowledges."""
+        if not self._accepting:
+            raise _DesktopBridgeStoppedError
         if event.type != DESKTOP_COMMAND_EVENT_TYPE:
             return
         if not authenticated_sender_matches(self.client, event, self.policy.controller):
-            logger.warning(
-                "desktop_command_sender_rejected",
-                sender=event.sender,
-                device_id=event.authenticated_device_id,
-            )
+            logger.warning("desktop_command_sender_rejected", sender=event.sender)
             return
         try:
             command = DesktopCommand.from_content(event_content(event.source))
         except DesktopProtocolError as exc:
             logger.warning("desktop_command_malformed", reason=str(exc))
             return
+        fingerprint = _command_fingerprint(command)
+        if self._replay_cached(command, fingerprint):
+            return
+        error = self._policy_error(command) or self._journal.sequence_error(command)
+        if error is not None:
+            self._queue_response(self._error_response(command, error))
+            return
+        if command.action == "request_status":
+            self._queue_response(self._request_status_response(command))
+            return
+        self._journal.admit(command, fingerprint)
+        self._work_available.set()
 
-        command_fingerprint = _command_fingerprint(command)
+    def _replay_cached(self, command: DesktopCommand, fingerprint: str) -> bool:
         cached = self._journal.get(command.request_id)
-        if cached is not None:
-            if cached.command_fingerprint != command_fingerprint:
-                logger.warning(
-                    "desktop_command_request_id_reused",
-                    request_id=command.request_id,
-                    action=command.action,
-                    requester_id=command.requester_id,
-                    agent_name=command.agent_name,
-                )
-                await self._send_response(
-                    self._error_response(command, "Desktop request ID was reused with different command content."),
-                )
-                return
-            response = cached.response
-            if response is None:
-                response = self._interrupted_response(command)
-                self._journal.remember_response(command, command_fingerprint, response)
-            logger.info(
-                "desktop_command_replayed",
-                request_id=command.request_id,
-                action=command.action,
-                requester_id=command.requester_id,
-                agent_name=command.agent_name,
-                ok=response.ok,
+        if cached is None:
+            return False
+        if cached.command_fingerprint != fingerprint:
+            self._queue_response(
+                self._error_response(command, "Desktop request ID was reused with different command content."),
             )
-            await self._send_response(response)
-            return
-        if command.request_id in self._in_flight:
-            return
+        elif cached.response is not None:
+            self._queue_response(cached.response)
+        elif cached.state == "started" and command.request_id not in self._in_flight:
+            self._journal.remember_response(command, fingerprint, self._interrupted_response(command))
+            self._response_available.set()
+        return True
 
-        self._in_flight.add(command.request_id)
+    def _request_status_response(self, command: DesktopCommand) -> DesktopResponse:
         try:
-            async with self._execution_lock:
-                response = await self._process(command, command_fingerprint)
-            self._journal.remember_response(command, command_fingerprint, response)
-            logger.info(
-                "desktop_command_completed",
-                request_id=command.request_id,
-                action=command.action,
-                requester_id=command.requester_id,
-                agent_name=command.agent_name,
-                ok=response.ok,
-                partial=bool(response.result.get("warning")),
-            )
-            await self._send_response(response)
-        finally:
-            self._in_flight.discard(command.request_id)
+            return self._success_response(command, result=self._request_status(command))
+        except DesktopProtocolError as exc:
+            return self._error_response(command, str(exc))
 
-    async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:  # noqa: PLR0911
+    def _request_status(self, command: DesktopCommand) -> dict[str, object]:
+        """Read a caller's retained receipt without waiting for the action executor."""
+        _reject_unexpected_parameters(command.parameters, allowed=frozenset({"request_id"}))
+        request_id = _required_str_parameter(command.parameters, "request_id")
+        entry = self._journal.get(request_id)
+        result: dict[str, object] = {"request_id": request_id, "state": "not_found"}
+        if (
+            entry is None
+            or entry.command is None
+            or entry.command.requester_id != command.requester_id
+            or entry.command.agent_name != command.agent_name
+            or entry.command.action == "request_status"
+        ):
+            return result
+        if entry.state == "started":
+            result["state"] = "running" if request_id in self._in_flight else "unknown"
+        else:
+            result["state"] = entry.state
+        if entry.response is not None:
+            result["response"] = entry.response.to_content()
+            if entry.response.result.get("action_outcome") == "unknown":
+                result["state"] = "unknown"
+        return result
+
+    def _queue_response(self, response: DesktopResponse) -> None:
+        self._journal.queue_response(response)
+        self._response_available.set()
+
+    def recover_interrupted(self) -> None:
+        """Record uncertain outcomes for started work without an active executor."""
+        for entry in self._journal.started():
+            command = entry.command
+            if command is not None and command.request_id not in self._in_flight:
+                self._journal.remember_response(
+                    command,
+                    entry.command_fingerprint,
+                    self._interrupted_response(command),
+                )
+                self._response_available.set()
+
+    async def execute_pending(self) -> None:
+        """Execute admitted work serially while Matrix polling remains independent."""
+        if self._execution_lock.locked():
+            return
+        async with self._execution_lock:
+            for entry in self._journal.queued():
+                if not self._accepting:
+                    break
+                command = entry.command
+                assert command is not None
+                self._in_flight.add(command.request_id)
+                self._active_action = command.action
+                started_at = self.monotonic_clock()
+                try:
+                    response = await self._process(command, entry.command_fingerprint)
+                    response = replace(
+                        response,
+                        result={
+                            **response.result,
+                            "metrics": {
+                                "elapsed_ms": max(0, round((self.monotonic_clock() - started_at) * 1000)),
+                                "structured_bytes": len(json.dumps(response.result, ensure_ascii=False).encode()),
+                                "screenshot_bytes": response.screenshot.size if response.screenshot is not None else 0,
+                            },
+                        },
+                    )
+                    self._journal.remember_response(command, entry.command_fingerprint, response)
+                    self._response_available.set()
+                    logger.info(
+                        "desktop_command_completed",
+                        request_id=command.request_id,
+                        action=command.action,
+                        ok=response.ok,
+                    )
+                finally:
+                    self._in_flight.discard(command.request_id)
+                    self._active_action = None
+
+    async def deliver_pending(self) -> bool:
+        """Retry exact recorded results without running desktop work again."""
+        progressed = False
+        async with self._delivery_lock:
+            for delivery_id, response in self._journal.pending_responses():
+                if not await self._send_response(response):
+                    break
+                self._journal.mark_delivered(delivery_id)
+                self._capacity_available.set()
+                progressed = True
+        return progressed
+
+    async def wait_for_capacity(self) -> None:
+        """Wait until response delivery frees admission capacity."""
+        await self._capacity_available.wait()
+        self._capacity_available.clear()
+
+    async def run(self) -> None:
+        """Run independent action and response workers until locally stopped."""
+        self.recover_interrupted()
+        self._work_available.set()
+        self._response_available.set()
+        async with asyncio.TaskGroup() as group:
+            executor = group.create_task(self._execute_loop(), name="desktop_executor")
+            sender = group.create_task(self._deliver_loop(), name="desktop_responses")
+            await self._stopped.wait()
+            executor.cancel()
+            sender.cancel()
+
+    async def _execute_loop(self) -> None:
+        while True:
+            await self._work_available.wait()
+            self._work_available.clear()
+            await self.execute_pending()
+
+    async def _deliver_loop(self) -> None:
+        while True:
+            await self._response_available.wait()
+            self._response_available.clear()
+            await self.deliver_pending()
+            if self._journal.pending_responses():
+                await asyncio.sleep(1)
+                self._response_available.set()
+
+    def local_status(self) -> dict[str, object]:
+        """Report local authority without exposing command arguments or secrets."""
+        remaining = 0.0
+        if self._control_available() and self._control_lease_deadline is not None:
+            remaining = max(0.0, self._control_lease_deadline - self.monotonic_clock())
+        return {
+            **self._bridge_status(),
+            "mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
+            "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
+            "lease_remaining_seconds": remaining,
+            "active_action": self._active_action,
+        }
+
+    def grant_local_control(self, duration_seconds: int) -> dict[str, object]:
+        """Grant control only through the local helper's private management channel."""
+        if type(duration_seconds) is not int or not 60 <= duration_seconds <= 3600:
+            msg = "Local control duration must be between 60 and 3600 seconds."
+            raise ValueError(msg)
+        if not self._accepting or self._control_revoked:
+            msg = "Restart or reset the stopped bridge before granting control."
+            raise ValueError(msg)
+        self.provider.check_emergency_stop()
+        self.policy = replace(
+            self.policy,
+            allow_control=True,
+            control_lease_expires_at_ms=round((self.clock() + duration_seconds) * 1000),
+        )
+        self._control_lease_deadline = self.monotonic_clock() + duration_seconds
+        return self.local_status()
+
+    def revoke_local_control(self) -> dict[str, object]:
+        """Revoke new input immediately without repeating or interrupting active actions."""
+        self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
+        self._control_lease_deadline = None
+        return self.local_status()
+
+    def reset_local_emergency_stop(self) -> dict[str, object]:
+        """Clear a local emergency latch only while idle and away from the fail-safe."""
+        if self._in_flight:
+            msg = "Wait for the active desktop action before resetting emergency stop."
+            raise ValueError(msg)
+        self.provider.check_emergency_stop()
+        self.revoke_local_control()
+        self._control_revoked = False
+        return self.local_status()
+
+    async def stop(self) -> None:
+        """Fence admission and drain only the currently executing action."""
+        self._accepting = False
+        self.revoke_local_control()
+        async with self._execution_lock:
+            self._stopped.set()
+
+    def close(self) -> None:
+        """Close durable command storage after workers have stopped."""
+        self._journal.close()
+
+    async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:
         policy_error = self._policy_error(command)
         if policy_error is not None:
             return self._error_response(command, policy_error)
-        sequence_error = self._journal.sequence_error(command)
-        if sequence_error is not None:
-            return self._error_response(command, sequence_error)
+        try:
+            await resolve_pinned_device(self.client, self.policy.controller)
+        except OlmToDeviceError as exc:
+            return self._error_response(command, str(exc))
+        policy_error = self._policy_error(command)
+        if policy_error is not None:
+            return self._error_response(command, policy_error)
+        try:
+            mode = desktop_observation_mode(command.action, command.parameters.get("observation", "both"))
+            resolved = self._observations.resolve(command) if "state_id" in command.parameters else command
+        except DesktopProtocolError as exc:
+            return self._error_response(command, str(exc))
         self._journal.remember_started(command, command_fingerprint)
-        execution = await self._execute_safely(command)
+        execution_command = replace(
+            resolved,
+            parameters={key: value for key, value in resolved.parameters.items() if key != "observation"},
+        )
+        execution = await self._execute_safely(execution_command)
+        return await self._execution_response(command, execution, mode)
+
+    async def _execution_response(
+        self,
+        command: DesktopCommand,
+        execution: _Execution | DesktopResponse,
+        mode: DesktopObservationMode,
+    ) -> DesktopResponse:
+        """Collect the requested fresh observation after an action."""
         if isinstance(execution, DesktopResponse):
             return execution
         if execution.follow_up_app is not None:
             execution = await self._attach_follow_up_state(command, execution)
             if isinstance(execution, DesktopResponse):
                 return execution
+        if command.action in DESKTOP_APP_ACTIONS:
+            result = {**execution.result, "observation": {"mode": mode}}
+            state_result = result.get("state")
+            if mode == "screenshot" and isinstance(state_result, dict):
+                result["state"] = {key: value for key, value in state_result.items() if key != "elements"}
+            execution = replace(execution, result=result)
+            if mode == "tree":
+                return self._success_response(command, result=execution.result)
         if execution.browser_image is not None:
             return await self._browser_image_response(command, execution)
         if execution.capture_app is None or execution.capture_state_id is None:
@@ -284,6 +501,7 @@ class DesktopBridge:
             return execution
         try:
             state = await asyncio.to_thread(self.provider.get_app_state, app_id)
+            self._observations.remember(state, command)
         except Exception:
             logger.exception(
                 "desktop_control_follow_up_state_failed",
@@ -341,6 +559,7 @@ class DesktopBridge:
                     "height": capture.capture_height,
                 },
                 "image": {"width": capture.image_width, "height": capture.image_height},
+                **({"coordinates": capture.coordinates} if capture.coordinates is not None else {}),
             },
             screenshot=screenshot,
         )
@@ -423,6 +642,7 @@ class DesktopBridge:
         if command.action in {"get_app_state", "screenshot"}:
             _reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
             state = await asyncio.to_thread(self.provider.get_app_state, _required_str_parameter(parameters, "app"))
+            self._observations.remember(state, command)
             return _Execution(
                 {"action": command.action, "state": state.to_result()},
                 capture_app=state.app_id,
@@ -505,26 +725,66 @@ class DesktopBridge:
         state_id: str,
     ) -> None:
         parameters = command.parameters
-        if command.action == "click":
+        if command.action in {"click", "double_click"}:
             _reject_unexpected_parameters(
                 parameters,
                 allowed=frozenset({"app", "state_id", "x", "y", "button"}),
             )
             await asyncio.to_thread(
-                self.provider.click,
+                self.provider.double_click if command.action == "double_click" else self.provider.click,
                 app_id=app_id,
                 state_id=state_id,
                 x=_required_int_parameter(parameters, "x"),
                 y=_required_int_parameter(parameters, "y"),
                 button=_optional_str_parameter(parameters, "button", default="left"),
             )
+        elif command.action == "hover":
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "x", "y"}))
+            await asyncio.to_thread(
+                self.provider.hover,
+                app_id=app_id,
+                state_id=state_id,
+                x=_required_int_parameter(parameters, "x"),
+                y=_required_int_parameter(parameters, "y"),
+            )
+        elif command.action == "drag":
+            _reject_unexpected_parameters(
+                parameters,
+                allowed=frozenset(
+                    {
+                        "app",
+                        "state_id",
+                        "start_x",
+                        "start_y",
+                        "end_x",
+                        "end_y",
+                        "duration_ms",
+                    },
+                ),
+            )
+            await asyncio.to_thread(
+                self.provider.drag,
+                app_id=app_id,
+                state_id=state_id,
+                start_x=_required_int_parameter(parameters, "start_x"),
+                start_y=_required_int_parameter(parameters, "start_y"),
+                end_x=_required_int_parameter(parameters, "end_x"),
+                end_y=_required_int_parameter(parameters, "end_y"),
+                duration_ms=_required_int_parameter({"duration_ms": 500, **parameters}, "duration_ms"),
+            )
         elif command.action == "type_text":
-            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "text"}))
+            _reject_unexpected_parameters(parameters, allowed=frozenset({"app", "state_id", "text", "element_index"}))
+            targeting = (
+                {"element_index": _required_int_parameter(parameters, "element_index")}
+                if "element_index" in parameters
+                else {}
+            )
             await asyncio.to_thread(
                 self.provider.type_text,
                 app_id=app_id,
                 state_id=state_id,
                 text=_required_str_parameter(parameters, "text"),
+                **targeting,
             )
         elif command.action == "scroll":
             _reject_unexpected_parameters(
@@ -560,6 +820,8 @@ class DesktopBridge:
             "emergency_stop_latched": self._control_revoked,
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
+            "observation_modes": ["tree", "screenshot", "both"],
+            "durable_commands": True,
         }
         if self.policy.control_lease_expires_at_ms is not None:
             status["control_lease_expires_at_ms"] = self.policy.control_lease_expires_at_ms
@@ -642,7 +904,7 @@ class DesktopBridge:
             "Desktop observation was interrupted before its outcome was recorded; retry with a new request.",
         )
 
-    async def _send_response(self, response: DesktopResponse) -> None:
+    async def _send_response(self, response: DesktopResponse) -> bool:
         try:
             await send_encrypted_to_device(
                 self.client,
@@ -652,6 +914,8 @@ class DesktopBridge:
             )
         except OlmToDeviceError:
             logger.exception("desktop_response_delivery_failed", request_id=response.request_id)
+            return False
+        return True
 
     @staticmethod
     def _error_response(command: DesktopCommand, error: str) -> DesktopResponse:
@@ -756,14 +1020,13 @@ def _optional_str_parameter(parameters: dict[str, object], key: str, *, default:
 
 def _required_str_list_parameter(parameters: dict[str, object], key: str) -> list[str]:
     value = parameters.get(key)
-    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], str):
-        msg = f"Desktop parameter {key} must contain exactly one locally safe navigation key."
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        msg = f"Desktop parameter {key} must contain a safe app-local key chord."
         raise DesktopProtocolError(msg)
-    normalized = value[0].strip().lower()
-    if normalized not in DESKTOP_SAFE_KEYS:
-        msg = f"Desktop parameter {key} may escape the allowed app."
-        raise DesktopProtocolError(msg)
-    return [normalized]
+    try:
+        return list(normalize_key_chord(cast("list[str]", value)))
+    except ValueError as exc:
+        raise DesktopProtocolError(str(exc)) from exc
 
 
 __all__ = ["DesktopBridge", "DesktopBridgePolicy"]
