@@ -70,10 +70,43 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
 
 # LEGACY_COMPAT: Approval calls without persisted toolkit origins.
 # Legacy format: Approval calls written before per-call toolkit origin persistence.
-# Last legacy release: v2026.9.139; replacement: per-call toolkit_name storage.
-# Handling: Preserve calls with unknown origins; approved execution requires a new request.
-# Coverage: tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_calls.
+# Last legacy release: v2026.9.139; replacement: v2026.9.140 added per-call toolkit_name storage.
+# Handling: Fence unresumable current generations for normal failure recovery, including already-upgraded rows.
+# Preserve historical calls, existing failures, and recoverable FINAL delivery debt.
+# Coverage: tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_fences_unresumable_calls,
+# tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_compatible_work,
+# tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_frozen_final.
 def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozenset[str]) -> None:
-    """Add unknown historical origins inside the existing schema setup transaction."""
+    """Add historical origins and fence unresumable work in the schema transaction."""
     if "toolkit_name" not in columns:
         transaction.execute("ALTER TABLE approval_continuation_calls ADD COLUMN toolkit_name TEXT")
+    transaction.execute(
+        """
+        UPDATE approval_continuations
+        SET state = 'failing', failure_reason = COALESCE(failure_reason, ?)
+        WHERE state IN ('waiting', 'ready', 'claimed')
+          AND EXISTS (
+            SELECT 1 FROM approval_continuation_calls AS calls
+            WHERE calls.principal_id = approval_continuations.principal_id
+              AND calls.approval_id = approval_continuations.approval_id
+              AND calls.generation = approval_continuations.generation
+              AND calls.toolkit_name IS NULL
+              AND (calls.decision IS NULL OR calls.decision = 'approved')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM matrix_delivery_outbox AS final
+            JOIN approval_continuation_sources AS source
+              ON source.principal_id = final.principal_id
+             AND source.event_id = final.delivery_id
+            WHERE source.principal_id = approval_continuations.principal_id
+              AND source.approval_id = approval_continuations.approval_id
+              AND source.source_ordinal = 0
+              AND final.stage = 'final'
+              AND final.permanent_failure_reason IS NULL
+          )
+        """,
+        (
+            "This approval is from an older version of MindRoom and can no longer be used. "
+            "Please check what already completed, then send a new request for anything unfinished.",
+        ),
+    )
