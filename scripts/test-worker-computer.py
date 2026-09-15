@@ -24,17 +24,26 @@ from urllib.parse import quote, urlsplit
 import httpx
 import uvicorn
 import yaml
+from agno.tools.function import ToolResult
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 from testing.worker_computer_matrix import create_matrix_fixture
+from testing.worker_computer_native import connect_viewer, native_json, native_tabs
 
 from mindroom.api import computers, config_lifecycle
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_agent_toolkit_worker_target,
+    resolve_worker_key,
+    tool_execution_identity,
+)
+from mindroom.worker_computer.mcp_results import decode_browser_mcp_result
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import shutdown_primary_worker_manager
@@ -98,8 +107,8 @@ class Fixture:
                         "display_name": "Writer",
                         "role": "Browser fixture",
                         "model": "default",
-                        "tools": ["browser", "shell"],
-                        "worker_tools": ["browser", "shell"],
+                        "tools": [args.provider, "shell"],
+                        "worker_tools": [args.provider, "shell"],
                         "worker_scope": "user_agent",
                     },
                 },
@@ -214,22 +223,118 @@ class Fixture:
             "private_agent_names": [],
             "kwargs": kwargs,
         }
-        if tool == "browser":
+        if tool in {"browser", "browser_mcp"}:
             payload["tool_config_overrides"] = {"allow_private_networks": True}
         async with httpx.AsyncClient(timeout=100) as client:
             response = await client.post(
                 handle.endpoint,
-                headers={"X-Mindroom-Sandbox-Token": self.token},
+                headers={"X-Mindroom-Sandbox-Token": handle.auth_token},
                 json=payload,
             )
             response.raise_for_status()
             return response.json()
 
-    async def browser(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 - browser tool JSON schema
+    async def browser(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - fixture provider translation
         """Return the public tool result, failing on runner errors."""
+        if self.args.provider == "browser_mcp":
+            action = kwargs["action"]
+            if action in {"open", "navigate"}:
+                if action == "navigate" and "targetId" in kwargs:
+                    await self.native("browser_tabs", action="select", index=kwargs["targetId"])
+                await self.native("browser_navigate", url=kwargs["targetUrl"])
+                tabs = await self.browser(action="tabs")
+                return {"targetId": tabs["activeTargetId"]}
+            if action == "tabs":
+                tabs = native_tabs((await self.native("browser_tabs", action="list")).content)
+                assert tabs, "Native tab list is empty"
+                return {"tabs": tabs, "activeTargetId": next(tab["index"] for tab in tabs if tab["current"])}
+            if action == "focus":
+                await self.native("browser_tabs", action="select", index=kwargs["targetId"])
+                return {"targetId": kwargs["targetId"]}
+            if action == "snapshot":
+                return {"snapshot": (await self.native("browser_snapshot")).content}
+            request = kwargs["request"]
+            if request["kind"] == "evaluate":
+                return {"result": native_json((await self.native("browser_evaluate", function=request["fn"])).content)}
+            if request["kind"] == "click":
+                return {"result": (await self.native("browser_click", target=request["ref"])).content}
+            raise AssertionError(kwargs)
         body = await self.execute("browser", "browser_control", kwargs)
         assert body["ok"], body
         return json.loads(body["result"])
+
+    async def native(self, function: str, **kwargs: Any) -> ToolResult:  # noqa: ANN401 - native tool JSON
+        """Call the actual native entrypoint and retain a bounded text transcript."""
+        body = await self.execute("browser_mcp", function, kwargs)
+        assert body["ok"], body
+        result = decode_browser_mcp_result(body["result"])
+        assert isinstance(result, ToolResult), result
+        with (self.args.output / "native-transcript.jsonl").open("a") as transcript:
+            transcript.write(json.dumps({"function": function, "arguments": kwargs, "text": result.content}) + "\n")
+        assert "### Error" not in result.content, result.content
+        return result
+
+    async def primary_native(self, function: str, **kwargs: Any) -> object:  # noqa: ANN401 - native tool JSON
+        """Use the real primary toolkit/proxy, including scoped image decoding."""
+        import mindroom.tools  # noqa: PLC0415, F401 - normal registry bootstrap
+
+        identity = self.identity(self.viewer)
+        target = build_agent_toolkit_worker_target(
+            "user_agent",
+            "writer",
+            is_private=False,
+            execution_identity=identity,
+            runtime_paths=self.paths,
+        )
+        with tool_execution_identity(identity):
+            toolkit = get_tool_by_name(
+                "browser_mcp",
+                self.paths,
+                runtime_config=self.config,
+                tool_config_overrides={"allow_private_networks": True},
+                worker_tools_override=["browser_mcp", "shell"],
+                worker_target=target,
+            )
+            return await toolkit.async_functions[function].entrypoint(**kwargs)
+
+    async def native_files(self) -> dict[str, Any]:
+        """Verify native upload/download paths and real primary text/media decoding."""
+        await self.shell(["sh", "-c", "printf native-upload-content > native-upload.txt"])
+        await self.native("browser_click", target="#upload")
+        workspace = (await self.shell(["pwd"])).strip()
+        await self.native("browser_file_upload", paths=[workspace + "/native-upload.txt"])
+        async with asyncio.timeout(10):
+            while await self.evaluate("()=>window.uploadContent") != "native-upload-content":  # noqa: ASYNC110
+                await asyncio.sleep(0.05)
+        assert await self.evaluate("()=>window.uploadName") == "native-upload.txt"
+        image = await self.primary_native("browser_take_screenshot", type="png", scale="css")
+        assert isinstance(image, ToolResult)
+        assert image.images
+        data = image.images[0].content
+        assert isinstance(data, bytes)
+        assert data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
+        text = await self.primary_native("browser_snapshot")
+        assert isinstance(text, ToolResult)
+        assert "Remote text" in text.content
+        named = await self.native("browser_take_screenshot", filename="native.png", type="png", scale="css")
+        assert not named.images
+        await self.native("browser_pdf_save", filename="native.pdf")
+        files = await self.shell(
+            [
+                "node",
+                "-e",
+                "const fs=require('fs');for(const [p,h] of [['browser/native.png','89504e470d0a1a0a'],['browser/native.pdf','25504446']]){"
+                "const b=fs.readFileSync(p);if(!b.toString('hex').startsWith(h))throw Error(p);console.log(p+':verified:'+b.length)}",
+            ],
+        )
+        assert "native.png:verified:" in files
+        assert "native.pdf:verified:" in files
+        return {
+            "upload_content_and_name": True,
+            "named_image_and_pdf": True,
+            "primary_inline_image_sha256": hashlib.sha256(data).hexdigest(),
+            "primary_text": True,
+        }
 
     async def evaluate(self, expression: str) -> Any:  # noqa: ANN401 - arbitrary page JSON
         """Read page state through the agent browser contract."""
@@ -360,14 +465,12 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
 
 async def connect(page: Page, session: dict[str, Any]) -> None:
     """Wait for a real connected noVNC stream."""
-    await page.evaluate("session=>window.connectComputer(session)", session)
-    await page.wait_for_function("window.probe.connected || window.probe.disconnected")
-    assert await page.evaluate("window.probe.connected && !window.probe.disconnected")
+    await connect_viewer(page, session)
 
 
 async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - sequential acceptance scenario
     """Check gateway auth, shared browser/files, takeover, foreground and persistence."""
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"provider": fixture.args.provider}
     async with httpx.AsyncClient(base_url=fixture.origin, timeout=100) as client:
 
         async def create(user: str = "alice") -> dict[str, Any]:
@@ -403,6 +506,38 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
         assert denied.status_code == 401
         session = await create()
         opened = await fixture.prepare_page()
+        process_security = await fixture.shell(
+            [
+                "sh",
+                "-c",
+                "id; for p in /proc/[0-9]*; do "
+                "[ -r \"$p/cmdline\" ] || continue; c=$(tr '\\0' ' ' < \"$p/cmdline\"); "
+                'case "$c" in *chromium*|*sandbox_runner*) printf \'%s %s\\n\' "$p" "$c"; '
+                "sed -n '/^Uid:/p;/^CapEff:/p;/^CapBnd:/p;/^NoNewPrivs:/p;/^Seccomp:/p' \"$p/status\";; esac; done",
+            ],
+        )
+        (fixture.args.output / "worker-process-security.txt").write_text(process_security)
+        assert "uid=1000" in process_security
+        process_check = await fixture.shell(
+            [
+                "node",
+                "-e",
+                r"""
+const fs=require('fs');let count=0;
+if(process.getuid()!==1000)throw Error('worker uid');
+for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){
+ let cmd,status;try{cmd=fs.readFileSync('/proc/'+pid+'/cmdline','utf8');
+ status=fs.readFileSync('/proc/'+pid+'/status','utf8')}catch{continue}
+ if(!cmd.split('\0')[0].endsWith('/chromium'))continue;
+ const fields=Object.fromEntries(status.split('\n').filter(l=>/^(Uid|CapEff|NoNewPrivs|Seccomp):/.test(l)).map(l=>l.split(/:\s*/)));
+ if(cmd.includes('--no-sandbox')||fields.CapEff!=='0000000000000000'||fields.NoNewPrivs!=='1'||fields.Seccomp!=='2')throw Error(JSON.stringify({pid,fields}));count++;
+}
+if(count<2)throw Error('browser subprocesses absent');console.log('SECURITY_VERIFIED');
+""",
+            ]
+        )
+        assert "SECURITY_VERIFIED" in process_check, process_check
+        result["effective_browser_security"] = True
         sandbox_probe = """\
 from playwright.sync_api import sync_playwright
 with sync_playwright() as playwright:
@@ -427,7 +562,16 @@ with sync_playwright() as playwright:
         result["chromium_sandbox_status"] = sandbox_status
         tabs = await fixture.browser(action="tabs")
         assert tabs["activeTargetId"] == opened["targetId"]
-        result["same_target_across_requests"] = opened["targetId"]
+        if fixture.args.provider == "browser_mcp":
+            result["native_files"] = await fixture.native_files()
+            await fixture.evaluate("()=>{window.fixtureContinuity='same-session';return true}")
+            await fixture.native("browser_type", target="#shared-input", text="native-tool-text")
+            assert "native-tool-text" in (await fixture.native("browser_snapshot")).content
+            assert await fixture.evaluate("()=>window.fixtureContinuity") == "same-session"
+            await fixture.native("browser_type", target="#shared-input", text="")
+            result["native_session_continuity"] = True
+        else:
+            result["same_target_across_requests"] = opened["targetId"]
         await fixture.evaluate(
             "()=>{document.querySelector('#shared-input').focus();localStorage.setItem('persist','yes');}",
         )
@@ -435,7 +579,7 @@ with sync_playwright() as playwright:
         await fixture.browser(action="act", request={"kind": "click", "ref": "#download"})
         async with asyncio.timeout(20):
             while "worker-shared-download-ok" not in await fixture.shell(  # noqa: ASYNC110 - remote filesystem readiness
-                ["find", ".", "-name", "*-fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
+                ["find", ".", "-name", "*fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
             ):
                 await asyncio.sleep(0.1)
         result["download_read_through_shell"] = True
@@ -450,6 +594,14 @@ with sync_playwright() as playwright:
                 page = await browser.new_page(viewport={"width": 1280, "height": 800})
                 errors: list[str] = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
+                page.on(
+                    "requestfailed",
+                    lambda request: (
+                        (fixture.args.output / "viewer-request-failures.log")
+                        .open("a")
+                        .write(request.url + " " + str(request.failure) + "\n")
+                    ),
+                )
                 await page.goto(fixture.origin)
                 await connect(page, session)
                 await page.wait_for_function(FRAMEBUFFER)
@@ -468,7 +620,11 @@ with sync_playwright() as playwright:
                 assert (await control("take"))["mode"] == "control"
                 await page.evaluate("window.rfb.sendKey(121,'KeyY')")
                 await asyncio.sleep(0.2)
-                blocked = await fixture.execute("browser", "browser_control", {"action": "tabs"})
+                blocked = await fixture.execute(
+                    fixture.args.provider,
+                    "browser_tabs" if fixture.args.provider == "browser_mcp" else "browser_control",
+                    {"action": "list" if fixture.args.provider == "browser_mcp" else "tabs"},
+                )
                 assert not blocked["ok"], blocked
                 assert "control" in json.dumps(blocked).lower(), blocked
                 await control("release")
@@ -498,6 +654,10 @@ with sync_playwright() as playwright:
                     await page.wait_for_function("window.probe.disconnected")
                     native_tabs = await fixture.browser(action="tabs")
                     assert any(tab["title"] == "New Tab" for tab in native_tabs["tabs"]), native_tabs
+                    if fixture.args.provider == "browser_mcp":
+                        opened["targetId"] = next(
+                            tab["index"] for tab in native_tabs["tabs"] if tab["url"] == "http://127.0.0.1:8767/"
+                        )
                     selected = await fixture.browser(
                         action=action,
                         targetId=opened["targetId"],
@@ -520,7 +680,7 @@ with sync_playwright() as playwright:
                 await fixture.browser(action="open", targetUrl="http://127.0.0.1:8767/")
                 assert await fixture.evaluate("()=>localStorage.getItem('persist')") == "yes"
                 assert "worker-shared-download-ok" in await fixture.shell(
-                    ["find", ".", "-name", "*-fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
+                    ["find", ".", "-name", "*fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
                 )
                 result["profile_and_download_after_restart"] = True
                 await create("bob")
@@ -541,6 +701,7 @@ async def main() -> None:  # noqa: C901, PLR0915 - CLI setup and owned service l
     """Run acceptance once or keep a loopback Chat fixture alive until interrupted."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="mindroom-worker-computer-test:local")
+    parser.add_argument("--provider", choices=("browser", "browser_mcp"), default="browser")
     parser.add_argument("--build", action="store_true", help="Build the existing full worker Dockerfile first.")
     parser.add_argument("--output", type=Path, required=True, help="New persistent directory for state and evidence.")
     parser.add_argument("--novnc", type=Path, help="Path to @novnc/novnc 1.7.0 package (for standalone acceptance).")
