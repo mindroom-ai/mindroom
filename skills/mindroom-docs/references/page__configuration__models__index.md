@@ -47,19 +47,26 @@ Presentation metadata is optional:
 models:
   default:
     provider: openai
-    id: test-model
+    id: gpt-6-astra
     display_name: Quick helper
     icon: icons/helper.png
 ```
 
 `display_name` changes the label clients show, while the mapping key (`default` above) remains the stable name used by agents, teams, routing, and commands.
 For `icon`, use either a path relative to the directory containing the active config file or a Matrix media URI such as `mxc://server/media`.
-Blank metadata uses the client's default presentation. A missing or unreadable relative image also falls back at presentation time and does not prevent the runtime from starting.
+Blank metadata uses the client's default presentation.
+A missing or unreadable relative image also falls back at presentation time and does not prevent the runtime from starting.
 These fields are presentation-only and are not passed to the model provider.
 
 The Matrix model picker publishes only model keys, display names, provider names, model IDs, and optional Matrix media URLs.
-Local icons must be valid PNG, JPEG, WebP, or GIF images no larger than 1 MiB. The runtime validates their bytes and uploads them to Matrix media; identical bytes reuse the upload within that runtime client. Changed bytes publish a new icon. Unsupported, missing, or unreadable images fall back to the client's provider icon.
-External image URLs are not fetched. Local paths, API keys, provider hosts, and extra provider settings never enter discovery responses.
+Local icons must be valid PNG, JPEG, WebP, or GIF images no larger than 1 MiB.
+At publication, the resolved image target must remain inside the resolved config directory, including when the path contains parent components or symlinks.
+A contained path such as `icons/../helper.png` is accepted; an escaping target falls back to the client's provider icon.
+The runtime validates image bytes and uploads them to Matrix media; identical bytes reuse the upload within that runtime client.
+Changed bytes publish a new icon.
+Unsupported, missing, or unreadable images fall back to the client's provider icon.
+External image URLs are not fetched.
+Local paths, API keys, provider hosts, and extra provider settings never enter discovery responses.
 See [Matrix model selection protocol](https://docs.mindroom.chat/architecture/matrix/#model-selection-protocol) for private discovery and confirmed thread changes.
 
 ## Hot Reload

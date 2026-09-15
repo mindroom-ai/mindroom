@@ -9,7 +9,7 @@ import json
 import warnings
 from collections import OrderedDict
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 from urllib.parse import urlsplit
 
 import nio
@@ -21,12 +21,22 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-__all__ = ["ModelCatalog"]
+__all__ = ["ModelCatalog", "ModelCatalogEntry"]
 
 _MAX_ICON_BYTES = 1024 * 1024
 _MAX_CACHE_ENTRIES = 256
 _RASTER_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "GIF": "image/gif"}
 logger = get_logger(__name__)
+
+
+class ModelCatalogEntry(TypedDict):
+    """Allowlisted JSON fields published for one configured model."""
+
+    key: str
+    display_name: str
+    provider: str
+    id: str
+    icon_url: NotRequired[str]
 
 
 def _matrix_uri(value: str) -> bool:
@@ -46,13 +56,15 @@ def _matrix_uri(value: str) -> bool:
         return False
 
 
-def _read_raster(path: Path) -> tuple[bytes, str] | None:
+def _read_raster(path: Path, config_dir: Path) -> tuple[bytes, str] | None:
     """Bound reads before decoding and verify actual bytes rather than extensions."""
     # Pillow can import NumPy; defer it to requested icon work off the event loop.
     from PIL import Image, UnidentifiedImageError  # noqa: PLC0415
 
     try:
-        if not path.is_file():
+        directory = config_dir.resolve()
+        path = path.resolve()
+        if not path.is_relative_to(directory) or not path.is_file():
             return None
         with path.open("rb") as handle:
             data = handle.read(_MAX_ICON_BYTES + 1)
@@ -70,6 +82,7 @@ def _read_raster(path: Path) -> tuple[bytes, str] | None:
                 image.load()
     except (
         OSError,
+        RuntimeError,
         ValueError,
         SyntaxError,
         UnidentifiedImageError,
@@ -96,7 +109,7 @@ class ModelCatalog:
         if "://" in value or Path(value).is_absolute():
             logger.warning("model_catalog_icon_unavailable", model=key)
             return None
-        raster = await asyncio.to_thread(_read_raster, self._config_dir / value)
+        raster = await asyncio.to_thread(_read_raster, self._config_dir / value, self._config_dir)
         if raster is None:
             logger.warning("model_catalog_icon_unavailable", model=key)
             return None
@@ -121,11 +134,11 @@ class ModelCatalog:
                 self._uploads.popitem(last=False)
             return response.content_uri
 
-    async def snapshot(self, config: Config) -> tuple[list[dict[str, object]], str]:
+    async def snapshot(self, config: Config) -> tuple[list[ModelCatalogEntry], str]:
         """Publish only model labels/identifiers and Matrix-hosted icon references."""
-        entries: list[dict[str, object]] = []
+        entries: list[ModelCatalogEntry] = []
         for key, model in sorted(config.models.items()):
-            entry: dict[str, object] = {
+            entry: ModelCatalogEntry = {
                 "key": key,
                 "display_name": model.display_name or key,
                 "provider": model.provider,

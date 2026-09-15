@@ -164,6 +164,10 @@ Matrix sync callback
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `model_loading.py` | Model instantiation and provider-specific loader selection |
+| `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
+| `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
+| `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
+| `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |

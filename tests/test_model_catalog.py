@@ -142,3 +142,42 @@ async def test_bad_png_checksum_falls_back(tmp_path: Path) -> None:
     config = Config(models={"fast": ModelConfig(provider="openai", id="test-model", icon="icon.png")})
     entries, _ = await ModelCatalog(client=AsyncMock(spec=nio.AsyncClient), runtime_paths=paths).snapshot(config)
     assert "icon_url" not in entries[0]
+
+
+@pytest.mark.parametrize(
+    ("kind", "published"),
+    [
+        ("parent", False),
+        ("outside_symlink", False),
+        ("normalized", True),
+        ("inside_symlink", True),
+        ("symlink_loop", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_local_icon_resolved_target_stays_inside_config_directory(
+    tmp_path: Path,
+    kind: str,
+    *,
+    published: bool,
+) -> None:
+    """Authored escapes fall back, while normalized paths and contained symlinks publish."""
+    paths = test_runtime_paths(tmp_path / "config")
+    directory = paths.config_path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "icons").mkdir()
+    Image.new("RGB", (2, 2)).save(directory / "logo.png")
+    Image.new("RGB", (2, 2)).save(directory.parent / "outside.png")
+    icon = "icons/../logo.png"
+    if kind == "parent":
+        icon = "../outside.png"
+    elif kind in {"outside_symlink", "inside_symlink", "symlink_loop"}:
+        icon = "link.png"
+        target = {"outside_symlink": "../outside.png", "inside_symlink": "logo.png", "symlink_loop": "link.png"}[kind]
+        (directory / icon).symlink_to(target)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.upload.return_value = (nio.UploadResponse("mxc://example.org/contained"), None)
+    config = Config(models={"fast": ModelConfig(provider="openai", id="test-model", icon=icon)})
+    entries, _ = await ModelCatalog(client=client, runtime_paths=paths).snapshot(config)
+    assert (entries[0].get("icon_url") == "mxc://example.org/contained") is published
+    assert client.upload.await_count == int(published)

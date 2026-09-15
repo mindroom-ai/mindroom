@@ -5,13 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal, TypeGuard, cast
+from typing import Literal, NotRequired, TypedDict, TypeGuard, cast
 
 __all__ = [
     "MODEL_SELECTION_CONTENT_KEY",
     "MODEL_SELECTION_RESULT_CONTENT_KEY",
     "CommandResultContent",
     "ModelSelectionRequest",
+    "ModelSelectionResult",
     "command_result_content_to_dict",
     "freeze_command_result_content",
     "model_selection_result",
@@ -34,6 +35,22 @@ class ModelSelectionRequest:
     operation: Literal["set", "reset"]
     model: str | None = None
     version: Literal[1] = 1
+
+
+class ModelSelectionResult(TypedDict):
+    """New acknowledgement wire fields, distinct from permissive recovered metadata."""
+
+    version: Literal[1]
+    command_event_id: str
+    room_id: str
+    thread_id: str | None
+    runtime_user_id: str
+    runtime_device_id: str
+    operation: Literal["set", "reset"]
+    status: Literal["applied", "rejected"]
+    model: NotRequired[str | None]
+    override: NotRequired[str | None]
+    error: NotRequired[str]
 
 
 def _bounded_string(value: object, limit: int) -> TypeGuard[str]:
@@ -92,9 +109,9 @@ def model_selection_result(
     room_id: str,
     thread_id: str | None,
     error: str | None = None,
-) -> dict[str, dict[str, str | int | None]]:
+) -> dict[str, ModelSelectionResult]:
     """Build a correlated result only after validation and the persistence outcome."""
-    result: dict[str, str | int | None] = {
+    result: ModelSelectionResult = {
         "version": 1,
         "command_event_id": command_event_id,
         "room_id": room_id,
@@ -143,6 +160,8 @@ def freeze_command_result_content(raw: object) -> CommandResultContent | None:
     )
 
 
-def command_result_content_to_dict(content: CommandResultContent | None) -> dict | None:
+def command_result_content_to_dict(
+    content: CommandResultContent | None,
+) -> dict[str, dict[str, str | int | None]] | None:
     """Thaw immutable checkpoint data for the existing JSON outbox boundary."""
     return {key: dict(value) for key, value in content.items()} if content is not None else None
