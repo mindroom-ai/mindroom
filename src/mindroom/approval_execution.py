@@ -11,6 +11,7 @@ from agno.db.base import SessionType
 from agno.run.agent import (
     RunCompletedEvent,
     RunContentEvent,
+    RunErrorEvent,
     RunOutput,
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
@@ -32,6 +33,7 @@ from mindroom.approval_tools import (
 )
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import DelegationState
+from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
@@ -79,11 +81,15 @@ async def _collect_agent_continuation(
 ) -> RunOutput:
     """Collect one ordered continuation stream and return its terminal run."""
     response: RunOutput | None = None
+    error_event: RunErrorEvent | None = None
     terminal_content: str | None = None
     saw_content_delta = False
     async for event in events:
         if isinstance(event, RunOutput):
             response = event
+        elif isinstance(event, RunErrorEvent):
+            # Drain the producer so Agno can finish persistence and cleanup.
+            error_event = event
         elif isinstance(event, RunContentEvent):
             presentation.append_text(event.content)
             saw_content_delta = saw_content_delta or bool(event.content)
@@ -93,6 +99,8 @@ async def _collect_agent_continuation(
             presentation.start_tool(event.tool)
         elif isinstance(event, ToolCallCompletedEvent):
             presentation.complete_tool(event.tool)
+    if error_event is not None and (response is None or response.status == RunStatus.error):
+        raise RuntimeError(run_error_event_text(error_event))
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)

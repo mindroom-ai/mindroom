@@ -9,8 +9,10 @@ from uuid import uuid4
 
 import pytest
 from agno.agent import Agent
+from agno.exceptions import ModelProviderError
+from agno.metrics import RunMetrics
 from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
+from agno.run.agent import RunErrorEvent, RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
 from agno.team import Team
@@ -479,7 +481,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                     "runtime_paths": paths,
                     "execution_identity": identity,
                     "member_config_names": {"leader": "leader", "other": "other"},
-                    "decisions": {call_id: outcome == "approve"},
+                    "decisions": {call_id: outcome in {"approve", "parent_provider_error", "child_provider_error"}},
                     "denial_reasons": {call_id: None},
                     "approval_calls": (
                         ApprovalCall(
@@ -497,17 +499,21 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 ) -> AsyncIterator[RunOutput | TeamRunOutput]:
                     yield persisted_response
 
+                events = drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options)
                 if team_parent:
                     assert team_presentation is not None
-                    resumed = await _collect_team_continuation(
-                        drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options),
-                        team_presentation,
-                    )
+                    continuation = _collect_team_continuation(events, team_presentation)
                 else:
-                    resumed = await _collect_agent_continuation(
-                        drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options),
-                        presentation,
-                    )
+                    continuation = _collect_agent_continuation(events, presentation)
+                if outcome == "parent_provider_error":
+                    with pytest.raises(RuntimeError, match="provider connection lost") as caught:
+                        await continuation
+                    assert "example-secret" not in str(caught.value)
+                    assert side_effects == ["written"]
+                    failed_run = await rebuilt.aget_run_output(response.run_id, session_id="parent")
+                    assert failed_run.status == RunStatus.error
+                    return
+                resumed = await continuation
                 visible_trace = team_presentation.tool_trace if team_parent else presentation.tool_trace
                 assert any(
                     entry.tool_call_id == call_id and entry.type == "tool_call_completed" for entry in visible_trace
@@ -539,9 +545,13 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 assert len(side_effects) == (index + 1 if outcome == "approve" else 0)
             assert resumed.status == RunStatus.completed
             assert resumed.content == "parent result"
-            assert side_effects == (["written"] * siblings if outcome == "approve" else [])
+            assert side_effects == (["written"] * siblings if outcome in {"approve", "child_provider_error"} else [])
             messages = resumed.member_responses[0].messages if team_parent else resumed.messages
             result_message = next(message.content for message in messages if message.tool_call_id == "delegate-0")
+            if outcome == "child_provider_error":
+                assert "provider connection lost" in result_message
+                assert "example-secret" not in result_message
+                return
             expected_result = (
                 "Cannot delegate"
                 if outcome == "revoke"
@@ -563,6 +573,62 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
         parent_storage.close()
         for storage in child_storages:
             storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team_parent", [False, True])
+@pytest.mark.parametrize("failed_entity", ["parent", "child"])
+@pytest.mark.parametrize("terminal_output", [False, True])
+async def test_delegated_approval_preserves_redacted_provider_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    team_parent: bool,
+    failed_entity: str,
+    terminal_output: bool,
+) -> None:
+    """A provider failure after the approved write retains its cause without replaying the write."""
+    original_stream = DelegationModel.ainvoke_stream
+
+    async def failing_stream(self: DelegationModel, *args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+        if self.responses and self.responses[0].content == f"{failed_entity} result":
+            yield ModelResponse(content="Earlier partial answer")
+            raise ModelProviderError(message="provider connection lost: api_key=example-secret")
+        async for event in original_stream(self, *args, **kwargs):
+            yield event
+
+    monkeypatch.setattr(DelegationModel, "ainvoke_stream", failing_stream)
+    if terminal_output:
+        original_continue = Agent.acontinue_run
+
+        async def with_terminal_output(self: Agent, *args: object, **kwargs: object) -> AsyncIterator[object]:
+            last_event = None
+            async for event in original_continue(self, *args, **kwargs):
+                last_event = event
+                yield event
+            if isinstance(last_event, RunErrorEvent):
+                terminal = await self.aget_run_output(last_event.run_id, session_id=last_event.session_id)
+                assert terminal is not None
+                terminal.metrics = RunMetrics(input_tokens=17, output_tokens=3)
+                yield terminal
+
+        monkeypatch.setattr(Agent, "acontinue_run", with_terminal_output)
+    await test_child_approval_survives_parent_reconstruction(
+        tmp_path,
+        monkeypatch,
+        outcome=f"{failed_entity}_provider_error",
+        siblings=1,
+        nested=False,
+        retry=False,
+        team_parent=team_parent,
+    )
+    if terminal_output and failed_entity == "child":
+        records = [
+            json.loads(path.read_text())
+            for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
+        ]
+        assert len(records) == 1
+        assert records[0]["usage"]["input_tokens"] == 17
+        assert records[0]["usage"]["output_tokens"] == 3
 
 
 @pytest.mark.asyncio

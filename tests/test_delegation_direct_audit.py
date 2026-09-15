@@ -303,6 +303,35 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: Path) -> None:
+    """A failed replacement run owns its error even if an earlier attempt emitted one."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+
+    async def retry_child(ctx: object, **kwargs: object) -> str:
+        callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
+        callback("first-run")
+        await observe_child_event(
+            RunErrorEvent(run_id="first-run", session_id=ctx.session_id, content="earlier provider failure"),
+        )
+        callback("replacement-run")
+        await observe_child_event(
+            RunOutput(
+                run_id="replacement-run",
+                session_id=ctx.session_id,
+                status=RunStatus.error,
+                content="replacement provider failure",
+            ),
+        )
+        return "replacement provider failure"
+
+    with tool_runtime_context(context), patch("mindroom.ai.ai_response", side_effect=retry_child):
+        await tools.run_subagent(agent_name="child", task="Run with a replacement attempt")
+
+    assert _only_run(tmp_path)["error"] == "replacement provider failure"
+
+
+@pytest.mark.asyncio
 async def test_direct_delegation_records_failure_and_returns_receipt(tmp_path: Path) -> None:
     """Converting an exception into text without a failed audit record must fail this test."""
     tools, config, runtime_paths = _tools(tmp_path)
