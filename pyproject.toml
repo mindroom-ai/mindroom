@@ -178,7 +178,6 @@ exa = [
   "exa-py",
 ]
 external_trigger_manager = []
-external_events = []
 fal = [
   "fal-client",
 ]

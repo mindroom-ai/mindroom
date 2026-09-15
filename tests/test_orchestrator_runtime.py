@@ -5204,27 +5204,3 @@ async def test_dashboard_departure_uses_live_membership_owner(tmp_path: Path) ->
     with pytest.raises(RuntimeError, match="No running Matrix owner"):
         await orchestrator.leave_matrix_room("general", "!room:localhost")
     assert gate.in_flight_response_count == 0
-
-
-@pytest.mark.asyncio
-async def test_external_event_scope_fences_reload_and_stale_clients(tmp_path: Path) -> None:
-    """External sends reserve admission only for the current running Matrix client."""
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=paths)
-    gate = orchestrator._response_admission_gate
-    client = MagicMock()
-    bot = MagicMock(running=True, client=client)
-    orchestrator.agent_bots["general"] = bot
-    async with orchestrator.external_event_delivery_scope("general", client):
-        assert gate.in_flight_response_count == 1
-    assert gate.in_flight_response_count == 0
-    gate.close()
-    with pytest.raises(RuntimeError, match="starting or reloading"):
-        async with orchestrator.external_event_delivery_scope("general", client):
-            pytest.fail("closed admission accepted a delivery")
-    gate.reopen()
-    bot.client = MagicMock()
-    with pytest.raises(RuntimeError, match="no longer current"):
-        async with orchestrator.external_event_delivery_scope("general", client):
-            pytest.fail("stale Matrix client accepted a delivery")
-    assert gate.in_flight_response_count == 0

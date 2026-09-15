@@ -62,7 +62,6 @@ from mindroom.tools.e2b import e2b_tools
 from mindroom.tools.eleven_labs import eleven_labs_tools
 from mindroom.tools.email import email_tools
 from mindroom.tools.exa import exa_tools
-from mindroom.tools.external_events import external_events_tools
 from mindroom.tools.external_trigger_manager import external_trigger_manager_tools
 from mindroom.tools.fal import fal_tools
 from mindroom.tools.file import file_tools
@@ -195,7 +194,6 @@ __all__ = [
     "eleven_labs_tools",
     "email_tools",
     "exa_tools",
-    "external_events_tools",
     "external_trigger_manager_tools",
     "fal_tools",
     "file_generation_tools",

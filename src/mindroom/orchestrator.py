@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
@@ -147,7 +147,7 @@ from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceTh
 
 if TYPE_CHECKING:
     import socket
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable
     from pathlib import Path
     from types import FrameType
 
@@ -657,21 +657,6 @@ class _MultiAgentOrchestrator:
                 msg = f"No running Matrix owner for {agent_name}"
                 raise RuntimeError(msg)
             return await bot.change_local_membership(room_id, "leave")
-        finally:
-            self._response_admission_gate.release()
-
-    @asynccontextmanager
-    async def external_event_delivery_scope(self, agent_name: str, client: nio.AsyncClient) -> AsyncIterator[None]:
-        """Fence external delivery against reloads and stale Matrix clients."""
-        if not self._response_admission_gate.admit():
-            msg = "MindRoom is starting or reloading; retry the external event"
-            raise RuntimeError(msg)
-        try:
-            bot = self.agent_bots.get(agent_name)
-            if bot is None or not bot.running or bot.client is not client:
-                msg = "External event Matrix runtime is no longer current"
-                raise RuntimeError(msg)
-            yield
         finally:
             self._response_admission_gate.release()
 
