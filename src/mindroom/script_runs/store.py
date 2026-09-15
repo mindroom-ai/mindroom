@@ -435,6 +435,31 @@ class ScriptRunStore:
             )
         return replace(run, snapshot_locator=normalized)
 
+    def replace_recovery_signature(
+        self,
+        run_id: str,
+        *,
+        expected_signature: str | None,
+        recovery_signature: str,
+    ) -> ScriptRunRecord:
+        """Atomically migrate one active run's verified recovery contract."""
+        with self._write_transaction() as connection:
+            row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
+            if row is None:
+                raise ScriptRunNotFoundError(run_id)
+            run = _run_from_row(row)
+            if run.recovery_signature != expected_signature:
+                msg = f"Script run '{run_id}' recovery signature changed during migration."
+                raise ScriptRunStoreError(msg)
+            if run.cancel_requested_at is not None or run.state in _TERMINAL_RUN_STATES:
+                msg = f"Script run '{run_id}' cannot migrate recovery authority after revocation."
+                raise ScriptRunStoreError(msg)
+            connection.execute(
+                "UPDATE script_runs SET recovery_signature = ? WHERE run_id = ?",
+                (recovery_signature, run_id),
+            )
+        return replace(run, recovery_signature=recovery_signature)
+
     def record_process_exit(
         self,
         run_id: str,

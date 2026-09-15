@@ -498,9 +498,6 @@ override-dependencies = [
   "pillow>=10.2,<11; python_version < '3.14'",
   "pillow>=11,<12; python_version >= '3.14'",
 ]
-[tool.uv.sources]
-# Remove this development override after NIO 1.1.0 is released.
-mindroom-nio = { url = "https://github.com/mindroom-ai/mindroom-nio/archive/aa7630ca73b6045daa3947e43005a67297d2fb64.tar.gz" }
 
 [tool.ruff]
 target-version = "py312"
