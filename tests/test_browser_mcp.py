@@ -1,6 +1,8 @@
 """Native browser catalog and transport contracts."""
 
+import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,8 +14,8 @@ from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_bro
 from mindroom.worker_computer.mcp_results import decode_browser_mcp_result, encode_browser_mcp_result
 
 
-def test_native_catalog_has_fixed_safe_schemas(tmp_path: Path) -> None:
-    """Materializing native functions has no process or directory side effects."""
+def test_native_catalog_has_fixed_safe_schemas() -> None:
+    """Materializing native functions preserves the fixed trusted schemas."""
     toolkit = BrowserMCPTools()
     tools = browser_mcp_catalog()
     assert "browser_run_code_unsafe" not in tools
@@ -24,7 +26,82 @@ def test_native_catalog_has_fixed_safe_schemas(tmp_path: Path) -> None:
     assert toolkit.get_async_functions().keys() == tools.keys()
     for name, tool in tools.items():
         assert toolkit.get_async_functions()[name].parameters == tool["inputSchema"]
-    assert list(tmp_path.iterdir()) == []
+
+
+def test_primary_materialization_has_no_process_or_workspace_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observe real launch seams and the configured runtime/workspace directories."""
+    import mindroom.tools  # noqa: PLC0415, F401 - normal registry bootstrap
+    from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
+    from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+    from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
+        ToolExecutionIdentity,
+        build_agent_toolkit_worker_target,
+        tool_execution_identity,
+        worker_root_path,
+    )
+
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "runtime",
+        process_env={"MINDROOM_WORKER_COMPUTER_ENABLED": "1", "MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    workspace = paths.storage_root / "agents" / "writer" / "workspace"
+    workspace.mkdir(parents=True)
+    marker = workspace / "existing.txt"
+    marker.write_text("preserve")
+    before = {str(path.relative_to(tmp_path)): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    before_directories = {str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_dir()}
+
+    def forbidden_launch(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Primary metadata materialization launched a process")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden_launch)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_launch)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden_launch)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="writer",
+        requester_id="@viewer:fixture",
+        room_id="!room:fixture",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="fixture",
+    )
+    target = build_agent_toolkit_worker_target(
+        "user_agent",
+        "writer",
+        is_private=False,
+        execution_identity=identity,
+        runtime_paths=paths,
+    )
+    with tool_execution_identity(identity):
+        toolkit = get_tool_by_name(
+            "browser_mcp",
+            paths,
+            worker_target=target,
+            worker_tools_override=["browser_mcp"],
+            tool_output_workspace_root=workspace,
+        )
+    assert toolkit.get_async_functions().keys() == browser_mcp_catalog().keys()
+    assert {
+        str(path.relative_to(tmp_path)): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    } == before
+    # Generic primary materialization initializes credential directories for every
+    # toolkit; it must not create a browser profile, output directory or workspace.
+    worker_root = worker_root_path(paths.storage_root, target.worker_key)
+    allowed = {
+        paths.storage_root / "credentials",
+        worker_root.parent,
+        worker_root,
+        worker_root / "credentials",
+        worker_root / ".shared_credentials",
+    }
+    assert {str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_dir()} == (
+        before_directories | {str(path.relative_to(tmp_path)) for path in allowed}
+    )
 
 
 @pytest.mark.asyncio

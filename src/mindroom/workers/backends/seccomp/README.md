@@ -14,3 +14,9 @@ only the Chromium sandbox operations observed on Linux: argument-filtered `clone
 `chroot`, which still requires namespace-local kernel authority. `clone3` keeps the default `ENOSYS` behavior.
 
 Rebase and revalidate this snapshot when the container runtime or packaged Chromium version changes.
+
+The namespace filters assume Linux syscall argument layouts where `clone` flags are argument 0, including aarch64
+and x86_64. The kernel must permit unprivileged user namespaces; seccomp cannot override a host sysctl or LSM denial.
+Live Chromium validation was performed on Linux aarch64 with Docker and containerd. Other architectures, including
+x86_64, require validation on the target kernel/runtime before deployment; Moby's upstream architecture coverage
+does not imply that this derived Chromium profile was tested across that matrix.
