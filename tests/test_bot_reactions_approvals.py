@@ -24,10 +24,12 @@ from mindroom.approval_inbound import maybe_handle_tool_approval_reply
 from mindroom.approval_manager import (
     initialize_approval_store,
 )
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.coalescing import ReadyPendingEvent
 from mindroom.coalescing_batch import PendingEvent, PreparedTurn, requester_coalescing_key
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_handoff import PreparedIngress
@@ -1475,6 +1477,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A fresh bot must execute the persisted tool once after policy or card consent."""
         config = self._config_for_storage(tmp_path)
+        config.agents[mock_agent_user.agent_name].tools = [ToolConfigEntry(name="shell")]
         runtime_paths = runtime_paths_for(config)
         session_db = tmp_path / "persisted-approval-agent.db"
         executed: list[list[str]] = []
@@ -1500,6 +1503,7 @@ class TestAgentBot(AgentBotTestBase):
                         name="run_shell_command",
                         entrypoint=run_shell_command,
                         requires_confirmation=True,
+                        owning_toolkit="shell",
                     ),
                 ],
                 db=SqliteDb(db_file=str(session_db), session_table="sessions"),
@@ -1518,7 +1522,7 @@ class TestAgentBot(AgentBotTestBase):
             paused_response,
             fallback_session_id=target.session_id,
             fallback_run_id=paused_response.run_id,
-            toolkit_owners={},
+            toolkit_owners=toolkit_owners_for_agents([first_agent]),
         )
         assert paused is not None
         paused.tools[0].approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
