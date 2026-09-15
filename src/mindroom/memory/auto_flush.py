@@ -109,6 +109,7 @@ def _resolve_flush_scope(
     )
 
 
+# LEGACY_COMPAT: File-memory flush state retaining room and thread locations.
 # Legacy format: File-memory auto-flush session entries persisted room_id and thread_id location fields.
 # Last legacy release: v2026.3.93; replacement: v2026.3.94 stopped writing both fields.
 # Handling: Drop only the retired locations when reading state; the next public mutation rewrites it durably.

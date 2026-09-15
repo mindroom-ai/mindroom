@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# LEGACY_COMPAT: Application-owned journal ingestion before durable Matrix consumers.
 # Legacy format: Application-owned journal ingestion without matrix_sync_consumers.
 # Last legacy release: v2026.9.28; replacement: v2026.9.29 transferred ingestion ownership.
 # Handling: Retire unfinished transport work while preserving history, terminal turns, and journal generation.
@@ -67,6 +68,7 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
     transaction.execute("UPDATE visible_messages SET membership_epoch = 0 WHERE membership_epoch != 0")
 
 
+# LEGACY_COMPAT: Approval calls without persisted toolkit origins.
 # Legacy format: Approval calls written before per-call toolkit origin persistence.
 # Last legacy release: v2026.9.139; replacement: per-call toolkit_name storage.
 # Handling: Preserve calls with unknown origins; approved execution requires a new request.

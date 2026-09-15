@@ -8,12 +8,14 @@ if TYPE_CHECKING:
     from agno.models.message import Message
 
 
+# LEGACY_COMPAT: Persisted Anthropic tool calls without empty arguments.
 # Legacy format: Agno writers omitted the arguments field for empty Anthropic tool calls.
 # Last legacy release: v2026.9.43; replacement: v2026.9.44 included the upstream Agno 3.0.7 writer fix.
 # Handling: Supply `{}` arguments in copies of affected calls until those histories are migrated or dropped.
 # Coverage: tests/test_openai_models.py::test_chat_models_supply_missing_tool_arguments_without_mutating_history.
 
 
+# LEGACY_COMPAT: Persisted sparse OpenAI tool placeholders and orphan results.
 # Legacy format: Streamed OpenAI history retained id-only tool placeholders and their orphan tool results.
 # Last legacy release: v2026.7.172; replacement: v2026.7.173 filtered sparse placeholders during writes.
 # Handling: Remove each placeholder and its matching result while preserving unchanged message identities.
@@ -56,6 +58,7 @@ def repair_legacy_openai_tool_replay(messages: list[Message]) -> list[Message]:
     return normalized_messages
 
 
+# LEGACY_COMPAT: Responses history without reusable ordered provider output.
 # Legacy format: Agno-only Responses spans retain a lossy reasoning tail and original function-call item IDs.
 # Last legacy release: No universal writer cutoff; v2026.9.128 predates ordered capture in v2026.9.129,
 # but current stored, nonportable responses can still omit ordered output.

@@ -25,6 +25,7 @@ _REQUIRED_SESSION_COLUMNS = frozenset(
 )
 
 
+# LEGACY_COMPAT: Session databases missing required schema columns.
 # Legacy format: Owned Agno session databases may lack columns required by the installed schema.
 # Last legacy release: schema-based boundary with no single release cutoff or safe row conversion.
 # Handling: Archive the reconstructable sessions directory before creating a current store; preserve its bytes.

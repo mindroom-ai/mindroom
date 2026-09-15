@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 
 _LEGACY_RECOVERY_TABLES = ("pendingtimelineevents", "syncrecoverygaps", "syncrecoveryabandonedrooms")
 
+# LEGACY_COMPAT: Crypto stores with retired transport recovery tables.
 # Legacy format: Dependency-owned 0.40 crypto store with pre-durable transport recovery tables.
 # Last legacy release: v2026.9.28; replacement: v2026.9.29 selected dependency 1.0 durable ingestion.
 # Handling: Retire only pending recovery rows under the file lease while preserving identity, trust, and keys.

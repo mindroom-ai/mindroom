@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .approval_continuations import ApprovalContinuation
     from .backend import Transaction
 
+# LEGACY_COMPAT: Live approvals referencing deleted retired INITIAL responses.
 # Legacy format: A live approval owns a retired INITIAL whose sources and response were deleted.
 # Last legacy release: v2026.9.63; replacement: v2026.9.64 added approval-aware INITIAL cleanup.
 # Handling: Recognize terminal deletion inside the caller's transaction; current owners expire cards,

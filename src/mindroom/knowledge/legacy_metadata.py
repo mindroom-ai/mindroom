@@ -7,21 +7,25 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+# LEGACY_COMPAT: Knowledge metadata without include/exclude filter identities.
 # Legacy format: Knowledge-index metadata omitted base include_patterns and exclude_patterns.
 # Last legacy release: v2026.6.41; replacement: v2026.6.42 persisted both filter identities.
 # Handling: Normalize absent or empty filters to the current empty-filter identity without mutating input.
 # Coverage: tests/test_knowledge_indexing_config.py::test_indexing_settings_from_metadata_normalizes_legacy_empty_filter_keys.
 
+# LEGACY_COMPAT: Knowledge metadata without extra-extension identity.
 # Legacy format: Semantic knowledge-index metadata omitted extra_extensions.
 # Last legacy release: v2026.6.127; replacement: v2026.6.128 persisted the extension identity.
 # Handling: Normalize absence to the semantic empty-filter identity; file-mode absence remains empty.
 # Coverage: tests/test_knowledge_indexing_config.py::test_indexing_settings_from_metadata_normalizes_legacy_empty_filter_keys.
 
+# LEGACY_COMPAT: Knowledge metadata without the effective hidden-file gate.
 # Legacy format: Knowledge-index metadata omitted the effective non-Git skip_hidden gate.
 # Last legacy release: v2026.7.162; replacement: v2026.7.163 persisted the gate in the corpus identity.
 # Handling: Keep absence empty so a currently hidden-filtered corpus rebuilds while Git identity remains stable.
 # Coverage: tests/test_knowledge_indexing_config.py::test_skip_hidden_changes_corpus_key_but_not_query_key.
 
+# LEGACY_COMPAT: Knowledge metadata without the content-publication gate.
 # Legacy format: Knowledge-index metadata omitted require_content_before_publish.
 # Last legacy release: v2026.7.328; replacement: v2026.7.329 persisted the publication gate.
 # Handling: Keep absence empty so gated runtime overlays invalidate old empty indexes; false stays compatible.

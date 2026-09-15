@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from .backend import Row, Transaction
 
+# LEGACY_COMPAT: Response ownership inferred from approval and FINAL snapshots.
 # Legacy format: Approval context and prepared FINAL snapshots carry response source ownership.
 # Last legacy release: v2026.9.137; replacement: the explicit response_attempts schema.
 # Handling: Adopt stable identities once under the backend schema transaction; preserve pending and frozen debt.

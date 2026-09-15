@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal.approval_continuations import ApprovalContinuation
 
+# LEGACY_COMPAT: Approval continuation context without frozen presentation visibility.
 # Legacy format: Continuation context without a frozen presentation-visibility snapshot.
 # Last legacy release: v2026.8.84; replacement: v2026.8.85 persisted presentation and show_tool_calls.
 # Handling: Adopt current visibility once at the first claim and freeze it for later claims and restarts.
@@ -28,6 +29,7 @@ def resolve_legacy_visibility(*, show_tool_calls: bool, is_frozen: bool, current
     return current_policy
 
 
+# LEGACY_COMPAT: Sparse external approval continuation origins.
 # Legacy format: Nullable or externally sparse approval continuation origin.
 # Last legacy release: Unversioned sparse input; replacement: no distinct released native predecessor.
 # Handling: Attribute a requester-authored turn or trusted router relay from the retained sender fields.
@@ -53,6 +55,7 @@ def restore_legacy_approval_origin(continuation: ApprovalContinuation) -> TurnOr
     )
 
 
+# LEGACY_COMPAT: Approval cards identifying calls only through tool_call_id.
 # Legacy format: Approval cards with only the defensive tool_call_id alias usable as identity.
 # Last legacy release: Unversioned external input; replacement: v2026.5.22 introduced both native ID fields.
 # Handling: Prefer a valid approval_id and otherwise accept a valid tool_call_id from sparse external cards.

@@ -197,6 +197,7 @@ def _published_report_to_json(report: PublishedReport) -> dict[str, object]:
     }
 
 
+# LEGACY_COMPAT: Published report records without an artifact kind.
 # Legacy format: Published report records omitted artifact_kind and represented single HTML files.
 # Last legacy release: v2026.6.71; replacement: v2026.6.72 persisted artifact_kind for HTML and static sites.
 # Handling: Default missing kind to html_file; an existing mutation rewrites the complete current record.

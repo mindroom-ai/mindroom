@@ -1,5 +1,6 @@
 """Historical requester keys and verified private-storage aliases."""
 
+# LEGACY_COMPAT: Relocated private directories without historical sibling aliases.
 # Legacy format: relocated current private directories without historical sibling aliases.
 # Last legacy release: v2026.9.36; verified historical aliases introduced in v2026.9.37.
 # Handling: accept only aliases proven by the current owner and exact historical reconstruction.

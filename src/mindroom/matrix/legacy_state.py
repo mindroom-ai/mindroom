@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from mindroom.matrix.state import MatrixState
 
+# LEGACY_COMPAT: Persisted Matrix accounts without a homeserver domain.
 # Legacy format: Persisted Matrix accounts had no homeserver domain.
 # Last legacy release: v2026.4.211; replacement: v2026.4.212 persisted the provisioned account domain.
 # Handling: Backfill only missing domains from current runtime configuration and rewrite the normalized state once.

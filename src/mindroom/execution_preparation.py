@@ -155,6 +155,7 @@ def _classify_partial_reply(
     active_event_ids: Collection[str],
 ) -> _PartialReplyKind | None:
     """Classify a self-authored partial reply from persisted stream metadata first."""
+    # LEGACY_COMPAT: Body-only terminal suffixes when structured stream status is absent.
     # Legacy format: mindroom.legacy_streaming owns body-only terminal suffix parsing without stream_status.
     # Last legacy release: v2026.3.121; replacement: v2026.3.122 wrote structured stream status.
     # Handling: Structured status wins; consult body markers only when status is absent or unrecognized.

@@ -18537,6 +18537,14 @@ Dependency-owned migrations and authoritative SaaS data remain under their exist
 This page maps every item from the migration audit to its current owner and disposition.
 It describes the current source rather than promising support for every earlier release.
 
+Each legacy compatibility comment starts with `# LEGACY_COMPAT: <short description of the legacy format>`, followed by its release provenance, handling, and coverage.
+The marker also applies to documented defaults and compatibility notes kept beside current owners.
+Find all marked Python rules, including the SaaS backend, from the repository root:
+
+```bash
+rg -n -F 'LEGACY_COMPAT:' --glob '*.py'
+```
+
 ## Status terms
 
 | Status | Meaning |

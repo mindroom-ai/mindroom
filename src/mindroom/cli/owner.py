@@ -9,6 +9,7 @@ from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 _LEGACY_OWNER_MATRIX_USER_ID_PLACEHOLDER = "__PLACEHOLDER__"
 _OWNER_MATRIX_USER_ID_RE = re.compile(r"^@[^:\s]+:[^\s]+$")
 
+# LEGACY_COMPAT: Generic owner placeholder in authored configuration.
 # Legacy format: Unversioned authored config may contain the generic __PLACEHOLDER__ owner token.
 # Last legacy release: no tagged native writer; v2026.2.163 introduced both accepted owner placeholders.
 # Handling: Replace either token with the same validated, YAML-quoted Matrix user ID.

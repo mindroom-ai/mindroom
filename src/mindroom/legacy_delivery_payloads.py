@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import Any
 
+# LEGACY_COMPAT: FINAL outcomes embedded directly in Matrix payloads.
 # Legacy format: Substantive final outcomes inline in Matrix payloads, including m.new_content edits.
 # Last legacy release: v2026.8.88; replacement: v2026.8.89 added local result_json and a wire marker.
 # Handling: Prefer the visible replacement outcome; substantive inline data wins, while a marker defers to local data.
