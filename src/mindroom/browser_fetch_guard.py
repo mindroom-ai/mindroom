@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 _BROWSER_INTERNAL_SCHEMES = frozenset({"about", "blob", "data"})
 
 
-def _validate_browser_fetch_url(url: str, *, allow_private_networks: bool = False) -> str:
+def validate_browser_fetch_url(url: str, *, allow_private_networks: bool = False) -> str:
     """Validate a browser request URL while allowing non-network browser internals."""
     try:
         scheme = urlsplit(url).scheme.lower()
@@ -29,7 +29,7 @@ async def continue_or_abort_browser_fetch(route: Route, *, allow_private_network
     """Continue public browser fetches and abort unsafe server-side destinations."""
     try:
         await asyncio.to_thread(
-            _validate_browser_fetch_url,
+            validate_browser_fetch_url,
             route.request.url,
             allow_private_networks=allow_private_networks,
         )
