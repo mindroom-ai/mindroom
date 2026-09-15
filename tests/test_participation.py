@@ -255,6 +255,33 @@ async def test_ambiguous_or_invalid_embedded_decisions_stay_quiet(content: str) 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "content",
+    [
+        '{"action":"stay_silent","action":"respond","reason":"Wait."}',
+        '{"action":"respond","action":"stay_silent","reason":"Wait."}',
+        '{"action":"respond","action":"respond","reason":"Help."}',
+        '{"action":"respond","reason":"Wait.","reason":"Help."}',
+        '{"action":"stay_silent","\\u0061ction":"respond","reason":"Wait."}',
+    ],
+)
+async def test_duplicate_decision_keys_stay_quiet(content: str) -> None:
+    """Duplicate keys must fail validation regardless of order, value, or escaping."""
+    model = ParticipationModel(ModelResponse(content=f"Before.\n```json\n{content}\n```\nAfter."))
+    gate = ParticipationGate()
+    with participation_model(model, gate, run_id="primary"):
+        result = await model.aresponse(
+            [Message(role="user", content="Can anyone explain this?")],
+            run_response=RunOutput(run_id="primary"),
+        )
+    assert not result.content
+    assert gate.is_silent
+    assert gate.decision is not None
+    assert gate.decision.reason == "decision_failed"
+    assert len(model.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "decision",
     [
         ModelResponse(content='{"action":"stay_silent","reason":"Humans are discussing plans."}'),

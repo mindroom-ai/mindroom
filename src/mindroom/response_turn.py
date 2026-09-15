@@ -45,6 +45,7 @@ from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -1207,14 +1208,16 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 resolution: StreamAttemptResolution | None = None
                 keep_going = False
                 try:
-                    async for item in adapter.run_attempt(run, continuation):
-                        if isinstance(item, AttemptResolved):
-                            # The sentinel must be the attempt's final yield; never
-                            # break out of this loop, so attempt cleanup stays
-                            # deterministic at generator return.
-                            resolution = item.resolution
-                            continue
-                        yield item
+                    attempt_stream = adapter.run_attempt(run, continuation)
+                    async with closing_async_stream(attempt_stream):
+                        async for item in attempt_stream:
+                            if isinstance(item, AttemptResolved):
+                                # The sentinel must be the attempt's final yield; never
+                                # break out of this loop, so attempt cleanup stays
+                                # deterministic at generator return.
+                                resolution = item.resolution
+                                continue
+                            yield item
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, SkippedAttempt):

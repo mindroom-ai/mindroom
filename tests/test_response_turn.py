@@ -1762,14 +1762,21 @@ def test_streaming_aclose_runs_cleanup_without_recording() -> None:
     """Closing the driver generator mid-stream cleans up and records nothing."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
+    attempt_closed = False
 
     async def _attempt(
         _run: TurnRunState,
         _c: DynamicContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
-        yield "first"
-        yield "second"
-        yield AttemptResolved(CompletedAttempt(replayable_text="full", has_visible_content=True))
+        nonlocal attempt_closed
+        try:
+            yield "first"
+            yield "second"
+            yield AttemptResolved(CompletedAttempt(replayable_text="full", has_visible_content=True))
+        finally:
+            assert log.finalized == 0
+            assert log.closed == 0
+            attempt_closed = True
 
     async def _run() -> None:
         stream = stream_response_turn(
@@ -1780,6 +1787,7 @@ def test_streaming_aclose_runs_cleanup_without_recording() -> None:
         )
         assert await anext(stream) == "first"
         await stream.aclose()
+        assert attempt_closed
 
     asyncio.run(_run())
 

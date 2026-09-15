@@ -29,6 +29,7 @@ from mindroom.approval_tools import (
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
 )
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -54,6 +55,7 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
@@ -921,11 +923,12 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 yield_run_output=True,
             )
         continued = None
-        async for event in continuation_stream:
-            if isinstance(event, (RunOutput, TeamRunOutput)):
-                continued = event
-            elif not isinstance(event, (RunPausedEvent, TeamRunPausedEvent)) and on_event is not None:
-                on_event(event)
+        async with closing_async_stream(continuation_stream):
+            async for event in continuation_stream:
+                if isinstance(event, (RunOutput, TeamRunOutput)):
+                    continued = event
+                elif not isinstance(event, (RunPausedEvent, TeamRunPausedEvent)) and on_event is not None:
+                    on_event(event)
         if continued is None:
             msg = "Delegation continuation did not yield its terminal run"
             raise RuntimeError(msg)
@@ -957,11 +960,13 @@ async def drive_delegation_stream(
             yield terminal
         return
     driven = response
-    async for event in _stream_driven_run(entity, response, cast("_DelegationOptions", kwargs)):
-        if isinstance(event, (RunOutput, TeamRunOutput)):
-            driven = event
-        else:
-            yield event
+    driven_stream = _stream_driven_run(entity, response, cast("_DelegationOptions", kwargs))
+    async with closing_async_stream(driven_stream):
+        async for event in driven_stream:
+            if isinstance(event, (RunOutput, TeamRunOutput)):
+                driven = event
+            else:
+                yield event
     if driven.status == RunStatus.paused:
         yield _project_pause_event(paused_event, driven)
     yield driven
@@ -1011,5 +1016,6 @@ async def _stream_driven_run(
     finally:
         if not task.done():
             task.cancel()
+            await wait_for_future_until_complete(asyncio.gather(task, return_exceptions=True))
             with suppress(asyncio.CancelledError):
-                await task
+                task.result()

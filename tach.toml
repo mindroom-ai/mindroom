@@ -352,6 +352,8 @@ depends_on = ["mindroom.durable_write"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
+    "mindroom.agno_session_persistence_patch",
+    "mindroom.tool_system.context_bound_streams",
     "mindroom.agno_participation",
     "mindroom.agents",
     "mindroom.approval_tools",
@@ -399,6 +401,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
+    "mindroom.tool_system.context_bound_streams",
     "mindroom.participation",
     "mindroom.ai_runtime",
     "mindroom.ai_turn_state",
@@ -611,7 +614,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agno_session_persistence_patch"
 depends_on = ["mindroom.background_tasks"]
-visibility = ["mindroom.agent_storage"]
+visibility = ["mindroom.agent_storage", "mindroom.ai"]
 
 [[modules]]
 path = "mindroom.agent_run_context"
@@ -3731,6 +3734,9 @@ depends_on = [
 path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
+    "mindroom.delegation.execution",
+    "mindroom.ai",
+    "mindroom.response_turn",
     "mindroom.api.openai_compat",
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",
@@ -5711,6 +5717,8 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.tool_system.context_bound_streams",
     "mindroom.approval_tools",
     "mindroom.delegation.sessions",
     "mindroom.tool_system.output_files",

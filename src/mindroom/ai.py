@@ -30,6 +30,7 @@ from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.agno_participation import participation_model
+from mindroom.agno_session_persistence_patch import drain_agent_cancellation
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
@@ -107,6 +108,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
@@ -894,24 +896,26 @@ async def _run_cached_agent_attempt(
     session_id: str,
     *,
     user_id: str | None = None,
-    run_id: str | None = None,
+    run_id: str,
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> RunOutput:
     """Run one non-streaming Agno request with timing instrumentation."""
-    return await ai_runtime.cached_agent_run(
-        agent,
-        run_input,
-        session_id,
-        user_id=user_id,
-        run_id=run_id,
-        run_id_callback=run_id_callback,
-        media=media,
-        metadata=metadata,
-        pipeline_timing=pipeline_timing,
-    )
+    async with drain_agent_cancellation(agent, run_id) as bind_owner:
+        with bind_owner():
+            return await ai_runtime.cached_agent_run(
+                agent,
+                run_input,
+                session_id,
+                user_id=user_id,
+                run_id=run_id,
+                run_id_callback=run_id_callback,
+                media=media,
+                metadata=metadata,
+                pipeline_timing=pipeline_timing,
+            )
 
 
 async def _run_non_streaming_agent_attempts(
@@ -1640,20 +1644,22 @@ async def ai_response(  # noqa: C901, PLR0915
         ):
             return skipped
         if supports_native_tool_approval:
-            response = cast(
-                "RunOutput",
-                await drive_delegations(
-                    prepared_run.agent,
-                    response,
-                    run_child=run_delegated_child_response,
-                    agent_name=agent_name,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    delegation_depth=delegation_depth,
-                    refresh_scheduler=refresh_scheduler,
-                ),
-            )
+            async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
+                with bind_owner():
+                    response = cast(
+                        "RunOutput",
+                        await drive_delegations(
+                            prepared_run.agent,
+                            response,
+                            run_child=run_delegated_child_response,
+                            agent_name=agent_name,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            execution_identity=execution_identity,
+                            delegation_depth=delegation_depth,
+                            refresh_scheduler=refresh_scheduler,
+                        ),
+                    )
 
         response_tool_trace = _extract_tool_trace(response)
         if tool_trace_collector is not None:
@@ -1914,21 +1920,24 @@ async def _stream_agent_attempt_chunks(
                 yield_run_output=True,
                 metadata=run_context.metadata,
             )
+        provider_stream = stream_generator
         stream_generator = stream_with_llm_request_log_context(
             stream_generator,
             request_context=request_context,
         )
         if transform_events is not None:
             stream_generator = transform_events(stream_generator)
-        async for stream_chunk in _process_stream_events(
+        chunks = _process_stream_events(
             stream_generator,
             state=state,
             show_tool_calls=show_tool_calls,
             agent_name=run_context.agent_name,
             state_updated=state_updated,
             pipeline_timing=pipeline_timing,
-        ):
-            yield stream_chunk
+        )
+        async with closing_async_stream(provider_stream), closing_async_stream(stream_generator), aclosing(chunks):
+            async for stream_chunk in chunks:
+                yield stream_chunk
     except Exception as e:
         logger.exception("Error starting streaming AI response")
         state.user_error = e
@@ -2188,8 +2197,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             active_model_name=prepared_run.runtime_model_name,
         )
         with participation_model(prepared_run.agent.model, ctx.participation, run_id=attempt.attempt_run_id):
-            async for stream_chunk in attempt_stream:
-                yield stream_chunk
+            async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
+                owned_stream = context_bound_async_stream(
+                    context_factory=bind_owner,
+                    stream_factory=attempt_stream.__aiter__,
+                )
+                async with closing_async_stream(owned_stream):
+                    async for stream_chunk in owned_stream:
+                        yield stream_chunk
 
         run_error = state.user_error or state.stream_exception
         if run_error is not None:

@@ -39,7 +39,15 @@ Return only a JSON object with action (respond or stay_silent) and a brief reaso
 
 def _parse_decision(content: str) -> ParticipationDecision:
     """Accept one decision object with prose or fences, rejecting ambiguous output."""
-    decoder = json.JSONDecoder()
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            msg = "Participation decision must not contain duplicate JSON keys"
+            raise ValueError(msg)
+        return result
+
+    decoder = json.JSONDecoder(object_pairs_hook=unique_object)
     values = []
     end = 0
     # Skip prose brackets, but let malformed JSON fail instead of extracting its children.
