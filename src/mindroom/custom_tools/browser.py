@@ -1604,6 +1604,7 @@ class BrowserTools(Toolkit):
                     headless=self._worker_display is None,
                 )
                 if self._worker_display is not None:
+                    launch_kwargs["chromium_sandbox"] = True
                     launch_kwargs["env"] = {
                         **os.environ,
                         **self._runtime_paths.process_env,

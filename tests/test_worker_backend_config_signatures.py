@@ -182,9 +182,10 @@ def test_kubernetes_signature_preserves_config_fields_and_adds_client_identity(
     # keep the independent oracle for every legacy configuration field.
     assert signature[0] == legacy_signature[0]
     assert signature[1] == ""
-    assert signature[2:16] == legacy_signature[1:15]
-    assert signature[17:] == legacy_signature[15:]
-    assert signature[16].startswith(("in-cluster:", "kubeconfig:"))
+    assert signature[2] == "null"
+    assert signature[3:17] == legacy_signature[1:15]
+    assert signature[18:] == legacy_signature[15:]
+    assert signature[17].startswith(("in-cluster:", "kubeconfig:"))
 
 
 def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> None:
@@ -248,6 +249,69 @@ def test_kubernetes_config_rejects_storage_subpath_traversal(
 
     with pytest.raises(WorkerBackendError, match="STORAGE_SUBPATH_PREFIX"):
         KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+def test_kubernetes_config_accepts_exact_localhost_seccomp_profile(tmp_path: Path) -> None:
+    """A node-installed profile is represented by an exact Localhost seccomp object."""
+    profile = {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"}
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_KUBERNETES_ENV,
+            "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON": json.dumps(profile),
+        },
+    )
+
+    assert KubernetesWorkerBackendConfig.from_runtime(runtime_paths).seccomp_profile == profile
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {},
+        {"type": "RuntimeDefault"},
+        {"type": "Unconfined"},
+        {"type": "Localhost", "localhostProfile": "/absolute.json"},
+        {"type": "Localhost", "localhostProfile": "../outside.json"},
+        {"type": "Localhost", "localhostProfile": "profiles//worker.json"},
+        {"type": "Localhost", "localhostProfile": "profiles/./worker.json"},
+        {"type": "Localhost", "localhostProfile": "profiles/worker.json", "extra": "value"},
+    ],
+)
+def test_kubernetes_config_rejects_unsupported_seccomp_profile(
+    tmp_path: Path,
+    profile: dict[str, str],
+) -> None:
+    """Only an exact, relative Localhost profile may override worker filtering."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_KUBERNETES_ENV,
+            "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON": json.dumps(profile),
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="SECCOMP_PROFILE_JSON"):
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+def test_kubernetes_signature_changes_with_seccomp_profile(tmp_path: Path) -> None:
+    """Selecting a different node profile invalidates the cached backend and worker template."""
+    base = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
+    changed = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_KUBERNETES_ENV,
+            "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON": json.dumps(
+                {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"},
+            ),
+        },
+    )
+
+    assert kubernetes_backend_config_signature(base, auth_token=None) != kubernetes_backend_config_signature(
+        changed,
+        auth_token=None,
+    )
 
 
 @pytest.mark.parametrize(

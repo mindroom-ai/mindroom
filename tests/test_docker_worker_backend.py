@@ -28,7 +28,11 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import (
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SHARED_CREDENTIALS_PATH_ENV,
+    WORKER_COMPUTER_ENABLED_ENV,
+)
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -209,6 +213,10 @@ class _FakeContainersApi:
             labels=dict(labels) if isinstance(labels, dict) else {},
             user=str(kwargs["user"]) if kwargs.get("user") is not None else None,
         )
+        container.attrs["HostConfig"] = {
+            "CapDrop": list(kwargs.get("cap_drop", [])),
+            "SecurityOpt": list(kwargs.get("security_opt", [])),
+        }
         if isinstance(volumes, list):
             container.attrs["Mounts"] = [
                 {
@@ -1458,6 +1466,8 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     _assert_projected_config_snapshot(projection_root, tmp_path)
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
+    assert run_call["cap_drop"] == ["ALL"]
+    assert run_call["security_opt"] == ["no-new-privileges:true"]
 
     labels = run_call["labels"]
     assert isinstance(labels, dict)
@@ -1470,6 +1480,70 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
+
+
+def test_docker_computer_worker_uses_argument_filtered_browser_seccomp_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Computer workers retain syscall filtering while allowing Chromium's namespace sandbox."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    security_opt = fake_client.containers.run_calls[0]["security_opt"]
+    assert isinstance(security_opt, list)
+    assert security_opt[0] == "no-new-privileges:true"
+    assert len(security_opt) == 2
+    profile = json.loads(str(security_opt[1]).removeprefix("seccomp="))
+    assert profile["defaultAction"] == "SCMP_ACT_ERRNO"
+    assert set(profile) == {"defaultAction", "defaultErrnoRet", "syscalls"}
+    assert "includes" not in json.dumps(profile)
+    assert "excludes" not in json.dumps(profile)
+    assert not any(
+        rule["action"] == "SCMP_ACT_ALLOW"
+        and not rule.get("args")
+        and {"clone", "unshare", "setns"}.intersection(rule["names"])
+        for rule in profile["syscalls"]
+    )
+    namespace_rules = [
+        rule
+        for rule in profile["syscalls"]
+        if rule["action"] == "SCMP_ACT_ALLOW" and rule.get("args") and "clone" in rule["names"]
+    ]
+    assert {
+        (rule["args"][0]["value"], rule["args"][0].get("valueTwo"))
+        for rule in namespace_rules
+        if rule["args"][0]["op"] == "SCMP_CMP_MASKED_EQ"
+    }.issuperset(
+        {
+            (0x7E020000, 0x10000000),
+            (0x7E020000, 0x20000000),
+            (0x7E020000, 0x70000000),
+        },
+    )
+    allowed_names = {
+        name for rule in profile["syscalls"] if rule["action"] == "SCMP_ACT_ALLOW" for name in rule["names"]
+    }
+    assert {
+        "bpf",
+        "delete_module",
+        "init_module",
+        "mount",
+        "perf_event_open",
+        "reboot",
+        "setns",
+        "swapon",
+        "swapoff",
+        "syslog",
+        "umount2",
+    }.isdisjoint(allowed_names)
+    assert "chroot" in allowed_names
 
 
 def test_docker_backend_writes_authoritative_worker_validation_snapshot(
@@ -3226,6 +3300,22 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     assert second_env["MINDROOM_SANDBOX_PROXY_TOKEN"] == _ROTATED_AUTH_TOKEN
     assert second_env["EXTRA_ENV"] == "updated"
     assert second_run_call["user"] == "2000:2000"
+
+
+def test_docker_backend_recreates_container_missing_runtime_security_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An old matching container must be replaced if its effective host security is stale."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    first_container.attrs["HostConfig"] = {"CapDrop": [], "SecurityOpt": []}
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
 
 
 def test_docker_backend_recreates_container_when_validation_snapshot_changes(
