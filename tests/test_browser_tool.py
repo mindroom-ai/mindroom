@@ -1494,7 +1494,7 @@ async def test_worker_browser_launch_uses_private_display_and_persistent_profile
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["launch", "route", "new_page"])
+@pytest.mark.parametrize("phase", ["driver_start", "launch", "route", "new_page"])
 async def test_worker_cancelled_startup_releases_partial_resources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1516,6 +1516,9 @@ async def test_worker_cancelled_startup_releases_partial_resources(
     )
     await asyncio.wait_for(adapter.reached.wait(), timeout=1)
     task.cancel()
+    if phase == "driver_start":
+        await asyncio.sleep(0)
+        adapter.proceed.set()
     with pytest.raises(asyncio.CancelledError):
         await task
     await runtime.close()
@@ -1612,3 +1615,62 @@ async def test_native_page_creation_during_tab_listing_preserves_snapshot(
     assert len(first["tabs"]) == 1
     assert len(second["tabs"]) == 2
     await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_driver_acquisition_closes_manager_owned_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An initial start failure still closes resources acquired by the manager."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    adapter = LifecycleBrowser(fail_start=True)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    with pytest.raises(RuntimeError, match="Driver startup failed"):
+        await browser.browser("start")
+    await browser.aclose()
+    assert adapter.live_resources == set()
+
+
+@pytest.mark.asyncio
+async def test_repeated_start_cancellation_keeps_cleanup_owned_until_runtime_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime close waits for acquisition cleanup even after repeated request cancellation."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser(pause_at="driver_start")
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    runtime = WorkerComputerRuntime(FakeDisplay())
+
+    closing_browser = asyncio.Event()
+
+    async def close_browser() -> None:
+        closing_browser.set()
+        await browser.aclose()
+
+    async def execute() -> object:
+        return await browser.browser("start")
+
+    task = asyncio.create_task(
+        runtime.run_browser_call("binding", lambda _: BrowserSession(execute, close_browser), [], {}),
+    )
+    await asyncio.wait_for(adapter.reached.wait(), timeout=1)
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
+    await asyncio.wait_for(closing_browser.wait(), timeout=1)
+    task.cancel()
+    closing = asyncio.create_task(runtime.close())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(closing), timeout=0.05)
+    assert not adapter.start_cancelled
+    adapter.proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(closing, timeout=1)
+    assert adapter.live_resources == set()

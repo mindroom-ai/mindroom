@@ -45,9 +45,12 @@ class LifecyclePage:
 class LifecycleBrowser:
     """Driver/context boundary with deferred phases and observable live resources."""
 
-    def __init__(self, *, pause_at: str | None = None, initial_pages: bool = False) -> None:
+    def __init__(self, *, pause_at: str | None = None, initial_pages: bool = False, fail_start: bool = False) -> None:
         self.pause_at = pause_at
         self.reached = asyncio.Event()
+        self.proceed = asyncio.Event()
+        self.fail_start = fail_start
+        self.start_cancelled = False
         self.live_resources: set[str] = set()
         self.pages = [LifecyclePage()] if initial_pages else []
         self.page_listeners: list[Callable[[LifecyclePage], object]] = []
@@ -57,11 +60,19 @@ class LifecycleBrowser:
         """Suspend a selected external operation until the test cancels it."""
         if phase == self.pause_at:
             self.reached.set()
-            await asyncio.Event().wait()
+            await self.proceed.wait()
 
     async def start(self) -> LifecycleBrowser:
         """Acquire the driver resource."""
         self.live_resources.add("driver")
+        try:
+            await self.checkpoint("driver_start")
+        except asyncio.CancelledError:
+            self.start_cancelled = True
+            raise
+        if self.fail_start:
+            msg = "Driver startup failed."
+            raise RuntimeError(msg)
         return self
 
     async def launch_persistent_context(self, **_kwargs: object) -> LifecycleBrowser:
@@ -101,3 +112,7 @@ class LifecycleBrowser:
     async def stop(self) -> None:
         """Release the Playwright driver resource."""
         self.live_resources.discard("driver")
+
+    async def __aexit__(self, *_args: object) -> None:
+        """Close manager-owned resources when acquisition did not return a driver."""
+        await self.stop()

@@ -561,6 +561,7 @@ class BrowserTools(Toolkit):
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
+        self._startup_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._describe_browser_schema()
 
     def bind_worker_display(self, display: str, workspace: Path) -> str:
@@ -592,7 +593,26 @@ class BrowserTools(Toolkit):
 
     async def aclose(self) -> None:
         """Close persistent browser resources on their owning event loop."""
-        await self._close_profiles()
+        try:
+            await self._close_profiles()
+        finally:
+            # Startup owns the driver until its handshake settles. A second
+            # cancellation must not orphan cleanup or cancel that handshake.
+            tasks = tuple(self._startup_cleanup_tasks)
+            cleanup = asyncio.gather(*tasks, return_exceptions=True)
+            cancelled: asyncio.CancelledError | None = None
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            results = cleanup.result()
+            self._startup_cleanup_tasks.difference_update(tasks)
+            if cancelled is not None:
+                raise cancelled
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
     def _describe_browser_schema(self) -> None:
         """Attach explicit model-facing descriptions for browser action routing."""
@@ -650,9 +670,9 @@ class BrowserTools(Toolkit):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            asyncio.run(self._close_profiles())
+            asyncio.run(self.aclose())
             return
-        self._close_task = loop.create_task(self._close_profiles())
+        self._close_task = loop.create_task(self.aclose())
 
     async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
@@ -1547,9 +1567,13 @@ class BrowserTools(Toolkit):
             if state is not None:
                 return state
 
-            playwright = await async_playwright().start()
+            manager = async_playwright()
+            acquisition = asyncio.create_task(manager.start())
             context: BrowserContext | None = None
             try:
+                # The public manager cannot stop its transport during subprocess
+                # creation. Let acquisition settle before attempting cleanup.
+                playwright = await asyncio.shield(acquisition)
                 launch_kwargs = _persistent_launch_kwargs(
                     self._runtime_paths,
                     profile_name,
@@ -1587,13 +1611,23 @@ class BrowserTools(Toolkit):
                     page = await context.new_page()
                     state.active_target_id = self._register_tab(state, page)
             except BaseException as exc:
-                # The persistent owner cannot rely on a per-call child exiting.
-                # Cover cancellation until all startup resources are registered.
-                try:
-                    if context is not None:
-                        await context.close()
-                finally:
-                    await playwright.stop()
+
+                async def cleanup_startup() -> None:
+                    try:
+                        driver = await acquisition
+                    except BaseException:
+                        await manager.__aexit__(None, None, None)
+                    else:
+                        try:
+                            if context is not None:
+                                await context.close()
+                        finally:
+                            await driver.stop()
+
+                cleanup = asyncio.create_task(cleanup_startup())
+                self._startup_cleanup_tasks.add(cleanup)
+                await asyncio.shield(cleanup)
+                self._startup_cleanup_tasks.discard(cleanup)
                 if isinstance(exc, PlaywrightError):
                     friendly_message = _friendly_playwright_browser_error_message(exc)
                     if friendly_message is not None:
