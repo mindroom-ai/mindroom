@@ -1,0 +1,86 @@
+"""Tests for authored model presentation metadata."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+from pydantic import ValidationError
+
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
+from mindroom.model_loading import get_model_instance
+from mindroom.synthetic_model import SyntheticModel
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def test_metadata_survives_config_roundtrip() -> None:
+    model = ModelConfig(
+        provider="openai",
+        id="test-model",
+        display_name="  Quick helper  ",
+        icon="  icons/helper.png  ",
+    )
+
+    assert model.model_dump()["display_name"] == "Quick helper"
+    assert model.model_dump()["icon"] == "icons/helper.png"
+
+
+def test_blank_metadata_uses_default_presentation() -> None:
+    model = ModelConfig(provider="openai", id="test-model", display_name="  ", icon=" ")
+
+    assert model.display_name is None
+    assert model.icon is None
+
+
+@pytest.mark.parametrize("icon", ["icons/helper.png", "images/models/helper.svg", "mxc://server/media-id"])
+def test_icon_accepts_supported_authored_locations(icon: str) -> None:
+    model = ModelConfig(provider="openai", id="test-model", icon=icon)
+
+    assert model.icon == icon
+
+
+@pytest.mark.parametrize(
+    "icon",
+    [
+        "/icons/helper.png",
+        r"C:\icons\helper.png",
+        "https://example.com/helper.png",
+        "http://example.com/helper.png",
+        "file://icons/helper.png",
+        "data:image/png;base64,AAAA",
+        "mxc://server",
+        "mxc:///media-id",
+        "mxc://server/media-id/extra",
+        "mxc://server/media-id?download=1",
+    ],
+)
+def test_icon_rejects_unsupported_authored_locations(icon: str) -> None:
+    with pytest.raises(ValidationError):
+        ModelConfig(provider="openai", id="test-model", icon=icon)
+
+
+def test_display_metadata_is_not_forwarded_to_model_provider(tmp_path: Path) -> None:
+    config = bind_runtime_paths(
+        Config(
+            models={
+                "presented": ModelConfig(
+                    provider="synthetic",
+                    id="synthetic-test",
+                    display_name="Quick helper",
+                    icon="icons/helper.png",
+                    extra_kwargs={"seed": 7},
+                ),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+    model = get_model_instance(config, runtime_paths_for(config), "presented")
+
+    assert isinstance(model, SyntheticModel)
+    assert model.id == "synthetic-test"
+    assert model.seed == 7

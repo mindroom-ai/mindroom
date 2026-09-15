@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
@@ -576,6 +578,8 @@ class ModelConfig(BaseModel):
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
+    display_name: str | None = Field(default=None, description="Friendly model name shown in clients")
+    icon: str | None = Field(default=None, description="Config-relative image path or Matrix mxc URI")
     api: Literal["responses", "chat_completions"] | None = Field(
         default=None,
         description="OpenAI API transport; unset keeps automatic model/endpoint selection",
@@ -598,6 +602,51 @@ class ModelConfig(BaseModel):
             "enables request-time fitting that trims replayed history when a request would exceed the window"
         ),
     )
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_display_name(cls, value: str | None) -> str | None:
+        """Trim an optional display name and treat blank input as unset."""
+        if value is None:
+            return None
+        return value.strip() or None
+
+    @field_validator("icon")
+    @classmethod
+    def _normalize_icon(cls, value: str | None) -> str | None:
+        """Accept config-relative paths and complete Matrix content URIs."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+
+        try:
+            parsed = urlsplit(normalized)
+        except ValueError as exc:
+            msg = "Model icon must be a config-relative path or Matrix mxc URI"
+            raise ValueError(msg) from exc
+
+        if parsed.scheme:
+            valid_mxc = (
+                parsed.scheme.lower() == "mxc"
+                and bool(parsed.netloc)
+                and parsed.path.startswith("/")
+                and parsed.path.count("/") == 1
+                and len(parsed.path) > 1
+                and not parsed.query
+                and not parsed.fragment
+                and not any(character.isspace() for character in normalized)
+            )
+            if not valid_mxc:
+                msg = "Model icon must be a config-relative path or Matrix mxc URI"
+                raise ValueError(msg)
+            return normalized
+
+        if PurePath(normalized).is_absolute() or PureWindowsPath(normalized).is_absolute():
+            msg = "Model icon filesystem path must be relative to the config file"
+            raise ValueError(msg)
+        return normalized
 
     @model_validator(mode="after")
     def _validate_api_provider(self) -> Self:
