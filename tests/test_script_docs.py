@@ -14,7 +14,7 @@ def test_background_script_docs_cover_security_and_lifecycle() -> None:
         "list_scripts",
         "allowed_tools",
         "MindRoomTools.call",
-        "ignore_mentions=False",
+        "recipient=AGENT_NAME",
         "interrupted",
         "indeterminate",
         "MINDROOM_SCRIPT_GATEWAY_URL",

@@ -37,7 +37,7 @@ vi.mock("@/hooks/useTools", () => ({
       },
       {
         name: "delegate",
-        display_name: "Agent Delegation",
+        display_name: "Subagents",
         setup_type: "none",
         status: "available",
       },
@@ -167,7 +167,7 @@ describe("AgentEditor", () => {
         },
         {
           name: "delegate",
-          display_name: "Agent Delegation",
+          display_name: "Subagents",
           setup_type: "none",
           status: "available",
         },
@@ -1627,9 +1627,25 @@ describe("AgentEditor", () => {
     expect(screen.getByRole("checkbox", { name: "File" })).toBeTruthy();
 
     // delegate should NOT appear even though useTools returns it
-    expect(
-      screen.queryByRole("checkbox", { name: /agent delegation/i }),
-    ).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Subagents" })).toBeNull();
+  });
+
+  it("allows a single agent to enable and disable fresh self subagents", () => {
+    render(<AgentEditor />);
+    const self = screen.getByRole("checkbox", {
+      name: /this agent/i,
+    });
+    expect(self).not.toBeChecked();
+    fireEvent.click(self);
+    expect(mockStore.updateAgent).toHaveBeenLastCalledWith(
+      "test_agent",
+      expect.objectContaining({ delegate_to: ["test_agent"] }),
+    );
+    fireEvent.click(self);
+    expect(mockStore.updateAgent).toHaveBeenLastCalledWith(
+      "test_agent",
+      expect.objectContaining({ delegate_to: [] }),
+    );
   });
 
   it("updates tools when checkboxes are toggled", () => {

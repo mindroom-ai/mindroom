@@ -48,7 +48,7 @@ A later `allowed_tools` expansion cannot widen a running script's unattended app
 The `browser`, `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
 Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
 Functions that declare their own confirmation requirement still require Matrix approval.
-The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are never preapproved for background scripts.
+The `claude_agent`, `config_manager`, and `scheduler` toolkits are never preapproved for background scripts.
 
 The limits are captured with each run.
 `max_concurrent_runs` defaults to `3` for one requester and agent.
@@ -123,7 +123,9 @@ MindRoom stores only a hash of the capability in durable state and removes the r
 ## Complete Watcher Example
 
 This watcher polls a controlled text endpoint and wakes the same Matrix agent once per observed value change.
-Replace the URL and full Matrix user ID with values for your deployment.
+Replace the URL and configured agent name with values for your deployment.
+Start this watcher from a human-requester turn: background calls retain that requester, and Matrix self-messaging requires a human requester.
+For a fresh self-run from another requester context, use `run_subagent` in the agent runtime when self-delegation is allowed; the background-script gateway does not grant delegation tools.
 
 ```python
 from __future__ import annotations
@@ -134,7 +136,7 @@ from mindroom.script_sdk import MindRoomTools
 
 
 STATUS_URL = "https://example.org/controlled-status.txt"
-AGENT_MATRIX_ID = "@mindroom_watcher:example.org"
+AGENT_NAME = "watcher"
 POLL_SECONDS = 15
 
 
@@ -153,8 +155,8 @@ def main() -> None:
             "matrix_message",
             "matrix_message",
             action="send",
-            message=f"{AGENT_MATRIX_ID} the watched value changed; inspect {STATUS_URL} now.",
-            ignore_mentions=False,
+            message=f"The watched value changed; inspect {STATUS_URL} now.",
+            recipient=AGENT_NAME,
         )
 
 
@@ -162,9 +164,9 @@ if __name__ == "__main__":
     main()
 ```
 
-`matrix_message` defaults to `ignore_mentions=True` to prevent accidental agent loops.
-Set `ignore_mentions=False` only for an intentional handoff or self-trigger like the example above.
-The message must mention the actual agent Matrix ID if it is meant to start a new agent turn.
+`matrix_message` starts an agent turn only when `recipient` names an available agent or team.
+Set it to your own agent name for an intentional self-trigger like the example above.
+The message uses the current conversation by default.
 Make the watcher edge-triggered, persist or update its observed value before sending, and avoid reacting to its own unchanged output.
 
 The script inherits the original room, thread, requester, and agent execution identity, so omitting `room_id` sends through that authorized conversation context.

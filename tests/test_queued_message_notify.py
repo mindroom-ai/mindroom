@@ -964,7 +964,10 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
-        patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as mock_send,
+        patch(
+            "mindroom.thread_summary._send_thread_summary_event",
+            new=AsyncMock(return_value="$summary"),
+        ) as mock_send,
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -1070,7 +1073,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     with (
         patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
         patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as mock_generate,
-        patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
+        patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")),
     ):
         await apply_post_response_effects(
             FinalDeliveryOutcome(

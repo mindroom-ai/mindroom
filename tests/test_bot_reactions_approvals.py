@@ -13,12 +13,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
-from agno.db.sqlite import SqliteDb
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
 from mindroom import approval_manager, approval_transport, interactive
+from mindroom.agent_storage import create_session_storage
 from mindroom.ai import _attach_blocking_pause_presentation
 from mindroom.approval_inbound import maybe_handle_tool_approval_reply
 from mindroom.approval_manager import (
@@ -67,6 +67,7 @@ from mindroom.tool_approval import (
     MatrixApprovalAction,
     shutdown_approval_runtime,
 )
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.bot_helpers import (
     AgentBotTestBase,
     _hook_plugin,
@@ -93,6 +94,8 @@ from tests.journal_membership_helpers import admit_room_membership
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
+
+    from agno.db.base import BaseDb
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.users import AgentMatrixUser
@@ -1484,15 +1487,23 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.agents[mock_agent_user.agent_name].tools = [ToolConfigEntry(name="shell")]
         runtime_paths = runtime_paths_for(config)
-        session_db = tmp_path / "persisted-approval-agent.db"
         executed: list[list[str]] = []
         target = MessageTarget.resolve("!test:localhost", None, "$source")
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=mock_agent_user.agent_name,
+            requester_id="@user:localhost",
+            room_id=target.room_id,
+            thread_id=target.source_thread_id,
+            resolved_thread_id=target.resolved_thread_id,
+            session_id=target.session_id,
+        )
 
         def run_shell_command(args: list[str]) -> str:
             executed.append(args)
             return "ok"
 
-        def new_agent() -> AgnoAgent:
+        def new_agent(history_storage: BaseDb | None = None) -> AgnoAgent:
             return AgnoAgent(
                 id=mock_agent_user.agent_name,
                 model=SyntheticModel(
@@ -1511,7 +1522,9 @@ class TestAgentBot(AgentBotTestBase):
                         owning_toolkit="shell",
                     ),
                 ],
-                db=SqliteDb(db_file=str(session_db), session_table="sessions"),
+                db=history_storage
+                if history_storage is not None
+                else create_session_storage(mock_agent_user.agent_name, config, runtime_paths, identity),
             )
 
         first_agent = new_agent()
@@ -1665,7 +1678,10 @@ class TestAgentBot(AgentBotTestBase):
             await restarted._response_runner.wait_for_source_owned_inbox_responses()
             await restarted._journal_dispatcher.drain_once()
 
-        with patch("mindroom.approval_execution.create_agent", side_effect=lambda *_args, **_kwargs: new_agent()):
+        with patch(
+            "mindroom.approval_execution.create_agent",
+            side_effect=lambda *_args, **kwargs: new_agent(kwargs["history_storage"]),
+        ):
             if requires_human:
                 manager = initialize_approval_store(
                     runtime_paths,

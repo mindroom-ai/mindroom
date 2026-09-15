@@ -126,7 +126,6 @@ _OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
     "website",
     "browser",
     "scheduler",
-    "subagents",
     "matrix_message",
 )
 
@@ -702,12 +701,9 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_delegate_to(self) -> Config:
-        """Ensure delegate_to targets exist and agents don't delegate to themselves."""
+        """Ensure delegate_to targets exist."""
         for agent_name, agent_config in self.agents.items():
             for target in agent_config.delegate_to:
-                if target == agent_name:
-                    msg = f"Agent '{agent_name}' cannot delegate to itself"
-                    raise ValueError(msg)
                 if target not in self.agents:
                     msg = f"Agent '{agent_name}' delegates to unknown agent '{target}'"
                     raise ValueError(msg)

@@ -125,7 +125,6 @@ from mindroom.tools.sleep import sleep_tools
 from mindroom.tools.spider import spider_tools
 from mindroom.tools.spotify import spotify_tools
 from mindroom.tools.sql import sql_tools
-from mindroom.tools.subagents import subagents_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
@@ -259,7 +258,6 @@ __all__ = [
     "spider_tools",
     "spotify_tools",
     "sql_tools",
-    "subagents_tools",
     "tavily_tools",
     "telegram_tools",
     "thread_model_tools",
@@ -295,7 +293,7 @@ __all__ = [
     category=ToolCategory.DEVELOPMENT,
     icon="Workflow",
     icon_color="text-orange-500",
-    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, subagents, matrix_message, attachments.",
+    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
 )
 def _openclaw_compat_tools() -> type[Toolkit]:
     """Return an empty toolkit — the real tools are loaded via tool preset expansion."""

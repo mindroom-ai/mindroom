@@ -35,7 +35,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.session_ids import create_session_id, parse_session_id
+from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -540,22 +540,20 @@ class TestCreateSessionIdWithNoneThread:
         session_id = create_session_id("!room:localhost", "$thread123")
         assert session_id == "!room:localhost:$thread123"
 
-    def test_room_level_session_round_trip_keeps_room_id_with_colons(self) -> None:
-        """Room-level session parsing should preserve room ids containing colons."""
+    def test_room_level_session_keeps_room_id_with_colons(self) -> None:
+        """Room-level sessions should preserve room ids containing colons."""
         room_id = "!room:with:colons:localhost"
         session_id = create_session_id(room_id, None)
 
         assert session_id == room_id
-        assert parse_session_id(session_id) == (room_id, None)
 
-    def test_thread_level_session_round_trip_keeps_event_id_with_dollars(self) -> None:
-        """Thread-level session parsing should preserve Matrix event ids containing dollars."""
+    def test_thread_level_session_keeps_event_id_with_dollars(self) -> None:
+        """Thread-level sessions should preserve Matrix event ids containing dollars."""
         room_id = "!room:with:colons:localhost"
         thread_id = "$thread$with$dollars:localhost"
         session_id = create_session_id(room_id, thread_id)
 
         assert session_id == f"{room_id}:{thread_id}"
-        assert parse_session_id(session_id) == (room_id, thread_id)
 
     def test_message_target_room_mode_reuses_room_level_session_format(self) -> None:
         """Room-mode MessageTarget sessions should match create_session_id(None)."""
@@ -569,7 +567,7 @@ class TestCreateSessionIdWithNoneThread:
         assert target.resolved_thread_id is None
         assert target.session_id == create_session_id("!room:localhost", None)
 
-    def test_message_target_thread_session_round_trips_through_canonical_parser(self) -> None:
+    def test_message_target_thread_session_uses_canonical_format(self) -> None:
         """Thread-mode MessageTarget sessions should use the canonical persisted format."""
         room_id = "!room:with:colons:localhost"
         thread_id = "$thread$with$dollars:localhost"
@@ -581,7 +579,6 @@ class TestCreateSessionIdWithNoneThread:
         )
 
         assert target.session_id == create_session_id(room_id, thread_id)
-        assert parse_session_id(target.session_id) == (room_id, thread_id)
 
     def test_message_target_plain_reply_keeps_room_level_session(self) -> None:
         """Plain reply targets should not derive thread or session identity."""

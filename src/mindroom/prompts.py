@@ -61,7 +61,7 @@ You are {display_name} (Matrix ID: {matrix_id}), a specialized agent in the Mind
 You are powered by the {model_provider} model: {model_id}.
 When working in teams with other agents, you should identify yourself as {display_name} and leverage your specific expertise.
 
-In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.target`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.
+In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.
 {openai_compat_history_guidance}When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.
 
 ## Matrix Reply Targeting
@@ -504,10 +504,26 @@ DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS = (
     "A tool loaded with load_tool() becomes callable once it appears in your available tools, and "
     "unload_tool() removes one. Do not call a newly loaded tool in the same parallel tool-call batch as load_tool()."
 )
-DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can delegate tasks to the following agents:
+DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
 {agent_descriptions}
 
-Use delegate_task to send a task to one of these agents. The agent will execute the task independently and return its response."""
+Use run_subagent(task, agent_name=None) for a bounded subtask whose result you need before continuing.
+The caller waits for the child to finish; this is not background work.
+The child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.
+It retains its configured tools, workspace, and memory.
+Omit agent_name or pass null to run a fresh copy of yourself, if your own name is listed in Allowed subagents.
+Delegation is limited to three nested child levels.
+For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.
+It uses the current conversation; set new_thread=True to start a separate thread.
+In Matrix, child tools that require approval pause both runs until the user approves or denies them.
+Other runtimes retain their approval restrictions.
+The result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.
+Use continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.
+Keep the returned ID: it stays valid across turns and restarts for this caller, requester, and originating conversation.
+Each follow-up has its own audit record and does not add nesting depth.
+A running child or one awaiting approval must finish its current turn before accepting a follow-up.
+Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json, events.jsonl, and transcript.md.
+Your workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC."""
 
 
 PROMPT_TEMPLATE_FIELDS = MappingProxyType(

@@ -704,6 +704,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "delegate":
         # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
         from mindroom.custom_tools import delegate  # noqa: PLC0415
+        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
         if not agent_config.delegate_to:
             logger.warning(
@@ -711,12 +712,12 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 agent=agent_name,
             )
             return None
-        if delegation_depth >= delegate.MAX_DELEGATION_DEPTH:
+        if delegation_depth >= MAX_DELEGATION_DEPTH:
             logger.warning(
                 "Skipping delegate tool because delegation depth limit was reached",
                 agent=agent_name,
                 delegation_depth=delegation_depth,
-                max_delegation_depth=delegate.MAX_DELEGATION_DEPTH,
+                max_delegation_depth=MAX_DELEGATION_DEPTH,
             )
             return None
         return _wrap_direct_agent_toolkit_for_output_files(
@@ -1225,6 +1226,12 @@ def apply_tool_approval_capability(
 
     if supports_native_tool_approval:
         for function in (*toolkit.functions.values(), *toolkit.async_functions.values()):
+            if registered_tool_name == "delegate" and function.name in {"run_subagent", "continue_subagent"}:
+                # The delegation driver owns the policy gate and exact child wait.
+                function.external_execution = True
+                function.external_execution_silent = True
+                function.requires_confirmation = False
+                continue
             if function_may_require_approval(function) and function.requires_confirmation is not True:
                 function.requires_confirmation = True
                 function.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE

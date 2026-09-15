@@ -1016,7 +1016,6 @@ agents:
       - scheduler
       - update_awareness
       - todo
-      - subagents
       - matrix_message
       - name: thread_model
         defer: true

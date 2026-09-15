@@ -1285,6 +1285,7 @@ class ResponseRunner:
                     response_text=snapshot_text,
                     response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
                     response_presentation_state=paused.response_presentation_state,
+                    delegation_storage_bindings=paused.delegation_storage_bindings,
                     show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,

@@ -153,6 +153,7 @@ class ApprovalContinuation:
     response_text: str = ""
     response_tool_trace: tuple[dict[str, object], ...] = ()
     response_presentation_state: dict[str, object] = field(default_factory=dict)
+    delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     show_tool_calls: bool = True
     show_tool_calls_is_frozen: bool = True
     execution_identity: dict[str, object] = field(default_factory=dict)
@@ -196,6 +197,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "response_text": continuation.response_text,
         "response_tool_trace": [dict(event) for event in continuation.response_tool_trace],
         "response_presentation_state": continuation.response_presentation_state,
+        "delegation_storage_bindings": continuation.delegation_storage_bindings,
         "show_tool_calls": continuation.show_tool_calls,
         "execution_identity": continuation.execution_identity,
         "runtime_model_name": continuation.runtime_model_name,
@@ -328,6 +330,10 @@ def _from_rows(
         response_presentation_state=cast(
             "dict[str, object]",
             stored.get("response_presentation_state", {}),
+        ),
+        delegation_storage_bindings=cast(
+            "dict[str, dict[str, object]]",
+            stored.get("delegation_storage_bindings", {}),
         ),
         show_tool_calls=stored.get("show_tool_calls", True) is not False,
         show_tool_calls_is_frozen="show_tool_calls" in stored,
@@ -663,6 +669,7 @@ def advance(
     response_text: str | None = None,
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
+    delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
@@ -683,6 +690,9 @@ def advance(
         response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
         response_presentation_state=(
             current.response_presentation_state if response_presentation_state is None else response_presentation_state
+        ),
+        delegation_storage_bindings=(
+            current.delegation_storage_bindings if delegation_storage_bindings is None else delegation_storage_bindings
         ),
         state=state,
         runtime_generation=publication_owner,

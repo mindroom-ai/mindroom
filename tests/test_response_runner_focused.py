@@ -18,8 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import nio
 import pytest
 from agno.agent import Agent as AgnoAgent
-from agno.db.base import SessionType
-from agno.db.sqlite import SqliteDb
+from agno.db.base import BaseDb, SessionType
 from agno.models.message import Message
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput
@@ -3414,6 +3413,16 @@ async def test_agent_continuation_executes_real_agno_confirmation(
         observed_metadata.append(run_context.metadata)
         return "ok"
 
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="general",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
     agent = AgnoAgent(
         id="general",
         model=SyntheticModel(
@@ -3432,7 +3441,7 @@ async def test_agent_continuation_executes_real_agno_confirmation(
                 owning_toolkit="shell",
             ),
         ],
-        db=SqliteDb(db_file=str(tmp_path / "agent-continuation.db"), session_table="sessions"),
+        db=runner.deps.state_writer.create_storage(identity),
     )
     paused = await agent.arun(
         "exercise the tool",
@@ -3445,15 +3454,6 @@ async def test_agent_continuation_executes_real_agno_confirmation(
     assert requirement.tool_execution is not None
     tool_call_id = requirement.tool_execution.tool_call_id
     assert tool_call_id is not None
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$thread",
-        session_id="session-1",
-    )
     continuation = ApprovalContinuation(
         approval_id="approval-real-agent",
         run_id=paused.run_id,
@@ -3485,7 +3485,6 @@ async def test_agent_continuation_executes_real_agno_confirmation(
             },
         ),
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     runner.deps.runtime.config.agents["general"].tools = [ToolConfigEntry(name="shell")]
     continue_run = MagicMock(wraps=agent.acontinue_run)
     knowledge = MagicMock()
@@ -3578,12 +3577,12 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
     ]
     persisted = RunOutput(
         run_id="run-1",
+        agent_id="general",
         session_id="session-1",
         status=RunStatus.paused,
         requirements=requirements,
     )
     agent = MagicMock()
-    agent.aget_session = AsyncMock(return_value=SimpleNamespace(get_run=lambda _run_id: persisted))
     agent.acontinue_run = AsyncMock(
         return_value=RunOutput(
             run_id="run-1",
@@ -3600,6 +3599,10 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
         resolved_thread_id="$thread",
         session_id="session-1",
     )
+    storage = runner.deps.state_writer.create_storage(identity)
+    storage.upsert_session(AgentSession(session_id="session-1", agent_id="general", user_id="@user:localhost"))
+    storage.upsert_run(run=persisted, session_id="session-1", user_id="@user:localhost")
+    storage.close()
     continuation = ApprovalContinuation(
         approval_id="approval-invalid-agent",
         run_id="run-1",
@@ -3646,7 +3649,13 @@ async def test_agent_continuation_rejects_non_exact_persisted_call_ids(
 async def test_agent_continuation_closes_runtime_when_notice_hook_setup_fails(tmp_path: Path) -> None:
     """Reconstructed storage must close even if pre-continuation model setup raises."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    storage = MagicMock()
+    storage = MagicMock(spec=BaseDb)
+    storage.get_session.return_value = AgentSession(
+        session_id="session-1",
+        agent_id="general",
+        user_id="@user:localhost",
+        runs=[RunOutput(run_id="run-1", agent_id="general", session_id="session-1", status=RunStatus.paused)],
+    )
     agent = MagicMock()
     agent.model = MagicMock()
     identity = ToolExecutionIdentity(
@@ -3754,6 +3763,15 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         resolved_thread_id="$thread",
         session_id="session-1",
     )
+
+    storage = runner.deps.state_writer.create_storage(identity)
+    storage.upsert_session(AgentSession(session_id="session-1", agent_id="general", user_id="@user:localhost"))
+    storage.upsert_run(
+        run=RunOutput(run_id="run-1", agent_id="general", session_id="session-1", status=RunStatus.paused),
+        session_id="session-1",
+        user_id="@user:localhost",
+    )
+    storage.close()
 
     def create_from_live_config(_name: str, config: object, *_args: object, **_kwargs: object) -> None:
         assert config is reloaded

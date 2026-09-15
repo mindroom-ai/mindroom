@@ -30,8 +30,8 @@ from mindroom.openai_models import MindRoomOpenAIResponses, MindRoomOpenRouter
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.thread_summary import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
+    _THREAD_SUMMARY_MAX_LENGTH,
     _TRUNCATION_SAMPLE_SIZE,
-    THREAD_SUMMARY_MAX_LENGTH,
     ThreadSummaryWriteError,
     _build_conversation_text,
     _configure_summary_model_temperature,
@@ -41,22 +41,22 @@ from mindroom.thread_summary import (
     _last_summary_counts,
     _next_thread_summary_threshold,
     _next_threshold,
+    _normalize_thread_summary_text,
     _recover_initial_enrichment_complete,
     _recover_last_summary_count,
     _recover_pin_state,
     _resolve_thread_summary_model_name,
+    _send_thread_summary_event,
     _thread_is_resolved,
     _thread_locks,
     _thread_summary_cache_key,
     _ThreadEnrichment,
     _ThreadSummary,
+    _update_last_summary_count,
     maybe_generate_thread_summary,
-    normalize_thread_summary_text,
-    send_thread_summary_event,
     set_manual_thread_summary,
     should_queue_thread_summary,
     thread_summary_message_count_hint,
-    update_last_summary_count,
 )
 from mindroom.thread_tag_vocabulary import _TagUsage, _TagVocabularySnapshot
 from mindroom.thread_tags import (
@@ -191,14 +191,14 @@ def _mock_client() -> AsyncMock:
 def test_thread_summary_model_rejects_overlong_summary() -> None:
     """Structured summary responses should reject content beyond the hard length limit."""
     with pytest.raises(ValidationError):
-        _ThreadSummary(summary="x" * (THREAD_SUMMARY_MAX_LENGTH + 1))
+        _ThreadSummary(summary="x" * (_THREAD_SUMMARY_MAX_LENGTH + 1))
 
 
 def test_normalize_thread_summary_text_strips_common_markdown_syntax() -> None:
     """Thread summary normalization should remove markdown syntax while preserving readable text."""
     raw_summary = "# **Fix** [ISSUE-116](http://example.com)\n> `deploy` ~~done~~"
 
-    assert normalize_thread_summary_text(raw_summary) == "Fix ISSUE-116 deploy done"
+    assert _normalize_thread_summary_text(raw_summary) == "Fix ISSUE-116 deploy done"
 
 
 # -- threshold arithmetic --
@@ -236,8 +236,8 @@ class TestUpdateLastSummaryCount:
 
     def test_ignores_lower_write_after_higher_write(self) -> None:
         """A later stale write must not move the summary baseline backwards."""
-        update_last_summary_count("!room:x", "$thread1", 12)
-        update_last_summary_count("!room:x", "$thread1", 7)
+        _update_last_summary_count("!room:x", "$thread1", 12)
+        _update_last_summary_count("!room:x", "$thread1", 7)
 
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
@@ -668,7 +668,7 @@ class TestShouldQueueThreadSummary:
 
     def test_cached_summary_uses_subsequent_threshold(self) -> None:
         """Once a summary baseline exists, the gate should honor the same margin."""
-        update_last_summary_count("!room:x", "$thread1", 5)
+        _update_last_summary_count("!room:x", "$thread1", 5)
         config = _mock_config()
 
         assert _next_thread_summary_threshold("!room:x", "$thread1", config) == 15
@@ -990,7 +990,7 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(return_value="🧵 Login failure investigation"),
             ) as generate,
-            patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
+            patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
             patch("mindroom.thread_summary.set_thread_tags_if_empty", new=AsyncMock()) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
@@ -1036,7 +1036,7 @@ class TestMaybeGenerateThreadSummary:
         with (
             patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_full(thread_history))),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value=generated)) as generate,
-            patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
+            patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
             patch(
                 "mindroom.thread_summary.set_thread_tags_if_empty",
                 new=AsyncMock(
@@ -1095,7 +1095,7 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary._generate_summary",
                 new=AsyncMock(return_value="🧵 Login failure investigation"),
             ) as generate,
-            patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
+            patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")) as send,
             patch(
                 "mindroom.thread_summary.set_thread_tags_if_empty",
                 new=AsyncMock(
@@ -1162,7 +1162,7 @@ class TestMaybeGenerateThreadSummary:
                 ),
             ),
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(return_value="$summary"),
             ) as send,
             patch(
@@ -1183,7 +1183,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_later_summary_refresh_does_not_touch_tag_state(self) -> None:
         """Later threshold calls should use the summary-only schema and never retag."""
-        update_last_summary_count("!room:x", "$thread1", 5)
+        _update_last_summary_count("!room:x", "$thread1", 5)
         client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1200,7 +1200,7 @@ class TestMaybeGenerateThreadSummary:
             ) as rebuild,
             patch("mindroom.thread_summary.load_tag_vocabulary_snapshot") as load_vocabulary,
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="🧵 Refreshed")) as generate,
-            patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
+            patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")),
             patch("mindroom.thread_summary.set_thread_tags_if_empty", new=AsyncMock()) as set_tags,
         ):
             await self._maybe_generate(client, config, rp)
@@ -1243,7 +1243,7 @@ class TestMaybeGenerateThreadSummary:
                 ),
             ),
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(side_effect=RuntimeError("send failed")),
             ),
             patch(
@@ -1291,7 +1291,7 @@ class TestMaybeGenerateThreadSummary:
                 ),
             ),
             patch("mindroom.thread_summary.set_thread_tags_if_empty", new=set_tags),
-            patch("mindroom.thread_summary.send_thread_summary_event", new=send_summary),
+            patch("mindroom.thread_summary._send_thread_summary_event", new=send_summary),
         ):
             await self._maybe_generate(client, config, rp)
 
@@ -1331,7 +1331,7 @@ class TestMaybeGenerateThreadSummary:
                 "mindroom.thread_summary.set_thread_tags_if_empty",
                 new=AsyncMock(side_effect=TimeoutError("timed out")),
             ) as set_tags,
-            patch("mindroom.thread_summary.send_thread_summary_event", new=send_summary),
+            patch("mindroom.thread_summary._send_thread_summary_event", new=send_summary),
         ):
             await self._maybe_generate(client, config, rp)
 
@@ -1370,7 +1370,7 @@ class TestMaybeGenerateThreadSummary:
                     ),
                 ),
             ),
-            patch("mindroom.thread_summary.send_thread_summary_event", new=send_summary),
+            patch("mindroom.thread_summary._send_thread_summary_event", new=send_summary),
         ):
             await self._maybe_generate(client, config, rp)
 
@@ -1395,7 +1395,7 @@ class TestMaybeGenerateThreadSummary:
             patch("mindroom.thread_summary.load_tag_vocabulary_snapshot") as load_vocabulary,
             patch("mindroom.thread_summary._load_thread_history", new=AsyncMock(return_value=_full(thread_history))),
             patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Summary")) as generate,
-            patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
+            patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")),
         ):
             await self._maybe_generate(client, config, rp)
 
@@ -1507,7 +1507,7 @@ class TestMaybeGenerateThreadSummary:
     )
     async def test_second_threshold_boundaries(self, message_count: int, should_generate: bool) -> None:
         """The second-threshold boundary should trigger only at count 15 or above."""
-        update_last_summary_count("!room:x", "$thread1", 5)
+        _update_last_summary_count("!room:x", "$thread1", 5)
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
         config = _mock_config()
@@ -1551,7 +1551,7 @@ class TestMaybeGenerateThreadSummary:
                 new=AsyncMock(side_effect=_blocked_generate),
             ) as mock_gen,
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(return_value="$summary1"),
             ) as mock_send,
         ):
@@ -1593,7 +1593,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value="# **Fix** [ISSUE-116](http://example.com)",
             ),
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(return_value="$summary1"),
             ) as mock_send,
         ):
@@ -1613,7 +1613,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_already_summarized_skips(self) -> None:
         """No LLM call when count hasn't crossed the next threshold."""
-        update_last_summary_count("!room:x", "$thread1", 5)
+        _update_last_summary_count("!room:x", "$thread1", 5)
         client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1633,7 +1633,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_crosses_second_threshold(self) -> None:
         """Summary is generated when crossing the second threshold (15)."""
-        update_last_summary_count("!room:x", "$thread1", 5)
+        _update_last_summary_count("!room:x", "$thread1", 5)
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
         config = _mock_config()
@@ -1679,7 +1679,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_custom_subsequent_interval_controls_next_threshold(self) -> None:
         """A custom interval should defer the next summary until the configured count is reached."""
-        update_last_summary_count("!room:x", "$thread1", 3)
+        _update_last_summary_count("!room:x", "$thread1", 3)
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-custom", room_id="!room:x"))
         config = _mock_config(first_threshold=3, subsequent_interval=4)
@@ -1716,7 +1716,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_manual_summary_below_first_threshold_delays_next_auto_summary(self) -> None:
         """A manual summary below the first threshold should suppress auto-summary until the interval is reached."""
-        update_last_summary_count("!room:x", "$thread1", 3)
+        _update_last_summary_count("!room:x", "$thread1", 3)
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-manual", room_id="!room:x"))
         config = _mock_config(first_threshold=5, subsequent_interval=10)
@@ -1766,7 +1766,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_existing_summary_notice_does_not_advance_threshold(self) -> None:
         """Existing thread summary notices must not count toward the next automatic threshold."""
-        update_last_summary_count("!room:x", "$thread1", 5)
+        _update_last_summary_count("!room:x", "$thread1", 5)
         client = _mock_client()
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1831,7 +1831,7 @@ class TestMaybeGenerateThreadSummary:
                 new=AsyncMock(side_effect=[_full(entry) for entry in histories]),
             ),
             patch("mindroom.thread_summary._generate_summary", new=generate),
-            patch("mindroom.thread_summary.send_thread_summary_event", new=AsyncMock(return_value="$summary")),
+            patch("mindroom.thread_summary._send_thread_summary_event", new=AsyncMock(return_value="$summary")),
         ):
             await self._maybe_generate(client, config, rp)
             await self._maybe_generate(client, config, rp)
@@ -1873,7 +1873,7 @@ class TestMaybeGenerateThreadSummary:
             ),
             patch("mindroom.thread_summary.set_thread_tags_if_empty", new=set_tags),
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(side_effect=asyncio.CancelledError),
             ),
         ):
@@ -2020,7 +2020,7 @@ class TestMaybeGenerateThreadSummary:
                 ),
             ) as set_tags,
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(return_value="$summary"),
             ) as send_summary,
         ):
@@ -2088,7 +2088,7 @@ class TestMaybeGenerateThreadSummary:
                 return_value="Users discussed testing strategies",
             ),
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(return_value="$summary1"),
             ) as mock_send,
         ):
@@ -2118,7 +2118,7 @@ class TestSendSummaryEvent:
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
 
-        result = await send_thread_summary_event(
+        result = await _send_thread_summary_event(
             client,
             room_id="!room:x",
             thread_id="$root1",
@@ -2155,40 +2155,15 @@ class TestSendSummaryEvent:
             thread_id="$root1",
         )
 
-    async def test_known_latest_thread_event_id_skips_the_history_read(self) -> None:
-        """A caller that already knows the newest thread event should not trigger a history read."""
-        client = _mock_client()
-        client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
-        conversation_reader = AsyncMock()
-        conversation_reader.latest_thread_event_id = AsyncMock(return_value="$never-read")
-
-        result = await send_thread_summary_event(
-            client,
-            room_id="!room:x",
-            thread_id="$root1",
-            summary="Spawned an isolated session",
-            message_count=1,
-            model_name="manual",
-            conversation_reader=conversation_reader,
-            known_latest_thread_event_id="$root1",
-        )
-
-        assert result == "$s1"
-        conversation_reader.latest_thread_event_id.assert_not_awaited()
-        relates_to = client.room_send.call_args.kwargs["content"]["m.relates_to"]
-        assert relates_to["rel_type"] == "m.thread"
-        assert relates_to["event_id"] == "$root1"
-        assert relates_to["m.in_reply_to"] == {"event_id": "$root1"}
-
     async def test_event_content_truncates_overlong_summary(self) -> None:
         """Overlong summaries should be truncated before sending to Matrix."""
         client = _mock_client()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
-        summary = "x" * (THREAD_SUMMARY_MAX_LENGTH + 1)
+        summary = "x" * (_THREAD_SUMMARY_MAX_LENGTH + 1)
 
-        result = await send_thread_summary_event(
+        result = await _send_thread_summary_event(
             client,
             room_id="!room:x",
             thread_id="$root1",
@@ -2200,9 +2175,9 @@ class TestSendSummaryEvent:
 
         assert result == "$s1"
         content = client.room_send.call_args.kwargs["content"]
-        truncated_summary = ("x" * (THREAD_SUMMARY_MAX_LENGTH - 3)) + "..."
+        truncated_summary = ("x" * (_THREAD_SUMMARY_MAX_LENGTH - 3)) + "..."
         assert content["body"] == truncated_summary
-        assert len(content["body"]) == THREAD_SUMMARY_MAX_LENGTH
+        assert len(content["body"]) == _THREAD_SUMMARY_MAX_LENGTH
         assert content["io.mindroom.thread_summary"]["summary"] == truncated_summary
         assert "initial_enrichment_complete" not in content["io.mindroom.thread_summary"]
 
@@ -2213,7 +2188,7 @@ class TestSendSummaryEvent:
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
 
-        result = await send_thread_summary_event(
+        result = await _send_thread_summary_event(
             client,
             room_id="!room:x",
             thread_id="$root1",
@@ -2232,7 +2207,7 @@ class TestSendSummaryEvent:
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(side_effect=RuntimeError("lookup boom"))
 
-        result = await send_thread_summary_event(
+        result = await _send_thread_summary_event(
             client,
             room_id="!room:x",
             thread_id="$root1",
@@ -2268,7 +2243,7 @@ class TestSetManualThreadSummary:
         serve_conversation_reader(conversation_reader, seeded_history)
 
         with patch(
-            "mindroom.thread_summary.send_thread_summary_event",
+            "mindroom.thread_summary._send_thread_summary_event",
             new=AsyncMock(return_value="$summary1"),
         ) as mock_send:
             result = await set_manual_thread_summary(
@@ -2304,11 +2279,11 @@ class TestSetManualThreadSummary:
         client = _mock_client()
         conversation_reader = make_conversation_reader_mock()
         serve_conversation_reader(conversation_reader, _make_thread_history(5))
-        update_last_summary_count("!room:x", "$root1", 2)
+        _update_last_summary_count("!room:x", "$root1", 2)
 
         with (
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(return_value=None),
             ),
             pytest.raises(ThreadSummaryWriteError, match=r"Failed to send thread summary event\."),
@@ -2798,7 +2773,7 @@ class TestGenerateSummary:
 
         for example in _EXPECTED_GOOD_PROMPT_EXAMPLES:
             assert example in instructions
-            assert len(example) <= THREAD_SUMMARY_MAX_LENGTH
+            assert len(example) <= _THREAD_SUMMARY_MAX_LENGTH
             lowered = example.lower()
             assert not any(term in lowered for term in _TRANSIENT_STATUS_TERMS)
 
@@ -3050,16 +3025,14 @@ class TestSummaryWritersLeavePinStateAlone:
     """Writers that summarize as a side effect must not disturb a user's pin."""
 
     async def test_default_write_omits_pinned_key(self) -> None:
-        """send_thread_summary_event must not record a pin decision unless asked.
+        """_send_thread_summary_event must not record a pin decision unless asked.
 
-        The subagent spawn path reuses an existing thread by label and writes a
-        summary outside the per-thread summary lock. Recording pinned=False by
-        default there would silently release a pin the user had set.
+        Automatic summary writers must preserve a pin the user has set.
         """
         client = _mock_client()
         conversation_reader = MagicMock()
 
-        await send_thread_summary_event(
+        await _send_thread_summary_event(
             client,
             "!room:x",
             "$thread1",
@@ -3078,7 +3051,7 @@ class TestSummaryWritersLeavePinStateAlone:
         client = _mock_client()
         conversation_reader = MagicMock()
 
-        await send_thread_summary_event(
+        await _send_thread_summary_event(
             client,
             "!room:x",
             "$thread1",
@@ -3132,7 +3105,7 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
     client = _mock_client()
     conversation_reader = MagicMock()
 
-    await send_thread_summary_event(
+    await _send_thread_summary_event(
         client,
         "!room:x",
         "$thread1",
@@ -3186,7 +3159,7 @@ class TestPinLandingDuringGeneration:
                 new=source_read,
             ),
             patch(
-                "mindroom.thread_summary.send_thread_summary_event",
+                "mindroom.thread_summary._send_thread_summary_event",
                 new=AsyncMock(return_value="$summary1"),
             ) as deliver,
         ):
@@ -3261,7 +3234,7 @@ class TestTruncatedHistoryIsNotCounted:
                 new=AsyncMock(return_value=history),
             ),
             patch("mindroom.thread_summary._generate_summary", new=generate),
-            patch("mindroom.thread_summary.send_thread_summary_event", new=send),
+            patch("mindroom.thread_summary._send_thread_summary_event", new=send),
         ):
             await maybe_generate_thread_summary(
                 _mock_client(),

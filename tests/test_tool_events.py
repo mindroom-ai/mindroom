@@ -35,12 +35,12 @@ def _room_threads_result(
 ) -> tuple[str, list[str]]:
     thread_ids = [f"$thread_{i}_{'X' * 40}:localhost" for i in range(thread_count)]
     payload = {
-        "action": "room-threads",
+        "action": "threads",
         "count": thread_count,
         "has_more": has_more,
         "next_token": next_token,
         "status": "ok",
-        "tool": "matrix_message",
+        "tool": "matrix_room",
         "threads": [
             {
                 "body_preview": "body " + ("y" * body_len),
@@ -187,7 +187,7 @@ def test_format_tool_combined_truncates_structured_room_threads_by_entry() -> No
     """Structured room-thread previews should drop whole entries and preserve metadata."""
     result, thread_ids = _room_threads_result(thread_count=4, body_len=400)
 
-    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+    _text, trace = format_tool_combined("matrix_room", {"action": "threads"}, result)
 
     assert trace.result_preview is not None
     assert len(trace.result_preview) <= _MAX_TOOL_RESULT_DISPLAY_CHARS
@@ -213,7 +213,7 @@ def test_format_tool_combined_truncates_body_preview_without_dropping_only_entry
         next_token=None,
     )
 
-    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+    _text, trace = format_tool_combined("matrix_room", {"action": "threads"}, result)
 
     assert trace.result_preview is not None
     assert len(trace.result_preview) <= _MAX_TOOL_RESULT_DISPLAY_CHARS
@@ -246,18 +246,18 @@ def test_format_tool_combined_falls_back_for_empty_threads_list_over_limit() -> 
     """Empty thread lists should use plain truncation instead of smart structured truncation."""
     result = json.dumps(
         {
-            "action": "room-threads",
+            "action": "threads",
             "count": 0,
             "has_more": True,
             "next_token": "N" * 600,
             "status": "ok",
             "threads": [],
-            "tool": "matrix_message",
+            "tool": "matrix_room",
         },
         sort_keys=True,
     )
 
-    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+    _text, trace = format_tool_combined("matrix_room", {"action": "threads"}, result)
 
     assert trace.result_preview is not None
     assert trace.result_preview == f"{result[: _MAX_TOOL_RESULT_DISPLAY_CHARS - 1]}…"
@@ -269,7 +269,7 @@ def test_format_tool_combined_preserves_exact_limit_structured_result() -> None:
     """Exact-at-limit thread payloads should not be marked truncated."""
     result, thread_ids = _exact_limit_room_threads_result()
 
-    _text, trace = format_tool_combined("matrix_message", {"action": "room-threads"}, result)
+    _text, trace = format_tool_combined("matrix_room", {"action": "threads"}, result)
 
     assert trace.result_preview == result
     assert trace.truncated is False

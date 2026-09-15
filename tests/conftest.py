@@ -2952,7 +2952,7 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                     ),
                 )
                 stack.enter_context(
-                    patch("mindroom.custom_tools.delegate.is_sender_allowed_for_responder", return_value=True),
+                    patch("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", return_value=True),
                 )
             yield
 
