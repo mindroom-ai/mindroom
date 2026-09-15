@@ -24,6 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation_execution import drive_delegations
+from mindroom.delegation_recovery import resolve_subagent
 from mindroom.delegation_state import DelegationState
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
@@ -131,7 +132,13 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
                     handle = json.loads(handle_path.read_text())
                     handle["child"]["status"] = "running"
                     handle_path.write_text(json.dumps(handle))
-                    restored = await toolkit.resolve_subagent(str(paused_child.subagent_id))
+                    restored = await resolve_subagent(
+                        str(paused_child.subagent_id),
+                        owner=identity,
+                        config=config,
+                        runtime_paths=paths,
+                        depth=0,
+                    )
                     assert restored.status == "paused"
                 response = await drive_delegations(
                     parent,

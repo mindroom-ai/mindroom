@@ -186,8 +186,8 @@ async def record_child_response(
     runtime_paths: RuntimePaths,
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
-) -> None:
-    """Record one retained child snapshot and settle only its explicit status."""
+) -> dict[str, object] | None:
+    """Record one retained attempt snapshot and return its usage without finishing the child."""
     _validate_response_identity(child, response)
     run_id = child.run_id
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
@@ -200,33 +200,17 @@ async def record_child_response(
         denial_reasons=denial_reasons,
     )
 
-    if response.status == RunStatus.paused:
-        if not pending_approval:
-            await owner.append_event(
-                handle,
-                DelegationEvent(
-                    kind="status",
-                    event_id=f"run:{run_id}:paused:{len(response.tools or ())}",
-                    status="paused",
-                    data={"status": "paused"},
-                ),
-            )
-        return
-    if response.status == RunStatus.completed:
-        result = str(response.content or "Agent completed the task but returned no content.")
-        await owner.finish(handle, status="completed", output=result, usage=usage)
-        return
-    if response.status == RunStatus.cancelled:
-        await owner.finish(
+    if response.status == RunStatus.paused and not pending_approval:
+        await owner.append_event(
             handle,
-            status="cancelled",
-            error=str(response.content or "Delegation cancelled."),
-            usage=usage,
+            DelegationEvent(
+                kind="status",
+                event_id=f"run:{run_id}:paused:{len(response.tools or ())}",
+                status="paused",
+                data={"status": "paused"},
+            ),
         )
-        return
-    if response.status in {RunStatus.error, RunStatus.regenerated}:
-        await owner.finish(handle, status="failed", error=str(response.content or response.status), usage=usage)
-        return
+    return usage
 
 
 async def _append_response_events(
@@ -303,20 +287,21 @@ async def finish_child_record(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    reason: str | None = None,
+    usage: dict[str, object] | None = None,
 ) -> str:
-    """Idempotently settle a child from driver-owned terminal state."""
+    """Idempotently project lifecycle-owned terminal state and usage."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
     if child.status not in {"completed", "failed", "cancelled", "denied"}:
         msg = f"Cannot finish active delegation record: {child.delegation_id}"
         raise ValueError(msg)
     status = cast("DelegationTerminalStatus", child.status)
-    result = reason or child.result
+    result = child.result
     await owner.finish(
         handle,
         status=status,
         output=result if status == "completed" else None,
         error=result if status != "completed" else None,
+        usage=usage,
     )
     receipt = handle.to_receipt()
     return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt

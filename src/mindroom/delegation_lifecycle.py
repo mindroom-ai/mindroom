@@ -136,7 +136,7 @@ async def settle_child_response(
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
     await update_subagent_turn(child, runtime_paths)
-    await record_child_response(
+    usage = await record_child_response(
         child,
         response,
         config=config,
@@ -144,6 +144,8 @@ async def settle_child_response(
         decisions=decisions,
         denial_reasons=denial_reasons,
     )
+    if child.status in _TERMINAL:
+        await finish_child_record(child, config=config, runtime_paths=runtime_paths, usage=usage)
 
 
 async def finish_child_turn(

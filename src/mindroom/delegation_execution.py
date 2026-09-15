@@ -309,7 +309,7 @@ async def _start_child_envelope(
     except ResponsePausedForApproval as suspension:
         if suspension.paused.runtime_model_name is not None:
             note_child_run_id(child, child.run_id, runtime_paths, model_name=suspension.paused.runtime_model_name)
-    response = await read_child_run(child, config, runtime_paths, run_id=child.run_id)
+    response = await read_child_run(child, config, runtime_paths)
     if response is None:
         msg = result or "Delegated execution did not retain its exact run outcome"
         raise RuntimeError(msg)
@@ -332,53 +332,40 @@ async def _continue_child(
     """Apply child decisions and drive any further nested delegations."""
     from mindroom.response_turn import apply_exact_approval_decisions  # noqa: PLC0415
 
-    if has_delegation_state(persisted):
-        return cast(
-            "RunOutput",
-            await drive_delegations(
-                agent,
-                persisted,
-                agent_name=child.child_agent_name,
-                run_child=run_child,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=identity,
-                delegation_depth=child.depth,
-                refresh_scheduler=refresh_scheduler,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
-            ),
+    if not has_delegation_state(persisted):
+        if decisions is None:
+            return persisted
+        requirements = apply_exact_approval_decisions(
+            deepcopy(persisted.requirements or []),
+            decisions=decisions,
+            denial_reasons=denial_reasons or {},
         )
-    if decisions is None:
-        return persisted
-    requirements = apply_exact_approval_decisions(
-        deepcopy(persisted.requirements or []),
-        decisions=decisions,
-        denial_reasons=denial_reasons or {},
-    )
-    events = agent.acontinue_run(
-        run_id=persisted.run_id,
-        requirements=requirements,
-        session_id=child.session_id,
-        user_id=identity.requester_id,
-        metadata=deepcopy(persisted.metadata),
-        stream=True,
-        stream_events=True,
-        yield_run_output=True,
-    )
-    continued = None
-    async for event in events:
-        await observe_child_event(event)
-        if isinstance(event, RunOutput):
-            continued = event
-    if continued is None:
-        msg = "Delegated continuation did not yield its retained outcome"
-        raise RuntimeError(msg)
+        events = agent.acontinue_run(
+            run_id=persisted.run_id,
+            requirements=requirements,
+            session_id=child.session_id,
+            user_id=identity.requester_id,
+            metadata=deepcopy(persisted.metadata),
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        )
+        continued = None
+        async for event in events:
+            await observe_child_event(event)
+            if isinstance(event, RunOutput):
+                continued = event
+        if continued is None:
+            msg = "Delegated continuation did not yield its retained outcome"
+            raise RuntimeError(msg)
+        persisted = continued
+        decisions = None
+        denial_reasons = None
     return cast(
         "RunOutput",
         await drive_delegations(
             agent,
-            continued,
+            persisted,
             agent_name=child.child_agent_name,
             run_child=run_child,
             config=config,
@@ -386,6 +373,8 @@ async def _continue_child(
             execution_identity=identity,
             delegation_depth=child.depth,
             refresh_scheduler=refresh_scheduler,
+            decisions=decisions,
+            denial_reasons=denial_reasons,
         ),
     )
 
@@ -420,7 +409,7 @@ async def _resolved_child_tool(
     runtime_paths: RuntimePaths,
 ) -> ToolExecution | None:
     """Read the exact approved attempt, even after the child starts another run."""
-    response = await read_child_run(source.child, config, runtime_paths, run_id=source.child.run_id)
+    response = await read_child_run(source.child, config, runtime_paths)
     if response is None:
         return None
     for tool in response.tools or ():
@@ -598,30 +587,32 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 if not caller:
                     msg = "Delegation requirement has no frozen member config identity"
                     raise RuntimeError(msg)
+            caller_identity = replace(execution_identity, agent_name=caller)
+            resolve_result = partial(
+                _resolve_delegation_requirement,
+                requirement,
+                response=response,
+                agent_name=agent_name,
+                on_event=on_event,
+            )
             args = tool.tool_args or {}
             retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             previous_child = None
             if tool.tool_name == "continue_subagent":
                 subagent_id, task = args.get("subagent_id"), args.get("message")
                 if not isinstance(subagent_id, str) or not isinstance(task, str):
-                    _resolve_delegation_requirement(
-                        requirement,
-                        "Cannot continue: subagent_id and message must be strings.",
-                        response,
-                        agent_name,
-                        on_event,
-                    )
+                    resolve_result("Cannot continue: subagent_id and message must be strings.")
                     continue
                 try:
                     previous_child = retained or await resolve_subagent(
                         subagent_id,
-                        owner=replace(execution_identity, agent_name=caller),
+                        owner=caller_identity,
                         config=config,
                         runtime_paths=runtime_paths,
                         depth=delegation_depth,
                     )
                 except SubagentSessionError as error:
-                    _resolve_delegation_requirement(requirement, str(error), response, agent_name, on_event)
+                    resolve_result(str(error))
                     continue
                 if previous_child.subagent_id != subagent_id:
                     msg = "Subagent ID no longer matches its retained requirement"
@@ -632,13 +623,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 if child_name is None:
                     child_name = caller
             if not isinstance(child_name, str) or not isinstance(task, str):
-                _resolve_delegation_requirement(
-                    requirement,
-                    "Cannot delegate: task must be a string and agent_name must be a string or null.",
-                    response,
-                    agent_name,
-                    on_event,
-                )
+                resolve_result("Cannot delegate: task must be a string and agent_name must be a string or null.")
                 continue
             authorization = authorize_delegation(
                 caller,
@@ -646,7 +631,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 task,
                 config=config,
                 runtime_paths=runtime_paths,
-                execution_identity=replace(execution_identity, agent_name=caller),
+                execution_identity=caller_identity,
                 depth=delegation_depth,
             )
             output_request = None
@@ -655,7 +640,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     caller,
                     config,
                     runtime_paths,
-                    replace(execution_identity, agent_name=caller),
+                    caller_identity,
                     args.get(OUTPUT_PATH_ARGUMENT),
                     tool_name=tool.tool_name or "run_subagent",
                 )
@@ -664,7 +649,6 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 else:
                     output_request = prepared_output
             if isinstance(authorization, str):
-                retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
                 if retained is not None:
                     await interrupt_child(
                         retained,
@@ -674,7 +658,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     )
                     if pending_id == retained.delegation_id and on_event is not None:
                         _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=authorization)
-                _resolve_delegation_requirement(requirement, authorization, response, agent_name, on_event)
+                resolve_result(authorization)
                 if requirement.id in state.hooks:
                     await after_delegation(
                         state.hooks[requirement.id],
@@ -683,14 +667,8 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                         result=authorization,
                     )
                 continue
-            resolve_result = partial(
-                _resolve_delegation_requirement,
-                requirement,
-                response=response,
-                agent_name=agent_name,
-                on_event=on_event,
-                output_request=output_request,
-            )
+            if output_request is not None:
+                resolve_result = partial(resolve_result, output_request=output_request)
             if (
                 tool_may_require_approval(config, tool.tool_name or "run_subagent")
                 and requirement_key not in state.gates
@@ -710,7 +688,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 continue
             if requirement.id not in state.hooks:
                 state.hooks[requirement.id] = await before_delegation(
-                    execution_identity=replace(execution_identity, agent_name=caller),
+                    execution_identity=caller_identity,
                     arguments=args,
                     tool_name=tool.tool_name or "run_subagent",
                     config=config,
@@ -728,7 +706,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 )
                 await _persist(entity, response, state)
                 continue
-            child = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
+            child = retained
             fresh = child is None
             if child is None:
                 child = prepare_child_turn(
@@ -750,7 +728,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     parent_delegation_id=_RUNNING_CHILD_ID.get(),
                     config=config,
                     runtime_paths=runtime_paths,
-                    caller_execution_identity=replace(execution_identity, agent_name=caller),
+                    caller_execution_identity=caller_identity,
                 )
                 # The stable child ID lands before any child side effect.
                 await _persist(entity, response, state)
@@ -786,7 +764,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     async with subagent_liveness(child, runtime_paths):
                         await reserve_child_turn(
                             child,
-                            owner=replace(execution_identity, agent_name=caller),
+                            owner=caller_identity,
                             runtime_paths=runtime_paths,
                         )
                         child_response = await _run_child(
@@ -819,7 +797,6 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                         config=config,
                         runtime_paths=runtime_paths,
                         reason="Delegation cancelled.",
-                        run_id=child.run_id,
                     )
                     await after_delegation(
                         hook_state,
@@ -837,7 +814,6 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                         runtime_paths=runtime_paths,
                         reason=str(error),
                         status="failed",
-                        run_id=child.run_id,
                     )
                     if child_decisions is not None and on_event is not None:
                         _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))

@@ -54,8 +54,6 @@ async def read_child_run(
     child: DelegationChild,
     config: Config,
     paths: RuntimePaths,
-    *,
-    run_id: str | None = None,
 ) -> RunOutput | None:
     """Read one exact run from the frozen child storage and validate its requester."""
     config = delegation_storage_config(config, child.storage_bindings)
@@ -71,7 +69,7 @@ async def read_child_run(
             session = storage.get_session(child.session_id, session_type=SessionType.AGENT)
             # Each turn owns its exact run even after later follow-ups reuse the session.
             runs = reversed(session.runs or ()) if isinstance(session, AgentSession) else ()
-            response = next((run for run in runs if run.run_id == (run_id or child.run_id)), None)
+            response = next((run for run in runs if run.run_id == child.run_id), None)
             return deepcopy(response) if isinstance(response, RunOutput) else None
         finally:
             storage.close()
@@ -89,7 +87,7 @@ async def read_child_run(
 
 async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runtime_paths: RuntimePaths) -> None:
     """Reconcile an abandoned running claim while its exclusive liveness lock is held."""
-    response = await read_child_run(child, config, runtime_paths, run_id=child.run_id)
+    response = await read_child_run(child, config, runtime_paths)
     if response is not None and response.status == RunStatus.paused:
         await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
         return
@@ -109,14 +107,12 @@ async def interrupt_child(
     runtime_paths: RuntimePaths,
     reason: str,
     status: Literal["cancelled", "failed"] = "cancelled",
-    run_id: str | None = None,
 ) -> None:
     """Settle retained descendants and preserve any already completed child outcome."""
     config = delegation_storage_config(config, child.storage_bindings)
-    response = await read_child_run(child, config, runtime_paths, run_id=run_id)
+    response = await read_child_run(child, config, runtime_paths)
     if response is not None and response.status == RunStatus.completed:
         await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
-        await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
         return
     if response is not None:
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)

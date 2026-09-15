@@ -32,7 +32,6 @@ from mindroom.delegation_sessions import (
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
     get_tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import (
@@ -164,29 +163,28 @@ class DelegateTools(Toolkit):
         """
         return await self._run_child(self._agent_name if agent_name is None else agent_name, task)
 
-    def caller_identity(self) -> ToolExecutionIdentity:
-        """Return the trusted current caller identity, including its parent session."""
+    def _caller_identity(self) -> ToolExecutionIdentity:
+        """Resolve one concrete caller identity for execution, ownership, and audit."""
         context = get_tool_runtime_context()
-        return _require_record_identity(
-            _record_execution_identity(
+        if self._execution_identity is not None:
+            return replace(
+                self._execution_identity,
                 agent_name=self._agent_name,
-                session_id=context.session_id
-                if context is not None
-                else (self._execution_identity.session_id if self._execution_identity is not None else None),
-                runtime_context=context,
-                configured_identity=self._execution_identity,
-                runtime_paths=self._runtime_paths,
-            ),
-        )
-
-    async def resolve_subagent(self, subagent_id: str) -> DelegationChild:
-        """Look up a child only within the current caller's originating conversation."""
-        return await resolve_subagent(
-            subagent_id,
-            owner=self.caller_identity(),
-            config=self._config,
+                session_id=context.session_id if context is not None else self._execution_identity.session_id,
+            )
+        if context is None:
+            msg = "Delegation requires a caller execution identity"
+            raise RuntimeError(msg)
+        return build_tool_execution_identity(
+            channel="matrix",
+            agent_name=self._agent_name,
+            transport_agent_name=context.transport_agent_name,
             runtime_paths=self._runtime_paths,
-            depth=self._delegation_depth,
+            requester_id=context.requester_id,
+            room_id=context.room_id,
+            thread_id=context.thread_id,
+            resolved_thread_id=context.resolved_thread_id,
+            session_id=context.session_id,
         )
 
     async def continue_subagent(self, subagent_id: str, message: str) -> str:
@@ -207,7 +205,13 @@ class DelegateTools(Toolkit):
 
         """
         try:
-            child = await self.resolve_subagent(subagent_id)
+            child = await resolve_subagent(
+                subagent_id,
+                owner=self._caller_identity(),
+                config=self._config,
+                runtime_paths=self._runtime_paths,
+                depth=self._delegation_depth,
+            )
         except SubagentSessionError as error:
             return str(error)
         return await self._run_child(child.child_agent_name, message, continuation=child)
@@ -232,7 +236,7 @@ class DelegateTools(Toolkit):
         )
         if isinstance(config, str):
             return config
-        owner = self.caller_identity()
+        owner = self._caller_identity()
         provenance = _DIRECT_DELEGATION_PROVENANCE.get()
         parent = provenance[-1] if provenance else None
         child = prepare_child_turn(
@@ -301,40 +305,6 @@ class DelegateTools(Toolkit):
             return _result_with_receipt(response or "Agent completed the task but returned no content.", receipt)
         finally:
             await liveness.aclose()
-
-
-def _record_execution_identity(
-    *,
-    agent_name: str,
-    session_id: str | None,
-    runtime_context: ToolRuntimeContext | None,
-    configured_identity: ToolExecutionIdentity | None,
-    runtime_paths: RuntimePaths,
-) -> ToolExecutionIdentity | None:
-    """Resolve the caller identity shared by authorization, child execution, and audit."""
-    if configured_identity is not None:
-        return replace(configured_identity, agent_name=agent_name, session_id=session_id)
-    if runtime_context is None:
-        return None
-    return build_tool_execution_identity(
-        channel="matrix",
-        agent_name=agent_name,
-        transport_agent_name=runtime_context.transport_agent_name,
-        runtime_paths=runtime_paths,
-        requester_id=runtime_context.requester_id,
-        room_id=runtime_context.room_id,
-        thread_id=runtime_context.thread_id,
-        resolved_thread_id=runtime_context.resolved_thread_id,
-        session_id=session_id,
-    )
-
-
-def _require_record_identity(identity: ToolExecutionIdentity | None) -> ToolExecutionIdentity:
-    """Require the execution identity already established by authorization."""
-    if identity is None:
-        msg = "Delegation audit requires a child execution identity"
-        raise RuntimeError(msg)
-    return identity
 
 
 def _result_with_receipt(result: str, receipt: str) -> str:

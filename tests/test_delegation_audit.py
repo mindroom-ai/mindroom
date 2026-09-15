@@ -23,7 +23,7 @@ from mindroom.delegation_audit import (
     observe_child_event,
     record_child_response,
 )
-from mindroom.delegation_lifecycle import start_child_turn
+from mindroom.delegation_lifecycle import settle_child_response, start_child_turn
 from mindroom.delegation_records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation_recovery import interrupt_child
 from mindroom.delegation_sessions import reserve_subagent_turn
@@ -82,7 +82,7 @@ def _child() -> DelegationChild:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [RunStatus.paused, RunStatus.completed, RunStatus.error, RunStatus.cancelled])
-async def test_audit_response_does_not_mutate_runtime_child_or_handle(tmp_path: Path, status: RunStatus) -> None:
+async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: Path, status: RunStatus) -> None:
     """Audit projection cannot change execution state or release a follow-up reservation."""
     config = _config()
     paths = test_runtime_paths(tmp_path)
@@ -107,6 +107,8 @@ async def test_audit_response_does_not_mutate_runtime_child_or_handle(tmp_path: 
     )
     assert asdict(child) == before_child
     assert handle_path.read_bytes() == before_handle
+    record_dir = await _record_dir(child, config, paths)
+    assert not any(event["kind"] == "delegation_finished" for event in _events(record_dir))
 
 
 def _events(record_dir: Path) -> list[dict[str, object]]:
@@ -220,8 +222,8 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         metrics=RunMetrics(input_tokens=5, output_tokens=2),
     )
 
-    await record_child_response(child, paused, config=config, runtime_paths=runtime_paths)
-    await record_child_response(child, paused, config=config, runtime_paths=runtime_paths)
+    await settle_child_response(child, paused, config=config, runtime_paths=runtime_paths)
+    await settle_child_response(child, paused, config=config, runtime_paths=runtime_paths)
 
     resumed_tool = ToolExecution(
         tool_call_id="pending-tool",
@@ -239,7 +241,7 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         tools=[completed_tool, resumed_tool],
         metrics=RunMetrics(input_tokens=8, output_tokens=4),
     )
-    await record_child_response(
+    await settle_child_response(
         child,
         completed,
         config=config,
@@ -278,8 +280,10 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     run = json.loads((record_dir / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "completed"
     assert run["output"] == "final response"
-    assert child.status == "running"
-    assert child.result is None
+    assert child.status == "completed"
+    assert child.result == "final response"
+    assert run["usage"]["input_tokens"] == 8
+    assert run["usage"]["output_tokens"] == 4
 
 
 @pytest.mark.asyncio

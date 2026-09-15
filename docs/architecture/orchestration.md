@@ -178,7 +178,8 @@ Native Matrix approval pauses retain the parent wait and exact child run rather 
 Both direct and native invocation use the same child preparation and lifecycle owner.
 The native driver receives its response runner explicitly and does not construct the agent-facing toolkit.
 Handle reads do not recover or execute children; recovery runs above storage under a liveness lock.
-Audit recording does not change the child state or handle registry, and editable workspace receipts never grant continuation authority.
+Audit snapshots do not settle child state or finish audit records; the lifecycle owner publishes terminal outcomes.
+Editable workspace receipts never grant continuation authority.
 A retained Agno run identifies the exact attempt; the lifecycle owner derives its outcome before publishing storage and audit projections.
 Tach dependency rules and isolated import tests enforce these directions.
 
