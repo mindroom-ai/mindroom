@@ -1602,8 +1602,14 @@ class BrowserTools(Toolkit):
                     self._runtime_paths,
                     profile_name,
                     headless=self._worker_display is None,
+                    executable_override=(
+                        self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or "/opt/mindroom-browser-mcp/chromium"
+                        if self._worker_display is not None
+                        else None
+                    ),
                 )
                 if self._worker_display is not None:
+                    launch_kwargs["chromium_sandbox"] = True
                     launch_kwargs["env"] = {
                         **os.environ,
                         **self._runtime_paths.process_env,

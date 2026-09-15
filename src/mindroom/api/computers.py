@@ -339,7 +339,8 @@ def _stream_session(websocket: WebSocket, session_id: str) -> ComputerSession:
     paths = config_lifecycle.require_api_state(websocket.app).snapshot.runtime_paths
     if websocket.headers.get("origin") not in computer_origins(paths):
         raise ComputerError(403, "Computer stream origin is not allowed.")
-    protocols = websocket.scope.get("subprotocols", [])
+    # Uvicorn sansio can expose raw comma-separated header lines in the ASGI scope.
+    protocols = [value.strip() for line in websocket.scope.get("subprotocols", []) for value in line.split(",")]
     tickets = [value.removeprefix("mindroom-ticket.") for value in protocols if value.startswith("mindroom-ticket.")]
     if "binary" not in protocols or len(tickets) != 1:
         raise ComputerError(401, "A computer stream ticket is required.")
@@ -374,13 +375,16 @@ async def stream(websocket: WebSocket, session_id: str) -> None:
                 task.result()
     except ComputerError as error:
         if not accepted:
-            await websocket.send_denial_response(
-                JSONResponse(
-                    {"detail": error.detail},
-                    status_code=error.status_code,
-                    headers={"Cache-Control": "no-store"},
-                ),
+            response = JSONResponse(
+                {"detail": error.detail},
+                status_code=error.status_code,
+                headers={"Cache-Control": "no-store"},
             )
+            # The WebSocket transport supplies denial framing/type. Sansio appends
+            # application headers, so duplicating these produces malformed HTTP.
+            del response.headers["content-length"]
+            del response.headers["content-type"]
+            await websocket.send_denial_response(response)
     except (HTTPException, WebSocketDisconnect, OSError, aiohttp.ClientError):
         pass
     except Exception as error:

@@ -1,0 +1,38 @@
+"""Security policy shared by dedicated worker backends."""
+
+from __future__ import annotations
+
+import hashlib
+from functools import lru_cache
+from importlib.resources import files
+
+_WORKER_COMPUTER_SECCOMP_PROFILE_SHA256 = "578ef2b662d8e9a886132148a0b75f0388efff92ed902b16d7be2777ae3788fa"
+_DOCKER_WORKER_SECURITY_POLICY_VERSION = "cap-drop-all-nnp-v1"
+_WORKER_COMPUTER_SECCOMP_RESOURCE = "seccomp/worker-computer.json"
+
+
+@lru_cache(maxsize=1)
+def _worker_computer_seccomp_profile_json() -> str:
+    """Load the reviewed OCI seccomp profile and verify its packaged identity."""
+    profile = files("mindroom.workers.backends").joinpath(_WORKER_COMPUTER_SECCOMP_RESOURCE).read_text(encoding="utf-8")
+    digest = hashlib.sha256(profile.encode("utf-8")).hexdigest()
+    if digest != _WORKER_COMPUTER_SECCOMP_PROFILE_SHA256:
+        msg = "Packaged worker computer seccomp profile failed its integrity check."
+        raise RuntimeError(msg)
+    return profile
+
+
+def docker_worker_security_options(*, computer_enabled: bool) -> list[str]:
+    """Return Docker security options for a dedicated worker container."""
+    options = ["no-new-privileges:true"]
+    if computer_enabled:
+        options.append(f"seccomp={_worker_computer_seccomp_profile_json()}")
+    return options
+
+
+def docker_worker_security_policy_signature(*, computer_enabled: bool) -> tuple[str, str]:
+    """Return the stable identity of Docker host security settings."""
+    return (
+        _DOCKER_WORKER_SECURITY_POLICY_VERSION,
+        _WORKER_COMPUTER_SECCOMP_PROFILE_SHA256 if computer_enabled else "",
+    )

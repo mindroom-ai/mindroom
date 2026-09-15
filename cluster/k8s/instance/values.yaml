@@ -66,6 +66,8 @@ kubernetesWorkerPort: 8766
 kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800
 kubernetesWorkerEnableServiceLinks: false
+# Optional node-installed profile applied only to the main worker container.
+kubernetesWorkerSeccompProfile: {}
 
 # API keys and secrets (referenced via Secret in deployment)
 # Production provisioner deploys create this Secret outside Helm so secret values

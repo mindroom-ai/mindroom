@@ -34,6 +34,21 @@
 - name: MINDROOM_SANDBOX_PROXY_URL
   value: "http://localhost:8766"
 {{- else if eq $workerBackend "kubernetes" }}
+{{- $workerSeccomp := $values.kubernetesWorkerSeccompProfile -}}
+{{- if $workerSeccomp -}}
+{{- if or (not (kindIs "map" $workerSeccomp)) (ne (len $workerSeccomp) 2) (not (hasKey $workerSeccomp "type")) (not (hasKey $workerSeccomp "localhostProfile")) -}}
+{{- fail "kubernetesWorkerSeccompProfile must define exactly type and localhostProfile" -}}
+{{- end -}}
+{{- if ne $workerSeccomp.type "Localhost" -}}
+{{- fail "kubernetesWorkerSeccompProfile.type must be Localhost" -}}
+{{- end -}}
+{{- if not (kindIs "string" $workerSeccomp.localhostProfile) -}}
+{{- fail "kubernetesWorkerSeccompProfile.localhostProfile must be a relative path" -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[^/\\\\]+(/[^/\\\\]+)*$" $workerSeccomp.localhostProfile)) (has "." (splitList "/" $workerSeccomp.localhostProfile)) (has ".." (splitList "/" $workerSeccomp.localhostProfile)) -}}
+{{- fail "kubernetesWorkerSeccompProfile.localhostProfile must be a relative path without traversal segments" -}}
+{{- end -}}
+{{- end -}}
 - name: MINDROOM_WORKER_COMPUTER_ENABLED
   value: {{ $values.workerComputerEnabled | default false | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_NAMESPACE
@@ -70,6 +85,10 @@
   value: {{ $values.kubernetesWorkerNamePrefix | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
   value: {{ $values.kubernetesWorkerEnableServiceLinks | quote }}
+{{- with $workerSeccomp }}
+- name: MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON
+  value: {{ toJson . | quote }}
+{{- end }}
 - name: MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME
   value: "mindroom-worker-auth-{{ $values.customer }}"
 - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON

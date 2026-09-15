@@ -1,6 +1,8 @@
 """Persistent browser ownership and lifecycle behavior."""
 
 import asyncio
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -175,7 +177,12 @@ async def test_release_disconnects_controller_to_reset_held_input() -> None:
 
 
 @pytest.mark.asyncio
-async def test_display_timeout_reaps_started_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("long_root", [False, True])
+async def test_display_timeout_reaps_started_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    long_root: bool,
+) -> None:
     """A never-ready display cannot leave a live subprocess after startup fails."""
     real_spawn = asyncio.create_subprocess_exec
     children = []
@@ -187,12 +194,62 @@ async def test_display_timeout_reaps_started_child(tmp_path: Path, monkeypatch: 
 
     monkeypatch.setattr("mindroom.worker_computer.display.shutil.which", lambda _name: "/display")
     monkeypatch.setattr("mindroom.worker_computer.display.asyncio.create_subprocess_exec", spawn)
-    display = WorkerDisplay(tmp_path, readiness_timeout=0.02)
+    root = tmp_path / ("worker" * 25) if long_root else tmp_path
+    display = WorkerDisplay(root, readiness_timeout=0.02)
     with pytest.raises(TimeoutError):
         await display.start()
     assert not display.healthy()
     assert children[0].returncode is not None
     assert not display.socket_path.exists()
+    if long_root:
+        assert not display.socket_path.parent.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("component", ["long" * 30, "界" * 30])
+async def test_display_long_socket_root_uses_private_bounded_owned_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    """Normal long worker paths still bind real Unix sockets and clean up on restart."""
+    real_spawn = asyncio.create_subprocess_exec
+    servers = []
+
+    async def spawn(*args: str, **_kwargs: object) -> asyncio.subprocess.Process:
+        if "-rfbunixpath" in args:
+            path = args[args.index("-rfbunixpath") + 1]
+            server = await asyncio.start_unix_server(lambda _reader, writer: writer.close(), path=path)
+            servers.append(server)
+        return await real_spawn("sleep", "60")
+
+    async def ready(self: WorkerDisplay, *_args: object) -> None:
+        assert self.socket_path.exists()
+
+    monkeypatch.setattr("mindroom.worker_computer.display.shutil.which", lambda _name: "/display")
+    monkeypatch.setattr("mindroom.worker_computer.display.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr(WorkerDisplay, "_wait_ready", ready)
+    root = tmp_path / component
+    assert len(os.fsencode(root / "rfb.sock")) >= 108
+    display = WorkerDisplay(root)
+    assert not root.exists(), "Socket allocation must stay lazy"
+    directories = []
+    try:
+        for _ in range(2):
+            await display.start()
+            assert len(os.fsencode(display.socket_path)) < 108
+            directory = display.socket_path.parent
+            assert directory.parent == Path("/tmp")  # noqa: S108 - assert the short ephemeral IPC parent
+            assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+            assert directory not in directories
+            directories.append(directory)
+            await display.close()
+            assert not directory.exists()
+    finally:
+        await display.close()
+        for server in servers:
+            server.close()
+            await server.wait_closed()
 
 
 @pytest.mark.asyncio

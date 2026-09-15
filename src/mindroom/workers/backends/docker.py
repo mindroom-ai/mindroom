@@ -34,6 +34,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
+    WORKER_COMPUTER_ENABLED_ENV,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
@@ -71,6 +72,10 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
+from mindroom.workers.backends.worker_security import (
+    docker_worker_security_options,
+    docker_worker_security_policy_signature,
+)
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import (
     ProgressSink,
@@ -162,6 +167,30 @@ __all__ = [
     "docker_backend_config_signature",
     "ensure_docker_dependencies",
 ]
+
+
+def _docker_seccomp_profile_matches(options: list[str]) -> bool:
+    seccomp_options = [option for option in options if option.lower().startswith("seccomp=")]
+    if len(options) != 2 or len(seccomp_options) != 1:
+        return False
+    actual_profile_json = seccomp_options[0].split("=", 1)[1]
+    expected_profile_json = docker_worker_security_options(computer_enabled=True)[1].split("=", 1)[1]
+    try:
+        return json.loads(actual_profile_json) == json.loads(expected_profile_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def _docker_security_options_match(value: object, *, computer_enabled: bool) -> bool:
+    if not isinstance(value, list) or not all(isinstance(option, str) for option in value):
+        return False
+    options = cast("list[str]", value)
+    no_new_privileges_options = [
+        option for option in options if option.lower() in {"no-new-privileges", "no-new-privileges:true"}
+    ]
+    if len(no_new_privileges_options) != 1:
+        return False
+    return _docker_seccomp_profile_matches(options) if computer_enabled else len(options) == 1
 
 
 def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
@@ -868,6 +897,8 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
+        if not self._container_runtime_security_matches(container):
+            return False
 
         config_mount_specs, projection = self._projection_manager.config_mount_specs(
             paths,
@@ -895,6 +926,24 @@ class DockerWorkerBackend:
         )
         mount_checks.extend(config_mount_specs)
         return self._container_mount_layout_matches(container, expected_mounts=mount_checks)
+
+    def _container_runtime_security_matches(self, container: _DockerContainer | None) -> bool:
+        if container is None:
+            return False
+        host_config = container.attrs.get("HostConfig")
+        if not isinstance(host_config, dict):
+            return False
+        host_config = cast("dict[str, object]", host_config)
+        cap_add = host_config.get("CapAdd")
+        cap_drop = host_config.get("CapDrop")
+        computer_enabled = self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV)
+        return (
+            host_config.get("Privileged") is False
+            and (cap_add is None or (isinstance(cap_add, list) and not cap_add))
+            and isinstance(cap_drop, list)
+            and [str(cap).upper() for cap in cap_drop] == ["ALL"]
+            and _docker_security_options_match(host_config.get("SecurityOpt"), computer_enabled=computer_enabled)
+        )
 
     def _ensure_container(
         self,
@@ -940,6 +989,10 @@ class DockerWorkerBackend:
                     launch_config_hash=launch_config.launch_config_hash,
                 ),
                 user=self.config.user,
+                cap_drop=["ALL"],
+                security_opt=docker_worker_security_options(
+                    computer_enabled=self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV),
+                ),
             )
         elif not self._container_is_running(container):
             try:
@@ -1270,6 +1323,9 @@ class DockerWorkerBackend:
             "host_config_path": str(self.config.host_config_path or ""),
             "image": self.config.image,
             "resolved_image": resolved_image_identity,
+            "runtime_security": docker_worker_security_policy_signature(
+                computer_enabled=self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV),
+            ),
             "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,

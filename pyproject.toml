@@ -105,6 +105,7 @@ brandfetch = [
 brightdata = [
   "requests",
 ]
+browser_mcp = []
 browser = [
   "playwright",
 ]

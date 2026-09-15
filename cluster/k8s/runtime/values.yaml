@@ -348,6 +348,9 @@ workers:
     namePrefix: mindroom-worker
     storageSubpathPrefix: workers
     enableServiceLinks: false
+    # Optional node-installed profile applied only to the main worker container.
+    # Example: {type: Localhost, localhostProfile: profiles/worker-computer.json}
+    seccompProfile: {}
     configMapName: ""
     configKey: ""
     configPath: ""

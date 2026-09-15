@@ -1539,7 +1539,10 @@ def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.Mo
     )
 
 
-@pytest.mark.parametrize("worker_tools_override", [["coding"], ["docker"], ["python"], ["shell", "coding"]])
+@pytest.mark.parametrize(
+    "worker_tools_override",
+    [["coding"], ["docker"], ["python"], ["shell", "coding"], ["browser_mcp"]],
+)
 def test_attachment_save_uses_worker_for_worker_routed_workspace_consumers(
     monkeypatch: pytest.MonkeyPatch,
     worker_tools_override: list[str],
@@ -6252,3 +6255,39 @@ def test_shell_extra_env_requires_explicit_patterns_for_service_urls() -> None:
 
     assert result == {"GITEA_TOKEN": "gitea-token"}
     assert "WHISPER_URL" not in result
+
+
+@pytest.mark.parametrize("tool_name", ["browser_mcp", "shell"])
+def test_worker_client_decodes_only_native_browser_envelopes(tool_name: str) -> None:
+    """Successful native calls restore inline images; other tool dictionaries stay opaque."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.worker_computer.mcp_results import encode_browser_mcp_result  # noqa: PLC0415
+
+    envelope = encode_browser_mcp_result(
+        ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")]),
+    )
+    result = execute_worker_proxy_request(
+        config=WorkerProxyClientConfig(
+            proxy_url="http://worker/execute",
+            proxy_token=_TEST_AUTH_TOKEN,
+            proxy_timeout_seconds=7.0,
+            credential_lease_ttl_seconds=60,
+            credential_policy={},
+        ),
+        payload={"tool_name": tool_name, "function_name": "browser_take_screenshot"},
+        credentials_manager=None,
+        tool_name=tool_name,
+        function_name="browser_take_screenshot",
+        worker_target=None,
+        worker_handle=None,
+        worker_manager=_TrackingWorkerManager(),
+        client_factory=_recording_client_class(responder=lambda _url, _payload: {"ok": True, "result": envelope}),
+    )
+    if tool_name == "browser_mcp":
+        assert isinstance(result, ToolResult)
+        assert result.images is not None
+        assert result.images[0].content == b"png"
+    else:
+        assert result == envelope

@@ -155,6 +155,7 @@ def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
     launch_kwargs = _persistent_launch_kwargs(runtime_paths, "mindroom", headless=True)
 
     assert launch_kwargs["executable_path"] == "/right"
+    assert "chromium_sandbox" not in launch_kwargs
 
 
 def test_validate_target_accepts_none_host_and_desktop() -> None:
@@ -1476,23 +1477,69 @@ async def test_worker_download_survives_browser_stop(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("executable", [None, "/opt/operator-browser"])
 async def test_worker_browser_launch_uses_private_display_and_persistent_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    executable: str | None,
 ) -> None:
     """Managed launches use headed Chromium without mutating the parent display environment."""
-    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={"BROWSER_EXECUTABLE_PATH": executable} if executable else {},
+    )
     browser = BrowserTools(paths)
     browser.bind_worker_display(":99", tmp_path / "workspace")
     monkeypatch.setenv("DISPLAY", ":42")
     launch, _ = _install_fake_persistent_playwright(monkeypatch, context=_FakeContext())
     await browser._ensure_profile("mindroom")
     assert launch["headless"] is False
+    assert launch["executable_path"] == (executable or "/opt/mindroom-browser-mcp/chromium")
+    assert launch["chromium_sandbox"] is True
     assert launch["env"]["DISPLAY"] == ":99"
     assert os.environ["DISPLAY"] == ":42"
     assert Path(str(launch["user_data_dir"])) == tmp_path / "state" / "browser-profiles" / "mindroom"
     assert launch["downloads_path"] == str(tmp_path / "workspace" / "browser")
     await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_worker_browser_sandbox_failure_does_not_retry_without_sandbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker browser launch must fail closed after one sandboxed attempt."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    browser.bind_worker_display(":99", tmp_path / "workspace")
+    launch_calls: list[dict[str, object]] = []
+    sandbox_error = "No usable sandbox"
+
+    class _FailingChromium:
+        async def launch_persistent_context(self, **kwargs: object) -> _FakeContext:
+            launch_calls.append(kwargs)
+            raise PlaywrightError(sandbox_error)
+
+    class _FailingPlaywright:
+        def __init__(self) -> None:
+            self.chromium = _FailingChromium()
+            self.stop = AsyncMock()
+
+    playwright = _FailingPlaywright()
+
+    class _FailingStarter:
+        async def start(self) -> _FailingPlaywright:
+            return playwright
+
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FailingStarter())
+
+    with pytest.raises(PlaywrightError, match=sandbox_error):
+        await browser._ensure_profile("mindroom")
+
+    assert len(launch_calls) == 1
+    assert launch_calls[0]["chromium_sandbox"] is True
+    playwright.stop.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

@@ -288,3 +288,102 @@ async def test_worker_stream_cancellation_drains_socket_and_exact_ownership(  # 
         server.close()
         server.abort_clients()
         await server.wait_closed()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTTP ownership lifecycle
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    """Current native names route through one retained toolkit; disabled mode fails closed."""
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP  # noqa: PLC0415
+    from mindroom.worker_computer.mcp_results import decode_browser_mcp_result  # noqa: PLC0415
+
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="writer",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session",
+    )
+    worker_key = resolve_worker_key("user_agent", identity, agent_name="writer")
+    root = tmp_path / "worker"
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=root,
+        process_env={
+            "MINDROOM_WORKER_COMPUTER_ENABLED": str(enabled).lower(),
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(root),
+        },
+    )
+    app = FastAPI()
+    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
+    computer = WorkerComputerRuntime(FakeDisplay())
+    if enabled:
+        app.state.worker_computer = computer
+    app.include_router(sandbox_runner.router)
+    prepared = sandbox_worker_prep.PreparedWorkerRequest(
+        handle=WorkerHandle("test", worker_key, "http://worker/execute", "secret", "ready", "docker", 0, 0),
+        paths=local_worker_state_paths_for_root(root),
+        runtime_overrides={"base_dir": root / "workspace"},
+    )
+    monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
+    calls = []
+
+    async def execute(self: WorkerBrowserMCP, name: str, arguments: dict[str, object]) -> ToolResult:
+        calls.append((id(self), name, arguments))
+        return ToolResult(content=name)
+
+    monkeypatch.setattr(WorkerBrowserMCP, "execute", execute)
+    payload = {
+        "tool_name": "browser_mcp",
+        "function_name": "browser_snapshot",
+        "worker_key": worker_key,
+        "worker_scope": "user_agent",
+        "execution_identity": asdict(identity),
+        "private_agent_names": [],
+        "kwargs": {},
+    }
+    headers = {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}
+    with TestClient(app) as client:
+        for name in ["browser_snapshot", "browser_tabs", "browser_close"]:
+            payload["function_name"] = name
+            payload["kwargs"] = {"action": "list"} if name == "browser_tabs" else {}
+            response = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
+            if not enabled:
+                assert response.status_code == 400
+                assert not calls
+                return
+            assert response.status_code == 200, response.text
+            assert response.json()["ok"], response.text
+            result = decode_browser_mcp_result(response.json()["result"])
+            assert result.content == name
+        assert [call[1] for call in calls] == ["browser_snapshot", "browser_tabs", "browser_close"]
+        assert len({call[0] for call in calls}) == 1
+        generation = computer.status()["generation"]
+        client.portal.call(computer.attach_stream, "viewer", generation)
+        client.portal.call(computer.take_control, "viewer")
+        for name in ["browser_snapshot", "browser_tabs", "browser_close"]:
+            payload["function_name"] = name
+            payload["kwargs"] = {"action": "list"} if name == "browser_tabs" else {}
+            denied = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
+            assert denied.json()["ok"] is False
+            assert "under user control" in denied.json()["error"]
+        assert len(calls) == 3
+        payload["function_name"] = "browser_run_code_unsafe"
+        payload["kwargs"] = {}
+        unsupported = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
+        assert unsupported.status_code == 400
+        payload["function_name"] = "browser_snapshot"
+        monkeypatch.setattr(sandbox_runner.TOOL_METADATA["browser_mcp"], "factory", lambda: type(None))
+        replaced = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
+        assert replaced.status_code == 400
+        assert "built-in browser factory" in replaced.json()["detail"]
+        assert len(calls) == 3
+        client.portal.call(computer.close)

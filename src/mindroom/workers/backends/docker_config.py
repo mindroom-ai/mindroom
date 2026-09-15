@@ -17,7 +17,11 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
 )
 from mindroom.credentials import runtime_credentials_manager_key
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import (
+    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    WORKER_COMPUTER_ENABLED_ENV,
+)
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._config_helpers import (
@@ -30,6 +34,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     build_backend_config_signature,
     validate_dedicated_worker_extra_env,
 )
+from mindroom.workers.backends.worker_security import docker_worker_security_policy_signature
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -286,9 +291,13 @@ def docker_backend_config_signature(
     workers_root = docker_workers_root(effective_runtime_paths.storage_root)
     credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
     runtime_env = runtime_env_values(effective_runtime_paths)
+    security_policy_signature = docker_worker_security_policy_signature(
+        computer_enabled=effective_runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV),
+    )
     return build_backend_config_signature(
         prefix_parts=(
             "docker",
+            *security_policy_signature,
             config.image,
             str(config.worker_port),
             config.storage_mount_path,
