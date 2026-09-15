@@ -29,12 +29,13 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         architecture: [arm64, x86_64]
     steps:
       - uses: actions/checkout@v5
       - name: Build and test native app
-        run: swift test --package-path macos/MindRoom --arch ${{ matrix.architecture }}
+        run: /usr/bin/arch -${{ matrix.architecture }} swift test --package-path macos/MindRoom --arch ${{ matrix.architecture }}
 
   packaging:
     runs-on: macos-latest
