@@ -28,6 +28,8 @@ def native_tabs(text: str) -> list[dict[str, Any]]:
     return [
         {"index": int(index), "current": bool(current), "title": title, "url": url}
         for index, current, title, url in re.findall(
-            r"^- (\d+): (\(current\) )?\[(.*?)\]\((.*?)\)$", text, re.MULTILINE
+            r"^- (\d+): (\(current\) )?\[(.*?)\]\((.*?)\)$",
+            text,
+            re.MULTILINE,
         )
     ]

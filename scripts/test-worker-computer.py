@@ -534,7 +534,7 @@ for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){
 }
 if(count<2)throw Error('browser subprocesses absent');console.log('SECURITY_VERIFIED');
 """,
-            ]
+            ],
         )
         assert "SECURITY_VERIFIED" in process_check, process_check
         result["effective_browser_security"] = True
