@@ -9,7 +9,12 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
+from mindroom.history.message_content import (
+    image_content_for_token_estimation,
+    media_payload_snapshot,
+    message_media_entries,
+    render_message_content,
+)
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
@@ -51,19 +56,43 @@ def estimate_prompt_visible_history_tokens(
         history_settings=history_settings,
     )
     if native_route is None:
-        estimated = _estimate_history_messages_tokens(history_messages)
-        if replay_model is not None:
-            provider_estimate = replay_model.estimate_portable_replay_tokens(history_messages)
-            if provider_estimate is not None:
-                estimated = max(estimated, provider_estimate)
-        return summary_tokens + estimated
+        provider_estimate = (
+            replay_model.estimate_portable_replay_tokens(history_messages) if replay_model is not None else None
+        )
+        if (
+            replay_model is not None
+            and provider_estimate is not None
+            and replay_model.portable_replay_uses_visual_tokens()
+        ):
+            # The provider accounts for visual input. Do not reintroduce
+            # encoded image bytes through the canonical chars/4 fallback.
+            history_messages = [_without_image_transport(message) for message in history_messages]
+        return summary_tokens + max(_estimate_history_messages_tokens(history_messages), provider_estimate or 0)
     projected = native_replay_messages(history_messages, native_route)
-    return summary_tokens + sum(
-        checkpoint_estimated_tokens(items)
-        if (items := checkpoint_items(message, native_route))
-        else (_estimated_message_chars(message) + 3) // 4
-        for message in projected
+    checkpoint_tokens = 0
+    tail = []
+    for message in projected:
+        if items := checkpoint_items(message, native_route):
+            checkpoint_tokens += checkpoint_estimated_tokens(items)
+        else:
+            tail.append(message)
+    provider_estimate = (
+        replay_model.estimate_portable_replay_tokens(tail) if replay_model is not None and tail else None
     )
+    if replay_model is not None and provider_estimate is not None and replay_model.portable_replay_uses_visual_tokens():
+        tail = [_without_image_transport(message) for message in tail]
+    tail_tokens = sum((_estimated_message_chars(message) + 3) // 4 for message in tail)
+    return summary_tokens + checkpoint_tokens + max(tail_tokens, provider_estimate or 0)
+
+
+def _without_image_transport(message: Message) -> Message:
+    """Project canonical images for estimation without changing saved messages."""
+    updates: dict[str, object] = {}
+    if isinstance(message.content, list):
+        updates["content"] = [image_content_for_token_estimation(block) for block in message.content]
+    if message.images:
+        updates["images"] = [image.model_copy(update={"url": None}) for image in message.images]
+    return message.model_copy(update=updates) if updates else message
 
 
 def _estimate_session_summary_tokens(summary_text: str | None) -> int:

@@ -38,6 +38,15 @@ def media_payload_snapshot(media_value: object) -> object:
     return media_value
 
 
+def image_content_for_token_estimation(value: object) -> object:
+    """Remove transport fields only from a typed image block, retaining its shape."""
+    if isinstance(value, dict):
+        block = cast("dict[str, object]", value)
+        if block.get("type") == "input_image":
+            return {key: item for key, item in block.items() if key not in {"image_url", "file_id"}}
+    return value
+
+
 def render_message_content(message: Message) -> str:
     """Render one replayable string form of a message body."""
     content = message.compressed_content if message.compressed_content is not None else message.content
