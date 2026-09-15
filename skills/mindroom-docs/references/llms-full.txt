@@ -7599,6 +7599,7 @@ Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
 Relative paths resolve from the agent workspace and must stay inside it.
 When sending to a recipient, all files arrive before the task text starts its response.
+For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
 Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
 
 ## [`matrix_room`]
@@ -8097,6 +8098,7 @@ New roots may not appear in discovery until they have a reply.
 | `event_id` | `str \| None` | `None` | Required target message ID for edit/react. |
 | `attachments` | `list[str] \| None` | `None` | Ordered attachment IDs or file paths; send only, maximum five. |
 | `message_extras` | `list[object] \| None` | `None` | Collapsible sections for send/edit; schema below. |
+| `idempotency_key` | `str \| None` | `None` | Nonblank key, at most 256 characters; durable text-only send retries. |
 | `limit` | `int \| None` | `None` | Read count, clamped to 1–50; default 20. |
 
 Workspace-backed agents may also see MindRoom's standard `mindroom_output_path` argument, which saves the tool result and returns a file receipt.
@@ -8107,6 +8109,49 @@ It controls the returned tool output, not where the Matrix message is delivered.
 `read` returns message event IDs; thread reads also include edit options for editable messages.
 Room access checks apply before cross-room operations.
 Calls are rate limited to 12 actions per 30 seconds per agent, room, and requester; each file costs one additional action.
+
+## Durable send retries
+
+Pass `idempotency_key` on a text-only `send` to retry safely after a timeout or interrupted tool call.
+Keys are scoped to the canonical requester, acting agent, and resolved destination room; room and requester aliases share the same scope.
+The first prepared payload, recipient, and thread target are saved before delivery, including formatting, mentions, and `message_extras`.
+Retrying that key reuses the saved payload and Matrix transaction ID even if the text, recipient, or current thread changes.
+The destination room remains part of the key scope: using a different room creates a separate send.
+
+```python
+matrix_message(message="Review this result.", recipient="code", new_thread=True, idempotency_key="review-42")
+```
+
+A successful result keeps the normal `status="ok"`, `event_id`, `room_id`, and `thread_id` fields.
+Only `status="ok"` confirms both Matrix delivery and a durable local receipt; retain the key and retry after any error or lost response.
+An error does not prove that Matrix rejected the message.
+Authorization for the sender and the original recipient is checked again on every retry, including completed receipts.
+A changed Matrix sender or device fails closed because its transaction IDs may no longer deduplicate the original send.
+These calls need durable control storage and a known Matrix sender and device.
+If the original recipient changes to room mode, a pending separate-thread send pauses before transport until compatible recipient settings are restored.
+Its stored target and transaction remain unchanged; completed receipts remain retrievable under current authorization.
+
+Completed receipts are retained for eight days, and the prepared message body is discarded after receipt storage.
+Pending sends never expire; retrying after eight days still uses their original payload.
+After a completed receipt expires, reusing its key may create a new event.
+Pruning happens when the requester/agent/room store is next used.
+Keep the storage across restarts and use the same Matrix device for retries.
+Rate limits also apply to retries; a rate-limit error requires waiting before retrying the same key.
+Keys cannot be used for `read`, `edit`, `react`, or attachment sends.
+There is no automatic retry worker; the caller controls retries.
+
+Keyed sends sharing the same canonical requester, acting agent, and room serialize under one file lock.
+A 60-second deadline covers lock wait, recipient discovery, preparation, and Matrix transport.
+On timeout the tool returns `status="error"` with `Idempotent Matrix send timed out; retry with the same idempotency_key.`
+Pending state and its transaction survive the timeout; the caller can retry, and other keys can proceed once the claim releases its lock.
+An in-flight durable filesystem write must finish before cancellation releases the lock, so a stalled filesystem can delay the timeout response.
+Ordinary sends have no new deadline.
+
+Each scope admits at most 10,000 retained records and 1,024 pending sends.
+The 16 MiB admission budget counts the exact serialized JSON plus 2 KiB reserved per pending receipt; durable files never exceed 16 MiB.
+Capacity errors reject new keys before Matrix send; existing keys can still recover or replay their receipts.
+Pending records are never evicted, and expired completed receipts can free admission capacity when the scope is used again.
+Oversized existing files fail closed before JSON parsing and are never discarded automatically.
 
 ## Attachments
 
@@ -11111,8 +11156,15 @@ Calls are serialized within one run to keep approval and side-effect order predi
 New Kubernetes script runs survive primary-runtime restarts and compatible image upgrades in their existing dedicated workers.
 Shutdown keeps those processes and capabilities alive while draining accepted tool calls within its deadline.
 Startup fences launches and gateway calls until it verifies the exact worker and supervisor handle, the current requester authorization, and the persisted recovery contract.
-The contract includes the script protocol version, worker ownership and configuration, authentication material, private scope, and gateway URL; it permits a changed image or image pull policy while keeping the active worker on its launch image.
+The contract includes the script protocol version, worker ownership and storage, authentication material, execution and private scope, knowledge paths, credential policy, selected resource-profile settings, and gateway URL.
+It permits a changed image or image pull policy while keeping the active worker on its launch image.
 Fresh runs use the newly configured worker image.
+Compatible Kubernetes scripts also survive configuration reloads that change delegation or unrelated agents.
+Removing the owner, authorization, or script tool, changing the owner's process authority, or reloading plugins interrupts affected scripts.
+Resource profiles come from the startup environment rather than reloadable YAML; changing the selected profile's resources prevents adoption after restart, while changing an unused profile does not.
+Backend replacement interrupts scripts whose backend cannot preserve their processes, including Docker workers.
+During replacement, new launches and gateway calls remain unavailable until the new backend is published; existing Kubernetes processes keep running and the SDK retries temporary gateway unavailability.
+Startup migrates an old unversioned recovery signature only when its complete original configuration digest still matches exactly; unverifiable records are interrupted.
 Keep the isolated gateway address stable across upgrades.
 Missing runtime dependencies or a temporary worker-status outage leave recovery pending; gateway calls return retryable HTTP 503 responses until admission reopens.
 The SDK retries transport failures and these responses using the same logical call ID.
@@ -17633,6 +17685,7 @@ MindRoom's architecture consists of several key components working together.
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
@@ -18271,6 +18324,7 @@ The remaining rows were already focused boundaries and complete the current map.
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
+| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] | Script-runtime startup encounters an unversioned recovery signature. | Only an exact recomputation of the original digest permits migration to v2; the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 
 ## Python provenance and regression coverage
 
@@ -18291,6 +18345,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | [Journal store][journal-store-tests] tests preserve incomplete deletion proof and FINAL debt; [response runner][response-runner-tests] tests recover every approval state only after card expiration, without editing deleted responses or resuming tools. |
 | [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
 | [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
+| [`script_runs/legacy_recovery.py`][script-legacy-recovery] | [Script lifecycle tests][script-lifecycle-tests] cover exact legacy adoption and rejection after authority changes; [script-run tests][script-run-tests] verify atomic signature replacement. |
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
@@ -18506,6 +18561,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
 [script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
+[script-legacy-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_recovery.py
+[script-lifecycle-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_script_runtime_lifecycle.py
 [session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
 [skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py
 [sso]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/routes/sso.py

@@ -17,6 +17,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     credentials_encryption_key_value,
 )
+from mindroom.script_runs.legacy_recovery import legacy_kubernetes_backend_recovery_signature
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_id_for_key
 from mindroom.workers.backend import (
     WorkerBackendError,
@@ -311,6 +312,15 @@ class KubernetesWorkerBackend:
             },
         }
 
+    def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
+        """Return current pod resources for one run's persisted profile."""
+        requests, limits = self.config.resources_for_profile(resource_profile)
+        return {
+            "profile": resource_profile,
+            "requests": requests,
+            "limits": limits,
+        }
+
     cleanup_locator: str | None = None
 
     def script_recovery_signature(self) -> str:
@@ -318,16 +328,31 @@ class KubernetesWorkerBackend:
         config = asdict(self.config)
         config.pop("image")
         config.pop("image_pull_policy")
+        config.pop("default_script_resource_profile")
+        config.pop("script_resource_profiles")
+        config.pop("resource_requests")
+        config.pop("resource_limits")
         payload = {
             "config": config,
             "owner": self.cleanup_locator,
             "auth_token": self.auth_token,
             "encryption_key": self._current_credentials_encryption_key_hash(),
             "storage_root": str(self.storage_root),
-            "config_snapshot": self._resources.config_snapshot,
             "grantable_credentials": sorted(self.worker_grantable_credentials),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def legacy_script_recovery_signature(self) -> str:
+        """Reproduce the pre-v2 authority digest for exact durable-record migration."""
+        return legacy_kubernetes_backend_recovery_signature(
+            config=self.config,
+            owner=self.cleanup_locator,
+            auth_token=self.auth_token,
+            encryption_key=self._current_credentials_encryption_key_hash(),
+            storage_root=str(self.storage_root),
+            config_snapshot=self._resources.config_snapshot,
+            grantable_credentials=self.worker_grantable_credentials,
+        )
 
     def __init__(
         self,

@@ -4009,7 +4009,7 @@ class TestMultiAgentOrchestrator:
             await orchestrator._apply_config_update_plan(current_config, plan, ())
 
         assert orchestrator.config is current_config
-        assert runtime._worker_replacement_pending is False
+        assert runtime._worker_replacement_phase == "idle"
         assert runtime.manager.worker_backend is old_backend
         assert runtime._current_worker_lease is lease
 
