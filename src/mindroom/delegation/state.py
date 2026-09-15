@@ -54,6 +54,7 @@ class DelegationPendingTool:
 
     child: DelegationChild
     tool_call_id: str
+    toolkit_name: str | None = None
 
 
 @dataclass
@@ -93,6 +94,7 @@ class DelegationState:
                 call_id: DelegationPendingTool(
                     child=DelegationChild(**source["child"]),
                     tool_call_id=source["tool_call_id"],
+                    toolkit_name=source.get("toolkit_name"),
                 )
                 for call_id, source in snapshot.get("pending_tool_sources", {}).items()
             },

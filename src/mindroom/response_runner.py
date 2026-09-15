@@ -1216,7 +1216,11 @@ class ResponseRunner:
         )
         approval_id = uuid4().hex
         try:
-            plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
+            plan = await self._approval_responses.plan_pause(
+                identified_tools,
+                requester_id=requester_id,
+                toolkit_owners=paused.toolkit_owners,
+            )
             response_event_id = progress.tracked_event_id
             approval_pending = plan.waiting_text is not None
             visible_tool_trace = tuple(paused.tool_trace) if show_tool_calls else ()
@@ -1924,6 +1928,7 @@ class ResponseRunner:
                         denial_reasons=denial_reasons,
                         refresh_scheduler=self._knowledge_refresh_scheduler(),
                         member_model_names=dict(continuation.team_member_model_names) or None,
+                        approval_calls=continuation.calls,
                         history_scope=continuation.history_scope,
                         prior_response_text=continuation.response_text,
                         prior_tool_trace=deserialize_tool_trace(continuation.response_tool_trace),

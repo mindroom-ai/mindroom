@@ -22,6 +22,7 @@ from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval_execution import _collect_agent_continuation
 from mindroom.approval_response import require_ordered_pause_presentation
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -34,9 +35,9 @@ from mindroom.delegation.lifecycle import note_child_run_id
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import _cancel_delegations, cancel_approval_delegations
 from mindroom.delegation.state import DelegationState
-from mindroom.event_journal import ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import paused_attempt_from_response
+from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.teams import (
     _attach_team_pause_presentation,
     _collect_team_continuation,
@@ -81,6 +82,30 @@ def _call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
 
 
+def _saved_approval_calls(state: DelegationState) -> tuple[ApprovalCall, ...]:
+    """Supply the saved journal calls when a test drives delegation without Matrix publication."""
+    calls = []
+    for tool in state.pending_tools:
+        call_id = str(tool["tool_call_id"])
+        if state.pending_child_id is None:
+            assert tool["tool_name"] in {"run_subagent", "continue_subagent"}
+            assert state.pending_agent_name is not None
+            invoking_agent, toolkit_name = state.pending_agent_name, "delegate"
+        else:
+            source = state.pending_tool_sources[call_id]
+            invoking_agent, toolkit_name = source.child.child_agent_name, source.toolkit_name
+        calls.append(
+            ApprovalCall(
+                tool_call_id=call_id,
+                tool_name=str(tool["tool_name"]),
+                invoking_agent=invoking_agent,
+                toolkit_name=toolkit_name,
+                expires_at_ns=2**62,
+            ),
+        )
+    return tuple(calls)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["approve", "deny", "cancel", "cancel_removed", "cancel_completed", "revoke"])
 @pytest.mark.parametrize(
@@ -103,7 +128,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
         Config(
             agents={
                 "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
-                "code": AgentConfig(display_name="Code", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code", tools=["file"], delegate_to=["code"]),
                 "other": AgentConfig(display_name="Other", delegate_to=["code"]),
             },
             defaults=DefaultsConfig(tools=[]),
@@ -137,6 +162,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
     parent_storage = create_session_storage("leader", config, paths, identity)
     external = Function.from_callable(run_subagent)
     external.external_execution = True
+    external.owning_toolkit = "delegate"
     parent = Agent(
         name="leader",
         db=parent_storage,
@@ -223,9 +249,12 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
         child_storages.append(storage)
         gated = Function.from_callable(write_report)
         gated.requires_confirmation = True
+        gated.owning_toolkit = "file"
         child_delegate = Function.from_callable(run_subagent)
         child_delegate.external_execution = True
+        child_delegate.owning_toolkit = "delegate"
         return Agent(
+            id="code",
             name="code",
             db=storage,
             tools=[gated, child_delegate],
@@ -267,7 +296,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 run_id=run_id,
                 user_id=identity.requester_id,
             )
-            await drive_delegations(
+            response = await drive_delegations(
                 child,
                 response,
                 run_child=start_child,
@@ -277,6 +306,14 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 execution_identity=child_identity,
                 delegation_depth=prepared.depth,
             )
+            paused_child = paused_attempt_from_response(
+                response,
+                fallback_session_id=session_id,
+                fallback_run_id=run_id,
+                toolkit_owners=toolkit_owners_for_agents([child]),
+            )
+            if paused_child is not None:
+                raise ResponsePausedForApproval(paused_child)
         return "ignored; persisted outcome owns success"
 
     monkeypatch.setattr("mindroom.agents.create_agent", build_child)
@@ -307,6 +344,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                     paused,
                     fallback_session_id="parent",
                     fallback_run_id=response.run_id,
+                    toolkit_owners={},
                 )
                 assert team_pause is not None
                 config_names = ["leader", "other"] if siblings == 2 else ["leader"]
@@ -347,6 +385,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                     paused,
                     fallback_session_id="parent",
                     fallback_run_id=response.run_id,
+                    toolkit_owners={},
                 )
                 if team_parent:
                     await _cancel_delegations(paused, config=config, runtime_paths=paths)
@@ -396,6 +435,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 paused,
                 fallback_session_id="parent",
                 fallback_run_id=response.run_id,
+                toolkit_owners={},
             )
             for tool in initial_pause.tools:
                 presentation.start_tool(tool)
@@ -441,6 +481,15 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                     "member_config_names": {"leader": "leader", "other": "other"},
                     "decisions": {call_id: outcome == "approve"},
                     "denial_reasons": {call_id: None},
+                    "approval_calls": (
+                        ApprovalCall(
+                            tool_call_id=call_id,
+                            tool_name="write_report",
+                            invoking_agent="code",
+                            toolkit_name="file",
+                            expires_at_ns=2**62,
+                        ),
+                    ),
                 }
 
                 async def stored_run(
@@ -468,6 +517,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 assert resumed.status == RunStatus.paused
                 next_pause = paused_attempt_from_response(
                     resumed,
+                    toolkit_owners={},
                     fallback_session_id="parent",
                     fallback_run_id=response.run_id,
                 )

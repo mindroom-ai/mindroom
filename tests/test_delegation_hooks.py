@@ -19,7 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.execution import _ChildOutcome, drive_delegations
 from mindroom.delegation.hooks import before_delegation
 from mindroom.delegation.recovery import _cancel_delegations
 from mindroom.delegation.state import DelegationState
@@ -35,7 +35,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity, _only_run
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.test_delegation_execution import DelegationModel, _call, _saved_approval_calls
 from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
@@ -114,14 +114,17 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
     monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
     if outcome in {"live_cancel", "cancelled_output"}:
 
-        async def cancelled(child: object, **_kwargs: object) -> RunOutput:
+        async def cancelled(child: object, **_kwargs: object) -> _ChildOutcome:
             if outcome == "live_cancel":
                 raise asyncio.CancelledError
-            return RunOutput(
-                run_id=child.run_id,
-                session_id=child.session_id,
-                status=RunStatus.cancelled,
-                content="Child cancelled",
+            return _ChildOutcome(
+                RunOutput(
+                    run_id=child.run_id,
+                    session_id=child.session_id,
+                    status=RunStatus.cancelled,
+                    content="Child cancelled",
+                ),
+                {},
             )
 
         monkeypatch.setattr("mindroom.delegation.execution._execute_child", cancelled)
@@ -175,6 +178,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
                         run_child=run_delegated_child_response,
                         **options,
                         decisions=decisions,
+                        approval_calls=_saved_approval_calls(state),
                         denial_reasons=dict.fromkeys(decisions),
                     )
 

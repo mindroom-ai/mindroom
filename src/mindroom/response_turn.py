@@ -82,6 +82,7 @@ __all__ = [
     "TurnRunState",
     "TurnSinks",
     "apply_exact_approval_decisions",
+    "apply_local_approval_decisions",
     "build_matrix_run_metadata",
     "paused_attempt_from_event",
     "paused_attempt_from_response",
@@ -378,6 +379,7 @@ class PausedAttempt:
     session_id: str
     run_id: str
     tools: tuple[ToolExecution, ...]
+    toolkit_owners: dict[tuple[str, str], str | None]
     requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -411,18 +413,45 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
         )
 
 
+def apply_local_approval_decisions(
+    response: RunOutput | TeamRunOutput,
+    *,
+    decisions: dict[str, bool],
+    denial_reasons: dict[str, str | None],
+) -> list[RunRequirement]:
+    """Apply this actor's approvals; projected child calls belong to the child executor."""
+    delegation = DelegationState.from_metadata(response.metadata)
+    if delegation.pending_child_id is not None:
+        return []
+    return apply_exact_approval_decisions(
+        [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
+        if delegation.pending_requirements
+        else deepcopy(response.requirements or []),
+        decisions=decisions,
+        denial_reasons=denial_reasons,
+    )
+
+
 def paused_attempt_from_response(
     response: RunOutput | TeamRunOutput,
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
+    toolkit_owners: dict[tuple[str, str], str | None],
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one persisted paused Agno run."""
     if response.status != RunStatus.paused:
         return None
     delegation = DelegationState.from_metadata(response.metadata)
     if delegation.pending_tools:
+        if delegation.pending_child_id is not None:
+            toolkit_owners = {
+                (source.child.child_agent_name, str(tool["tool_name"])): source.toolkit_name
+                for tool in delegation.pending_tools
+                if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
+            }
         paused = _paused_attempt(
+            toolkit_owners=toolkit_owners,
             tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
             session_id=response.session_id or fallback_session_id,
@@ -438,6 +467,7 @@ def paused_attempt_from_response(
             else None
         )
     return _paused_attempt(
+        toolkit_owners=toolkit_owners,
         tools=response.tools or (),
         requirements=response.requirements or (),
         session_id=response.session_id or fallback_session_id,
@@ -450,9 +480,11 @@ def paused_attempt_from_event(
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
+    toolkit_owners: dict[tuple[str, str], str | None],
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one streamed Agno pause event."""
     return _paused_attempt(
+        toolkit_owners=toolkit_owners,
         tools=event.tools or (),
         requirements=event.requirements or (),
         session_id=event.session_id or fallback_session_id,
@@ -464,6 +496,7 @@ def _paused_attempt(
     *,
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
+    toolkit_owners: dict[tuple[str, str], str | None],
     session_id: str | None,
     run_id: str | None,
 ) -> PausedAttempt | None:
@@ -519,6 +552,7 @@ def _paused_attempt(
             ),
             None,
         ),
+        toolkit_owners=toolkit_owners,
     )
 
 

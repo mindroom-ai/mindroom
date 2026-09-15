@@ -35,6 +35,7 @@ from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
     empty_request_metric_totals,
 )
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
@@ -1641,6 +1642,7 @@ async def ai_response(  # noqa: C901, PLR0915
                 response,
                 fallback_session_id=session_id,
                 fallback_run_id=attempt.attempt_run_id,
+                toolkit_owners=toolkit_owners_for_agents([prepared_run.agent]),
             )
             if paused_attempt is not None:
                 return replace(
@@ -2179,12 +2181,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     state.terminal_response,
                     fallback_session_id=session_id,
                     fallback_run_id=attempt.attempt_run_id,
+                    toolkit_owners=toolkit_owners_for_agents([prepared_run.agent]),
                 )
                 if state.terminal_response is not None
                 else paused_attempt_from_event(
                     state.paused_run_event,
                     fallback_session_id=session_id,
                     fallback_run_id=attempt.attempt_run_id,
+                    toolkit_owners=toolkit_owners_for_agents([prepared_run.agent]),
                 )
             )
             if paused_attempt is not None:

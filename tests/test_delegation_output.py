@@ -24,7 +24,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.test_delegation_execution import DelegationModel, _call, _saved_approval_calls
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -119,6 +119,7 @@ async def test_native_delegation_obeys_output_file_policy(
                     run_child=run_delegated_child_response,
                     **options,
                     decisions={str(tool["tool_call_id"]): True for tool in state.pending_tools},
+                    approval_calls=_saved_approval_calls(state),
                     denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},
                 )
         assert result.status == RunStatus.completed

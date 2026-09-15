@@ -7,7 +7,7 @@ import json
 from contextlib import suppress
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
@@ -23,6 +23,12 @@ from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.approval_receipt import install_approval_receipt_hooks
+from mindroom.approval_tools import (
+    approval_denial_context,
+    required_approval_tool_names,
+    toolkit_owners_for_agents,
+    validate_approval_tool_owners,
+)
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -63,7 +69,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from agno.agent import Agent
     from agno.session.agent import AgentSession
@@ -72,6 +78,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import ChildResponseRunner
+    from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -88,10 +95,19 @@ class _DelegationOptions(TypedDict):
     refresh_scheduler: NotRequired[KnowledgeRefreshScheduler | None]
     decisions: NotRequired[dict[str, bool] | None]
     denial_reasons: NotRequired[dict[str, str | None] | None]
+    approval_calls: NotRequired[Sequence[ApprovalCall]]
     member_config_names: NotRequired[Mapping[str, str] | None]
 
 
 _RUNNING_CHILD_ID: ContextVar[str | None] = ContextVar("running_delegated_child", default=None)
+
+
+@dataclass(frozen=True)
+class _ChildOutcome:
+    """Retained outcome and executable ownership observed by its actual envelope."""
+
+    response: RunOutput
+    toolkit_owners: dict[tuple[str, str], str | None]
 
 
 def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequirement]:
@@ -131,8 +147,9 @@ async def _run_child(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     decisions: dict[str, bool] | None,
     denial_reasons: dict[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
     fresh: bool,
-) -> RunOutput:
+) -> _ChildOutcome:
     token = _RUNNING_CHILD_ID.set(child.delegation_id)
     try:
         async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
@@ -146,10 +163,11 @@ async def _run_child(
                     refresh_scheduler=refresh_scheduler,
                     decisions=decisions,
                     denial_reasons=denial_reasons,
+                    approval_calls=approval_calls,
                     fresh=fresh,
                 ),
             )
-            observation.response = response
+            observation.response = response.response
             observation.terminal = None
             return response
     finally:
@@ -165,12 +183,14 @@ async def _execute_child(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     decisions: dict[str, bool] | None,
     denial_reasons: dict[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
     fresh: bool,
-) -> RunOutput:
+) -> _ChildOutcome:
     """Start a fresh envelope or resume the exact stored child under its own scope."""
     # These imports cross the creation/envelope cycle only during execution.
     from mindroom.agents import create_agent  # noqa: PLC0415
     from mindroom.knowledge.utils import resolve_agent_knowledge_access_async  # noqa: PLC0415
+    from mindroom.response_turn import apply_local_approval_decisions  # noqa: PLC0415
 
     identity = child_execution_identity(child)
     context = get_tool_runtime_context()
@@ -196,8 +216,19 @@ async def _execute_child(
     if persisted is None:
         msg = "Delegated run was interrupted before retaining an outcome"
         raise RuntimeError(msg)
-    if persisted.status != RunStatus.paused:
-        return persisted
+    if persisted.status != RunStatus.paused or decisions is None:
+        # A retained pause must never acquire ownership from a later reconstruction.
+        return _ChildOutcome(persisted, {})
+    child_state = DelegationState.from_metadata(persisted.metadata)
+    local_calls = () if child_state.pending_child_id is not None else approval_calls
+    approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
+    required_tool_names = await required_approval_tool_names(
+        child.child_agent_name,
+        approved_calls,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=identity,
+    )
     if decisions is not None:
         await settle_child_response(
             child,
@@ -238,6 +269,7 @@ async def _execute_child(
             dynamic_tool_continuation=True,
             include_interactive_questions=False,
             tool_function_filter=context.tool_function_filter,
+            required_tool_names=required_tool_names,
         )
     except BaseException:
         storage.close()
@@ -247,7 +279,19 @@ async def _execute_child(
             install_approval_receipt_hooks(agent.model, agent.fallback_config)
         session = await agent.aget_session(session_id=child.session_id, user_id=identity.requester_id)
         restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession | None", session))
-        with tool_runtime_context(child_context):
+        requirements = apply_local_approval_decisions(
+            persisted,
+            decisions=decisions,
+            denial_reasons=denial_reasons or {},
+        )
+        validate_approval_tool_owners([agent], approved_calls, requirements)
+        with (
+            tool_runtime_context(child_context),
+            approval_denial_context(
+                agent,
+                {child.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id))},
+            ),
+        ):
             response = await _continue_child(
                 agent,
                 run_child,
@@ -259,7 +303,9 @@ async def _execute_child(
                 refresh_scheduler=refresh_scheduler,
                 decisions=decisions,
                 denial_reasons=denial_reasons,
+                approval_calls=approval_calls,
             )
+        toolkit_owners = toolkit_owners_for_agents([agent])
     finally:
         close_agent_runtime_state_dbs(agent, shared_scope_storage=storage)
         storage.close()
@@ -281,7 +327,7 @@ async def _execute_child(
                 prompt=decision.next_prompt,
                 refresh_scheduler=refresh_scheduler,
             )
-    return response
+    return _ChildOutcome(response, toolkit_owners)
 
 
 async def _start_child_envelope(
@@ -292,11 +338,12 @@ async def _start_child_envelope(
     *,
     prompt: str,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-) -> RunOutput:
+) -> _ChildOutcome:
     """Run the normal response loop in the child's retained conversation scope."""
     from mindroom.response_turn import ResponsePausedForApproval  # noqa: PLC0415
 
     result = None
+    toolkit_owners = {}
     try:
         result = await run_child(
             child,
@@ -307,13 +354,14 @@ async def _start_child_envelope(
             supports_native_tool_approval=True,
         )
     except ResponsePausedForApproval as suspension:
+        toolkit_owners = suspension.paused.toolkit_owners
         if suspension.paused.runtime_model_name is not None:
             note_child_run_id(child, child.run_id, runtime_paths, model_name=suspension.paused.runtime_model_name)
     response = await read_child_run(child, config, runtime_paths)
     if response is None:
         msg = result or "Delegated execution did not retain its exact run outcome"
         raise RuntimeError(msg)
-    return response
+    return _ChildOutcome(response, toolkit_owners)
 
 
 async def _continue_child(
@@ -328,6 +376,7 @@ async def _continue_child(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     decisions: dict[str, bool] | None,
     denial_reasons: dict[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
 ) -> RunOutput:
     """Apply child decisions and drive any further nested delegations."""
     from mindroom.response_turn import apply_exact_approval_decisions  # noqa: PLC0415
@@ -361,6 +410,7 @@ async def _continue_child(
         persisted = continued
         decisions = None
         denial_reasons = None
+        approval_calls = ()
     return cast(
         "RunOutput",
         await drive_delegations(
@@ -375,14 +425,21 @@ async def _continue_child(
             refresh_scheduler=refresh_scheduler,
             decisions=decisions,
             denial_reasons=denial_reasons,
+            approval_calls=approval_calls,
         ),
     )
 
 
-def _pending_child(state: DelegationState, child: DelegationChild, response: RunOutput) -> None:
+def _pending_child(state: DelegationState, child: DelegationChild, outcome: _ChildOutcome) -> None:
     from mindroom.response_turn import paused_attempt_from_response  # noqa: PLC0415
 
-    paused = paused_attempt_from_response(response, fallback_session_id=child.session_id, fallback_run_id=child.run_id)
+    response = outcome.response
+    paused = paused_attempt_from_response(
+        response,
+        fallback_session_id=child.session_id,
+        fallback_run_id=child.run_id,
+        toolkit_owners=outcome.toolkit_owners,
+    )
     if paused is None:
         msg = "Delegated child paused without supported exact approval requirements"
         raise RuntimeError(msg)
@@ -395,7 +452,11 @@ def _pending_child(state: DelegationState, child: DelegationChild, response: Run
         state.pending_tools.append(projected.to_dict())
         state.pending_tool_sources[projected.tool_call_id] = deepcopy(
             child_state.pending_tool_sources.get(str(tool.tool_call_id))
-            or DelegationPendingTool(child=child, tool_call_id=str(tool.tool_call_id)),
+            or DelegationPendingTool(
+                child=child,
+                tool_call_id=str(tool.tool_call_id),
+                toolkit_name=paused.toolkit_owners.get((child.child_agent_name, str(tool.tool_name))),
+            ),
         )
         requirement = RunRequirement(projected)
         state.pending_requirements.append(requirement.to_dict())
@@ -518,6 +579,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
     refresh_scheduler: KnowledgeRefreshScheduler | None = None,
     decisions: dict[str, bool] | None = None,
     denial_reasons: dict[str, str | None] | None = None,
+    approval_calls: Sequence[ApprovalCall] = (),
     member_config_names: Mapping[str, str] | None = None,
     on_event: Callable[[object], None] | None = None,
 ) -> RunOutput | TeamRunOutput:
@@ -744,10 +806,14 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     raise RuntimeError(msg)
                 child_decisions = None
                 child_reasons = None
+                child_calls = ()
                 if pending_id == child.delegation_id and decisions is not None:
                     prefix = f"{child.delegation_id}:"
                     child_decisions = {key.removeprefix(prefix): value for key, value in decisions.items()}
                     child_reasons = {key.removeprefix(prefix): value for key, value in (denial_reasons or {}).items()}
+                    child_calls = tuple(
+                        replace(call, tool_call_id=call.tool_call_id.removeprefix(prefix)) for call in approval_calls
+                    )
                     decisions = None
                     pending_id = None
                 try:
@@ -768,7 +834,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                             owner=caller_identity,
                             runtime_paths=runtime_paths,
                         )
-                        child_response = await _run_child(
+                        child_outcome = await _run_child(
                             child,
                             run_child=run_child,
                             config=authorization,
@@ -776,6 +842,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                             refresh_scheduler=refresh_scheduler,
                             decisions=child_decisions,
                             denial_reasons=child_reasons,
+                            approval_calls=child_calls,
                             fresh=fresh,
                         )
                     if child_decisions is not None and on_event is not None:
@@ -788,8 +855,8 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                             )
                             if completed_tool is not None:
                                 on_event(_child_completion_event(response, completed_tool))
-                    if child_response.status == RunStatus.paused:
-                        _pending_child(state, child, child_response)
+                    if child_outcome.response.status == RunStatus.paused:
+                        _pending_child(state, child, child_outcome)
                         await _persist(entity, response, state)
                         return response
                 except asyncio.CancelledError:

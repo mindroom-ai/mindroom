@@ -24,6 +24,7 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.records import DelegationRecordOwner
 from mindroom.delegation.state import DelegationState
+from mindroom.event_journal import ApprovalCall
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
@@ -327,6 +328,17 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
                 persisted = storage.get_run(paused.run_id)
                 assert isinstance(persisted, RunOutput)
                 decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
+                assert {source.toolkit_name for source in state.pending_tool_sources.values()} == {"calculator"}
+                approval_calls = tuple(
+                    ApprovalCall(
+                        tool_call_id=str(tool["tool_call_id"]),
+                        tool_name=str(tool["tool_name"]),
+                        invoking_agent="child",
+                        toolkit_name="calculator",
+                        expires_at_ns=2**62,
+                    )
+                    for tool in state.pending_tools
+                )
                 completed = await drive_delegations(
                     parent,
                     persisted,
@@ -337,6 +349,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
                     execution_identity=identity,
                     decisions=decisions,
                     denial_reasons=dict.fromkeys(decisions),
+                    approval_calls=approval_calls,
                     on_event=events.append,
                 )
 

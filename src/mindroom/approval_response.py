@@ -43,7 +43,7 @@ def _require_successful_edit(succeeded: bool, failure_reason: str) -> None:
 _USER_STOP_VISIBLE_NOTE = "**[Response cancelled by user]**"
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from agno.models.response import ToolExecution
 
@@ -212,6 +212,7 @@ class ApprovalResponseCoordinator:
         identified: tuple[tuple[ToolExecution, str, str, str], ...],
         *,
         requester_id: str,
+        toolkit_owners: Mapping[tuple[str, str], str | None],
     ) -> _ApprovalPausePlan:
         """Evaluate policy once and normalize exact calls with integer deadlines."""
         config = self.config()
@@ -244,6 +245,7 @@ class ApprovalResponseCoordinator:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 invoking_agent=invoking_agent,
+                toolkit_name=toolkit_owners.get((invoking_agent, tool_name)),
                 expires_at_ns=int((now + timedelta(seconds=decisions[tool_call_id][1])).timestamp() * 1_000_000_000),
                 decision=decisions[tool_call_id][0],
                 reason=(
@@ -255,6 +257,9 @@ class ApprovalResponseCoordinator:
             )
             for _tool, tool_call_id, tool_name, invoking_agent in identified
         )
+        if any(call.toolkit_name is None for call in calls):
+            msg = "Paused tool has no configured toolkit origin and cannot support restartable approval"
+            raise RuntimeError(msg)
         gated_calls = tuple(call for call in calls if call.decision is None)
         return _ApprovalPausePlan(
             tools=tuple(tool for tool, _tool_call_id, _tool_name, _invoking_agent in identified),
@@ -360,7 +365,11 @@ class ApprovalResponseCoordinator:
         """Replace one claim with Agno's next exact pause generation."""
         require_ordered_pause_presentation(paused, show_tool_calls=current.show_tool_calls)
         identified = identify_approval_tools(paused, default_agent_name=current.entity_name)
-        plan = await self.plan_pause(identified, requester_id=current.requester_id)
+        plan = await self.plan_pause(
+            identified,
+            requester_id=current.requester_id,
+            toolkit_owners=paused.toolkit_owners,
+        )
         approval_pending = plan.waiting_text is not None
         visible_tool_trace = tuple(paused.tool_trace) if current.show_tool_calls else ()
         visible_text = paused.response_text or plan.waiting_text or pending_text

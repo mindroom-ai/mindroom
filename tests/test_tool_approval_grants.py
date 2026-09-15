@@ -149,7 +149,11 @@ async def test_only_policy_pause_offers_timed_approval(
         requires_confirmation=True,
         approval_type=approval_type,
     )
-    plan = await coordinator.plan_pause(((tool, "call-authored", "shell", "code"),), requester_id="@human:test")
+    plan = await coordinator.plan_pause(
+        ((tool, "call-authored", "shell", "code"),),
+        requester_id="@human:test",
+        toolkit_owners={("code", "shell"): "test_toolkit"},
+    )
     await responder.admit(
         InboundEvent(
             event_id="$source-authored",
@@ -243,7 +247,11 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                 requires_confirmation=True,
                 approval_type="mindroom_policy",
             )
-            plan = await coordinator.plan_pause(((tool, "call-" + name, "shell", "code"),), requester_id="@human:test")
+            plan = await coordinator.plan_pause(
+                ((tool, "call-" + name, "shell", "code"),),
+                requester_id="@human:test",
+                toolkit_owners={("code", "shell"): "test_toolkit"},
+            )
             assert plan.calls[0].human_approval_required is True
             await responder.admit(
                 InboundEvent(

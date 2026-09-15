@@ -405,6 +405,7 @@ _TABLES = (
         decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
         reason TEXT,
         human_approval_required BOOLEAN,
+        toolkit_name TEXT,
         PRIMARY KEY (principal_id, approval_id, generation, tool_call_id),
         UNIQUE (principal_id, approval_id, generation, call_ordinal),
         FOREIGN KEY (principal_id, approval_id)
