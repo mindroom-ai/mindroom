@@ -27,11 +27,14 @@ def macos_build_script() -> str:
 
 def test_release_builds_universal_macos_app(release_workflow: str, macos_build_script: str) -> None:
     """Published app binaries must support both Apple silicon and Intel Macs."""
-    assert "uv-aarch64-apple-darwin.tar.gz" in release_workflow
-    assert "uv-x86_64-apple-darwin.tar.gz" in release_workflow
-    assert "shasum --algorithm 256 --check" in release_workflow
-    assert '"$RUNNER_TEMP/uv-aarch64-apple-darwin/uv"' in release_workflow
-    assert '"$RUNNER_TEMP/uv-x86_64-apple-darwin/uv"' in release_workflow
+    universal_uv_script = (ROOT / "macos" / "build-universal-uv.sh").read_text(encoding="utf-8")
+    assert 'macos/build-universal-uv.sh "$RUNNER_TEMP/uv-universal"' in release_workflow
+    assert "for architecture in aarch64 x86_64; do" in universal_uv_script
+    assert 'archive="uv-${architecture}-apple-darwin.tar.gz"' in universal_uv_script
+    assert "shasum --algorithm 256 --check" in universal_uv_script
+    assert '"$BUILD_DIR/uv-aarch64-apple-darwin/uv"' in universal_uv_script
+    assert '"$BUILD_DIR/uv-x86_64-apple-darwin/uv"' in universal_uv_script
+    assert 'lipo "$OUTPUT" -verify_arch arm64 x86_64' in universal_uv_script
     assert "UV_BINARY: ${{ runner.temp }}/uv-universal" in release_workflow
     assert "macos/build-macos-app.sh --universal --dmg" in release_workflow
     assert "--arch arm64 --arch x86_64" in macos_build_script
