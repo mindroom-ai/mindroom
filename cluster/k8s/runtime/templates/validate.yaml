@@ -7,6 +7,21 @@
 {{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
 {{- fail "eventCache.backend must be either postgres or sqlite" -}}
 {{- end -}}
+{{- $workerSeccomp := .Values.workers.kubernetes.seccompProfile -}}
+{{- if $workerSeccomp -}}
+{{- if or (not (kindIs "map" $workerSeccomp)) (ne (len $workerSeccomp) 2) (not (hasKey $workerSeccomp "type")) (not (hasKey $workerSeccomp "localhostProfile")) -}}
+{{- fail "workers.kubernetes.seccompProfile must define exactly type and localhostProfile" -}}
+{{- end -}}
+{{- if ne $workerSeccomp.type "Localhost" -}}
+{{- fail "workers.kubernetes.seccompProfile.type must be Localhost" -}}
+{{- end -}}
+{{- if not (kindIs "string" $workerSeccomp.localhostProfile) -}}
+{{- fail "workers.kubernetes.seccompProfile.localhostProfile must be a relative path" -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[^/\\\\]+(/[^/\\\\]+)*$" $workerSeccomp.localhostProfile)) (has "." (splitList "/" $workerSeccomp.localhostProfile)) (has ".." (splitList "/" $workerSeccomp.localhostProfile)) -}}
+{{- fail "workers.kubernetes.seccompProfile.localhostProfile must be a relative path without traversal segments" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (or (eq .Values.matrix.managedAccountAuth "password") (eq .Values.matrix.managedAccountAuth "appservice")) -}}
 {{- fail "matrix.managedAccountAuth must be either password or appservice" -}}
 {{- end -}}

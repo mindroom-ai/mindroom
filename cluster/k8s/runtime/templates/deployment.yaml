@@ -280,6 +280,10 @@ spec:
               value: {{ .Values.workers.kubernetes.namePrefix | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
               value: {{ .Values.workers.kubernetes.enableServiceLinks | quote }}
+            {{- with .Values.workers.kubernetes.seccompProfile }}
+            - name: MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON

@@ -34,6 +34,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
+    WORKER_COMPUTER_ENABLED_ENV,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
@@ -71,6 +72,10 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
+from mindroom.workers.backends.worker_security import (
+    docker_worker_security_options,
+    docker_worker_security_policy_signature,
+)
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import (
     ProgressSink,
@@ -868,6 +873,8 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
+        if not self._container_runtime_security_matches(container):
+            return False
 
         storage_mounts = self._scoped_storage_mount_specs(
             metadata.worker_key,
@@ -895,6 +902,27 @@ class DockerWorkerBackend:
         mount_checks.extend(storage_mounts)
         mount_checks.extend(config_mount_specs)
         return self._container_mount_layout_matches(container, expected_mounts=mount_checks)
+
+    def _container_runtime_security_matches(self, container: _DockerContainer | None) -> bool:
+        if container is None:
+            return False
+        host_config = container.attrs.get("HostConfig")
+        if not isinstance(host_config, dict):
+            return False
+        host_config = cast("dict[str, object]", host_config)
+        cap_drop = host_config.get("CapDrop")
+        if not isinstance(cap_drop, list) or "ALL" not in {str(cap).upper() for cap in cap_drop}:
+            return False
+        security_opt = host_config.get("SecurityOpt")
+        if not isinstance(security_opt, list):
+            return False
+        normalized_options = {str(option).lower() for option in security_opt}
+        has_no_new_privileges = any(
+            option in {"no-new-privileges", "no-new-privileges:true"} for option in normalized_options
+        )
+        has_seccomp_profile = any(option == "seccomp" or option.startswith("seccomp=") for option in normalized_options)
+        computer_enabled = self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV)
+        return has_no_new_privileges and (not computer_enabled or has_seccomp_profile)
 
     def _ensure_container(
         self,
@@ -940,6 +968,10 @@ class DockerWorkerBackend:
                     launch_config_hash=launch_config.launch_config_hash,
                 ),
                 user=self.config.user,
+                cap_drop=["ALL"],
+                security_opt=docker_worker_security_options(
+                    computer_enabled=self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV),
+                ),
             )
         elif not self._container_is_running(container):
             try:
@@ -1273,6 +1305,9 @@ class DockerWorkerBackend:
             "host_config_path": str(self.config.host_config_path or ""),
             "image": self.config.image,
             "resolved_image": resolved_image_identity,
+            "runtime_security": docker_worker_security_policy_signature(
+                computer_enabled=self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV),
+            ),
             "name_prefix": self.config.name_prefix,
             "publish_host": self.config.publish_host,
             "storage_mount_path": self.config.storage_mount_path,

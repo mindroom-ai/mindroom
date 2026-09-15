@@ -63,6 +63,50 @@ Use the chart's existing worker image, authentication secret, storage, and RBAC 
 The instance chart names its opt-in values `workerBackend: kubernetes` and `workerComputerEnabled: true`; supply the allowed-origin environment value to its primary runtime through your deployment's environment configuration.
 Changing the feature flag changes the worker configuration signature, so workers are replaced as needed.
 
+## Browser and container sandboxing
+
+Worker computers launch Chromium with its Linux process sandbox enabled. A startup failure is returned to the caller;
+MindRoom does not retry with Chromium's sandbox disabled.
+
+Docker workers automatically drop all Linux capabilities and set `no-new-privileges`. When worker computers are
+enabled, the backend also installs the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
+That profile is based on Moby's maintained default policy and adds only the namespace and `chroot` operations used by
+the Chromium sandbox. Existing Docker worker containers are replaced if these host security settings are missing.
+
+Kubernetes workers keep the pod-level `RuntimeDefault` seccomp policy. If that policy supports unprivileged user
+namespaces, no extra setting is needed. Runtimes that block Chromium's namespace sandbox need the packaged profile
+installed on every eligible node at:
+
+```text
+/var/lib/kubelet/seccomp/profiles/worker-computer.json
+```
+
+Then select it for the main worker container:
+
+```dotenv
+MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON={"type":"Localhost","localhostProfile":"profiles/worker-computer.json"}
+```
+
+The runtime chart accepts the same object at `workers.kubernetes.seccompProfile`; the instance chart uses
+`kubernetesWorkerSeccompProfile`. For example:
+
+```yaml
+workers:
+  kubernetes:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/worker-computer.json
+```
+
+Kubernetes applies this override only to the main worker container. Init and extra containers continue to inherit the
+pod's `RuntimeDefault` policy. A missing node profile causes pod startup to fail with `CreateContainerError`, which
+keeps the sandbox requirement explicit. The node kernel and its security modules must also permit unprivileged user
+namespaces.
+
+The Chromium process sandbox, the container runtime's seccomp filter, and the persistent worker filesystem address
+different boundaries. The browser sandbox isolates Chromium processes, seccomp limits host syscalls, and persistent
+storage deliberately retains the browser profile and worker files across container replacement.
+
 ## Connect MindRoom Chat
 
 Configure an explicitly trusted **origin**, without a path, in Chat's operator-managed configuration:

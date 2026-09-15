@@ -9,6 +9,7 @@ from __future__ import annotations
 # ruff: noqa: N999 - command name follows the existing script CLI convention
 import argparse
 import asyncio
+import hashlib
 import json
 import secrets
 import shutil
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from mindroom.workers.models import WorkerHandle
 
 ASSETS = Path(__file__).resolve().parents[1] / "tests/fixtures/worker_computer"
+SECCOMP_PROFILE = Path(__file__).resolve().parents[1] / "src/mindroom/workers/backends/seccomp/worker-computer.json"
 WORKER_CONTEXT_PATH_SCRIPT = """import sys
 from mindroom.api.sandbox_exec import runner_storage_root
 from mindroom.constants import resolve_runtime_paths
@@ -89,6 +91,7 @@ class Fixture:
         self.owned_matrix_id = owned_matrix_id
         self.token = secrets.token_urlsafe(32)
         self.container_ids: set[str] = set()
+        self.container_security: dict[str, dict[str, Any]] = {}
         self.matrix = json.loads(args.matrix_fixture.read_text()) if args.matrix_fixture else None
         if self.matrix:
             loopback_origin(self.matrix["homeserver"])
@@ -203,8 +206,33 @@ class Fixture:
         target = self.target(user)
         handle = await asyncio.to_thread(computers._resolve_worker, self.config, self.paths, target, start=False)
         container_id = await command("docker", "inspect", "--format", "{{.Id}}", handle.worker_id)
+        if container_id not in self.container_ids:
+            host_config = json.loads(
+                await command("docker", "inspect", "--format", "{{json .HostConfig}}", handle.worker_id),
+            )
+            cap_drop = host_config.get("CapDrop") or []
+            security_options = host_config.get("SecurityOpt") or []
+            assert "ALL" in {str(capability).upper() for capability in cap_drop}
+            assert "no-new-privileges:true" in security_options
+            seccomp_options = [
+                option.removeprefix("seccomp=")
+                for option in security_options
+                if isinstance(option, str) and option.startswith("seccomp=")
+            ]
+            assert len(seccomp_options) == 1
+            expected_profile_sha256 = hashlib.sha256(SECCOMP_PROFILE.read_bytes()).hexdigest()
+            actual_profile_sha256 = hashlib.sha256(seccomp_options[0].encode()).hexdigest()
+            assert actual_profile_sha256 == expected_profile_sha256
+            self.container_security[container_id] = {
+                "cap_drop": cap_drop,
+                "no_new_privileges": True,
+                "seccomp_profile_sha256": actual_profile_sha256,
+            }
         self.container_ids.add(container_id)
         (self.args.output / "containers.json").write_text(json.dumps(sorted(self.container_ids)) + "\n")
+        (self.args.output / "container-security.json").write_text(
+            json.dumps(self.container_security, indent=2, sort_keys=True) + "\n",
+        )
         payload = {
             "tool_name": tool,
             "function_name": function,
@@ -405,6 +433,28 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
         assert denied.status_code == 401
         session = await create()
         opened = await fixture.prepare_page()
+        sandbox_probe = """\
+from playwright.sync_api import sync_playwright
+with sync_playwright() as playwright:
+    browser = playwright.chromium.launch(
+        executable_path="/usr/bin/chromium",
+        headless=True,
+        chromium_sandbox=True,
+    )
+    page = browser.new_page()
+    page.goto("chrome://sandbox")
+    print(page.locator("body").inner_text())
+    browser.close()
+"""
+        sandbox_status = await fixture.shell(
+            ["uv", "run", "--project", "/app", "--no-sync", "python", "-c", sandbox_probe],
+        )
+        assert "Layer 1 Sandbox\tNamespace" in sandbox_status
+        assert "PID namespaces\tYes" in sandbox_status
+        assert "Network namespaces\tYes" in sandbox_status
+        assert "Seccomp-BPF sandbox\tYes" in sandbox_status
+        assert "You are adequately sandboxed." in sandbox_status
+        result["chromium_sandbox_status"] = sandbox_status
         tabs = await fixture.browser(action="tabs")
         assert tabs["activeTargetId"] == opened["targetId"]
         result["same_target_across_requests"] = opened["targetId"]

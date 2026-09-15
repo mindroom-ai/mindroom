@@ -94,6 +94,7 @@ _SCRIPT_RESOURCE_PROFILES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY
 _DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["default_script_resource_profile"]
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
+_SECCOMP_PROFILE_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["seccomp_profile_json"]
 _AGENT_VAULT_ENABLED_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_enabled"]
 _AGENT_VAULT_VAULT_NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_vault_name_prefix"]
 _AGENT_VAULT_CLI_IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["agent_vault_cli_image"]
@@ -182,6 +183,45 @@ def _read_script_resource_profiles_env(env: Mapping[str, str]) -> dict[str, dict
         msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV} must contain a JSON object."
         raise WorkerBackendError(msg) from exc
     return _normalized_script_resource_profiles(parsed)
+
+
+def _normalized_seccomp_profile(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"type", "localhostProfile"}:
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV} must define exactly type and localhostProfile."
+        raise WorkerBackendError(msg)
+    profile = cast("dict[str, object]", value)
+    profile_type = profile["type"]
+    profile_path = profile["localhostProfile"]
+    if profile_type != "Localhost":
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV}.type must be Localhost."
+        raise WorkerBackendError(msg)
+    if not isinstance(profile_path, str):
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV}.localhostProfile must be a relative path."
+        raise WorkerBackendError(msg)
+    path_parts = profile_path.split("/")
+    if (
+        not profile_path
+        or profile_path.startswith("/")
+        or "\\" in profile_path
+        or any(part in {"", ".", ".."} for part in path_parts)
+    ):
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV}.localhostProfile must be a relative path without traversal segments."
+        raise WorkerBackendError(msg)
+    return {"type": "Localhost", "localhostProfile": profile_path}
+
+
+def _read_seccomp_profile_env(env: Mapping[str, str]) -> dict[str, str] | None:
+    raw = read_env(env, _SECCOMP_PROFILE_JSON_ENV)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"{_SECCOMP_PROFILE_JSON_ENV} must contain a JSON object."
+        raise WorkerBackendError(msg) from exc
+    return _normalized_seccomp_profile(parsed)
 
 
 def is_kubernetes_worker_backend_config_env_name(name: str) -> bool:
@@ -338,6 +378,7 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
+    seccomp_profile: dict[str, str] | None = None
     script_resource_profiles: dict[str, dict[str, dict[str, str]]] = field(
         default_factory=_default_script_resource_profiles,
     )
@@ -362,6 +403,7 @@ class KubernetesWorkerBackendConfig:
             msg = f"{_DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV} must be one of: small, standard, large."
             raise WorkerBackendError(msg)
         object.__setattr__(self, "script_resource_profiles", normalized_profiles)
+        object.__setattr__(self, "seccomp_profile", _normalized_seccomp_profile(self.seccomp_profile))
 
     def resources_for_profile(self, profile_name: str | None) -> tuple[dict[str, str], dict[str, str]]:
         """Return main-worker resources or one bounded script profile."""
@@ -428,6 +470,7 @@ class KubernetesWorkerBackendConfig:
             resource_limits=resource_limits,
             enable_service_links=read_bool_env(env, _ENABLE_SERVICE_LINKS_ENV, default=False),
             auth_secret_name=read_env(env, _AUTH_SECRET_NAME_ENV) or None,
+            seccomp_profile=_read_seccomp_profile_env(env),
             script_resource_profiles=_read_script_resource_profiles_env(env),
             default_script_resource_profile=(
                 read_env(
@@ -464,6 +507,7 @@ def kubernetes_backend_config_signature(
     return (
         "kubernetes",
         runtime_paths.env_value(WORKER_COMPUTER_ENABLED_ENV, default="") or "",
+        stable_signature_json(config.seccomp_profile),
         config.namespace,
         config.image,
         config.image_pull_policy,
