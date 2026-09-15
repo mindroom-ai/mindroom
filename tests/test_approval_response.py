@@ -2,21 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.agent import Agent
 from agno.models.response import ToolExecution
+from agno.run import RunContext
 from agno.run.agent import RunCompletedEvent, RunOutput, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
+from agno.session.agent import AgentSession
 
 from mindroom.approval_execution import _collect_agent_continuation
 from mindroom.approval_response import identify_approval_tools, require_ordered_pause_presentation
+from mindroom.approval_tools import approval_denial_context
+from mindroom.event_journal import ApprovalCall
 from mindroom.response_turn import PausedAttempt
+from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
+from tests.conftest import unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from pathlib import Path
 
 
 @pytest.mark.parametrize("member_agent_id", ["researcher-a", "Researcher_A"])
@@ -50,6 +61,7 @@ def test_identify_approval_tools_keeps_team_member_owner(member_agent_id: str) -
                 ],
                 "consensus": "",
             },
+            toolkit_owners={("general", "dangerous"): "test_toolkit"},
         ),
         default_agent_name="research-team",
     )
@@ -92,6 +104,7 @@ def member_pause() -> PausedAttempt:
             ],
             "consensus": "",
         },
+        toolkit_owners={("general", "dangerous"): "test_toolkit"},
     )
 
 
@@ -178,6 +191,7 @@ def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> No
             "members": [],
             "consensus": "🔧 `dangerous` [1] ⏳",
         },
+        toolkit_owners={("general", "dangerous"): "test_toolkit"},
     )
 
     with pytest.raises(RuntimeError, match="ordered presentation"):
@@ -354,3 +368,71 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
     await _collect_agent_continuation(events(), presentation)
 
     assert presentation.final_text() == "Before tool.\n\nAfter tool."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", [None, "calculator"])
+async def test_pause_plan_requires_exact_live_toolkit_origin(tmp_path: Path, owner: str | None) -> None:
+    """A new card cannot defer discovering its toolkit owner until approval time."""
+    coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)._approval_responses
+    tool = ToolExecution(tool_call_id="call-1", tool_name="add", requires_confirmation=True)
+    origins = {("general", "add"): owner, ("other", "add"): "calculator"}
+    if owner is None:
+        with pytest.raises(RuntimeError, match="toolkit origin"):
+            await coordinator.plan_pause(
+                ((tool, "call-1", "add", "general"),),
+                requester_id="@user:localhost",
+                toolkit_owners=origins,
+            )
+    else:
+        plan = await coordinator.plan_pause(
+            ((tool, "call-1", "add", "general"),),
+            requester_id="@user:localhost",
+            toolkit_owners=origins,
+        )
+        assert plan.calls[0].toolkit_name == "calculator"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_error", [None, RuntimeError, asyncio.CancelledError])
+async def test_denial_context_matches_run_identity_and_restores_lookup(exit_error: type[BaseException] | None) -> None:
+    """Exact denials survive retries but cannot affect other runs or outlive the continuation."""
+    actor = Agent(id="general", model=SyntheticModel(id="synthetic"), tools=[], telemetry=False)
+    call = ApprovalCall(tool_call_id="reused-id", tool_name="missing", invoking_agent="general", expires_at_ns=2**62)
+
+    async def lookup_twice(run_id: str) -> tuple[RunOutput, ToolExecution]:
+        tool = ToolExecution(
+            tool_call_id="reused-id",
+            tool_name="missing",
+            confirmed=False,
+            requires_confirmation=True,
+            confirmation_note="Declined by requester",
+        )
+        run = RunOutput(run_id=run_id, session_id="session", messages=[], tools=[tool])
+        for _ in range(2):
+            await actor.aget_tools(
+                run_response=run,
+                run_context=RunContext(run_id=run_id, session_id="session"),
+                session=AgentSession(session_id="session"),
+            )
+        return run, tool
+
+    with (
+        pytest.raises(exit_error) if exit_error is not None else nullcontext(),
+        approval_denial_context(actor, {"continued-run": (call,)}),
+    ):
+        for run_id in ("earlier-run", "continued-run", "later-run", "continued-run"):
+            run, tool = await lookup_twice(run_id)
+            if run_id == "continued-run":
+                assert len(run.messages or []) == 1
+                assert run.messages[0].tool_call_error is True
+                assert tool.requires_confirmation is False
+            else:
+                assert run.messages == []
+                assert tool.requires_confirmation is True
+        if exit_error is not None:
+            raise exit_error
+
+    run, tool = await lookup_twice("continued-run")
+    assert run.messages == []
+    assert tool.requires_confirmation is True

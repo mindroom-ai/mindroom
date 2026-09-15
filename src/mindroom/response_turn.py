@@ -377,6 +377,7 @@ class PausedAttempt:
     session_id: str
     run_id: str
     tools: tuple[ToolExecution, ...]
+    toolkit_owners: dict[tuple[str, str], str | None]
     requirements: tuple[RunRequirement, ...] = ()
     runtime_model_name: str | None = None
     team_member_model_names: tuple[tuple[str, str], ...] = ()
@@ -413,11 +414,13 @@ def paused_attempt_from_response(
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
+    toolkit_owners: dict[tuple[str, str], str | None],
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one persisted paused Agno run."""
     if response.status != RunStatus.paused:
         return None
     return _paused_attempt(
+        toolkit_owners=toolkit_owners,
         tools=response.tools or (),
         requirements=response.requirements or (),
         session_id=response.session_id or fallback_session_id,
@@ -430,9 +433,11 @@ def paused_attempt_from_event(
     *,
     fallback_session_id: str | None,
     fallback_run_id: str | None,
+    toolkit_owners: dict[tuple[str, str], str | None],
 ) -> PausedAttempt | None:
     """Extract confirmation requirements from one streamed Agno pause event."""
     return _paused_attempt(
+        toolkit_owners=toolkit_owners,
         tools=event.tools or (),
         requirements=event.requirements or (),
         session_id=event.session_id or fallback_session_id,
@@ -444,6 +449,7 @@ def _paused_attempt(
     *,
     tools: Sequence[ToolExecution],
     requirements: Sequence[RunRequirement],
+    toolkit_owners: dict[tuple[str, str], str | None],
     session_id: str | None,
     run_id: str | None,
 ) -> PausedAttempt | None:
@@ -491,6 +497,7 @@ def _paused_attempt(
         run_id=run_id,
         tools=tuple(pending_tools),
         requirements=pending_requirements,
+        toolkit_owners=toolkit_owners,
     )
 
 

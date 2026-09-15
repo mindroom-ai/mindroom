@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -15,6 +15,7 @@ import psycopg
 import pytest
 
 from mindroom.event_journal import (
+    ApprovalDecisionMetadata,
     EventClass,
     EventJournalStore,
     EventKind,
@@ -25,6 +26,7 @@ from mindroom.event_journal import (
     sqlite_backend,
 )
 from tests.conftest import postgres_journal_schema_url
+from tests.test_event_journal_store import TestApprovalContinuations as _ApprovalContinuations
 from tests.test_event_journal_store import admit, message
 
 if TYPE_CHECKING:
@@ -291,3 +293,60 @@ async def test_concurrent_startups_share_one_upgrade(legacy_database: _LegacyDat
     finally:
         await first.close()
         await second.close()
+
+
+@pytest.mark.asyncio
+async def test_approval_toolkit_upgrade_preserves_calls(legacy_database: _LegacyDatabase) -> None:
+    """Adding provenance preserves unknown calls, history and cards across reopen and refresh."""
+    store = legacy_database.open()
+    principal = store.principal("agent@alice")
+    await _ApprovalContinuations.admit_sources(principal)
+    original = replace(_ApprovalContinuations.continuation(state="waiting"), runtime_generation="runtime-a")
+    assert await principal.create_approval_continuation(original) == original
+    await _ApprovalContinuations.remember_card(principal)
+    original = await principal.approval_continuation("approval-1")
+    assert original is not None
+    await store.close()
+    legacy_database.execute("ALTER TABLE approval_continuation_calls DROP COLUMN toolkit_name")
+    rows_before = legacy_database.query("SELECT event_id, state FROM journal_events ORDER BY event_id")
+    cards_before = legacy_database.query("SELECT * FROM approval_cards")
+
+    for _ in range(2):
+        store = legacy_database.open()
+        principal = store.principal("agent@alice")
+        loaded = await principal.approval_continuation("approval-1")
+        assert loaded == original
+        assert await store.approval_continuations() == (("agent@alice", original),)
+        assert legacy_database.query("SELECT toolkit_name FROM approval_continuation_calls") == [(None,)]
+        assert legacy_database.query("SELECT event_id, state FROM journal_events ORDER BY event_id") == rows_before
+        assert legacy_database.query("SELECT * FROM approval_cards") == cards_before
+        await store.close()
+
+    store = legacy_database.open()
+    principal = store.principal("agent@alice")
+    await principal.resolve_continuation_approval_card(
+        card_event_id="$approval",
+        requested_status="approved",
+        reason=None,
+        metadata=ApprovalDecisionMetadata(),
+    )
+    await principal.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+    next_call = replace(original.calls[0], tool_call_id="call-2", toolkit_name="shell")
+    advanced = await principal.advance_approval_continuation(
+        "approval-1",
+        claimant_generation=0,
+        run_id="run-2",
+        session_id="session-1",
+        calls=(next_call,),
+    )
+    assert advanced is not None
+    await store.close()
+    store = legacy_database.open()
+    try:
+        assert await store.principal("agent@alice").approval_continuation("approval-1") == advanced
+        assert await store.approval_continuations() == (("agent@alice", advanced),)
+        assert legacy_database.query(
+            "SELECT toolkit_name FROM approval_continuation_calls ORDER BY generation",
+        ) == [(None,), ("shell",)]
+    finally:
+        await store.close()

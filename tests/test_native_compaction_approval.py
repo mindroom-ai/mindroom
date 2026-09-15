@@ -16,7 +16,7 @@ from agno.team import Team
 from agno.tools.function import Function
 from openai import AsyncOpenAI
 
-from mindroom.event_journal import ApprovalContinuation
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -42,6 +42,14 @@ async def _resume_approval(
     tmp_path: Path,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Enter the production agent or team approval boundary with a fresh actor."""
+    calls = (
+        ApprovalCall(
+            tool_call_id=tool_call_id,
+            tool_name="lookup",
+            invoking_agent=identity.agent_name,
+            expires_at_ns=2**62,
+        ),
+    )
     if isinstance(actor, Agent):
         continuation = ApprovalContinuation(
             approval_id="approval-native",
@@ -53,7 +61,7 @@ async def _resume_approval(
             thread_id="$thread",
             requester_id="@user:localhost",
             response_event_id="$waiting",
-            calls=(),
+            calls=calls,
             execution_identity={},
             sources=ResponseSources(("$source",), ("$source",)),
             state="claimed",
@@ -74,7 +82,7 @@ async def _resume_approval(
                 continuation,
                 execution_identity=identity,
                 tool_dispatch=ToolDispatchContext(execution_identity=identity),
-                decisions={tool_call_id: True},
+                decisions={tool_call_id: False},
                 denial_reasons={tool_call_id: None},
                 tool_trace_collector=[],
                 typing_log_context={},
@@ -97,6 +105,7 @@ async def _resume_approval(
         ):
             result = await continue_paused_team_run(
                 member_names=(),
+                approval_calls=calls,
                 mode=TeamMode.COORDINATE,
                 config=config,
                 runtime_paths=runtime_paths_for(config),
@@ -106,7 +115,7 @@ async def _resume_approval(
                 user_id="@user:localhost",
                 configured_team_name=identity.agent_name,
                 model_name="default",
-                decisions={tool_call_id: True},
+                decisions={tool_call_id: False},
                 denial_reasons={tool_call_id: None},
                 refresh_scheduler=None,
                 prior_presentation_state=_TeamStreamPresentation.new([], [], show_tool_calls=True).to_state(),
@@ -188,7 +197,7 @@ async def test_rebuilt_approval_resumes_latest_native_policy(
         )
 
         assert isinstance(result, CompletedApprovalRun)
-        assert executed == ["lookup"]
+        assert executed == []
         assert len(requests) == 3
         resumed = requests[-1]
         replay = resumed["input"]
@@ -299,7 +308,7 @@ async def test_rebuilt_approval_preserves_reasoning_context(  # noqa: PLR0915
             tmp_path=tmp_path,
         )
         assert isinstance(result, CompletedApprovalRun)
-        assert executed == ["lookup"]
+        assert executed == []
         assert len(requests) == 2
         resumed = requests[-1]
         assert resumed["store"] is True

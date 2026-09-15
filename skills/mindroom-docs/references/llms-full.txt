@@ -17393,6 +17393,7 @@ MindRoom's architecture consists of several key components working together.
 | `response_attempt.py` | Executes one visible response attempt with stop tracking |
 | `response_terminal.py` | Classifies pending-visible failures and terminal stream outcomes |
 | `response_lifecycle.py` | Shared response lifecycle helpers and queued-notice state |
+| `approval_tools.py` | Rebuilds required saved-approval tools from current configuration and scoped MCP catalogs for agent and team continuation |
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |

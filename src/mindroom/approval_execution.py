@@ -22,6 +22,12 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
+from mindroom.approval_tools import (
+    approval_denial_context,
+    required_approval_tool_names,
+    toolkit_owners_for_agents,
+    validate_approval_tool_owners,
+)
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
@@ -154,6 +160,14 @@ class AgentApprovalExecution:
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
             raise RuntimeError(msg)
+        approved_calls = tuple(call for call in continuation.calls if decisions.get(call.tool_call_id))
+        required_tool_names = await required_approval_tool_names(
+            continuation.entity_name,
+            approved_calls,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            execution_identity=execution_identity,
+        )
         knowledge = (
             await self.knowledge_access.resolve_for_agent_async(
                 continuation.entity_name,
@@ -181,6 +195,7 @@ class AgentApprovalExecution:
                 refresh_scheduler=self.refresh_scheduler(),
                 dynamic_tool_continuation=True,
                 supports_native_tool_approval=True,
+                required_tool_names=required_tool_names,
             )
         except BaseException:
             history_storage.close()
@@ -206,24 +221,33 @@ class AgentApprovalExecution:
                 decisions=decisions,
                 denial_reasons=denial_reasons,
             )
+            validate_approval_tool_owners([agent], approved_calls, requirements)
 
-            async with typing_indicator(
-                self.client(),
-                continuation.room_id,
-                log_context=typing_log_context,
-            ):
-                response, presentation = await self.tool_runtime.run_in_context(
-                    tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-                    operation=lambda: run_with_tool_execution_identity(
-                        tool_dispatch.execution_identity,
-                        operation=lambda: _continue_persisted_agent(
-                            agent,
-                            continuation,
-                            persisted,
-                            requirements,
-                        ),
+            with approval_denial_context(
+                agent,
+                {
+                    continuation.run_id: tuple(
+                        call for call in continuation.calls if not decisions.get(call.tool_call_id)
                     ),
-                )
+                },
+            ):
+                async with typing_indicator(
+                    self.client(),
+                    continuation.room_id,
+                    log_context=typing_log_context,
+                ):
+                    response, presentation = await self.tool_runtime.run_in_context(
+                        tool_context=runtime_context_from_dispatch_context(tool_dispatch),
+                        operation=lambda: run_with_tool_execution_identity(
+                            tool_dispatch.execution_identity,
+                            operation=lambda: _continue_persisted_agent(
+                                agent,
+                                continuation,
+                                persisted,
+                                requirements,
+                            ),
+                        ),
+                    )
         finally:
             try:
                 ai_runtime.register_queued_notice_storage(
@@ -246,6 +270,7 @@ class AgentApprovalExecution:
             response,
             fallback_session_id=continuation.session_id,
             fallback_run_id=continuation.run_id,
+            toolkit_owners=toolkit_owners_for_agents([agent]),
         )
         if paused is not None:
             return replace(

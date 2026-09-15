@@ -90,6 +90,7 @@ class ApprovalCall:
     decision: ApprovalDecision | None = None
     reason: str | None = None
     human_approval_required: bool | None = None
+    toolkit_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,7 +259,7 @@ def get(
     call_rows = transaction.fetchall(
         """
         SELECT tool_call_id, tool_name, invoking_agent, expires_at_ns, decision, reason,
-               human_approval_required
+               human_approval_required, toolkit_name
         FROM approval_continuation_calls
         WHERE principal_id = ? AND approval_id = ? AND generation = ?
         ORDER BY call_ordinal
@@ -297,6 +298,7 @@ def _from_rows(
             tool_call_id=str(call["tool_call_id"]),
             tool_name=str(call["tool_name"]),
             invoking_agent=str(call["invoking_agent"]),
+            toolkit_name=cast("str | None", call["toolkit_name"]),
             expires_at_ns=int(call["expires_at_ns"]),
             decision=(ApprovalDecision(str(call["decision"])) if call["decision"] is not None else None),
             reason=cast("str | None", call["reason"]),
@@ -384,8 +386,8 @@ def _insert_calls(
             INSERT INTO approval_continuation_calls (
                 principal_id, approval_id, generation, tool_call_id, call_ordinal,
                 tool_name, invoking_agent, expires_at_ns, decision, reason,
-                human_approval_required
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                human_approval_required, toolkit_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 principal_id,
@@ -399,6 +401,7 @@ def _insert_calls(
                 call.decision.value if call.decision is not None else None,
                 call.reason,
                 call.human_approval_required,
+                call.toolkit_name,
             ),
         )
 
@@ -550,7 +553,7 @@ def _load_owners(transaction: Transaction, rows: tuple[Row, ...]) -> tuple[tuple
         f"""
         SELECT calls.approval_id, calls.tool_call_id, calls.tool_name,
                calls.invoking_agent, calls.expires_at_ns, calls.decision, calls.reason,
-               calls.human_approval_required
+               calls.human_approval_required, calls.toolkit_name
         FROM approval_continuation_calls AS calls
         JOIN approval_continuations AS continuations
           ON continuations.principal_id = calls.principal_id

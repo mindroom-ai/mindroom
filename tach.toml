@@ -353,6 +353,7 @@ depends_on = ["mindroom.durable_write"]
 path = "mindroom.ai"
 depends_on = [
     "mindroom.agents",
+    "mindroom.approval_tools",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.credentials",
@@ -743,6 +744,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval_receipt",
+    "mindroom.approval_tools",
     "mindroom.event_journal",
     "mindroom.history.native",
     "mindroom.history.session_context",
@@ -753,6 +755,19 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.approval_tools"
+depends_on = [
+    "mindroom.credentials",
+    "mindroom.mcp.registry",
+    "mindroom.mcp.toolkit",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.dynamic_toolkits",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.ai", "mindroom.approval_execution", "mindroom.teams"]
 
 [[modules]]
 path = "mindroom.approval_receipt"
@@ -2147,6 +2162,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval_receipt",
+    "mindroom.approval_tools",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -2473,6 +2489,7 @@ depends_on = [
 path = "mindroom.mcp.toolkit"
 depends_on = ["mindroom.mcp.function_surface"]
 visibility = [
+    "mindroom.approval_tools",
     "mindroom.mcp_gateway.toolkits",
     "mindroom.agents",
     "mindroom.mcp.registry",
@@ -5495,7 +5512,6 @@ expose = [
     "get_loaded_tools_for_session",
     "has_deferred_tools",
     "load_tool_for_session",
-    "resolve_dynamic_tool_selection",
     "save_loaded_tools_for_session",
     "suppress_fully_deferred_toolkit_instructions",
     "unload_tool_for_session",

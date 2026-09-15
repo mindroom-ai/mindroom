@@ -3334,6 +3334,7 @@ class TestUserIdPassthrough:
                 session_id="session-1",
                 run_id="run-paused",
                 tools=(tool,),
+                toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
         )
 
