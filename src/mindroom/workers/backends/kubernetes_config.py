@@ -7,7 +7,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
@@ -37,6 +37,14 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.constants import RuntimePaths
+
+
+class _WorkerSeccompProfile(TypedDict):
+    """Validated Kubernetes wire mapping for the main worker's Localhost profile."""
+
+    type: Literal["Localhost"]
+    localhostProfile: str
+
 
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
@@ -185,7 +193,7 @@ def _read_script_resource_profiles_env(env: Mapping[str, str]) -> dict[str, dict
     return _normalized_script_resource_profiles(parsed)
 
 
-def _normalized_seccomp_profile(value: object) -> dict[str, str] | None:
+def _normalized_seccomp_profile(value: object) -> _WorkerSeccompProfile | None:
     if value is None:
         return None
     if not isinstance(value, dict) or set(value) != {"type", "localhostProfile"}:
@@ -212,7 +220,7 @@ def _normalized_seccomp_profile(value: object) -> dict[str, str] | None:
     return {"type": "Localhost", "localhostProfile": profile_path}
 
 
-def _read_seccomp_profile_env(env: Mapping[str, str]) -> dict[str, str] | None:
+def _read_seccomp_profile_env(env: Mapping[str, str]) -> _WorkerSeccompProfile | None:
     raw = read_env(env, _SECCOMP_PROFILE_JSON_ENV)
     if not raw:
         return None
@@ -378,7 +386,7 @@ class KubernetesWorkerBackendConfig:
     resource_limits: dict[str, str]
     enable_service_links: bool
     auth_secret_name: str | None
-    seccomp_profile: dict[str, str] | None = None
+    seccomp_profile: _WorkerSeccompProfile | None = None
     script_resource_profiles: dict[str, dict[str, dict[str, str]]] = field(
         default_factory=_default_script_resource_profiles,
     )

@@ -67,6 +67,8 @@ from mindroom.workers.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.workers.backends.kubernetes_config import _WorkerSeccompProfile
+
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_SCOPED_WORKER_KEY_A = "v1:tenant-123:shared:code"
 _TEST_SCOPED_WORKER_KEY_B = "v1:tenant-123:shared:research"
@@ -671,7 +673,7 @@ def _backend(
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
     reconcile_pod_templates: bool = True,
-    seccomp_profile: dict[str, str] | None = None,
+    seccomp_profile: _WorkerSeccompProfile | None = None,
     agent_vault: KubernetesAgentVaultConfig | None = None,
     config_snapshot: dict[str, object] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
@@ -989,7 +991,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
 
 def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_path: Path) -> None:
     """A browser-compatible Localhost profile must not broaden pod-level or helper-container policy."""
-    profile = {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"}
+    profile: _WorkerSeccompProfile = {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"}
     backend, apps_api, _core_api = _backend(
         runtime_paths=resolve_primary_runtime_paths(
             config_path=Path("config.yaml"),

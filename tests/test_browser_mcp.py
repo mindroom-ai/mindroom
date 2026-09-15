@@ -7,10 +7,14 @@ from pathlib import Path
 
 import pytest
 from agno.media import Image
-from agno.tools.function import ToolResult
+from agno.tools.function import Function, ToolResult
+from mcp.types import CallToolResult, TextContent, Tool
 
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.worker_computer import mcp_results
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
+from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
 from mindroom.worker_computer.mcp_results import decode_browser_mcp_result, encode_browser_mcp_result
 
 
@@ -33,6 +37,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Observe real launch seams and the configured runtime/workspace directories."""
+    # Bootstrap the optional tool registry only for this materialization test.
     import mindroom.tools  # noqa: PLC0415, F401 - normal registry bootstrap
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
@@ -173,9 +178,6 @@ def test_invalid_images_fail(mime: str, data: str) -> None:
 @pytest.mark.parametrize(("media", "path"), [(False, None), (False, "result.txt"), (True, None), (True, "result.txt")])
 async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool, path: str | None) -> None:
     """Text receipts and explicit media redirect errors keep established workspace semantics."""
-    from agno.tools.function import Function  # noqa: PLC0415
-
-    from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files  # noqa: PLC0415
 
     async def result() -> ToolResult:
         return ToolResult(
@@ -202,8 +204,6 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
 
 def test_worker_launch_has_fixed_sandbox_and_workspace(tmp_path: Path) -> None:
     """Launch cannot expand capabilities or disable Chromium's sandbox."""
-    from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP  # noqa: PLC0415
-
     provider = WorkerBrowserMCP(display=":77", workspace=tmp_path / "workspace", storage_root=tmp_path / "storage")
     parameters = provider._server_parameters()
     assert parameters.args[0] == "/opt/mindroom-browser-mcp/node_modules/@playwright/mcp/cli.js"
@@ -228,10 +228,6 @@ async def test_worker_bootstraps_guard_and_closes_on_drift(
     drift: bool,
 ) -> None:
     """Native requests cannot precede discovery and initial guard installation."""
-    from mcp.types import CallToolResult, TextContent, Tool  # noqa: PLC0415
-
-    from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP  # noqa: PLC0415
-
     calls = []
 
     class Session:
@@ -276,8 +272,6 @@ async def test_worker_bootstraps_guard_and_closes_on_drift(
 
 def test_codec_bounds_before_image_decode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Oversized payloads fail before base64 allocates decoded bytes."""
-    from mindroom.worker_computer import mcp_results  # noqa: PLC0415
-
     monkeypatch.setattr(mcp_results, "_MAX_ENCODED_BYTES", 4)
     payload = {
         "mindroom_browser_mcp_result": {
