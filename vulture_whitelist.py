@@ -164,6 +164,8 @@ _.normalize_shorthand  # unused method (src/mindroom/config/memory.py)
 _.validate_include_patterns  # unused method (src/mindroom/config/memory.py)
 _._check_history_config  # unused method (src/mindroom/config/models.py)
 _._validate_credentials_service  # Pydantic field validator (src/mindroom/config/models.py)
+_._normalize_display_name  # Pydantic field validator (src/mindroom/config/models.py)
+_._normalize_icon  # Pydantic field validator (src/mindroom/config/models.py)
 _._validate_api_provider  # Pydantic model validator (src/mindroom/config/models.py)
 _._using_reasoning_model  # Agno Responses continuation hook (src/mindroom/openai_models.py)
 _.handle_starttag  # unused method (src/mindroom/matrix/message_builder.py)
@@ -378,6 +380,9 @@ _collections_to_query  # Agno calls this hook to resolve the exact published rea
 
 response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
+
+icon_url  # ModelCatalogEntry optional Matrix wire field, accessed through JSON dictionary keys.
+
 _.controller_session_id  # serialized TypedDict field (src/mindroom/worker_computer/protocol.py)
 control  # FastAPI endpoint (src/mindroom/api/worker_computer.py)
 

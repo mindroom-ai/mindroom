@@ -9,7 +9,7 @@ import nio
 import pytest
 from nio.crypto.attachments import encrypt_attachment
 
-from mindroom.matrix.conversation_hydration import _readable_event
+from mindroom.matrix.conversation_hydration import readable_event
 
 
 def _file_edit() -> dict:
@@ -43,7 +43,7 @@ def test_legacy_file_edit_is_readable_without_changing_source(encrypted: bool) -
     original = deepcopy(source)
     event = nio.Event.parse_event(source)
     assert isinstance(event, nio.BadEvent)
-    restored = _readable_event(Mock(spec=nio.AsyncClient), event)
+    restored = readable_event(Mock(spec=nio.AsyncClient), event)
     assert isinstance(restored, nio.RoomEncryptedFile if encrypted else nio.RoomMessageFile)
     assert restored.source == original == source
 
@@ -65,4 +65,4 @@ def test_unrelated_malformed_file_payload_remains_unreadable(damage: str) -> Non
         source.pop("sender")
     else:
         source["content"].pop("m.relates_to")
-    assert _readable_event(Mock(spec=nio.AsyncClient), nio.Event.parse_event(source)) is None
+    assert readable_event(Mock(spec=nio.AsyncClient), nio.Event.parse_event(source)) is None
