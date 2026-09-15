@@ -69,9 +69,10 @@ class ParticipationGate:
         """Whether a completed check declined participation."""
         return self.decision is not None and self.decision.action == "stay_silent"
 
-    def decline(self, reason: str) -> None:
-        """Settle a failed pre-decision turn quietly and wake activity waiters."""
+    def decline(self, reason: str) -> bool:
+        """Settle quietly unless already approved; return whether the turn is silent."""
         self._settle(ParticipationDecision(action="stay_silent", reason=reason))
+        return self.is_silent
 
     def approve_existing_response(self) -> None:
         """Restore approval for a turn that already owns a visible response."""
@@ -137,6 +138,10 @@ def participation_model(model: Model | None, gate: ParticipationGate | None, *, 
     Only the explicitly identified primary run owns the decision. Compression,
     learning and other helper calls lack that run identity, even when Agno
     shares or copies the model. Methods are restored before agent release.
+
+    Agno 3.0.9 has no supported hook here: agent pre-hooks precede compression,
+    and tool-result hooks miss the first request. Keep this compatibility seam
+    scoped to the attempt instead of spreading it across provider subclasses.
     """
     if gate is None or model is None:
         yield

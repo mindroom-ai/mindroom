@@ -1843,14 +1843,16 @@ def test_declined_participation_discards_empty_run_without_retry(streaming: bool
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("approved", [False, True])
-async def test_outer_turn_failure_is_quiet_until_participation_approves(streaming: bool, approved: bool) -> None:
+@pytest.mark.parametrize("gate_state", ["absent", "pending", "silent", "approved"])
+async def test_outer_turn_failure_is_quiet_until_participation_approves(streaming: bool, gate_state: str) -> None:
     """Scope preparation failure cannot emit error text before primary approval."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
-    gate = ParticipationGate()
-    if approved:
+    gate = None if gate_state == "absent" else ParticipationGate()
+    if gate is not None and gate_state == "approved":
         gate.approve_existing_response()
+    elif gate is not None and gate_state == "silent":
+        gate.decline("already_answered")
 
     def broken_scope() -> AbstractContextManager[ScopeSessionContext | None]:
         message = "Scope unavailable"
@@ -1894,12 +1896,16 @@ async def test_outer_turn_failure_is_quiet_until_participation_approves(streamin
             TurnSinks(turn_recorder=cast("Any", recorder)),
             continuation=_continuation(),
         )
-    if approved:
+    if gate_state in {"absent", "approved"}:
         assert "Visible error" in result
         assert recorder.outcome == "interrupted"
     else:
         assert result == ""
+        assert gate is not None
         assert gate.is_silent
+        assert gate.decided.is_set()
+        assert gate.decision is not None
+        assert gate.decision.reason == ("already_answered" if gate_state == "silent" else "run_failed_before_decision")
         assert recorder.outcome == "skipped"
         assert recorder.interrupted_calls == []
         assert log.persisted == []

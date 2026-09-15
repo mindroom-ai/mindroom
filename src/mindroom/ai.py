@@ -85,7 +85,6 @@ from mindroom.response_turn import (
     HandledAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
-    SkippedAttempt,
     StreamingTurnAdapter,
     TurnPartialSnapshot,
     TurnSinks,
@@ -93,6 +92,7 @@ from mindroom.response_turn import (
     paused_attempt_from_event,
     paused_attempt_from_response,
     run_blocking_response_turn,
+    skip_unapproved_attempt,
     stream_response_turn,
 )
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
@@ -954,21 +954,6 @@ async def _run_non_streaming_agent_attempts(
         )
 
 
-def _skip_unapproved_agent_attempt(
-    ctx: ResponseTurnContext,
-    *,
-    reason: str,
-    session_id: str | None = None,
-    run_id: str | None = None,
-    output_tokens: int | None = None,
-) -> SkippedAttempt | None:
-    """Convert unapproved completion or failure into explicit quiet settlement."""
-    if ctx.participation is None or ctx.participation.approved:
-        return None
-    ctx.participation.decline(reason)
-    return SkippedAttempt(reason=reason, session_id=session_id, run_id=run_id, output_tokens=output_tokens)
-
-
 def _failed_agent_attempt(
     ctx: ResponseTurnContext,
     error: Exception,
@@ -977,8 +962,8 @@ def _failed_agent_attempt(
     run_id: str | None = None,
 ) -> BlockingAttemptResolution:
     """Keep pre-decision failures quiet; approved turns retain ordinary error replies."""
-    skipped = _skip_unapproved_agent_attempt(
-        ctx,
+    skipped = skip_unapproved_attempt(
+        ctx.participation,
         reason="preparation_failed",
         session_id=session_id,
         run_id=run_id,
@@ -1555,8 +1540,8 @@ async def ai_response(  # noqa: C901
             )
         response = cast("RunOutput", attempt_result.response)
         if response.status in (RunStatus.completed, RunStatus.error) and (
-            skipped := _skip_unapproved_agent_attempt(
-                ctx,
+            skipped := skip_unapproved_attempt(
+                ctx.participation,
                 reason="participation_declined"
                 if response.status == RunStatus.completed
                 else "run_failed_before_decision",
@@ -1994,7 +1979,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
         except Exception as e:
             logger.exception("Error preparing agent for streaming", agent=agent_name)
-            if skipped := _skip_unapproved_agent_attempt(ctx, reason="preparation_failed"):
+            if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
                 yield AttemptResolved(skipped)
                 return
             yield get_user_friendly_error_message(e, agent_name)
@@ -2081,8 +2066,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
 
         run_error = state.user_error or state.stream_exception
         if run_error is not None:
-            if skipped := _skip_unapproved_agent_attempt(
-                ctx,
+            if skipped := skip_unapproved_attempt(
+                ctx.participation,
                 reason="run_failed_before_decision",
                 session_id=session_id,
                 run_id=attempt.attempt_run_id,
@@ -2113,8 +2098,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             return
 
-        if skipped := _skip_unapproved_agent_attempt(
-            ctx,
+        if skipped := skip_unapproved_attempt(
+            ctx.participation,
             reason="participation_declined",
             session_id=session_id,
             run_id=attempt.attempt_run_id,

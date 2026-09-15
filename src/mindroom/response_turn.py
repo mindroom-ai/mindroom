@@ -87,6 +87,7 @@ __all__ = [
     "paused_attempt_from_event",
     "paused_attempt_from_response",
     "run_blocking_response_turn",
+    "skip_unapproved_attempt",
     "stream_response_turn",
 ]
 
@@ -874,13 +875,12 @@ async def run_blocking_response_turn(
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        if ctx.participation is not None and not ctx.participation.approved:
-            ctx.participation.decline("run_failed_before_decision")
+        if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
             _settle_skipped_attempt(
                 ctx,
                 sinks,
                 run,
-                SkippedAttempt(reason="run_failed_before_decision"),
+                skipped,
                 adapter.discard_empty_run,
             )
             logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
@@ -900,6 +900,20 @@ async def run_blocking_response_turn(
         return adapter.unexpected_error_text(e)
     finally:
         adapter.close_runtime_dbs(run.scope_context)
+
+
+def skip_unapproved_attempt(
+    participation: ParticipationGate | None,
+    *,
+    reason: str,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    output_tokens: int | None = None,
+) -> SkippedAttempt | None:
+    """Resolve unapproved completion or failure without taking over run cleanup."""
+    if participation is None or not participation.decline(reason):
+        return None
+    return SkippedAttempt(reason=reason, session_id=session_id, run_id=run_id, output_tokens=output_tokens)
 
 
 def _settle_skipped_attempt(
@@ -1225,13 +1239,12 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        if ctx.participation is not None and not ctx.participation.approved:
-            ctx.participation.decline("run_failed_before_decision")
+        if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
             _settle_skipped_attempt(
                 ctx,
                 sinks,
                 run,
-                SkippedAttempt(reason="run_failed_before_decision"),
+                skipped,
                 adapter.discard_empty_run,
             )
             logger.exception("Response turn skipped before participation", entity=ctx.entity_label)

@@ -544,6 +544,18 @@ def _skipped_participation_outcome() -> FinalDeliveryOutcome:
     )
 
 
+def _skip_unapproved_response(
+    participation: ParticipationGate | None,
+    turn_recorder: TurnRecorder | None = None,
+) -> FinalDeliveryOutcome | None:
+    """Settle a pre-approval failure before failed-turn persistence or delivery."""
+    if participation is None or not participation.decline("run_failed_before_decision"):
+        return None
+    if turn_recorder is not None:
+        turn_recorder.mark_skipped()
+    return _skipped_participation_outcome()
+
+
 def _is_silent_schedule_response(request: ResponseRequest) -> bool:
     """Return whether one response must avoid provisional Matrix activity."""
     return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
@@ -3550,17 +3562,15 @@ class ResponseRunner:
                     raise error.error from error
                 raise
             if (
-                participation is not None
-                and not participation.approved
-                and not progress.stage_started
+                not progress.stage_started
                 and progress.delivery_outcome is None
                 and not (
                     isinstance(error, StreamingDeliveryError) and error.transport_outcome.terminal_status == "cancelled"
                 )
+                and (skipped := _skip_unapproved_response(participation)) is not None
             ):
-                participation.decline("run_failed_before_decision")
                 self.deps.logger.exception("Response skipped before participation", error=str(error))
-                progress.settle(_skipped_participation_outcome())
+                progress.settle(skipped)
             elif isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
                 progress.settle(await streaming_delivery_error_handler(error))
             elif progress.stage_started or progress.delivery_outcome is not None:
@@ -4691,9 +4701,7 @@ class ResponseRunner:
                     pipeline_timing=request.pipeline_timing,
                 )
             except Exception:
-                if runtime.participation is not None and not runtime.participation.approved:
-                    runtime.participation.decline("run_failed_before_decision")
-                    turn_recorder.mark_skipped()
+                _skip_unapproved_response(runtime.participation, turn_recorder)
                 raise
             finally:
                 if not current_task_is_process_shutdown():
@@ -4727,10 +4735,8 @@ class ResponseRunner:
             )
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
-            if runtime.participation is not None and not runtime.participation.approved:
-                runtime.participation.decline("run_failed_before_decision")
-                turn_recorder.mark_skipped()
-                return build_outcome(_skipped_participation_outcome())
+            if skipped := _skip_unapproved_response(runtime.participation, turn_recorder):
+                return build_outcome(skipped)
             raise
 
         if runtime.participation is not None and runtime.participation.is_silent:
@@ -4918,10 +4924,8 @@ class ResponseRunner:
             if current_task_is_process_shutdown():
                 raise
             self.deps.logger.exception("Error in streaming response", error=str(error))
-            if runtime.participation is not None and not runtime.participation.approved:
-                runtime.participation.decline("run_failed_before_decision")
-                turn_recorder.mark_skipped()
-                return build_outcome(_skipped_participation_outcome())
+            if skipped := _skip_unapproved_response(runtime.participation, turn_recorder):
+                return build_outcome(skipped)
             return build_outcome(
                 await self.deps.delivery_gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
