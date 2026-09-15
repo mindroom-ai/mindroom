@@ -301,6 +301,7 @@ async def test_team_can_first_delegate_after_ordinary_approval() -> None:
                 config=config,
                 runtime_paths=runtime_paths_for(config),
                 execution_identity=identity,
+                user_id=identity.requester_id,
                 members=members,
                 refresh_scheduler=None,
                 decisions={"prepare": True},
