@@ -12,6 +12,7 @@ from mcp.client.stdio import get_default_environment
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.browser_guard import BrowserURLVerifier
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ class WorkerBrowserMCP:
         self._profile = storage_root.resolve() / "browser-profiles" / "native-mcp"
         self._output = self._workspace / "browser"
         self._verifier = BrowserURLVerifier(allow_private_networks=allow_private_networks)
+        self._proxy = BrowserDestinationProxy(allow_private_networks=allow_private_networks)
         self._session: PlaywrightMCPSession | None = None
         self._ready = False
 
@@ -60,6 +62,10 @@ class WorkerBrowserMCP:
                 "vision,pdf",
                 "--sandbox",
                 "--block-service-workers",
+                "--proxy-server",
+                self._proxy.endpoint,
+                "--proxy-bypass",
+                "<-loopback>",
                 "--executable-path",
                 _BROWSER,
                 "--user-data-dir",
@@ -86,6 +92,7 @@ class WorkerBrowserMCP:
                 self._profile.mkdir(parents=True, exist_ok=True, mode=0o700)
                 self._output.mkdir(parents=True, exist_ok=True)
                 await self._verifier.start()
+                await self._proxy.start()
                 self._session = PlaywrightMCPSession(self._server_parameters())
                 tools = await self._session.list_tools()
                 verify_browser_mcp_catalog([tool.model_dump(by_alias=True) for tool in tools])
@@ -115,4 +122,7 @@ class WorkerBrowserMCP:
                     self._session = None
         finally:
             self._ready = False
-            await self._verifier.close()
+            try:
+                await self._proxy.close()
+            finally:
+                await self._verifier.close()

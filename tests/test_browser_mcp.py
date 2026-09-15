@@ -134,6 +134,8 @@ def test_worker_launch_has_fixed_sandbox_and_workspace(tmp_path: Path) -> None:
     assert "--headless" not in parameters.args
     assert "--no-sandbox" not in parameters.args
     assert "--block-service-workers" in parameters.args
+    assert parameters.args[parameters.args.index("--proxy-server") + 1] == provider._proxy.endpoint
+    assert parameters.args[parameters.args.index("--proxy-bypass") + 1] == "<-loopback>"
     assert parameters.args[parameters.args.index("--caps") + 1] == "vision,pdf"
     assert parameters.cwd == str(tmp_path / "workspace")
     assert parameters.env["DISPLAY"] == ":77"
@@ -189,6 +191,8 @@ async def test_worker_bootstraps_guard_and_closes_on_drift(
         ]
     finally:
         await provider.close()
+        assert provider._proxy._server is None
+        assert not provider._proxy._connections
     assert calls[-2:] == [("browser_close", {}), "closed"]
 
 

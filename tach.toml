@@ -6229,8 +6229,12 @@ path = "mindroom.worker_computer.browser_guard"
 depends_on = []
 
 [[modules]]
+path = "mindroom.worker_computer.browser_proxy"
+depends_on = []
+
+[[modules]]
 path = "mindroom.worker_computer.mcp_provider"
-depends_on = ["mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard"]
+depends_on = ["mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
 
 [[modules]]
 path = "mindroom.custom_tools.browser_mcp"
