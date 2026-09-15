@@ -1,15 +1,19 @@
 """Public Computer routes deny unauthenticated callers independently of dashboard auth."""
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import httpx
 import pytest
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
+from nio.exceptions import LocalProtocolError, RemoteTransportError
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
@@ -20,10 +24,10 @@ from mindroom.api.computers import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
-from mindroom.worker_computer.sessions import ComputerError
+from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerMaintenanceResult
-from tests.computer_helpers import ComputerPeer, computer_app
+from tests.computer_helpers import ComputerPeer, authorized_target, computer_app
 
 type Gateway = tuple[TestClient, ComputerPeer, FastAPI]
 
@@ -89,6 +93,94 @@ def test_public_session_lifecycle_and_scope_revocation(gateway: Gateway) -> None
     assert client.get(path, headers=headers).status_code == 401
     assert all("secret" not in url for url, _ in peer.requests)
     assert all(header == "worker-secret" for _, header in peer.requests)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientPayloadError,
+        LocalProtocolError,
+        RemoteTransportError,
+        OSError,
+        TimeoutError,
+        None,
+    ],
+)
+@pytest.mark.parametrize("phase", ["create", "status", "upgrade"])
+def test_authorization_transport_failure_is_sanitized_and_revokes_session(
+    gateway: Gateway,
+    failure: type[Exception] | None,
+    phase: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Expected transport outages never escape as framework errors or retain failed capabilities."""
+    client, _, app = gateway
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    state = config_lifecycle.app_state(app)
+    assert state.computer_runtime is not None
+    state.computer_runtime = (
+        None
+        if failure is None
+        else replace(
+            state.computer_runtime,
+            authorize=AsyncMock(
+                side_effect=failure("https://matrix.example.org/members?access_token=transport-secret"),
+            ),
+        )
+    )
+    if phase == "upgrade":
+        with (
+            pytest.raises(WebSocketDenialResponse) as denied,
+            client.websocket_connect(
+                path + "/stream",
+                subprotocols=["binary", "mindroom-ticket." + ticket],
+                headers={"Origin": "https://chat.example.org"},
+            ),
+        ):
+            pass
+        response = denied.value
+    else:
+        response = create(client) if phase == "create" else client.get(path, headers=headers)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert set(response.json()) == {"detail"}
+    assert len(response.json()["detail"]) < 200
+    assert "transport-secret" not in response.text + caplog.text
+    if phase != "create":
+        assert client.get(path, headers=headers).status_code == 401
+
+
+def test_active_stream_authorization_transport_failure_revokes_control(
+    gateway: Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later Matrix outage closes the active controller and revokes its bearer."""
+    client, _, app = gateway
+    monkeypatch.setattr(computers, "_STREAM_RECHECK_SECONDS", 0.01)
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    with client.websocket_connect(
+        path + "/stream",
+        subprotocols=["binary", "mindroom-ticket." + ticket],
+        headers={"Origin": "https://chat.example.org"},
+    ) as websocket:
+        assert websocket.receive_bytes() == b"screen"
+        assert client.post(path + "/control", headers=headers, json={"action": "take"}).json()["mode"] == "control"
+        state = config_lifecycle.app_state(app)
+        assert state.computer_runtime is not None
+        state.computer_runtime = replace(
+            state.computer_runtime,
+            authorize=AsyncMock(side_effect=aiohttp.ServerDisconnectedError("transport-secret")),
+        )
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_bytes()
+    assert client.get(path, headers=headers).status_code == 401
 
 
 def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway) -> None:
@@ -379,3 +471,67 @@ def test_orchestrator_unbind_revokes_active_stream(gateway: Gateway, monkeypatch
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_bytes()
     assert client.get(path, headers=headers).status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_phase", ["authorization", "manager", "status"])
+async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
+    monkeypatch: pytest.MonkeyPatch,
+    slow_phase: str,
+) -> None:
+    """A slow successful check fits, but a later overdue phase revokes at 30 seconds."""
+    loop = asyncio.get_running_loop()
+    now = 0.0
+    monkeypatch.setattr(loop, "time", lambda: now)
+    app = FastAPI()
+    store = ComputerSessionStore(clock=lambda: now)
+    config_lifecycle.ensure_app_state(app).computer_sessions = store
+    session = store.create(authorized_target())
+    stream_closed = asyncio.Event()
+    session.stream = stream_closed
+    websocket = WebSocket({"type": "websocket", "app": app}, receive=AsyncMock(), send=AsyncMock())
+    starts: list[float] = []
+    completed: list[float] = []
+    cancelled: list[str] = []
+
+    async def checked_status(*_args: object) -> None:
+        starts.append(now)
+        for phase in ("authorization", "manager", "status"):
+            if phase == slow_phase and len(starts) > 1:
+                try:
+                    await asyncio.sleep(4 if len(starts) == 2 else 18)
+                except asyncio.CancelledError:
+                    cancelled.append(phase)
+                    raise
+        completed.append(now)
+
+    monkeypatch.setattr(computers, "_checked_status", checked_status)
+    task = asyncio.create_task(computers._maintain(websocket, session, stream_closed))
+
+    async def advance(value: float) -> None:
+        nonlocal now
+        now = value
+        # Drain ready callbacks and timeout cancellation without wall-clock sleeps.
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+    try:
+        await advance(0)
+        await advance(25)
+        assert starts == [0, 25]
+        await advance(29)
+        assert completed == [0, 29]
+        assert not task.done()
+        await advance(50)
+        assert starts == [0, 25, 50]
+        await advance(55)
+        assert task.done(), "Overdue authorization/worker check must close within 30 seconds"
+        await task
+        assert cancelled == [slow_phase]
+        assert session.closed.is_set()
+        assert stream_closed.is_set()
+        with pytest.raises(ComputerError, match="Invalid or expired"):
+            store.authenticate(session.session_id, session.session_token)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

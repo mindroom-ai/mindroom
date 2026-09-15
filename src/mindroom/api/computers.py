@@ -12,6 +12,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSo
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
+from nio.exceptions import ProtocolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
@@ -151,13 +152,23 @@ def _same_worker(previous: WorkerHandle, current: WorkerHandle) -> bool:
     ) == (current.worker_id, current.endpoint, current.auth_token, current.last_started_at, current.startup_count)
 
 
-async def _authorize(connection: Request | WebSocket, target: ComputerTarget) -> None:
-    runtime = _runtime(connection)
+async def _authorized_target(
+    runtime: ComputerRuntime,
+    requester_id: str,
+    room_id: str,
+    agent_user_id: str,
+) -> ComputerTarget:
     try:
         async with asyncio.timeout(20):
-            current = await runtime.authorize(target.requester_id, target.room_id, target.agent_user_id)
-    except TimeoutError:
-        raise ComputerError(503, "Computer authorization timed out.") from None
+            return await runtime.authorize(requester_id, room_id, agent_user_id)
+    except (aiohttp.ClientError, ProtocolError, OSError):
+        # Matrix transport errors may contain credential-bearing request URLs.
+        raise ComputerError(503, "Computer authorization is unavailable.") from None
+
+
+async def _authorize(connection: Request | WebSocket, target: ComputerTarget) -> None:
+    runtime = _runtime(connection)
+    current = await _authorized_target(runtime, target.requester_id, target.room_id, target.agent_user_id)
     if runtime is not _runtime(connection) or current != target:
         raise ComputerError(409, "Computer configuration or scope changed; create a new session.")
 
@@ -196,11 +207,7 @@ async def create_session(payload: _CreateSession, request: Request) -> dict[str,
     runtime = _runtime(request)
     config, paths = config_lifecycle.read_app_committed_runtime_config(request.app)
     requester_id = await verify_openid(payload.openid_token, paths)
-    try:
-        async with asyncio.timeout(20):
-            target = await runtime.authorize(requester_id, payload.room_id, payload.agent_user_id)
-    except TimeoutError:
-        raise ComputerError(503, "Computer authorization timed out.") from None
+    target = await _authorized_target(runtime, requester_id, payload.room_id, payload.agent_user_id)
     if runtime is not _runtime(request):
         raise ComputerError(409, "Computer configuration changed; retry session creation.")
     store = _store(request.app)
@@ -282,7 +289,9 @@ async def _maintain(websocket: WebSocket, session: ComputerSession, stream: asyn
     while not stream.is_set():
         started = asyncio.get_running_loop().time()
         try:
-            async with asyncio.timeout(20):
+            # A 25-second start cadence plus at most five seconds for the entire
+            # authorization/manager/status check bounds completed touches to 30s.
+            async with asyncio.timeout(5):
                 await _checked_status(websocket, session)
         except TimeoutError:
             _store(websocket.app).close(session.session_id)

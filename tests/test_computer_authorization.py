@@ -3,8 +3,10 @@
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import aiohttp
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.access import ResponderAccessConfig
@@ -49,7 +51,10 @@ def test_expired_openid_input_is_rejected(expires_in: int) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("private", [False, True])
-@pytest.mark.parametrize("denial", ["requester", "agent", "policy", "scope", "routing", "unknown", "pending", None])
+@pytest.mark.parametrize(
+    "denial",
+    ["requester", "agent", "policy", "scope", "routing", "unknown", "pending", "backend", None],
+)
 async def test_live_membership_policy_and_canonical_browser_scope(
     tmp_path: Path,
     denial: str | None,
@@ -60,7 +65,10 @@ async def test_live_membership_policy_and_canonical_browser_scope(
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={"MATRIX_HOMESERVER": "https://example.org", "MINDROOM_WORKER_BACKEND": "docker"},
+        process_env={
+            "MATRIX_HOMESERVER": "https://example.org",
+            "MINDROOM_WORKER_BACKEND": {"backend": "static"}.get(str(denial), "docker"),
+        },
     )
     config = Config(
         agents={
@@ -115,8 +123,59 @@ async def test_live_membership_policy_and_canonical_browser_scope(
     if denial:
         with pytest.raises(ComputerError) as error:
             await call
-        assert error.value.status_code == (503 if denial in {"scope", "routing", "pending"} else 403)
+        assert error.value.status_code == (
+            409 if denial == "scope" else 503 if denial in {"routing", "pending", "backend"} else 403
+        )
     else:
         target = await call
         assert target.spec.worker_key == "v1:default:user_agent:~@alice:example.org:writer"
         assert target.spec.private_agent_names == (frozenset({"writer"}) if private else frozenset())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["rooms", "members"])
+async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: Path, stage: str) -> None:
+    """The shared grant refresh retains uncertainty while removing URL-bearing diagnostics."""
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MATRIX_HOMESERVER": "https://example.org", "MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    config = Config(
+        agents={
+            "writer": AgentConfig(
+                display_name="Writer",
+                tools=["browser"],
+                worker_tools=["browser"],
+                worker_scope="user_agent",
+                access=ResponderAccessConfig(current_room_members=True),
+            ),
+        },
+    )
+    persist_entity_accounts(config, paths)
+    agent_id = entity_ids(config, paths)["writer"].full_id
+    joined = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user, None, None) for user in [agent_id, "@alice:example.org"]],
+        room_id="!room:example.org",
+    )
+    client = AsyncMock(spec=nio.AsyncClient)
+    failure = aiohttp.ClientConnectionError("https://matrix.example.org/members?access_token=refresh-secret")
+    client.joined_members.return_value = joined
+    client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:example.org"])
+    if stage == "rooms":
+        client.joined_rooms.side_effect = failure
+    else:
+        client.joined_members.side_effect = [joined, failure]
+    with capture_logs() as logs, pytest.raises(ComputerError) as error:
+        await _authorize_computer(
+            "@alice:example.org",
+            "!room:example.org",
+            agent_id,
+            config=config,
+            runtime_paths=paths,
+            client=client,
+            memberships=AgentReplyMembershipIndex(),
+        )
+    assert error.value.status_code == 503
+    assert "refresh-secret" not in str(logs)
+    assert any(log.get("error") == "ClientConnectionError" for log in logs)

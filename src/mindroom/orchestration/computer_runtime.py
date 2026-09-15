@@ -80,7 +80,7 @@ def _resolve_target(
     if primary_worker_backend_name(runtime_paths) not in {"docker", "kubernetes"}:
         raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes worker backend.")
     if not config.agent_has_tool_at_execution_scope(name, "browser", "user_agent"):
-        raise ComputerError(503, "Computer requires browser tools and explicit user_agent worker scope.")
+        raise ComputerError(409, "Computer requires browser tools and explicit user_agent worker scope.")
 
     # Match normal toolkit materialization without adding heavy tool imports to API startup.
     from mindroom.agents import resolve_runtime_worker_tools  # noqa: PLC0415
