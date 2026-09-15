@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
+    from contextlib import AbstractAsyncContextManager
 
     import nio
 
@@ -62,6 +63,14 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def hook_room_state_putter(self) -> HookRoomStatePutter | None: ...  # noqa: D102
 
     def hook_matrix_admin(self) -> HookMatrixAdmin | None: ...  # noqa: D102
+
+    def external_event_delivery_scope(
+        self,
+        agent_name: str,
+        client: nio.AsyncClient,
+    ) -> AbstractAsyncContextManager[None]:
+        """Admit a delivery only while its Matrix runtime remains current."""
+        ...
 
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102
 

@@ -8072,6 +8072,30 @@
       "dependencies": [
         "agno"
       ],
+      "description": "Deliver external messages to this agent with durable event and conversation identity",
+      "display_name": "External Events",
+      "docs_url": null,
+      "function_names": [
+        "deliver_event"
+      ],
+      "helper_text": null,
+      "icon": "Webhook",
+      "icon_color": "text-emerald-500",
+      "name": "external_events",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
       "description": "Create and manage signed external trigger endpoints",
       "display_name": "External Trigger Manager",
       "docs_url": "https://github.com/mindroom-ai/mindroom",

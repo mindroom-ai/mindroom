@@ -42,6 +42,7 @@ _LOCAL_ONLY_TOOL_NAMES = frozenset(
         "callback_manager",
         "desktop",
         "external_trigger_manager",
+        "external_events",
         "github",
         "gmail",
         "google_calendar",
