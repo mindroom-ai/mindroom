@@ -971,6 +971,71 @@ async def test_startup_migrates_exact_legacy_recovery_contract(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("migration_race", ["cancellation", "terminal"])
+async def test_startup_legacy_migration_race_does_not_block_later_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    migration_race: str,
+) -> None:
+    """One run changed by another writer cannot abort migration of later runs."""
+    runtime, survivor, backend, _client = _recovery_scenario(tmp_path)
+    legacy_signature = script_runtime_module.legacy_script_recovery_signature(
+        backend=backend,
+        config=runtime.config_provider(),
+        agent_name=survivor.agent_name,
+        gateway_url=runtime.manager.gateway_url,
+    )
+    assert legacy_signature is not None
+    runtime.store.replace_recovery_signature(
+        survivor.run_id,
+        expected_signature=survivor.recovery_signature,
+        recovery_signature=legacy_signature,
+    )
+    raced = _stored_run_pinned_to_worker(
+        runtime.store,
+        runtime.runtime_paths,
+        run_id=f"script-{'b' * 32}",
+        recovery_signature=legacy_signature,
+    )
+    backend.handles.append(_worker(raced))
+    replace_recovery_signature = runtime.store.replace_recovery_signature
+
+    def race_then_replace(
+        run_id: str,
+        *,
+        expected_signature: str | None,
+        recovery_signature: str,
+    ) -> ScriptRunRecord:
+        if run_id == raced.run_id:
+            if migration_race == "cancellation":
+                runtime.store.request_cancel(run_id, reason="concurrent cancellation")
+            else:
+                runtime.store.transition_run(run_id, state=ScriptRunState.EXITED, exit_code=0)
+        return replace_recovery_signature(
+            run_id,
+            expected_signature=expected_signature,
+            recovery_signature=recovery_signature,
+        )
+
+    monkeypatch.setattr(runtime.store, "replace_recovery_signature", race_then_replace)
+
+    try:
+        await runtime.start()
+        migrated = runtime.store.get_run(survivor.run_id)
+        assert migrated.state is ScriptRunState.RUNNING
+        assert migrated.cancel_requested_at is None
+        assert migrated.recovery_signature is not None
+        assert migrated.recovery_signature.startswith("v2:")
+        raced_after = runtime.store.get_run(raced.run_id)
+        if migration_race == "cancellation":
+            assert raced_after.cancel_requested_at is not None
+        else:
+            assert raced_after.state is ScriptRunState.EXITED
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_startup_adopts_script_after_compatible_delegation_change(tmp_path: Path) -> None:
     """An unrelated delegation edit leaves the run's process authority unchanged."""
     runtime, run, _backend, client = _recovery_scenario(tmp_path)

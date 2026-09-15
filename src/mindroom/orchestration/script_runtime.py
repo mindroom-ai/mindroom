@@ -1173,7 +1173,13 @@ class ScriptRuntimeLifecycle:
                     # Settle that ownership without replaying it or revoking the surviving process.
                     await self.broker.cancel_run(verified_run.run_id)
                     adopted.add(verified_run.run_id)
-            except (ScriptRunManagerError, ScriptWorkerError, WorkerBackendError, _ScriptRuntimeUnavailableError):
+            except (
+                ScriptRunManagerError,
+                ScriptRunStoreError,
+                ScriptWorkerError,
+                WorkerBackendError,
+                _ScriptRuntimeUnavailableError,
+            ):
                 logger.warning("script_startup_recovery_pending", run_id=run.run_id, exc_info=True)
         return adopted
 
