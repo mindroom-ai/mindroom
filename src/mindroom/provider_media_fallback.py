@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Never, Protocol, cast, runtime_checkable
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, RetryableModelProviderError
 from agno.models.message import Message
 
+from mindroom.agno_compat_model_hooks import install_retry_cycle_hooks
 from mindroom.error_handling import (
     TRANSIENT_PROVIDER_STATUS_CODES,
     IncompleteResponsesStreamError,
@@ -75,6 +76,13 @@ _UNSUPPORTED_MEDIA_KINDS_BY_ROUTE: dict[_ModelMediaRoute, set[MediaKind]] = {}
 # These Agno adapters omit these inputs instead of rejecting them. Keep their
 # limitations separate from model capabilities learned from provider errors.
 # Module names avoid importing optional provider SDKs here; MRO covers our wrappers.
+# Reason: Agno has no public adapter media-capability API and silently omits some
+# input kinds. This small table stays beside the owner's fallback capability policy.
+# Upstream issue: No matching public adapter media-capability issue identified.
+# Upstream PR: None identified for this extension point.
+# Remove when: Public adapter capabilities report supported input kinds accurately;
+# retain provider-error capability learning and the owner's fallback prompt policy.
+# Coverage: tests/test_provider_media_fallback.py.
 _ADAPTER_OMITTED_MEDIA: dict[str, frozenset[MediaKind]] = {
     "agno.models.openai.responses": frozenset({"audio", "video"}),
     "agno.models.openai.chat": frozenset({"video"}),
@@ -92,33 +100,15 @@ class _AsyncClosableIterator(Protocol):
 
 def install_provider_media_fallback(model: Model, *, fallback_prompt: str) -> None:
     """Install one media-free retry around a model's asynchronous provider calls."""
-    model_dict = vars(model)
-    if model_dict.get(_INSTALLED_ATTR) is True:
-        return
-
-    model_dict["_ainvoke_with_retry"] = partial(
-        _ainvoke_in_request_scope,
+    install_retry_cycle_hooks(
         model,
-        model._ainvoke_with_retry,
+        marker=_INSTALLED_ATTR,
+        wrap_retry=lambda original: partial(_ainvoke_in_request_scope, model, original),
+        wrap_retry_stream=lambda original: partial(_ainvoke_stream_in_request_scope, model, original),
+        wrap_predicate=lambda original: partial(_is_retryable_provider_error, model, original),
+        wrap_invoke=lambda original: partial(_fallback_ainvoke, model, original, fallback_prompt),
+        wrap_stream=lambda original: partial(_fallback_ainvoke_stream, model, original, fallback_prompt),
     )
-    model_dict["_ainvoke_stream_with_retry"] = partial(
-        _ainvoke_stream_in_request_scope,
-        model,
-        model._ainvoke_stream_with_retry,
-    )
-    model_dict["_is_retryable_error"] = partial(
-        _is_retryable_provider_error,
-        model,
-        model._is_retryable_error,
-    )
-    model_dict["ainvoke"] = partial(_fallback_ainvoke, model, model.ainvoke, fallback_prompt)
-    model_dict["ainvoke_stream"] = partial(
-        _fallback_ainvoke_stream,
-        model,
-        model.ainvoke_stream,
-        fallback_prompt,
-    )
-    model_dict[_INSTALLED_ATTR] = True
 
 
 async def _ainvoke_in_request_scope(

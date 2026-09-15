@@ -1,4 +1,4 @@
-"""Private Agno prompt-builder calls and temporary instruction-state workarounds.
+"""Shared private Agno tool preparation and temporary instruction-state workarounds.
 
 Keep SDK internals here; prompt_tokens owns caching and token estimation.
 Verified against the pinned Agno version by prompt-surface integration tests.
@@ -10,17 +10,21 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from agno.agent._tools import determine_tools_for_model
 from agno.team._tools import _determine_tools_for_model
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from agno.agent import Agent
     from agno.run import RunContext
+    from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
+    from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
     from agno.team import Team
     from agno.tools.function import Function
+    from agno.tools.toolkit import Toolkit
 
 
 # Reason: Prompt estimation needs private tool preparation and temporary _tool_instructions.
@@ -72,3 +76,33 @@ def prepare_team_prompt_tools(
             check_mcp_tools=False,
         )
         return _PreparedTeamPromptTools(tuple(tools), tuple(team._tool_instructions or ()))
+
+
+# Reason: RTC needs prepared Functions with Agno's run context and media bindings,
+# which Agent.aget_tools alone does not supply through a public preparation API.
+# Upstream issue: https://github.com/agno-agi/agno/issues/7806
+# Upstream PR: https://github.com/agno-agi/agno/pull/7807 is related inspection work;
+# it must also support executable run-context/media bindings to replace this path.
+# Remove when: A public Agent preparation API returns the same effective Functions
+# for execution; RTC filtering and requester authorization remain with the owner.
+# Coverage: tests/test_matrix_rtc_call_tools.py::test_build_call_tools_returns_same_agent_prompt_and_tools;
+# tests/test_matrix_rtc_call_tools.py::test_build_call_tools_includes_async_only_toolkit_functions.
+def prepare_agent_tools(
+    agent: Agent,
+    *,
+    processed_tools: list[Toolkit | Callable | Function | dict],
+    run_response: RunOutput,
+    run_context: RunContext,
+    session: AgentSession,
+) -> list[Function | dict]:
+    """Prepare executable async Agent tools with Agno's canonical context bindings."""
+    assert agent.model is not None
+    return determine_tools_for_model(
+        agent,
+        model=agent.model,
+        processed_tools=processed_tools,
+        run_response=run_response,
+        run_context=run_context,
+        session=session,
+        async_mode=True,
+    )

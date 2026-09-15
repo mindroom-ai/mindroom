@@ -25,7 +25,6 @@ from inspect import isasyncgenfunction, iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agno.agent._tools import determine_tools_for_model
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
@@ -34,6 +33,7 @@ from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
+from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.background_tasks import (
     run_blocking_until_complete,
     run_coroutine_until_complete,
@@ -592,14 +592,12 @@ async def _prepare_call_agent_tools(
         session=session,
         user_id=requester_id,
     )
-    effective_tools = determine_tools_for_model(
+    effective_tools = prepare_agent_tools(
         agent,
-        model=agent.model,
         processed_tools=processed_tools,
         run_response=run_output,
         run_context=run_context,
         session=session,
-        async_mode=True,
     )
     return session, run_context, effective_tools
 

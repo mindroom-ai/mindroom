@@ -66,6 +66,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Matrix Integration | `architecture/matrix.md` | `architecture/matrix/index.md` | `page__architecture__matrix__index.md` |
 | Agent Orchestration | `architecture/orchestration.md` | `architecture/orchestration/index.md` | `page__architecture__orchestration__index.md` |
 | Migration Boundaries | `architecture/migrations.md` | `architecture/migrations/index.md` | `page__architecture__migrations__index.md` |
+| Agno Compatibility | `architecture/agno-compatibility.md` | `architecture/agno-compatibility/index.md` | `page__architecture__agno-compatibility__index.md` |
 | History Compaction | `architecture/compaction.md` | `architecture/compaction/index.md` | `page__architecture__compaction__index.md` |
 | Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
 | Nio 1.0 Upgrade | `deployment/nio-upgrade.md` | `deployment/nio-upgrade/index.md` | `page__deployment__nio-upgrade__index.md` |

@@ -11,14 +11,14 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
-from types import MethodType
-from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
+from typing import TYPE_CHECKING, Literal, cast, get_type_hints
 
 from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
@@ -249,57 +249,9 @@ def normalize_output_path_argument(raw_path: object) -> object | None:
     return _normalize_output_path_argument(raw_path)
 
 
-def _process_entrypoint_with_output_path_schema(self: Function, strict: bool = False) -> None:
-    effective_strict = False if self.strict is False else strict
-    Function.process_entrypoint(self, strict=effective_strict)
-    ensure_output_path_schema_optional(self)
-
-
 def uses_output_file_schema(function: Function) -> bool:
     """Whether this Function uses our known output-path schema processor."""
-    processor = function.process_entrypoint
-    return (
-        function.entrypoint is not None
-        and isinstance(processor, MethodType)
-        and processor.__func__ is _process_entrypoint_with_output_path_schema
-    )
-
-
-def _copy_function_model(self: Function, *, update: Mapping[str, object] | None, deep: bool) -> Function:
-    model_copy_parameters = inspect.signature(Function.model_copy).parameters
-    if "update" in model_copy_parameters:
-        copied = cast("Any", Function.model_copy)(self, update=update, deep=deep)
-    else:
-        copied = Function.model_copy(self, deep=deep)
-        if update:
-            for field_name, value in update.items():
-                object.__setattr__(copied, field_name, value)
-    return copied
-
-
-def _model_copy_with_output_path_schema(
-    self: Function,
-    *,
-    update: Mapping[str, object] | None = None,
-    deep: bool = False,
-) -> Function:
-    copied = _copy_function_model(self, update=update, deep=deep)
-    _install_output_path_schema_postprocessor(copied)
-    return copied
-
-
-def _install_output_path_schema_postprocessor(function: Function) -> None:
-    """Install a per-function schema sanitizer that survives Agno's Function copies."""
-    object.__setattr__(
-        function,
-        "process_entrypoint",
-        MethodType(_process_entrypoint_with_output_path_schema, function),
-    )
-    object.__setattr__(
-        function,
-        "model_copy",
-        MethodType(_model_copy_with_output_path_schema, function),
-    )
+    return uses_schema_postprocessor(function, ensure_output_path_schema_optional)
 
 
 def _path_has_environment_expansion(raw_path: str) -> bool:
@@ -784,7 +736,7 @@ def wrap_function_for_output_files(function: Function, policy: ToolOutputFilePol
     uses_custom_parameters = function.skip_entrypoint_processing or function.parameters != _DEFAULT_PARAMETERS
     function.entrypoint = _wrap_entrypoint(function.entrypoint, policy, tool_name=function.name)
     function.strict = False
-    _install_output_path_schema_postprocessor(function)
+    install_schema_postprocessor(function, ensure_output_path_schema_optional)
     if uses_custom_parameters:
         ensure_output_path_schema_optional(function)
     return function

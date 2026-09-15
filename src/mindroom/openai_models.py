@@ -8,9 +8,8 @@ import os
 import struct
 from copy import copy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
-from agno.exceptions import ModelProviderError
 from agno.models.deepseek import DeepSeek
 from agno.models.llama_cpp import LlamaCpp
 from agno.models.openai import OpenAIChat, OpenAIResponses
@@ -18,14 +17,10 @@ from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
 from agno.utils.media import get_image_type
 from agno.utils.tokens import _parse_image_dimensions_from_bytes
-from openai.types.responses import (
-    ResponseCompletedEvent,
-    ResponseCreatedEvent,
-    ResponseInProgressEvent,
-    ResponseOutputItemDoneEvent,
-)
 
-from mindroom.error_handling import IncompleteResponsesStreamError
+from mindroom.agno_compat_openai_chat import OpenAIChatProviderCompat as AgnoOpenAIChatProviderCompat
+from mindroom.agno_compat_openai_responses import OpenAIResponsesProviderCompat
+from mindroom.agno_compat_openai_responses_items import record_response_output, record_tool_search_items
 from mindroom.history.message_content import image_content_for_token_estimation
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
@@ -37,11 +32,7 @@ from mindroom.native_compaction import (
     recorded_native_settings,
 )
 from mindroom.openai_prompt_cache import formatted_input_with_shared_system_prefix, supports_openai_cache_breakpoints
-from mindroom.openai_response_replay import (
-    formatted_input_with_provider_items,
-    record_response_output,
-    record_tool_search_items,
-)
+from mindroom.openai_response_replay import formatted_input_with_provider_items
 from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
@@ -49,19 +40,16 @@ from mindroom.openai_tool_search import (
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator
-
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.tools.function import Function
-    from openai.types.chat import ChatCompletion
-    from openai.types.responses import Response, ResponseStreamEvent
+    from openai.types.responses import Response
     from pydantic import BaseModel
 
 
-class OpenAIChatProviderCompat:
-    """Repair tool replay and preserve OpenAI Chat Completions finish reasons.
+class OpenAIChatProviderCompat(AgnoOpenAIChatProviderCompat):
+    """Repair canonical tool replay after provider parser compatibility.
 
     Mix in ahead of an ``OpenAIChat`` subclass; ``_format_all_messages`` is the
     single choke point for all four request paths.  Deliberately not a
@@ -69,17 +57,6 @@ class OpenAIChatProviderCompat:
     ``OpenAIChat`` field defaults over provider-specific ones (base URL, name)
     during dataclass field collection.
     """
-
-    def _parse_provider_response(self, response: ChatCompletion, **kwargs: object) -> ModelResponse:
-        """Retain the terminal reason Agno drops when parsing Chat Completions."""
-        parsed = super()._parse_provider_response(response, **kwargs)  # ty: ignore[unresolved-attribute]
-        parsed.provider_data = {**(parsed.provider_data or {}), "finish_reason": response.choices[0].finish_reason}
-        return parsed
-
-    def parse_tool_calls(self, tool_calls_data: list[Any]) -> list[dict[str, Any]]:
-        """Drop empty slots created when a streamed tool-call index starts above zero."""
-        parsed = super().parse_tool_calls(tool_calls_data)  # ty: ignore[unresolved-attribute]
-        return [tool_call for tool_call in parsed if isinstance(tool_call.get("function"), dict)]
 
     def _format_all_messages(
         self,
@@ -199,20 +176,8 @@ def _prepare_response_continuation(
     ], True
 
 
-def _stream_error_types(error: BaseException) -> str:
-    """Keep causal exception types without exposing provider payloads or URLs."""
-    names: list[str] = []
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        names.append(type(current).__name__)
-        current = current.__cause__ or current.__context__
-    return " caused by ".join(names)
-
-
 @dataclass
-class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
+class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponsesProviderCompat, OpenAIResponses):
     """OpenAI Responses model that preserves completed continuation and ordered output."""
 
     approval_receipt_after_response_id: ClassVar[bool] = True
@@ -341,15 +306,6 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
             msg = "Background Responses require store=True"
             raise ValueError(msg)
 
-    def _using_reasoning_model(self) -> bool:
-        """Enable Responses continuation independently of the model's name.
-
-        Agno 3.0.9 gates response chaining and encrypted reasoning retrieval on
-        this predicate, although both belong to the API rather than a model list.
-        This does not enable reasoning or override ``store=False``.
-        """
-        return True
-
     def get_request_params(
         self,
         messages: list[Message] | None = None,
@@ -434,156 +390,33 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         }
         record_tool_search_items(model_response, response.output)
         if response.status == "completed":
-            model_response.provider_data["mindroom_portable_replay"] = self._portable_replay
             items = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
-            record_native_checkpoint(model_response, items, self.native_compaction)
-            if self.store is False or self._portable_replay:
-                record_response_output(model_response, items)
+            self._record_completed_responses_output(model_response, items)
         return model_response
 
-    # Agno 3.0.9 workaround; upstream completion/response-ID fix:
-    # https://github.com/agno-agi/agno/pull/10135
-    # Remove duplicate completion/ID checks after pinning a release with that fix.
-    # Keep retry protection until Agno also avoids reusing partial stream output.
-    def _is_retryable_error(self, error: ModelProviderError) -> bool:
-        """Do not retry incomplete streams with Agno's retained partial text and tool calls."""
-        return not isinstance(error, IncompleteResponsesStreamError) and super()._is_retryable_error(error)
-
-    def invoke_stream(
+    def _record_completed_responses_output(
         self,
-        messages: list[Message],
-        assistant_message: Message,
-        response_format: dict[Any, Any] | type[BaseModel] | None = None,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
-        run_response: RunOutput | None = None,
-        compress_tool_results: bool = False,
-    ) -> Iterator[ModelResponse]:
-        """Require a successful terminal event for each provider invocation."""
-        completed = False
-        yielded = False
-        stream = super().invoke_stream(
-            messages,
-            assistant_message,
-            response_format,
-            tools,
-            tool_choice,
-            run_response,
-            compress_tool_results,
-        )
-        try:
-            for chunk in stream:
-                lifecycle_only = bool(chunk.extra and chunk.extra.pop("mindroom_stream_lifecycle_only", False))
-                yielded = yielded or not lifecycle_only
-                # The parser publishes response_id only on response.completed.
-                completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
-                yield chunk
-        except ModelProviderError as error:
-            if not yielded:
-                if not str(error).strip():
-                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(error)})"
-                raise
-            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(error)})"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
-        finally:
-            # Agno returns a generator, annotated only as Iterator.
-            cast("Generator[ModelResponse, None, None]", stream).close()
-        if not completed:
-            msg = "OpenAI Responses stream ended without response.completed"
-            raise IncompleteResponsesStreamError(
-                msg,
-                model_name=self.name,
-                model_id=self.id,
-            )
+        model_response: ModelResponse,
+        items: list[dict[str, Any]],
+    ) -> None:
+        """Apply application replay and compaction policy after provider completion."""
+        model_response.provider_data = {
+            **(model_response.provider_data or {}),
+            "mindroom_response_stored": self.store is not False,
+            "mindroom_portable_replay": self._portable_replay,
+        }
+        record_native_checkpoint(model_response, items, self.native_compaction)
+        if self.store is False or self._portable_replay:
+            record_response_output(model_response, items)
 
-    async def ainvoke_stream(
+    def _record_provider_only_responses_items(
         self,
-        messages: list[Message],
-        assistant_message: Message,
-        response_format: dict[Any, Any] | type[BaseModel] | None = None,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
-        run_response: RunOutput | None = None,
-        compress_tool_results: bool = False,
-    ) -> AsyncIterator[ModelResponse]:
-        """Require a successful terminal event for each async provider invocation."""
-        completed = False
-        yielded = False
-        stream = super().ainvoke_stream(
-            messages,
-            assistant_message,
-            response_format,
-            tools,
-            tool_choice,
-            run_response,
-            compress_tool_results,
-        )
-        try:
-            async for chunk in stream:
-                lifecycle_only = bool(chunk.extra and chunk.extra.pop("mindroom_stream_lifecycle_only", False))
-                yielded = yielded or not lifecycle_only
-                completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
-                yield chunk
-        except ModelProviderError as error:
-            if not yielded:
-                if not str(error).strip():
-                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(error)})"
-                raise
-            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(error)})"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
-        finally:
-            # Finalize Agno's async generator when the consumer stops at a yield.
-            await cast("AsyncGenerator[ModelResponse, None]", stream).aclose()
-        if not completed:
-            msg = "OpenAI Responses stream ended without response.completed"
-            raise IncompleteResponsesStreamError(
-                msg,
-                model_name=self.name,
-                model_id=self.id,
-            )
+        model_response: ModelResponse,
+        output_items: list[Any],
+    ) -> None:
+        """Capture provider-only items selected by canonical replay policy."""
+        record_tool_search_items(model_response, output_items)
 
-    def _parse_provider_response_delta(
-        self,
-        stream_event: ResponseStreamEvent,
-        assistant_message: Message,
-        tool_use: dict[str, Any],
-    ) -> tuple[ModelResponse, dict[str, Any]]:
-        """Publish completed response IDs and ordered provider output."""
-        response_items = tool_use.pop("mindroom_response_items", {})
-        model_response, tool_use = super()._parse_provider_response_delta(stream_event, assistant_message, tool_use)
-        if isinstance(stream_event, ResponseCreatedEvent) and model_response.provider_data is not None:
-            # An unfinished response may contain tool calls we never received.
-            # Chaining to it would require outputs that we cannot supply.
-            model_response.provider_data.pop("response_id", None)
-        elif isinstance(stream_event, ResponseCompletedEvent):
-            model_response.provider_data = {
-                **(model_response.provider_data or {}),
-                "response_id": stream_event.response.id,
-                "mindroom_response_stored": self.store is not False,
-                "mindroom_portable_replay": self._portable_replay,
-            }
-            items = [item.model_dump(mode="json", exclude_none=True) for item in stream_event.response.output]
-            if not items:
-                items = [response_items[index] for index in sorted(response_items)]
-            record_native_checkpoint(model_response, items, self.native_compaction)
-            if self.store is False or self._portable_replay:
-                record_response_output(model_response, items)
-            response_items = {}
-        if isinstance(stream_event, ResponseOutputItemDoneEvent):
-            record_tool_search_items(model_response, [stream_event.item])
-            if self.store is False or self._portable_replay:
-                response_items[stream_event.output_index] = stream_event.item.model_dump(mode="json", exclude_none=True)
-        if response_items:
-            tool_use["mindroom_response_items"] = response_items
-        if (
-            isinstance(stream_event, (ResponseCreatedEvent, ResponseInProgressEvent))
-            and not stream_event.response.output
-            and not tool_use
-            and not any(
-                value for name, value in vars(model_response).items() if name not in {"created_at", "event", "role"}
-            )
-        ):
-            # A lifecycle snapshot can already contain output the upstream
-            # parser ignores. Only empty snapshots and parsed chunks may retry.
-            model_response.extra = {"mindroom_stream_lifecycle_only": True}
-        return model_response, tool_use
+    def _should_buffer_responses_output(self) -> bool:
+        """Buffer ordered streaming output only for explicit replay modes."""
+        return self.store is False or self._portable_replay

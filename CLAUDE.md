@@ -216,6 +216,7 @@ Matrix sync callback
 | `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
 | `tool_system/agno_compat_tool_hooks.py` | Private Agno hook-chain adapters installed by `tool_system/tool_hooks.py`; dispatch, approval, and cancellation ownership stay with the tool runtime |
+| `agno_compat_*.py` and subsystem-local `agno_compat_*.py` | Agno SDK repairs and private bindings; see `docs/architecture/agno-compatibility.md` for the complete boundary inventory and owners |
 | `constants.py` | Shared constants, paths, and environment variable defaults |
 | `error_handling.py` | User-friendly error message extraction |
 | `authorization.py` | Sender and per-agent authorization checks |
@@ -453,6 +454,7 @@ Design migrations around that assumption rather than adding machinery to coordin
   Never invent a tracking link or treat a related PR as a complete fix.
   Separate removal conditions when one module handles multiple upstream gaps.
 - Keep patch installation explicit and idempotent, preserve optional-import boundaries, and retain version guards where private signatures or semantics require them.
+- Keep the boundary inventory in `docs/architecture/agno-compatibility.md` aligned with extractions and removals; source comments own exact upstream tracking and test references.
 - On each Agno upgrade, inspect these boundaries, verify which fixes the pinned release includes, and run their behavioral tests.
   Remove a workaround only when the relevant tests pass without it; a merged PR alone is insufficient.
   Retain regression coverage for behavior MindRoom still requires and update Tach boundaries with any extraction or removal.

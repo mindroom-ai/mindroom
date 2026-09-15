@@ -7,7 +7,7 @@ import time
 import weakref
 from contextlib import nullcontext
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
 
-from mindroom import agno_compat_session_persistence
+from mindroom import agno_compat_session_persistence, agno_compat_sqlite
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.logging_config import get_logger
@@ -147,9 +147,6 @@ def _create_sqlite_state_storage(
         return database
 
 
-_AGNO_CONNECT_LISTENER_NAME = "_set_sqlite_pragmas"
-
-
 def configure_state_engine_pragmas(engine: Engine) -> None:
     """Keep rollback journaling on state databases despite Agno 3 forcing WAL.
 
@@ -160,12 +157,7 @@ def configure_state_engine_pragmas(engine: Engine) -> None:
     only the part MindRoom wants: foreign keys on, so deleting a session row
     cascades to its runs.
     """
-    connect_listeners = cast("Any", engine.pool.dispatch).connect.listeners
-    listeners = [listener for listener in connect_listeners if listener.__name__ == _AGNO_CONNECT_LISTENER_NAME]
-    if len(listeners) != 1:
-        msg = f"Expected exactly one Agno {_AGNO_CONNECT_LISTENER_NAME} connect listener, found {len(listeners)}"
-        raise RuntimeError(msg)
-    event.remove(engine, "connect", listeners[0])
+    agno_compat_sqlite.remove_default_pragmas(engine)
 
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection: Any, _connection_record: object) -> None:  # noqa: ANN401
@@ -265,8 +257,7 @@ class _ConversationSqliteDb(SqliteDb):
         are traversed, serialized, or retained by these diagnostics.
         """
         global _CACHE_DIAGNOSTICS_NEXT_REPORT
-        sessions = self._run_object_cache._per_session
-        counts = (len(sessions), sum(len(runs) for runs in sessions.values()))
+        counts = agno_compat_sqlite.cached_run_counts(self)
         now = time.monotonic()
         with _CACHE_DIAGNOSTICS_LOCK:
             if self not in _CACHE_DIAGNOSTICS:
@@ -313,45 +304,21 @@ class _ConversationSqliteDb(SqliteDb):
         user_id: str | None = None,
         run_index: int | None = None,
     ) -> None:
-        """Persist one run, letting the database place a new run after the existing ones.
-
-        Agno derives ``run_index`` from the run's position in ``session.runs``.
-        MindRoom removes runs from the middle of a session (compaction,
-        redaction), after which that position collides with the indexes stored
-        rows keep, so new rows take ``MAX(run_index) + 1`` instead and existing
-        rows keep their index either way.
-
-        Upstream: agno-agi/agno#9936, fixed by agno-agi/agno#9938 (or the wider
-        agno-agi/agno#9342). Once the pinned agno includes either, drop this
-        override and pass ``run_index`` through.
-        """
+        """Sanitize prompt messages before Agno's monotonic run insertion."""
         del run_index
-        super().upsert_run(
-            run=_run_without_prompt_messages(run, self._prompt_roles),
+        agno_compat_sqlite.upsert_run_at_end(
+            self,
+            _run_without_prompt_messages(run, self._prompt_roles),
             session_id=session_id,
             user_id=user_id,
-            run_index=None,
         )
 
     def delete_runs(self, run_ids: list[str]) -> None:
-        """Delete run rows and scrub the same ids from any 2.x ``runs`` blob, in one transaction.
-
-        Agno deletes the rows, then scrubs the blob in a second best-effort
-        transaction whose failures it swallows, and skips both when the runs
-        table does not exist yet (the state of a 2.x database nothing has
-        appended to). A legacy run that survives the scrub comes back on the
-        next read, so a redaction must either remove it everywhere or fail.
-
-        Upstream: agno-agi/agno#9934, fixed by agno-agi/agno#9939. Once the
-        pinned agno includes it, the blob scrub below can go; the descendant
-        expansion over the runs table stays (agno deletes only the given ids).
-        """
+        """Delete a run subtree and its legacy representations atomically."""
         if not run_ids:
             return
         wanted = {run_id for run_id in run_ids if run_id}
-        runs_table = self._get_table(table_type="runs")
-        sessions_table = self._get_table(table_type="sessions")
-        with self.Session() as sess, sess.begin():
+        with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table, sessions_table):
             if runs_table is not None:
                 # Team member runs are rows whose parent_run_id is the team run; a
                 # deleted run takes its whole subtree along, as agno's own

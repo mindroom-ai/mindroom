@@ -29,12 +29,13 @@ Persisted replay fitting and the Vertex full-request guard remain separate becau
 
 Agno internals use named `agno_compat_<subject>.py` boundaries beside their owners.
 Each boundary records the upstream issue or tracking gap, proposed PR, removal condition, and regression coverage in source comments.
+The [Agno compatibility inventory](https://docs.mindroom.chat/architecture/agno-compatibility/) covers the full runtime; the table below describes the history-related boundaries and the shared tool-hook patch.
 
 | Module | Workaround and installation point |
 | --- | --- |
 | `history/agno_compat_message_builder.py` | Preserves roleful Team inputs and strips historical inline media in Agent/Team message builders; installed explicitly by `agents._initialize_agent_instance` and `teams._create_team_instance`. |
 | `agno_compat_session_persistence.py` | Guards and adapts Agno's asynchronous persistence against the owned session store; installed by `agent_storage._create_sqlite_state_storage` before filesystem work. |
-| `history/agno_compat_prompt.py` | Calls the private Agno Team tool preparer and temporarily supplies tool instructions, restoring the original list even on failure. |
+| `agno_compat_prepared_tools.py` | Shares private Agent/Team tool preparation between RTC execution and prompt inspection; temporarily supplies Team tool instructions, restoring the original list even on failure. |
 | `tool_system/agno_compat_tool_hooks.py` | Adapts Agno's private sync/async hook chains to deferred results and owner-controlled synchronous execution; installed by `tool_system/tool_hooks.py`, which retains dispatch, approval, and cancellation ownership. |
 | `history/claude_replay_compat.py` | Removes stale signed reasoning from completed portable turns after rewriting; native checkpoint replay retains its separate provider policy. |
 | `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested Claude/OpenAI SDK retries, and classifies provider completion signals. |
