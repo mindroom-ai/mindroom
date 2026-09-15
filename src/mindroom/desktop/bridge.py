@@ -140,7 +140,7 @@ class DesktopBridge:
         remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
         self._control_lease_deadline = self.monotonic_clock() + remaining_seconds
 
-    async def on_to_device_event(self, event: AuthenticatedToDeviceEvent) -> None:
+    async def on_to_device_event(self, event: AuthenticatedToDeviceEvent) -> None:  # noqa: PLR0911
         """Handle one authenticated custom to-device event without trusting its payload."""
         if event.type != DESKTOP_COMMAND_EVENT_TYPE:
             return
@@ -171,6 +171,8 @@ class DesktopBridge:
                 await self._send_response(
                     self._error_response(command, "Desktop request ID was reused with different command content."),
                 )
+                return
+            if command.request_id in self._in_flight:
                 return
             response = cached.response
             if response is None:

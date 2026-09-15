@@ -519,6 +519,55 @@ async def test_browser_control_failure_requires_fresh_observation(transport: Asy
 
 
 @pytest.mark.asyncio
+async def test_active_browser_request_keeps_original_response_owner(transport: AsyncMock) -> None:
+    """An active request ignores exact replays while rejecting changed content."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingBrowserProvider(FakeBrowserProvider):
+        async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
+            entered.set()
+            await release.wait()
+            return await super().execute(action, parameters)
+
+    browser = BlockingBrowserProvider()
+    bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(allow_control=True, browser_enabled=True),
+        browser_provider=browser,
+        clock=lambda: NOW_SECONDS,
+    )
+    command = _command(
+        "browser_control",
+        parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.org"}},
+    )
+    task = asyncio.create_task(bridge.on_to_device_event(_event(command)))
+
+    try:
+        await entered.wait()
+        await bridge.on_to_device_event(_event(command))
+        transport.assert_not_awaited()
+
+        changed_command = _command(
+            "browser_control",
+            parameters={"browser_action": "navigate", "browser_parameters": {"targetUrl": "https://example.net"}},
+        )
+        await bridge.on_to_device_event(_event(changed_command))
+        assert len(transport.await_args_list) == 1
+        assert "reused with different command content" in (_response(transport).error or "")
+    finally:
+        release.set()
+        await task
+
+    responses = [DesktopResponse.from_content(call.kwargs["content"]) for call in transport.await_args_list]
+    assert len(responses) == 2
+    assert responses[-1].ok
+    assert responses[-1].result.get("action_outcome") != "unknown"
+    assert browser.calls == [("navigate", {"targetUrl": "https://example.org"})]
+
+
+@pytest.mark.asyncio
 async def test_browser_screenshot_is_uploaded_as_encrypted_matrix_media(transport: AsyncMock) -> None:
     """Browser-native screenshots use the same encrypted media path as desktop captures."""
     browser = FakeBrowserProvider(
