@@ -259,9 +259,10 @@ async def control(payload: _Control, request: Request, session_id: str) -> dict[
         )
         store.get(session.session_id)
     except BaseException:
-        if payload.action == "take":
-            # A delayed worker take can settle after local revocation. Drain its
-            # compensation before reporting failure, even if our caller cancels.
+        if payload.action == "take" and session.closed.is_set():
+            # Only revoked sessions require compensation. A rejected old take on
+            # a live session must not release its replacement stream's control.
+            # Drain revocation cleanup even if our caller cancels.
             with suppress(ComputerError):
                 await run_coroutine_until_complete(
                     computer_request(session.handle, "release", session.session_id, generation=session.generation),

@@ -29,7 +29,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
 from mindroom.worker_computer.auth import computer_origins
-from mindroom.worker_computer.protocol import ComputerStatus
+from mindroom.worker_computer.protocol import BrowserSession, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
@@ -664,7 +664,7 @@ async def test_background_maintenance_snapshots_computers_on_owning_loop(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("revocation", ["delete", "expiry", "unbind"])
+@pytest.mark.parametrize("revocation", ["delete", "expiry", "unbind", "cancel"])
 @pytest.mark.parametrize("cancel_compensation", [False, True])
 async def test_delayed_take_revocation_drains_compensation(  # noqa: PLR0915 - deterministic revocation and cancellation ordering
     tmp_path: Path,
@@ -713,6 +713,9 @@ async def test_delayed_take_revocation_drains_compensation(  # noqa: PLR0915 - d
             assert (await computers.delete_session(request, session.session_id)).status_code == 204
         elif revocation == "expiry":
             peer.now += 3600
+        elif revocation == "cancel":
+            task.cancel()
+            await asyncio.wait_for(session.closed.wait(), timeout=1)
         else:
             store.close_all()
         proceed.set()
@@ -734,9 +737,105 @@ async def test_delayed_take_revocation_drains_compensation(  # noqa: PLR0915 - d
             controller = peer.runtime.status()["controller_session_id"]
             accepts_input = peer.runtime.allows_input(session.session_id, stream)
             await peer.runtime.detach_stream(session.session_id, stream)
-        assert isinstance(results[0], asyncio.CancelledError if cancel_compensation else ComputerError)
+        assert isinstance(
+            results[0],
+            asyncio.CancelledError if cancel_compensation or revocation == "cancel" else ComputerError,
+        )
         assert controller is None
         assert not accepts_input
+
+
+@pytest.mark.asyncio
+async def test_rejected_old_take_preserves_replacement_stream_control(  # noqa: PLR0915 - exact runtime ordering and cleanup
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An old stream's definitive take rejection cannot release its live replacement's control."""
+    peer = ComputerPeer()
+    app = computer_app(peer, tmp_path)
+    async with app.router.lifespan_context(app):
+        store = config_lifecycle.app_state(app).computer_sessions
+        assert store is not None
+        session = store.create(authorized_target())
+        session.handle = peer.handle
+        session.generation = (await peer.runtime.ensure_started())["generation"]
+        old_stream = await peer.runtime.attach_stream(session.session_id, session.generation)
+        session.stream = asyncio.Event()
+        request = Request(
+            {"type": "http", "app": app, "headers": [(b"authorization", ("Bearer " + session.session_token).encode())]},
+        )
+        action_started, finish_action, attachment_queued, rejected, deliver_failure = (
+            asyncio.Event() for _ in range(5)
+        )
+
+        async def browser_action() -> None:
+            action_started.set()
+            await finish_action.wait()
+
+        async def close_browser() -> None:
+            pass
+
+        def browser_factory(_display: str) -> BrowserSession:
+            return BrowserSession(browser_action, close_browser)
+
+        async def replace_stream() -> asyncio.Event:
+            attachment_queued.set()
+            assert session.generation is not None
+            return await peer.runtime.attach_stream(session.session_id, session.generation)
+
+        original = computers.computer_request
+
+        async def hold_rejection(
+            handle: WorkerHandle,
+            action: Literal["status", "start", "take", "release", "stop"],
+            session_id: str,
+            *,
+            generation: str | None = None,
+        ) -> ComputerStatus:
+            try:
+                return await original(handle, action, session_id, generation=generation)
+            except ComputerError as error:
+                if action == "take" and error.status_code == 409:
+                    rejected.set()
+                    await deliver_failure.wait()
+                raise
+
+        monkeypatch.setattr(computers, "_resolve_worker", lambda *_args, **_kwargs: peer.handle)
+        monkeypatch.setattr(computers, "computer_request", hold_rejection)
+        browser_task = asyncio.create_task(peer.runtime.run_browser_call("fixture", browser_factory, [], {}))
+        await asyncio.wait_for(action_started.wait(), timeout=1)
+        attachment = asyncio.create_task(replace_stream())
+        await asyncio.wait_for(attachment_queued.wait(), timeout=1)
+        old_take = asyncio.create_task(
+            computers.control(computers._Control(action="take"), request, session.session_id),
+        )
+        replacement = None
+        try:
+            async with asyncio.timeout(1):
+                while peer.runtime._pending_controller != session.session_id:  # noqa: ASYNC110 - observe real worker take admission, without replacing its lock or control logic
+                    await asyncio.sleep(0)
+            finish_action.set()
+            await browser_task
+            replacement = await attachment
+            await asyncio.wait_for(rejected.wait(), timeout=1)
+            assert old_stream.is_set()
+            assert (await computers.control(computers._Control(action="take"), request, session.session_id))[
+                "mode"
+            ] == "control"
+            assert peer.runtime.allows_input(session.session_id, replacement)
+            deliver_failure.set()
+            with pytest.raises(ComputerError) as failed:
+                await old_take
+            assert failed.value.status_code == 409
+            assert store.get(session.session_id) is session
+            assert peer.runtime.allows_input(session.session_id, replacement)
+            assert not replacement.is_set()
+        finally:
+            finish_action.set()
+            deliver_failure.set()
+            await asyncio.gather(browser_task, attachment, old_take, return_exceptions=True)
+            if replacement is not None:
+                await peer.runtime.detach_stream(session.session_id, replacement)
 
 
 @pytest.mark.parametrize("termination", ["text", "bug"])
