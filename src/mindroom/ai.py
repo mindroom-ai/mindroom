@@ -28,6 +28,7 @@ from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
+from mindroom.agno_participation import participation_model
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
@@ -68,7 +69,6 @@ from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import build_memory_prompt_parts, strip_user_turn_time_prefix
 from mindroom.metadata_merge import deep_merge_metadata
-from mindroom.participation import participation_model
 from mindroom.pre_model_preparation import (
     build_agent_off_loop,
     close_unreturned_agent,

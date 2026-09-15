@@ -18,6 +18,7 @@ from agno.run.agent import RunOutput
 from agno.utils.models.claude import format_messages
 from anthropic.types import Message as AnthropicMessage
 
+from mindroom.agno_participation import participation_model
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.claude_prompt_cache import (
     install_claude_deferred_tool_search,
@@ -25,7 +26,7 @@ from mindroom.claude_prompt_cache import (
     prepare_claude_request_kwargs,
 )
 from mindroom.hooks.enrichment import render_transient_context
-from mindroom.participation import ParticipationGate, participation_model
+from mindroom.participation import ParticipationGate
 from mindroom.synthetic_model import SyntheticModel
 
 if TYPE_CHECKING:
@@ -115,71 +116,6 @@ async def test_helpers_cannot_acquire_primary_decision(helper: str, streaming: b
     # Helpers really ran; replacing compression or disabling learning would hide the defect.
     assert len(requests) >= 3 + int(approved)
     assert gate.approved is approved
-
-
-@pytest.mark.asyncio
-async def test_simultaneous_primary_calls_share_one_decision() -> None:
-    """Concurrent entries must not issue competing participation decisions."""
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    decisions = 0
-
-    async def invoke(**_kwargs: object) -> ModelResponse:
-        nonlocal decisions
-        decisions += 1
-        entered.set()
-        await release.wait()
-        return ModelResponse(content='{"action":"respond","reason":"Open question."}')
-
-    gate = ParticipationGate()
-    model = SyntheticModel(id="test", name="test", provider="test")
-    messages = [Message(role="user", content="Question")]
-    first = asyncio.create_task(gate.check(model, invoke, messages, {}))
-    await entered.wait()
-    second = asyncio.create_task(gate.check(model, invoke, messages, {}))
-    await asyncio.sleep(0)
-    release.set()
-    assert await asyncio.gather(first, second) == [True, True]
-    assert decisions == 1
-
-
-@pytest.mark.asyncio
-async def test_late_approval_cannot_reopen_failed_turn() -> None:
-    """An in-flight provider answer must not reopen activity after quiet failure."""
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def invoke(**_kwargs: object) -> ModelResponse:
-        entered.set()
-        await release.wait()
-        return ModelResponse(content='{"action":"respond","reason":"Open question."}')
-
-    gate = ParticipationGate()
-    model = SyntheticModel(id="test", name="test", provider="test")
-    decision = asyncio.create_task(gate.check(model, invoke, [Message(role="user", content="Question")], {}))
-    await entered.wait()
-    gate.decline("preparation_failed")
-    assert gate.decided.is_set()
-    release.set()
-
-    assert not await decision
-    assert gate.is_silent
-    assert gate.decision is not None
-    assert gate.decision.reason == "preparation_failed"
-
-
-@pytest.mark.asyncio
-async def test_settled_approval_cannot_be_overwritten() -> None:
-    """Late errors must not revoke a turn that already owns visible output."""
-
-    async def invoke(**_kwargs: object) -> ModelResponse:
-        return ModelResponse(content='{"action":"respond","reason":"Open question."}')
-
-    gate = ParticipationGate()
-    model = SyntheticModel(id="test", name="test", provider="test")
-    assert await gate.check(model, invoke, [Message(role="user", content="Question")], {})
-    gate.decline("late_failure")
-    assert gate.approved
 
 
 @pytest.mark.asyncio

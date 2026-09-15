@@ -352,7 +352,7 @@ depends_on = ["mindroom.durable_write"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
-    "mindroom.participation",
+    "mindroom.agno_participation",
     "mindroom.agents",
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
@@ -5750,13 +5750,18 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
 
 [[modules]]
 path = "mindroom.participation"
-depends_on = ["mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy"]
-visibility = ["mindroom.ai", "mindroom.response_runner", "mindroom.response_turn"]
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.agno_participation", "mindroom.response_runner", "mindroom.response_turn"]
+
+[[modules]]
+path = "mindroom.agno_participation"
+depends_on = ["mindroom.participation", "mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy"]
+visibility = ["mindroom.ai"]
 
 [[modules]]
 path = "mindroom.provider_tool_policy"
 depends_on = []
-visibility = ["mindroom.participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model"]
+visibility = ["mindroom.agno_participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model"]
 
 [[modules]]
 path = "mindroom.groq_model"

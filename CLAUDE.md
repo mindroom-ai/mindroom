@@ -106,7 +106,8 @@ Matrix sync callback
 | `coalescing_batch.py` | Coalesced dispatch batch construction |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
-| `participation.py` | Primary-run participation decision at the prepared provider-request boundary, with one immutable result and isolated helper requests |
+| `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
+| `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |

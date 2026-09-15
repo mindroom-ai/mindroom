@@ -13,8 +13,9 @@ from agno.compression.manager import CompressionManager
 from agno.metrics import MessageMetrics, RunMetrics
 from agno.run.agent import RunOutput
 
+from mindroom.agno_participation import participation_model
 from mindroom.ai import ai_response, stream_agent_response
-from mindroom.participation import ParticipationGate, participation_model
+from mindroom.participation import ParticipationGate
 from tests.ai_user_id_helpers import _config, _prepared_prompt_result, _runtime_paths
 from tests.conftest import make_turn_context
 from tests.participation_helpers import ParticipationModel
