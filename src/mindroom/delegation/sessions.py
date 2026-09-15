@@ -85,6 +85,21 @@ async def load_subagent(
     return child
 
 
+async def load_retained_subagent_turn(child: DelegationChild, runtime_paths: RuntimePaths) -> DelegationChild | None:
+    """Read a trusted wait's latest attempt without crossing into a later follow-up."""
+    if child.subagent_id is None:
+        return None
+    path = _path(child.subagent_id, runtime_paths)
+
+    def read() -> DelegationChild | None:
+        if not path.exists():
+            return None
+        retained = DelegationChild(**json.loads(path.read_text())["child"])
+        return retained if retained.delegation_id == child.delegation_id else None
+
+    return await asyncio.to_thread(read)
+
+
 @contextmanager
 def subagent_recovery_lock(subagent_id: str, runtime_paths: RuntimePaths) -> Iterator[bool]:
     """Recover only while no process is executing or claiming a turn on this handle."""

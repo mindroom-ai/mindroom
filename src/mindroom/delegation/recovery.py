@@ -16,7 +16,7 @@ from agno.session.agent import AgentSession
 from mindroom.agent_storage import create_session_storage
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
-from mindroom.delegation.sessions import load_subagent, subagent_recovery_lock
+from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState
 from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import create_scope_session_storage
@@ -109,6 +109,10 @@ async def interrupt_child(
     status: Literal["cancelled", "failed"] = "cancelled",
 ) -> None:
     """Settle retained descendants and preserve any already completed child outcome."""
+    retained = await load_retained_subagent_turn(child, runtime_paths)
+    if retained is not None:
+        child.run_id = retained.run_id
+        child.model_name = retained.model_name
     config = delegation_storage_config(config, child.storage_bindings)
     response = await read_child_run(child, config, runtime_paths)
     if response is not None and response.status == RunStatus.completed:
