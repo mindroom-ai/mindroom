@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import sys
@@ -134,3 +135,66 @@ setInterval(()=>{},1000);
         # Clean only the child created by this fixture when RED exposes a leak.
         with contextlib.suppress(ProcessLookupError):
             os.kill(pid, 9)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 23])
+async def test_live_supervisor_reaps_adopted_exits_and_preserves_main_status(tmp_path: Path, exit_code: int) -> None:
+    """Adopted zombies disappear during service while live children and main status survive."""
+    node = shutil.which("node")
+    if node is None or sys.platform != "linux":
+        pytest.skip("Linux subreaper and Node fixture required")
+    script = tmp_path / "live-server.cjs"
+    script.write_text("""
+const {spawn} = require('child_process');
+const orphan = `
+const {spawn} = require('child_process');
+const short = spawn(process.execPath, ['-e', 'setTimeout(()=>process.exit(0),150)'], {stdio:'ignore', detached:true});
+const live = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio:'ignore', detached:true});
+console.log(JSON.stringify([short.pid, live.pid]));
+short.unref(); live.unref();
+`;
+require('readline').createInterface({input:process.stdin}).on('line', line => {
+  if (line === 'spawn') spawn(process.execPath, ['-e', orphan], {stdio:['ignore','inherit','inherit']});
+  else if (line === 'ping') console.log('alive');
+  else if (line === 'exit') process.exit(Number(process.argv[2]));
+});
+""")
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-m",
+        "mindroom.playwright_mcp_process",
+        node,
+        str(script),
+        str(exit_code),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    children: list[int] = []
+    try:
+        for _ in range(6):
+            process.stdin.write(b"spawn\n")
+            await process.stdin.drain()
+            pids = json.loads(await asyncio.wait_for(process.stdout.readline(), 5))
+            children.extend(pids)
+            short, live = (Path(f"/proc/{pid}") for pid in pids)
+            async with asyncio.timeout(2):
+                while short.exists():  # noqa: ASYNC110 - observe actual kernel child reaping
+                    await asyncio.sleep(0.01)
+            assert live.exists()
+            assert (live / "stat").read_text().split()[2] != "Z"
+            process.stdin.write(b"ping\n")
+            await process.stdin.drain()
+            assert await asyncio.wait_for(process.stdout.readline(), 2) == b"alive\n"
+            assert process.returncode is None
+        process.stdin.write(b"exit\n")
+        await process.stdin.drain()
+        assert await asyncio.wait_for(process.wait(), 5) == exit_code
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), 5)
+    assert all(not Path(f"/proc/{pid}").exists() for pid in children)

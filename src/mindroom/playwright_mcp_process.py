@@ -28,6 +28,14 @@ def _children() -> list[int]:
     return [int(value) for value in path.read_text().split()]
 
 
+def _reap_exited_descendants(main_pid: int) -> None:
+    """Reap adopted exits without consuming Popen's status or touching live children."""
+    for pid in _children():
+        if pid != main_pid:
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(pid, os.WNOHANG)
+
+
 def _reap_descendants() -> None:
     """Kill and reap adopted child roots repeatedly until the owned tree is empty."""
     deadline = time.monotonic() + 1.5
@@ -66,6 +74,7 @@ def _main() -> int:
         # Arguments come from trusted desktop/worker launch configuration, never tools.
         process = subprocess.Popen(sys.argv[1:])
         while not stopping and process.poll() is None:
+            _reap_exited_descendants(process.pid)
             time.sleep(0.01)
         return process.returncode or 0
     finally:

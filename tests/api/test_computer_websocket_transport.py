@@ -46,7 +46,26 @@ async def _assert_denial(port: int, path: str, protocols: str, status: int, *, a
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ["websockets-sansio", "websockets"])
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "websockets-sansio",
+        pytest.param(
+            "websockets",
+            marks=[
+                pytest.mark.filterwarnings(
+                    r"ignore:websockets\.legacy is deprecated.*:DeprecationWarning:websockets\.legacy",
+                ),
+                pytest.mark.filterwarnings(
+                    r"ignore:websockets\.server\.WebSocketServerProtocol is deprecated:DeprecationWarning:uvicorn\.protocols\.websockets\.websockets_impl",
+                ),
+                pytest.mark.filterwarnings(
+                    r"ignore:remove second argument of ws_handler:DeprecationWarning:websockets\.legacy\.server",
+                ),
+            ],
+        ),
+    ],
+)
 async def test_computer_ticket_handshake_and_denial_framing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
