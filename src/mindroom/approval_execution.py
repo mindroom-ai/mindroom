@@ -11,6 +11,7 @@ from agno.db.base import SessionType
 from agno.run.agent import (
     RunCompletedEvent,
     RunContentEvent,
+    RunErrorEvent,
     RunOutput,
     ToolCallCompletedEvent,
     ToolCallStartedEvent,
@@ -28,6 +29,7 @@ from mindroom.approval_tools import (
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
 )
+from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
@@ -76,11 +78,15 @@ async def _collect_agent_continuation(
 ) -> RunOutput:
     """Collect one ordered continuation stream and return its terminal run."""
     response: RunOutput | None = None
+    error_event: RunErrorEvent | None = None
     terminal_content: str | None = None
     saw_content_delta = False
     async for event in events:
         if isinstance(event, RunOutput):
             response = event
+        elif isinstance(event, RunErrorEvent):
+            # Drain the producer so Agno can finish persistence and cleanup.
+            error_event = event
         elif isinstance(event, RunContentEvent):
             presentation.append_text(event.content)
             saw_content_delta = saw_content_delta or bool(event.content)
@@ -90,6 +96,8 @@ async def _collect_agent_continuation(
             presentation.start_tool(event.tool)
         elif isinstance(event, ToolCallCompletedEvent):
             presentation.complete_tool(event.tool)
+    if error_event is not None and (response is None or response.status == RunStatus.error):
+        raise RuntimeError(run_error_event_text(error_event))
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
@@ -98,12 +106,17 @@ async def _collect_agent_continuation(
         terminal_content,
         saw_content_delta=saw_content_delta,
     )
+    _complete_terminal_agent_tools(presentation, response)
+    return response
+
+
+def _complete_terminal_agent_tools(presentation: CollectedStreamPresentation, response: RunOutput) -> None:
+    """Reconcile tool events that were present only in the terminal output."""
     for tool in response.tools or ():
         if tool.is_paused:
             presentation.start_tool(tool)
         else:
             presentation.complete_tool(tool)
-    return response
 
 
 async def _continue_persisted_agent(

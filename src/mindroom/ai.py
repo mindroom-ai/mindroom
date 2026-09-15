@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -36,7 +35,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import get_user_friendly_error_message, run_error_event_text
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
     persist_interrupted_replay,
@@ -555,39 +554,6 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
             response_parts.append("\n\n".join(tool_sections))
 
     return "\n".join(response_parts) if response_parts else ""
-
-
-def _run_error_event_text(event: RunErrorEvent) -> str:
-    """Return the best available error text for an Agno streaming error event."""
-    if event.content:
-        return event.content
-
-    additional_message = _run_error_additional_message(event.additional_data or {})
-    if additional_message:
-        return additional_message
-
-    details = []
-    if event.error_type:
-        details.append(f"type={event.error_type}")
-    if event.error_id:
-        details.append(f"id={event.error_id}")
-    if details:
-        return f"Agent run failed ({', '.join(details)})"
-
-    return "Agent run failed without provider error details"
-
-
-def _run_error_additional_message(data: object) -> str | None:
-    if isinstance(data, str):
-        stripped = data.strip()
-        return stripped or None
-    if isinstance(data, Mapping):
-        mapping = cast("Mapping[object, object]", data)
-        for key in ("message", "error", "detail"):
-            message = _run_error_additional_message(mapping.get(key))
-            if message:
-                return message
-    return None
 
 
 def _extract_replayable_response_text(response: RunOutput) -> str:
@@ -1718,7 +1684,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912, PLR0915
                 continue
 
             if isinstance(event, RunErrorEvent):
-                error_text = _run_error_event_text(event)
+                error_text = run_error_event_text(event)
                 logger.error("Agent run error during streaming", agent=agent_name, error=error_text)
                 state.user_error = Exception(error_text)
                 return

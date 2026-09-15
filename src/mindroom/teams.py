@@ -56,7 +56,7 @@ from mindroom.constants import (
     is_silent_schedule_no_report_response,
 )
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.error_handling import get_user_friendly_error_message, run_error_event_text
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
     prepare_bound_team_run_context,
@@ -2444,10 +2444,14 @@ async def _collect_team_continuation(
 ) -> TeamRunOutput:
     """Collect one team continuation stream and return its terminal run output."""
     response: TeamRunOutput | None = None
+    error_event: TeamRunErrorEvent | None = None
     content_delta_scopes: set[str] = set()
     async for event in events:
         if isinstance(event, TeamRunOutput):
             response = event
+        elif isinstance(event, TeamRunErrorEvent):
+            # An error output can retain earlier text; the event has the failure.
+            error_event = event
         else:
             if isinstance(event, AgentRunContentEvent) and event.content:
                 member_id = presentation.resolve_member_id(event.agent_id, event.agent_name)
@@ -2455,6 +2459,8 @@ async def _collect_team_continuation(
             elif isinstance(event, TeamRunContentEvent) and event.content:
                 content_delta_scopes.add("team")
             _apply_team_continuation_event(event, presentation)
+    if error_event is not None and (response is None or response.status == RunStatus.error):
+        raise RuntimeError(run_error_event_text(error_event, entity_label="Team"))
     if response is None:
         msg = "Team continuation returned an unexpected result"
         raise TypeError(msg)
