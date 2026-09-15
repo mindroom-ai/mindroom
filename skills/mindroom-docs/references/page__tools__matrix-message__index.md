@@ -78,6 +78,7 @@ New roots may not appear in discovery until they have a reply.
 | `event_id` | `str \| None` | `None` | Required target message ID for edit/react. |
 | `attachments` | `list[str] \| None` | `None` | Ordered attachment IDs or file paths; send only, maximum five. |
 | `message_extras` | `list[object] \| None` | `None` | Collapsible sections for send/edit; schema below. |
+| `idempotency_key` | `str \| None` | `None` | Nonblank key, at most 256 characters; durable text-only send retries. |
 | `limit` | `int \| None` | `None` | Read count, clamped to 1–50; default 20. |
 
 Workspace-backed agents may also see MindRoom's standard `mindroom_output_path` argument, which saves the tool result and returns a file receipt.
@@ -88,6 +89,49 @@ It controls the returned tool output, not where the Matrix message is delivered.
 `read` returns message event IDs; thread reads also include edit options for editable messages.
 Room access checks apply before cross-room operations.
 Calls are rate limited to 12 actions per 30 seconds per agent, room, and requester; each file costs one additional action.
+
+## Durable send retries
+
+Pass `idempotency_key` on a text-only `send` to retry safely after a timeout or interrupted tool call.
+Keys are scoped to the canonical requester, acting agent, and resolved destination room; room and requester aliases share the same scope.
+The first prepared payload, recipient, and thread target are saved before delivery, including formatting, mentions, and `message_extras`.
+Retrying that key reuses the saved payload and Matrix transaction ID even if the text, recipient, or current thread changes.
+The destination room remains part of the key scope: using a different room creates a separate send.
+
+```python
+matrix_message(message="Review this result.", recipient="code", new_thread=True, idempotency_key="review-42")
+```
+
+A successful result keeps the normal `status="ok"`, `event_id`, `room_id`, and `thread_id` fields.
+Only `status="ok"` confirms both Matrix delivery and a durable local receipt; retain the key and retry after any error or lost response.
+An error does not prove that Matrix rejected the message.
+Authorization for the sender and the original recipient is checked again on every retry, including completed receipts.
+A changed Matrix sender or device fails closed because its transaction IDs may no longer deduplicate the original send.
+These calls need durable control storage and a known Matrix sender and device.
+If the original recipient changes to room mode, a pending separate-thread send pauses before transport until compatible recipient settings are restored.
+Its stored target and transaction remain unchanged; completed receipts remain retrievable under current authorization.
+
+Completed receipts are retained for eight days, and the prepared message body is discarded after receipt storage.
+Pending sends never expire; retrying after eight days still uses their original payload.
+After a completed receipt expires, reusing its key may create a new event.
+Pruning happens when the requester/agent/room store is next used.
+Keep the storage across restarts and use the same Matrix device for retries.
+Rate limits also apply to retries; a rate-limit error requires waiting before retrying the same key.
+Keys cannot be used for `read`, `edit`, `react`, or attachment sends.
+There is no automatic retry worker; the caller controls retries.
+
+Keyed sends sharing the same canonical requester, acting agent, and room serialize under one file lock.
+A 60-second deadline covers lock wait, recipient discovery, preparation, and Matrix transport.
+On timeout the tool returns `status="error"` with `Idempotent Matrix send timed out; retry with the same idempotency_key.`
+Pending state and its transaction survive the timeout; the caller can retry, and other keys can proceed once the claim releases its lock.
+An in-flight durable filesystem write must finish before cancellation releases the lock, so a stalled filesystem can delay the timeout response.
+Ordinary sends have no new deadline.
+
+Each scope admits at most 10,000 retained records and 1,024 pending sends.
+The 16 MiB admission budget counts the exact serialized JSON plus 2 KiB reserved per pending receipt; durable files never exceed 16 MiB.
+Capacity errors reject new keys before Matrix send; existing keys can still recover or replay their receipts.
+Pending records are never evicted, and expired completed receipts can free admission capacity when the scope is used again.
+Oversized existing files fail closed before JSON parsing and are never discarded automatically.
 
 ## Attachments
 

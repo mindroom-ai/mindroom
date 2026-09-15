@@ -133,6 +133,7 @@ Matrix sync callback
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |

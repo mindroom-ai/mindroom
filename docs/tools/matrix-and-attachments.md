@@ -68,6 +68,7 @@ Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action
 `attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
 Relative paths resolve from the agent workspace and must stay inside it.
 When sending to a recipient, all files arrive before the task text starts its response.
+For durable text-only retries, supply `idempotency_key`; the same requester, agent, room, and key reuse the first prepared payload and receipt for eight days after completion.
 Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
 
 ## [`matrix_room`]
