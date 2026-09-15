@@ -15,7 +15,7 @@ import secrets
 import shutil
 import socket
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,13 +30,14 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 from testing.worker_computer_matrix import create_matrix_fixture
-from testing.worker_computer_native import connect_viewer, native_json, native_tabs
+from testing.worker_computer_native import connect_viewer, docker_environment, native_json, native_tabs, shell_stdout
 
 from mindroom.api import computers, config_lifecycle
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.runtime_context import WorkerRuntimeContext, worker_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
@@ -139,6 +140,7 @@ class Fixture:
             config_path=args.output / "config.yaml",
             storage_path=args.output / "data",
             process_env={
+                **docker_environment(),
                 "MATRIX_HOMESERVER": self.matrix["homeserver"] if self.matrix else origin,
                 "MATRIX_SERVER_NAME": self.server_name,
                 "MINDROOM_WORKER_COMPUTER_ENABLED": "1",
@@ -271,6 +273,9 @@ class Fixture:
                 if action == "navigate" and "targetId" in kwargs:
                     await self.native("browser_tabs", action="select", index=kwargs["targetId"])
                 await self.native("browser_navigate", url=kwargs["targetUrl"])
+                # The native server defaults to a smaller OS window. Normalize
+                # only this deterministic fixture's viewport for RFB coordinates.
+                await self.native("browser_resize", width=1280, height=800)
                 tabs = await self.browser(action="tabs")
                 return {"targetId": tabs["activeTargetId"]}
             if action == "tabs":
@@ -292,18 +297,20 @@ class Fixture:
         assert body["ok"], body
         return json.loads(body["result"])
 
-    async def native(self, function: str, **kwargs: Any) -> ToolResult:  # noqa: ANN401 - native tool JSON
+    async def native(self, tool_function: str, **kwargs: Any) -> ToolResult:  # noqa: ANN401 - native tool JSON
         """Call the actual native entrypoint and retain a bounded text transcript."""
-        body = await self.execute("browser_mcp", function, kwargs)
+        body = await self.execute("browser_mcp", tool_function, kwargs)
         assert body["ok"], body
         result = decode_browser_mcp_result(body["result"])
         assert isinstance(result, ToolResult), result
         with (self.args.output / "native-transcript.jsonl").open("a") as transcript:
-            transcript.write(json.dumps({"function": function, "arguments": kwargs, "text": result.content}) + "\n")
+            transcript.write(
+                json.dumps({"function": tool_function, "arguments": kwargs, "text": result.content}) + "\n",
+            )
         assert "### Error" not in result.content, result.content
         return result
 
-    async def primary_native(self, function: str, **kwargs: Any) -> object:  # noqa: ANN401 - native tool JSON
+    async def primary_native(self, tool_function: str, **kwargs: Any) -> object:  # noqa: ANN401 - native tool JSON
         """Use the real primary toolkit/proxy, including scoped image decoding."""
         import mindroom.tools  # noqa: PLC0415, F401 - normal registry bootstrap
 
@@ -315,7 +322,7 @@ class Fixture:
             execution_identity=identity,
             runtime_paths=self.paths,
         )
-        with tool_execution_identity(identity):
+        with worker_runtime_context(WorkerRuntimeContext(self.paths, self.config)), tool_execution_identity(identity):
             toolkit = get_tool_by_name(
                 "browser_mcp",
                 self.paths,
@@ -324,7 +331,10 @@ class Fixture:
                 worker_tools_override=["browser_mcp", "shell"],
                 worker_target=target,
             )
-            return await toolkit.async_functions[function].entrypoint(**kwargs)
+            try:
+                return await toolkit.async_functions[tool_function].entrypoint(**kwargs)
+            except httpx.HTTPStatusError as error:
+                raise AssertionError(error.response.text) from error
 
     async def native_files(self) -> dict[str, Any]:
         """Verify native upload/download paths and real primary text/media decoding."""
@@ -339,15 +349,16 @@ class Fixture:
         image = await self.primary_native("browser_take_screenshot", type="png", scale="css")
         assert isinstance(image, ToolResult)
         assert image.images
+        assert image.images[0].mime_type == "image/png"
         data = image.images[0].content
         assert isinstance(data, bytes)
         assert data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
         text = await self.primary_native("browser_snapshot")
         assert isinstance(text, ToolResult)
         assert "Remote text" in text.content
-        named = await self.native("browser_take_screenshot", filename="native.png", type="png", scale="css")
+        named = await self.native("browser_take_screenshot", filename="browser/native.png", type="png", scale="css")
         assert not named.images
-        await self.native("browser_pdf_save", filename="native.pdf")
+        await self.native("browser_pdf_save", filename="browser/native.pdf")
         files = await self.shell(
             [
                 "node",
@@ -385,12 +396,12 @@ class Fixture:
 
     async def shell(self, args: list[str], *, background: bool = False, user: str | None = None) -> str:
         """Run commands in the exact worker used by the browser."""
-        kwargs: dict[str, Any] = {"args": args}
+        kwargs: dict[str, Any] = {"args": args, "tail": 1000}
         if background:
             kwargs["timeout"] = 0
         body = await self.execute("shell", "run_shell_command", kwargs, user=user)
         assert body["ok"], body
-        return body["result"]
+        return shell_stdout(body["result"])
 
     async def prepare_page(self) -> dict[str, Any]:
         """Serve deterministic page/download content inside the worker loopback network."""
@@ -782,6 +793,17 @@ with sync_playwright() as playwright:
                 result["requester_isolation"] = True
                 assert not errors, errors
                 result["page_errors"] = errors
+            except BaseException:
+                with suppress(Exception):
+                    diagnostic_page = browser.contexts[-1].pages[-1]
+                    await diagnostic_page.screenshot(path=str(fixture.args.output / "failure-visible.png"))
+                    diagnostics = await diagnostic_page.evaluate("""() => {
+                        const c=document.querySelector('canvas');
+                        return {probe:window.probe,canvas:c?[c.width,c.height]:null,
+                            pixel:c?Array.from(c.getContext('2d').getImageData(1200,700,1,1).data):null};
+                    }""")
+                    (fixture.args.output / "viewer-failure.json").write_text(json.dumps(diagnostics, indent=2) + "\n")
+                raise
             finally:
                 await browser.close()
     return result

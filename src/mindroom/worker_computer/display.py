@@ -3,6 +3,7 @@
 import asyncio
 import os
 import shutil
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 
@@ -18,6 +19,7 @@ class WorkerDisplay:
         self._lock = asyncio.Lock()
         self._root = root
         self.socket_path = root / "rfb.sock"
+        self._socket_directory: Path | None = None
         self._timeout = readiness_timeout
         self._children: list[asyncio.subprocess.Process] = []
 
@@ -34,6 +36,7 @@ class WorkerDisplay:
         if self.healthy():
             return
         await run_coroutine_until_complete(self._close_children())
+        self.socket_path = self._root / "rfb.sock"
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._root.chmod(0o700)
         env = {**os.environ, "DISPLAY": self.display}
@@ -42,6 +45,11 @@ class WorkerDisplay:
             msg = "Worker computer requires TigerVNC Xvnc in the worker image."
             raise RuntimeError(msg)
         try:
+            # Linux sun_path includes its terminating NUL. Worker storage paths
+            # contain requester IDs and may exceed it, including in UTF-8 bytes.
+            if len(os.fsencode(self.socket_path)) >= 108:
+                self._socket_directory = Path(tempfile.mkdtemp(prefix="mindroom-rfb-", dir="/tmp"))
+                self.socket_path = self._socket_directory / "rfb.sock"
             server = await asyncio.create_subprocess_exec(
                 executable,
                 self.display,
@@ -131,6 +139,9 @@ class WorkerDisplay:
                 self._children.remove(child)
         if not self._children:
             self.socket_path.unlink(missing_ok=True)
+            if self._socket_directory is not None:
+                self._socket_directory.rmdir()
+                self._socket_directory = None
         if errors:
             msg = "Failed to reap display children"
             raise ExceptionGroup(msg, errors)
