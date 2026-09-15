@@ -74,7 +74,8 @@ def upgrade_legacy_journal(transaction: Transaction, existing_tables: frozenset[
 # Handling: Fence unresumable current generations for normal failure recovery, including already-upgraded rows.
 # Preserve historical calls, existing failures, and recoverable FINAL delivery debt.
 # Coverage: tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_fences_unresumable_calls,
-# test_approval_toolkit_upgrade_preserves_compatible_work, test_approval_toolkit_upgrade_preserves_frozen_final.
+# tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_compatible_work,
+# tests/test_journal_upgrade_boundary.py::test_approval_toolkit_upgrade_preserves_frozen_final.
 def upgrade_approval_toolkit_origins(transaction: Transaction, columns: frozenset[str]) -> None:
     """Add historical origins and fence unresumable work in the schema transaction."""
     if "toolkit_name" not in columns:
