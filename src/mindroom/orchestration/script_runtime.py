@@ -9,7 +9,7 @@ import socket
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.parse import urlsplit
 
 from mindroom import approval_manager
@@ -20,6 +20,10 @@ from mindroom.custom_tools.script import bind_script_run_manager
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
+from mindroom.script_runs.legacy_recovery import (
+    is_legacy_script_recovery_signature,
+    legacy_script_recovery_signature,
+)
 from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
@@ -40,7 +44,7 @@ from mindroom.script_runs.reasons import (
     SCRIPT_TOOL_REMOVED,
     WORKER_CONFIGURATION_CHANGED,
 )
-from mindroom.script_runs.recovery import script_recovery_signature
+from mindroom.script_runs.recovery import script_process_authority, script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
 from mindroom.script_runs.worker_client import ScriptWorkerClient, ScriptWorkerError
 from mindroom.tool_approval import (
@@ -76,6 +80,10 @@ logger = get_logger(__name__)
 
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+# A published generation may remain committed while its backend acquisition retries.
+# preparing_retry suspends that retry while a same-generation reload owns the launch fence.
+_WorkerReplacementPhase = Literal["idle", "preparing", "preparing_retry", "committed"]
+_WorkerReplacementAction = Literal["wait", "finish", "replace"]
 
 
 def _agent_reply_authorization_changed(current: Config, replacement: Config) -> bool:
@@ -397,7 +405,7 @@ class ScriptRuntimeLifecycle:
     _pending_worker_backend_locator: str | None = field(default=None, init=False, repr=False)
     _startup_cleanup_pending: bool = field(default=False, init=False, repr=False)
     _reload_launch_fence_started: bool = field(default=False, init=False, repr=False)
-    _worker_replacement_pending: bool = field(default=False, init=False, repr=False)
+    _worker_replacement_phase: _WorkerReplacementPhase = field(default="idle", init=False, repr=False)
 
     def bind_api(self, gateway_url: str) -> None:
         """Publish the reachable gateway without replacing the broker that owns calls."""
@@ -565,41 +573,78 @@ class ScriptRuntimeLifecycle:
         return task, delivery, self._pending_worker_lease_epoch
 
     async def complete_worker_replacement(self) -> None:
-        """Reopen safely, then publish the backend for the config visible now."""
-        try:
-            if not self._worker_replacement_pending:
+        """Commit a prepared config generation and publish its replacement backend."""
+        await self._complete_worker_replacement(commit_prepared=True)
+
+    async def _retry_committed_worker_replacement(self) -> None:
+        """Retry only a replacement whose config generation is already published."""
+        await self._complete_worker_replacement(commit_prepared=False)
+
+    async def _complete_worker_replacement(self, *, commit_prepared: bool) -> None:
+        """Publish the replacement backend before retiring the previous lookup."""
+        retired_lease: _WorkerManagerLease | None = None
+        replacement_lease: _WorkerManagerLease | None = None
+        retirement_task: asyncio.Task[None] | None = None
+
+        async with self._worker_refresh_lock:
+            replacement_action = self._commit_worker_replacement_phase(commit_prepared=commit_prepared)
+            if replacement_action == "wait":
                 return
-            self._worker_replacement_pending = False
-
-            retired_lease = self._current_worker_lease
-            self._clear_current_worker_backend()
-            self._worker_config_epoch += 1
-            release_task = None if retired_lease is None else _release_worker_lease_later(retired_lease)
-            if release_task is not None:
-                await asyncio.shield(release_task)
-
-            async with self._worker_refresh_lock:
+            if replacement_action == "replace":
+                retired_lease = self._current_worker_lease
                 try:
-                    if self.config_provider() is None:
+                    current_config = self.config_provider()
+                    if (
+                        current_config is None
+                        or configured_primary_worker_manager_identity(self.runtime_paths, current_config) is None
+                    ):
                         self._clear_current_worker_backend()
                     else:
-                        await asyncio.wait_for(
-                            self._refresh_worker_backend_locked(),
+                        replacement_lease = await asyncio.wait_for(
+                            self._acquire_current_worker_lease(None),
                             timeout=self.pass_timeout_seconds,
                         )
+                        if replacement_lease is None:
+                            logger.warning("script_worker_backend_commit_refresh_pending")
+                            return
+                        self._current_worker_lease = replacement_lease
+                        self.manager.worker_backend = replacement_lease.manager
                 except TimeoutError:
-                    self._clear_current_worker_backend()
                     logger.warning(
                         "script_worker_backend_commit_refresh_timeout",
                         timeout_seconds=self.pass_timeout_seconds,
                     )
+                    return
                 except Exception:
-                    self._clear_current_worker_backend()
                     logger.warning("script_worker_backend_commit_refresh_pending", exc_info=True)
-        finally:
-            if self._reload_launch_fence_started:
-                self._reload_launch_fence_started = False
-                await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
+                    return
+                self._worker_replacement_phase = "idle"
+            if retired_lease is not None and retired_lease is not replacement_lease:
+                retirement_task = _release_worker_lease_later(retired_lease)
+            await run_coroutine_until_complete(self._end_reload_launch_fence())
+        if retirement_task is not None:
+            await asyncio.shield(retirement_task)
+
+    def _commit_worker_replacement_phase(self, *, commit_prepared: bool) -> _WorkerReplacementAction:
+        """Commit an explicit preparation, or authorize one published-generation retry."""
+        phase = self._worker_replacement_phase
+        if not commit_prepared and phase != "committed":
+            return "wait"
+        if phase == "preparing":
+            self._worker_replacement_phase = "committed"
+            self._worker_config_epoch += 1
+        elif phase == "preparing_retry":
+            self._worker_replacement_phase = "committed"
+        return "finish" if self._worker_replacement_phase == "idle" else "replace"
+
+    async def _end_reload_launch_fence(self) -> None:
+        """Finish the accepted fence release before reopening broker admission."""
+        if not self._reload_launch_fence_started:
+            return
+        await self.manager.end_startup_reconciliation()
+        self._reload_launch_fence_started = False
+        if self.api_enabled and self._api_ready.is_set() and not self._startup_cleanup_pending:
+            self.broker.open_call_admission()
 
     def _clear_current_worker_backend(self) -> None:
         self._current_worker_lease = None
@@ -648,33 +693,48 @@ class ScriptRuntimeLifecycle:
             if _agent_has_script_tool(current_config, agent_name)
             and not _agent_has_script_tool(plan.new_config, agent_name)
         }
+        process_authority_changes = {
+            agent_name
+            for agent_name in set(current_config.agents) & set(plan.new_config.agents)
+            if script_process_authority(current_config, agent_name)
+            != script_process_authority(plan.new_config, agent_name)
+        }
         authorization_changed = _agent_reply_authorization_changed(current_config, plan.new_config)
         if (
             not removed_agents
             and not isolation_changes
             and not script_tool_removals
+            and not process_authority_changes
             and not worker_configuration_changed
             and not authorization_changed
             and not plugins_changed
         ):
             return
 
-        replacement_started = False
+        previous_replacement_phase: _WorkerReplacementPhase | None = None
         launch_fence_started = False
 
         async def apply_update_boundary() -> None:
-            nonlocal launch_fence_started, replacement_started
-            launch_fence_started = True
-            await self.manager.begin_startup_reconciliation()
-            self._reload_launch_fence_started = True
-            if worker_configuration_changed:
-                replacement_started = True
-                self._worker_replacement_pending = True
+            nonlocal launch_fence_started, previous_replacement_phase
+            async with self._worker_refresh_lock:
+                self.broker.close_call_admission()
+                if not self._reload_launch_fence_started:
+                    launch_fence_started = True
+                    await self.manager.begin_startup_reconciliation()
+                    self._reload_launch_fence_started = True
+                if worker_configuration_changed:
+                    previous_replacement_phase = self._worker_replacement_phase
+                    self._worker_replacement_phase = "preparing"
+                elif self._worker_replacement_phase == "committed":
+                    previous_replacement_phase = self._worker_replacement_phase
+                    self._worker_replacement_phase = "preparing_retry"
             await self._apply_update_pass(
                 removed_agents=removed_agents,
                 isolation_changes=isolation_changes,
                 script_tool_removals=script_tool_removals,
+                process_authority_changes=process_authority_changes,
                 worker_configuration_changed=worker_configuration_changed,
+                recovery_config=current_config,
                 authorization_config=plan.new_config if authorization_changed else None,
                 plugins_changed=plugins_changed,
             )
@@ -685,15 +745,27 @@ class ScriptRuntimeLifecycle:
                 timeout=self.pass_timeout_seconds,
             )
         except BaseException as exc:
-            if replacement_started:
-                self._worker_replacement_pending = False
-            if launch_fence_started:
-                self._reload_launch_fence_started = False
-                await run_coroutine_until_complete(self.manager.end_startup_reconciliation())
+            await self._rollback_update_preparation(
+                previous_replacement_phase=previous_replacement_phase,
+                release_launch_fence=launch_fence_started,
+            )
             if isinstance(exc, TimeoutError):
                 msg = "Background script reload did not durably revoke every active run before the reload deadline."
                 raise _ScriptRuntimeLifecycleError(msg) from None
             raise
+
+    async def _rollback_update_preparation(
+        self,
+        *,
+        previous_replacement_phase: _WorkerReplacementPhase | None,
+        release_launch_fence: bool,
+    ) -> None:
+        """Restore replacement and fence ownership after an update preparation fails."""
+        async with self._worker_refresh_lock:
+            if previous_replacement_phase is not None:
+                self._worker_replacement_phase = previous_replacement_phase
+            if release_launch_fence:
+                await run_coroutine_until_complete(self._end_reload_launch_fence())
 
     async def _apply_update_pass(
         self,
@@ -701,7 +773,9 @@ class ScriptRuntimeLifecycle:
         removed_agents: set[str],
         isolation_changes: set[str],
         script_tool_removals: set[str],
+        process_authority_changes: set[str],
         worker_configuration_changed: bool,
+        recovery_config: Config,
         authorization_config: Config | None,
         plugins_changed: bool,
     ) -> None:
@@ -712,7 +786,12 @@ class ScriptRuntimeLifecycle:
             if authorization_config is not None
             and self.resolver.is_authorized(run, config=authorization_config) is not True
         }
-        affected_agents = removed_agents | isolation_changes | script_tool_removals
+        nonrecoverable_worker_ids = self._nonrecoverable_worker_run_ids(
+            runs,
+            config=recovery_config,
+            worker_configuration_changed=worker_configuration_changed,
+        )
+        affected_agents = removed_agents | isolation_changes | script_tool_removals | process_authority_changes
         affected = (
             runs
             if plugins_changed
@@ -720,10 +799,12 @@ class ScriptRuntimeLifecycle:
                 run
                 for run in runs
                 if run.run_id in unauthorized_ids
+                or run.run_id in nonrecoverable_worker_ids
                 or run.agent_name in affected_agents
-                or (worker_configuration_changed and not run.local_unsafe)
             ]
         )
+        affected_ids = {run.run_id for run in affected}
+        strict_worker_replacement = worker_configuration_changed and any(not run.local_unsafe for run in affected)
         await self._interrupt_runs(
             affected,
             reason_for=lambda run: (
@@ -733,11 +814,13 @@ class ScriptRuntimeLifecycle:
                     run,
                     removed_agents=removed_agents,
                     isolation_changes=isolation_changes,
-                    worker_configuration_changed=worker_configuration_changed,
+                    script_tool_removals=script_tool_removals,
+                    process_authority_changes=process_authority_changes,
+                    nonrecoverable_worker_ids=nonrecoverable_worker_ids,
                     plugins_changed=plugins_changed,
                 )
             ),
-            require_worker_success=worker_configuration_changed,
+            require_worker_success=strict_worker_replacement,
         )
 
         unfinished = await asyncio.to_thread(self.store.list_runs, include_finished=False)
@@ -746,10 +829,50 @@ class ScriptRuntimeLifecycle:
             raise _ScriptRuntimeLifecycleError(msg)
         _require_terminal_worker_replacement(
             unfinished,
-            worker_configuration_changed=worker_configuration_changed,
+            affected_ids=affected_ids if strict_worker_replacement else set(),
         )
-        if worker_configuration_changed:
-            await self._release_current_worker_lease()
+
+    def _nonrecoverable_worker_run_ids(
+        self,
+        runs: Sequence[ScriptRunRecord],
+        *,
+        config: Config,
+        worker_configuration_changed: bool,
+    ) -> set[str]:
+        """Return processes that the retiring backend cannot leave available."""
+        if not worker_configuration_changed:
+            return set()
+        return {
+            run.run_id
+            for run in runs
+            if not run.local_unsafe and not self._run_matches_recovery_contract(run, config=config)
+        }
+
+    def _run_matches_recovery_contract(self, run: ScriptRunRecord, *, config: Config) -> bool:
+        """Return whether the current backend advertises this run as recoverable."""
+        backend = self._worker_backend_for(run)
+        current_signature = script_recovery_signature(
+            backend=backend,
+            config=config,
+            agent_name=run.agent_name,
+            gateway_url=self.manager.gateway_url,
+            resource_profile=run.resource_profile,
+            resource_requests=run.resource_requests,
+            resource_limits=run.resource_limits,
+        )
+        if current_signature is not None and current_signature == run.recovery_signature:
+            return True
+        if not is_legacy_script_recovery_signature(run.recovery_signature):
+            return False
+        return (
+            legacy_script_recovery_signature(
+                backend=backend,
+                config=config,
+                agent_name=run.agent_name,
+                gateway_url=self.manager.gateway_url,
+            )
+            == run.recovery_signature
+        )
 
     async def _interrupt_runs(
         self,
@@ -900,6 +1023,8 @@ class ScriptRuntimeLifecycle:
         )
 
     async def _reconcile_pass(self) -> None:
+        if self._worker_replacement_phase == "committed":
+            await self._retry_committed_worker_replacement()
         try:
             await self._refresh_worker_backend()
         except WorkerBackendError:
@@ -1001,6 +1126,7 @@ class ScriptRuntimeLifecycle:
             return adopted
         for run in runs:
             try:
+                verified_run = run
                 backend = await self._refresh_worker_backend(required_backend_locator=run.worker_backend_locator)
                 if backend is not None and run.worker_key is not None:
                     await asyncio.to_thread(backend.touch_worker, run.worker_key)
@@ -1009,22 +1135,44 @@ class ScriptRuntimeLifecycle:
                     config=config,
                     agent_name=run.agent_name,
                     gateway_url=self.manager.gateway_url,
+                    resource_profile=run.resource_profile,
+                    resource_requests=run.resource_requests,
+                    resource_limits=run.resource_limits,
                 )
-                if current_signature != run.recovery_signature:
+                legacy_signature = (
+                    legacy_script_recovery_signature(
+                        backend=backend,
+                        config=config,
+                        agent_name=run.agent_name,
+                        gateway_url=self.manager.gateway_url,
+                    )
+                    if is_legacy_script_recovery_signature(run.recovery_signature)
+                    else None
+                )
+                if current_signature == run.recovery_signature:
+                    pass
+                elif legacy_signature == run.recovery_signature and current_signature is not None:
+                    verified_run = await asyncio.to_thread(
+                        self.store.replace_recovery_signature,
+                        run.run_id,
+                        expected_signature=run.recovery_signature,
+                        recovery_signature=current_signature,
+                    )
+                else:
                     await self.manager.revoke(run.run_id, reason=WORKER_CONFIGURATION_CHANGED)
                     await self.manager.reconcile_durable(run_id=run.run_id)
                     continue
-                authorized = self.resolver.is_authorized(run, config=config)
+                authorized = self.resolver.is_authorized(verified_run, config=config)
                 if authorized is None:
                     continue
                 if not authorized:
-                    await self.manager.revoke(run.run_id, reason=OWNER_AUTHORIZATION_REVOKED)
-                reconciled = await self.manager.reconcile_durable(run_id=run.run_id)
+                    await self.manager.revoke(verified_run.run_id, reason=OWNER_AUTHORIZATION_REVOKED)
+                reconciled = await self.manager.reconcile_durable(run_id=verified_run.run_id)
                 if reconciled.state is ScriptRunState.RUNNING and reconciled.cancel_requested_at is None:
                     # A previous primary may have died after claiming a tool call.
                     # Settle that ownership without replaying it or revoking the surviving process.
-                    await self.broker.cancel_run(run.run_id)
-                    adopted.add(run.run_id)
+                    await self.broker.cancel_run(verified_run.run_id)
+                    adopted.add(verified_run.run_id)
             except (ScriptRunManagerError, ScriptWorkerError, WorkerBackendError, _ScriptRuntimeUnavailableError):
                 logger.warning("script_startup_recovery_pending", run_id=run.run_id, exc_info=True)
         return adopted
@@ -1323,9 +1471,9 @@ def _require_successful_worker_replacement_stage(
 def _require_terminal_worker_replacement(
     unfinished: Sequence[ScriptRunRecord],
     *,
-    worker_configuration_changed: bool,
+    affected_ids: set[str],
 ) -> None:
-    if worker_configuration_changed and any(not run.local_unsafe for run in unfinished):
+    if any(run.run_id in affected_ids and not run.local_unsafe for run in unfinished):
         msg = "Worker replacement did not publish terminal durable state for every active worker run."
         raise _ScriptRuntimeLifecycleError(msg)
 
@@ -1335,18 +1483,22 @@ def _reload_reason_for(
     *,
     removed_agents: set[str],
     isolation_changes: set[str],
-    worker_configuration_changed: bool,
+    script_tool_removals: set[str],
+    process_authority_changes: set[str],
+    nonrecoverable_worker_ids: set[str],
     plugins_changed: bool,
 ) -> str:
-    if worker_configuration_changed and not run.local_unsafe:
-        return WORKER_CONFIGURATION_CHANGED
     if plugins_changed:
         return PLUGIN_TOOLS_CHANGED
     if run.agent_name in removed_agents:
         return OWNER_AGENT_REMOVED
     if run.agent_name in isolation_changes:
         return AGENT_ISOLATION_CHANGED
-    return SCRIPT_TOOL_REMOVED
+    if run.agent_name in script_tool_removals:
+        return SCRIPT_TOOL_REMOVED
+    if run.agent_name in process_authority_changes or run.run_id in nonrecoverable_worker_ids:
+        return WORKER_CONFIGURATION_CHANGED
+    return OWNER_AUTHORIZATION_REVOKED
 
 
 def _script_retention_seconds(runtime_paths: RuntimePaths) -> float:
