@@ -4,6 +4,7 @@ from __future__ import annotations
 
 _LEGACY_TERMINAL_SUFFIXES = (" [cancelled]", " [error]")
 
+# LEGACY_COMPAT: Body-only cancellation and error suffixes.
 # Legacy format: Body-only cancellation and error suffixes without stream_status.
 # Last legacy release: v2026.3.121; replacement: v2026.3.122 wrote structured stream status.
 # Handling: Detect and strip only the two bounded suffixes in their historical single-pass order.

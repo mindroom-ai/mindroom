@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import nio
 
+# LEGACY_COMPAT: File edits with media descriptors only inside m.new_content.
 # Legacy format: m.file replacement events with media descriptors only inside m.new_content.
 # Last legacy release: v2026.8.87; replacement: v2026.8.88 writes valid outer media fallbacks.
 # Handling: Supply validated replacement media only for parsing; preserve the original source for projection.

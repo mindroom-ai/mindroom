@@ -4,11 +4,13 @@ Only the SQLite store invokes this boundary when validating or normalizing store
 This module never owns a transaction or imports the live store or lifecycle.
 """
 
+# LEGACY_COMPAT: Embedded OAuth publication metadata in credential mappings.
 # Legacy format: embedded `_mindroom_oauth_publication` metadata inside credential mappings.
 # Last legacy release: unreleased pre-SQLite writer; v2026.8.80 already stripped the marker.
 # Handling: reads normalize a copy; only the owning write transaction persists marker removal.
 # Coverage: tests/test_oauth_credential_store.py::test_legacy_publication_marker_normalizes_without_changing_credentials_or_generations.
 
+# LEGACY_COMPAT: OAuth requester bindings without the lossless prefix.
 # Legacy format: OAuth scope bindings used requester keys without the lossless `~` prefix.
 # Last legacy release: v2026.9.32; prefixed lossless encoding introduced in v2026.9.33.
 # Handling: compatibility added in v2026.9.34 retains verified bindings at their raw-identity paths.

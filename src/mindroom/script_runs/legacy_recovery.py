@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from mindroom.workers.backends.kubernetes_config import KubernetesWorkerBackendConfig
 
 
+# LEGACY_COMPAT: Unversioned recovery digests covering the complete Kubernetes config.
 # Legacy format: unversioned recovery digests included the complete Kubernetes config snapshot.
 # Last legacy release: v2026.9.142; v2 binds only the owning script worker's process authority.
 # Handling: migrate only an exact digest for the current config; unverifiable changed digests fail closed.

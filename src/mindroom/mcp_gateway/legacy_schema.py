@@ -90,6 +90,7 @@ def _install_triggers(connection: sqlite3.Connection, table: str, *, lifecycle: 
 
 def _migrate_client_expiry(connection: sqlite3.Connection, registration_expires_at: Callable[[], float]) -> None:
     """Give legacy client registrations the current fixed retention deadline once."""
+    # LEGACY_COMPAT: Gateway client registrations without expiry.
     # Legacy format: staged `clients` rows had no registration expiry column.
     # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
     # Handling: assign one durable registration deadline and index it without sliding on reopen.
@@ -102,6 +103,7 @@ def _migrate_client_expiry(connection: sqlite3.Connection, registration_expires_
 
 def _migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
     """Backfill once under the caller's writer transaction; reopening never resets timestamps."""
+    # LEGACY_COMPAT: Gateway tables without capacity accounting and ownership fields.
     # Legacy format: staged gateway tables had no byte charges, counters, requester ownership, or issuance time.
     # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
     # Handling: backfill fields and counters once inside the store's writer transaction.
@@ -170,6 +172,7 @@ def _migrate_accounting(connection: sqlite3.Connection, now: float) -> None:
 
 def _migrate_lifecycle(connection: sqlite3.Connection) -> None:
     """Preserve existing absolute deadlines and leave unknown creation/activity dates null."""
+    # LEGACY_COMPAT: Gateway grants and consent without lifecycle dates and account bindings.
     # Legacy format: staged grants and pending consent lacked lifecycle dates and account bindings.
     # Last legacy release: pre-release schema; v2026.9.33 already completed this upgrade.
     # Handling: preserve absolute expiry, leave unknown history null, and add nullable account ownership.
@@ -202,6 +205,7 @@ def _migrate_lifecycle(connection: sqlite3.Connection) -> None:
 
 def _migrate_accounts(connection: sqlite3.Connection) -> None:
     """Create the directory inside the caller's migration transaction."""
+    # LEGACY_COMPAT: Gateway schemas without an account directory.
     # Legacy format: staged gateway schemas had no account directory.
     # Last legacy release: pre-release schema; v2026.9.33 already created the directory during initialization.
     # Handling: create the account directory in the same migration transaction.
@@ -212,6 +216,7 @@ def _migrate_accounts(connection: sqlite3.Connection) -> None:
         created_at REAL NOT NULL, updated_at REAL NOT NULL,
         profile TEXT NOT NULL DEFAULT '{}', token_valid_after REAL NOT NULL
     )""")
+    # LEGACY_COMPAT: Gateway accounts without an external-token cutoff.
     # Legacy format: released six-column gateway accounts had no external-token cutoff.
     # Last legacy release: v2026.9.46; `token_valid_after` introduced in v2026.9.47.
     # Handling: assign one durable migration-time cutoff so older external tokens remain rejected.
@@ -223,6 +228,7 @@ def _migrate_accounts(connection: sqlite3.Connection) -> None:
 
 def _migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
     """Compact consumed refresh bindings and install their bounded charge once."""
+    # LEGACY_COMPAT: Gateway accounting v1 with full consumed-refresh payloads.
     # Legacy format: staged accounting v1 retained full payloads on consumed refresh rows.
     # Last legacy release: pre-release schema; v2026.9.33 already completed accounting v2.
     # Handling: compact only consumed refresh payloads, replace triggers, and reconcile byte counters atomically.
@@ -241,7 +247,9 @@ def _migrate_lifecycle_accounting(connection: sqlite3.Connection) -> None:
 
 def _migrate_user_authority(connection: sqlite3.Connection) -> None:
     """Require fresh consent when moving from one agent to the dashboard's shared selection."""
+    # LEGACY_COMPAT: Gateway schema v2 authority bound to one personal agent.
     # Legacy format: schema v2 grants and pending consent authorized one personal agent.
+    # Last legacy release: v2026.9.74; replacement: v2026.9.75 introduced schema v3 authority with shared agent selection.
     # Handling: retire old authority atomically; preserve registrations and provisioned accounts.
     # Coverage: tests/test_mcp_gateway_selection.py::test_agent_bound_authority_is_retired_once.
     if connection.execute("PRAGMA user_version").fetchone()[0] >= 3:

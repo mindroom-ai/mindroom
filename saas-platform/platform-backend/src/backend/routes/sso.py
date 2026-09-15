@@ -48,6 +48,7 @@ def _set_cookie(
     response.set_cookie(**kwargs)
 
 
+# LEGACY_COMPAT: Host-only SSO cookies on shared-domain deployments.
 # Legacy format: Shared DNS-domain deployments wrote host-only SSO cookies that tenant subdomains could not receive.
 # Last legacy release: v2026.6.146; replacement: v2026.6.147 wrote shared-domain cookies and expired host-only cookies.
 # Handling: Expire old host-only cookies for shared DNS domains; localhost, IPs, and single-label hosts remain host-only.

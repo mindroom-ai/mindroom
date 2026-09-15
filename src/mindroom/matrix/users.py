@@ -597,6 +597,7 @@ def _direct_token_registration_error(
     return None
 
 
+# LEGACY_COMPAT: Persisted Matrix accounts without the requested username.
 # Legacy format: Persisted internal Matrix accounts omitted requested_username.
 # Last legacy release: v2026.5.160; replacement: v2026.5.161 persisted the immutable creation request.
 # Handling: Use the actual stored username as the original request only when the dedicated field is absent.

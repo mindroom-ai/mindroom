@@ -1,5 +1,6 @@
 """Atomic SQLite storage for one canonical OAuth credential scope."""
 
+# LEGACY_COMPAT: Retired OAuth JSON credentials and generation/lock sidecars.
 # Legacy format: generic JSON OAuth credentials and adjacent generation/lock sidecars.
 # Last legacy release: v2026.8.79; authoritative SQLite storage introduced in v2026.8.80.
 # Handling: adoption ended after v2026.9.48; obsolete files stay untouched and reconnect is required.

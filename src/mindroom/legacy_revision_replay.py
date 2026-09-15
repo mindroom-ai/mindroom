@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
     from mindroom.turn_record import RevisionReplay
 
+# LEGACY_COMPAT: Source revision summaries without per-revision provenance.
 # Legacy format: Source-level revision summaries without per-revision replay provenance.
 # Last legacy release: v2026.9.42; replacement: v2026.9.43 added per-revision provenance.
 # Handling: Preserve and select source-only summary ownership only for reconstructed historical revisions.

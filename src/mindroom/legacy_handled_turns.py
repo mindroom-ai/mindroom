@@ -20,11 +20,13 @@ logger = get_logger(__name__)
 
 _LEDGER_RECORDS_KEY = "records"
 
+# LEGACY_COMPAT: Handled-turn records without source or suppressed revision summaries.
 # Legacy format: Schema-version-1 handled turns without source or suppressed revision summaries.
 # Last legacy release: v2026.7.252; replacement: v2026.7.253 added optional source-level summaries.
 # Handling: Accept absent summaries without inventing revision identity that the old writer never persisted.
 # Coverage: tests/test_handled_turns.py::test_a_pre_database_ledger_is_adopted_on_first_load.
 
+# LEGACY_COMPAT: Revision summaries without per-revision replay state.
 # Legacy format: Source-level revision summaries without per-revision replay state.
 # Last legacy release: v2026.9.42; replacement: v2026.9.43 added revision_replay.
 # Handling: Reconstruct reduced replay facts and label their summary-only provenance.
@@ -84,11 +86,13 @@ async def import_legacy_ledger(
     if path is None or not path.exists():
         return ()
 
+    # LEGACY_COMPAT: Unversioned event-to-record handled-turn JSON maps.
     # Legacy format: Top-level event-to-record handled-turn JSON map.
     # Last legacy release: v2026.7.101; replacement: v2026.7.102 intentionally rejected this shape.
     # Handling: Process as zero rows and preserve exact bytes under .imported without restoring its reader.
     # Coverage: tests/test_handled_turns.py::test_released_unversioned_ledger_cutoff_preserves_bytes_without_adoption.
 
+    # LEGACY_COMPAT: Schema-v1 handled-turn JSON before journal ownership.
     # Legacy format: Schema-version-1 handled-turn JSON ledger before journal ownership.
     # Last legacy release: v2026.8.30; replacement: v2026.8.31 moved records into turn_records.
     # Handling: Adopt missing indexes and rename only after the full pass; .imported means processed, not adopted.

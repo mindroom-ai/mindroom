@@ -451,7 +451,9 @@ Design migrations around that assumption rather than adding machinery to coordin
   This includes one-time migrations, recurring old-data readers, and diagnostics for retired fields.
 - Keep current-format processing, transactions, locking, validation, authorization, and retries with the current storage or lifecycle owner.
   Small field defaults can stay with their model when extraction would only add indirection.
-- Each substantive legacy rule must have a nearby source comment with these fields:
+- Each substantive legacy rule must have a nearby source comment whose first line is `# LEGACY_COMPAT: <short description of the legacy format>`.
+  Use one marker per documented rule, including small defaults and compatibility notes kept beside current owners, so `rg -n -F 'LEGACY_COMPAT:' --glob '*.py'` lists them across the repository.
+  Follow the marker with these fields:
   - `Legacy format`: the old representation and the condition that selects this rule.
   - `Last legacy release`: the last stable MindRoom release whose native writer or typed model emitted that representation, plus the replacement release and format.
   - `Handling`: what the current reader, migration, or rejection does and which guarantees it preserves.

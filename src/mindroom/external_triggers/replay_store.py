@@ -257,6 +257,7 @@ def _empty_store() -> _SerializedReplayStore:
     return {"nonces": {}, "events": {}, "threads": {}}
 
 
+# LEGACY_COMPAT: External-trigger replay claims without thread-key tracking.
 # Legacy format: External-trigger replay stores contained nonce and event claims but no threads section.
 # Last legacy release: v2026.9.20; replacement: v2026.9.21 persisted thread-key claims.
 # Handling: Treat the missing section as empty and preserve existing dedup claims on the next store write.

@@ -2,26 +2,31 @@
 
 from __future__ import annotations
 
+# LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
 # Last legacy release: v2026.2.32; replacement: v2026.2.33 removed the scalar field.
 # Handling: Reject the retired spelling with a directed replacement instead of silently discarding it.
 # Coverage: tests/test_agents.py::test_config_rejects_legacy_agent_knowledge_base_field.
 
+# LEGACY_COMPAT: Retired memory_dir agent configuration.
 # Legacy format: Agent config accepted memory_dir for file-backed memory.
 # Last legacy release: v2026.2.166; replacement: v2026.2.167 removed memory_dir.
 # Handling: Reject it with guidance to current context files and file-memory configuration.
 # Coverage: tests/test_agents.py::test_config_rejects_legacy_agent_memory_dir_field.
 
+# LEGACY_COMPAT: Retired memory_file_path agent configuration.
 # Legacy format: Agent config accepted memory_file_path as a file-memory location.
 # Last legacy release: v2026.3.100; replacement: v2026.3.101 moved file memory to canonical workspaces.
 # Handling: Reject it for every memory backend and direct authored paths to the workspace model.
 # Coverage: tests/test_agents.py::test_config_rejects_memory_file_path_even_with_file_backend.
 
+# LEGACY_COMPAT: Sandbox tools configured under sandbox_tools.
 # Legacy format: Agent and defaults config accepted sandbox_tools instead of worker_tools.
 # Last legacy release: v2026.3.71; replacement: v2026.3.72 renamed the field to worker_tools.
 # Handling: Reject both retired locations with their current field name.
 # Coverage: tests/test_agents.py::test_config_rejects_legacy_defaults_sandbox_tools_field.
 
+# LEGACY_COMPAT: Agent tool selection through allowed_toolkits and initial_toolkits.
 # Legacy format: Agent config accepted allowed_toolkits and initial_toolkits.
 # Last legacy release: v2026.6.11; replacement: v2026.6.12 removed both agent fields.
 # Handling: Reject them with guidance to expand bundles into per-tool configuration.
@@ -62,6 +67,7 @@ def reject_legacy_agent_fields(value: object) -> object:
     return value
 
 
+# LEGACY_COMPAT: Unversioned toolkit-selection fields in defaults.
 # Legacy format: Defaults allowed_toolkits and initial_toolkits are unversioned authored input, not native fields.
 # Last legacy release: no tagged native model; v2026.4.19 first rejected these previously ignored defaults keys.
 # Handling: Reject both spellings with guidance to defaults.tools; do not infer a native removal release.
