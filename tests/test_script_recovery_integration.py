@@ -75,6 +75,9 @@ class _RecoveringWorkerBackend:
     def script_recovery_signature(self) -> str:
         return "stable-worker-authority"
 
+    def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
+        return {"profile": resource_profile, "requests": {}, "limits": {}}
+
     def ensure_worker(
         self,
         spec: WorkerSpec,

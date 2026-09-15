@@ -262,8 +262,15 @@ Calls are serialized within one run to keep approval and side-effect order predi
 New Kubernetes script runs survive primary-runtime restarts and compatible image upgrades in their existing dedicated workers.
 Shutdown keeps those processes and capabilities alive while draining accepted tool calls within its deadline.
 Startup fences launches and gateway calls until it verifies the exact worker and supervisor handle, the current requester authorization, and the persisted recovery contract.
-The contract includes the script protocol version, worker ownership and configuration, authentication material, private scope, and gateway URL; it permits a changed image or image pull policy while keeping the active worker on its launch image.
+The contract includes the script protocol version, worker ownership and storage, authentication material, execution and private scope, knowledge paths, credential policy, selected resource-profile settings, and gateway URL.
+It permits a changed image or image pull policy while keeping the active worker on its launch image.
 Fresh runs use the newly configured worker image.
+Compatible Kubernetes scripts also survive configuration reloads that change delegation or unrelated agents.
+Removing the owner, authorization, or script tool, changing the owner's process authority, or reloading plugins interrupts affected scripts.
+Resource profiles come from the startup environment rather than reloadable YAML; changing the selected profile's resources prevents adoption after restart, while changing an unused profile does not.
+Backend replacement interrupts scripts whose backend cannot preserve their processes, including Docker workers.
+During replacement, new launches and gateway calls remain unavailable until the new backend is published; existing Kubernetes processes keep running and the SDK retries temporary gateway unavailability.
+Startup migrates an old unversioned recovery signature only when its complete original configuration digest still matches exactly; unverifiable records are interrupted.
 Keep the isolated gateway address stable across upgrades.
 Missing runtime dependencies or a temporary worker-status outage leave recovery pending; gateway calls return retryable HTTP 503 responses until admission reopens.
 The SDK retries transport failures and these responses using the same logical call ID.
