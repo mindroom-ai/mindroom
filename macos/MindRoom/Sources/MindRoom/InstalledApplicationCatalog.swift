@@ -4,7 +4,6 @@ import Foundation
 struct InstalledDesktopApplication: Identifiable, Hashable {
     let id: String
     let name: String
-    let url: URL
     let running: Bool
 }
 
@@ -32,7 +31,6 @@ enum InstalledApplicationCatalog {
                 found[identifier] = InstalledDesktopApplication(
                     id: identifier,
                     name: name,
-                    url: url,
                     running: runningIDs.contains(identifier)
                 )
             }
@@ -40,7 +38,6 @@ enum InstalledApplicationCatalog {
         found["primary-screen"] = InstalledDesktopApplication(
             id: "primary-screen",
             name: "Primary Screen (advanced coordinate fallback)",
-            url: URL(fileURLWithPath: "/"),
             running: true
         )
         return found.values.sorted {

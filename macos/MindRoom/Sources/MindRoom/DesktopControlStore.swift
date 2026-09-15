@@ -251,7 +251,8 @@ final class DesktopControlStore: ObservableObject {
         }
     }
 
-    private func hydrateConfiguration(from value: DesktopStatus) {
+    func hydrateConfiguration(from value: DesktopStatus) {
+        let shouldHydrateBrowser = value.config.state == "ready" && observedConfigRevision != value.config.revision
         if observedConfigRevision != value.config.revision {
             confirmedIdentity = nil
         }
@@ -263,6 +264,11 @@ final class DesktopControlStore: ObservableObject {
         if selectedAppIDs.isEmpty { selectedAppIDs = Set(value.config.allowedAppIDs ?? []) }
         if controllerFingerprint.isEmpty {
             controllerFingerprint = value.pairing.controllerFingerprint ?? ""
+        }
+        if shouldHydrateBrowser {
+            browserEnabled = value.browser.configured
+            browserExecutable = value.browser.executablePath ?? ""
+            browserProfile = value.browser.userDataDirectory ?? ""
         }
     }
 

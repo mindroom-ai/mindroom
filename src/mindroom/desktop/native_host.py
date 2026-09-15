@@ -28,6 +28,7 @@ from mindroom.desktop.native_protocol import (
     encode_native_message,
     parse_native_request,
 )
+from mindroom.desktop.protocol import DesktopSetupDescriptor
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -82,6 +83,7 @@ class NativeDesktopHost:
         self._dependencies = dependencies or NativeHostDependencies()
         self._lock = asyncio.Lock()
         self._runtime: _NativeBridgeRuntimeProtocol | None = None
+        self._startup_task: asyncio.Task[None] | None = None
         self._helper_state = "running"
         self._last_error: dict[str, object] | None = None
         self._pairing_state = "unpaired"
@@ -112,7 +114,6 @@ class NativeDesktopHost:
         if self._helper_state == "stopping":
             bridge_state = "stopping"
         browser_configured = bool(config and config.browser.enabled)
-        env_value = getattr(self._runtime_paths, "env_value", lambda *_args, **_kwargs: None)
         return {
             "config": {
                 "state": "ready" if config is not None else ("invalid" if self._last_error else "missing"),
@@ -146,13 +147,17 @@ class NativeDesktopHost:
             "permissions": _permission_status(),
             "browser": {
                 "configured": browser_configured,
+                "executable_path": str(config.browser.executable_path)
+                if config and config.browser.executable_path
+                else None,
+                "user_data_dir": str(config.browser.user_data_dir) if config and config.browser.user_data_dir else None,
                 "runtime": "available" if shutil.which("npx") else "missing",
                 "extension": (
                     "connected"
                     if runtime_status.get("browser_connected")
                     else ("disconnected" if browser_configured else "disabled")
                 ),
-                "reconnect_token_configured": bool(env_value("PLAYWRIGHT_MCP_EXTENSION_TOKEN")),
+                "reconnect_token_configured": bool(self._runtime_paths.env_value("PLAYWRIGHT_MCP_EXTENSION_TOKEN")),
                 "last_error": None,
             },
             "apps": [
@@ -212,8 +217,6 @@ class NativeDesktopHost:
             return {"status": self.status()}
         if action == "import_setup":
             _expect_keys(parameters, {"descriptor"})
-            from mindroom.desktop.protocol import DesktopSetupDescriptor
-
             descriptor = DesktopSetupDescriptor.from_content(parameters.get("descriptor"))
             return descriptor.to_content()
         if action == "login":
@@ -264,8 +267,12 @@ class NativeDesktopHost:
                 raise NativeProtocolError("already_running", "The desktop bridge is already running.")
             runtime = (self._dependencies.runtime_factory or NativeBridgeRuntime)(self._runtime_paths, config)
             self._helper_state = "starting"
+            self._startup_task = asyncio.create_task(runtime.start())
             try:
-                await runtime.start()
+                await self._startup_task
+            except asyncio.CancelledError as exc:
+                self._helper_state = "running"
+                raise NativeProtocolError("not_running", "Desktop bridge startup was stopped.") from exc
             except Exception as exc:
                 self._helper_state = "faulted"
                 message = str(exc) or "Desktop bridge start failed."
@@ -276,11 +283,23 @@ class NativeDesktopHost:
                     recovery="Complete sign-in and pairing, then retry.",
                     retryable=True,
                 ) from exc
+            finally:
+                self._startup_task = None
             self._runtime = runtime
             self._helper_state = "running"
             return {"status": self.status()}
         if action == "stop":
             _expect_keys(parameters, set())
+            if self._startup_task is not None:
+                self._helper_state = "stopping"
+                self._startup_task.cancel()
+                # Startup owns cleanup; wait until its handler has released
+                # the lifecycle lock before deciding whether it published a runtime.
+                async with self._lock:
+                    pass
+                if self._runtime is None:
+                    self._helper_state = "running"
+                    return {"status": self.status()}
             runtime = self._require_runtime()
             self._helper_state = "stopping"
             await runtime.stop()

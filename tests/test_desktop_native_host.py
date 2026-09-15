@@ -10,6 +10,7 @@ import io
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 from mindroom.desktop.native_config import NativeDesktopConfig
@@ -19,7 +20,7 @@ from mindroom.desktop.native_host import (
     serve_native_stream,
     supervise_native_tasks,
 )
-from mindroom.desktop.native_protocol import NativeRequest
+from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest
 
 
 def _config_payload() -> dict[str, object]:
@@ -93,7 +94,7 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     dependencies = NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime)
     host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path),
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
         helper_version="1.2.3",
         dependencies=dependencies,
     )
@@ -116,6 +117,32 @@ def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
     assert runtime.stopped == 1
 
 
+def test_host_status_returns_persisted_browser_settings(tmp_path: Path) -> None:
+    executable = tmp_path / "browser"
+    executable.touch()
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    payload = _config_payload()
+    payload["browser"] = {
+        "enabled": True,
+        "executable_path": str(executable),
+        "user_data_dir": str(profile),
+        "timeout_seconds": 90,
+    }
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: FakeRuntime()),
+    )
+
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+
+    browser = cast("dict[str, object]", host.status()["browser"])
+    assert browser["configured"] is True
+    assert browser["executable_path"] == str(executable)
+    assert browser["user_data_dir"] == str(profile)
+
+
 def test_host_login_and_pair_never_echo_secrets(tmp_path: Path) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -129,7 +156,7 @@ def test_host_login_and_pair_never_echo_secrets(tmp_path: Path) -> None:
         return {"verification": "ABCD-EFGH", "confirmation_command": "!desktop confirm code ABCD-EFGH"}
 
     host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path),
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
         helper_version="1",
         dependencies=NativeHostDependencies(
             runtime_factory=lambda _paths, _config: FakeRuntime(),
@@ -158,7 +185,7 @@ def test_host_login_and_pair_never_echo_secrets(tmp_path: Path) -> None:
 
 def test_import_setup_validates_and_keeps_pairing_code_transient(tmp_path: Path) -> None:
     host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path),
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
         helper_version="1",
         dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: FakeRuntime()),
     )
@@ -184,7 +211,7 @@ def test_import_setup_validates_and_keeps_pairing_code_transient(tmp_path: Path)
 def test_stream_emits_correlated_error_and_stops_on_eof(tmp_path: Path) -> None:
     runtime = FakeRuntime()
     host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path),
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
         helper_version="1",
         dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
     )
@@ -201,7 +228,7 @@ def test_stream_emits_correlated_error_and_stops_on_eof(tmp_path: Path) -> None:
 
 def test_stream_drains_one_oversized_record_before_next_request(tmp_path: Path) -> None:
     host = NativeDesktopHost(
-        SimpleNamespace(storage_root=tmp_path),
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
         helper_version="1",
         dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: FakeRuntime()),
     )
@@ -285,7 +312,7 @@ def test_eof_waits_for_inflight_stop_and_retains_runtime_ownership(tmp_path: Pat
     async def scenario() -> tuple[bool, bool, bool, bool, str]:
         runtime = SlowStopRuntime()
         host = NativeDesktopHost(
-            SimpleNamespace(storage_root=tmp_path),
+            SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
             helper_version="1",
             dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
         )
@@ -343,7 +370,7 @@ def test_revoke_bypasses_slow_lifecycle_operation(tmp_path: Path) -> None:
     async def scenario() -> int:
         runtime = FakeRuntime()
         host = NativeDesktopHost(
-            SimpleNamespace(storage_root=tmp_path),
+            SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
             helper_version="1",
             dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
         )
@@ -358,3 +385,54 @@ def test_revoke_bypasses_slow_lifecycle_operation(tmp_path: Path) -> None:
         return runtime.revoked
 
     assert asyncio.run(scenario()) == 1
+
+
+def test_host_remains_available_when_config_path_is_a_directory(tmp_path: Path) -> None:
+    path = tmp_path / "desktop_bridge" / "native_config.json"
+    path.mkdir(parents=True, mode=0o700)
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+    )
+    status = host.status()
+    assert status["config"]["state"] == "invalid"
+    assert status["bridge"]["last_error"]["code"] == "invalid_request"
+
+
+def test_stop_cancels_pending_start_before_it_can_publish_running(tmp_path: Path) -> None:
+    class SlowStartRuntime(FakeRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def start(self) -> None:
+            self.entered.set()
+            await self.release.wait()
+            await super().start()
+
+    async def scenario() -> None:
+        runtime = SlowStartRuntime()
+        host = NativeDesktopHost(
+            SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+            helper_version="1",
+            dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
+        )
+        await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+        starting = asyncio.create_task(host.handle(_request("start")))
+        await runtime.entered.wait()
+        stopping = asyncio.create_task(host.handle(_request("stop")))
+        await asyncio.sleep(0)
+        runtime.release.set()
+        stopped, start_result = await asyncio.gather(stopping, starting, return_exceptions=True)
+        assert isinstance(stopped, dict)
+        assert stopped["status"]["bridge"]["state"] == "stopped"
+        assert isinstance(start_result, NativeProtocolError)
+        assert start_result.code == "not_running"
+        assert not runtime.running
+        # A cancelled start must release ownership for a subsequent explicit start.
+        await host.handle(_request("start"))
+        assert runtime.running
+        await host.shutdown()
+
+    asyncio.run(scenario())

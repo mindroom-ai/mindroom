@@ -113,6 +113,8 @@ struct DesktopPermissionsStatus: Codable, Equatable {
 
 struct DesktopBrowserStatus: Codable, Equatable {
     let configured: Bool
+    let executablePath: String?
+    let userDataDirectory: String?
     let runtime: String
     let extensionState: String
     let reconnectTokenConfigured: Bool
@@ -120,6 +122,8 @@ struct DesktopBrowserStatus: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case configured, runtime
+        case executablePath = "executable_path"
+        case userDataDirectory = "user_data_dir"
         case extensionState = "extension"
         case reconnectTokenConfigured = "reconnect_token_configured"
         case lastError = "last_error"
@@ -176,6 +180,8 @@ struct DesktopStatus: Codable, Equatable {
         ),
         browser: DesktopBrowserStatus(
             configured: false,
+            executablePath: nil,
+            userDataDirectory: nil,
             runtime: "missing",
             extensionState: "disabled",
             reconnectTokenConfigured: false,

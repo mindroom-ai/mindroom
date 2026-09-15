@@ -1,6 +1,6 @@
 """Native desktop configuration contract tests."""
 
-# ruff: noqa: D103, TC003
+# ruff: noqa: D103
 
 from __future__ import annotations
 
@@ -89,3 +89,22 @@ def test_load_native_config_rejects_permissive_mode(tmp_path: Path) -> None:
     path.chmod(0o644)
     with pytest.raises(NativeConfigError, match="group or other"):
         load_native_config(path)
+
+
+@pytest.mark.parametrize("operation", ["stat", "read_text"])
+def test_load_native_config_reports_filesystem_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    path = native_config_path(tmp_path)
+    save_native_config(path, NativeDesktopConfig.from_payload(_payload()), expected_revision=0)
+
+    def denied(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, operation, denied)
+        with pytest.raises(NativeConfigError, match="could not be read") as caught:
+            load_native_config(path)
+    assert caught.value.code == "invalid_request"

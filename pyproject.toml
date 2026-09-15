@@ -43,7 +43,10 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Pin the reviewed transport commit until NIO 1.1.0 is released.
-  "mindroom-nio[e2e] @ git+https://github.com/mindroom-ai/mindroom-nio.git@6542ccaad43848fa6f894f4b6a612b3c4cbff81a",
+  """\
+  mindroom-nio[e2e] @ \
+  https://github.com/mindroom-ai/mindroom-nio/archive/aa7630ca73b6045daa3947e43005a67297d2fb64.tar.gz\
+  """,
   "openai",
   "packaging>=24",
   "pydantic>=2",

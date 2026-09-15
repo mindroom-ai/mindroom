@@ -600,7 +600,13 @@ async def test_auxiliary_replay_preserves_evidence_but_current_authority_can_be_
             "sender": device.user_id,
             "content": {"algorithm": "m.olm.v1.curve25519-aes-sha2", "sender_key": "curve"},
         },
-        clear={"type": "org.example.call", "sender": device.user_id, "content": {"key": "value"}},
+        clear={
+            "type": "org.example.call",
+            "sender": device.user_id,
+            "sender_device": device.device_id,
+            "keys": {"ed25519": device.ed25519},
+            "content": {"key": "value"},
+        },
         route="to_device",
         crypto=CryptoEvidence(
             None,

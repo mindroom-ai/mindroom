@@ -176,6 +176,8 @@ def load_native_config(path: Path) -> NativeDesktopConfig:
         file_stat = path.stat()
     except FileNotFoundError as exc:
         raise NativeConfigError("configuration_missing", "Native desktop configuration is missing.") from exc
+    except OSError as exc:
+        raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
     if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
         raise NativeConfigError(
             "invalid_request",
@@ -185,6 +187,8 @@ def load_native_config(path: Path) -> NativeDesktopConfig:
         return NativeDesktopConfig.from_payload(json.loads(path.read_text(encoding="utf-8")))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise NativeConfigError("invalid_request", "Native desktop configuration is malformed.") from exc
+    except OSError as exc:
+        raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
 
 
 def save_native_config(

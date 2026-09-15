@@ -208,6 +208,19 @@ Matrix sync callback
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
+| `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
+| `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
+| `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
+| `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
+| `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
+| `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |
+| `desktop/macos_input.py` | Sends bounded Quartz pointer input in global logical coordinates |
+| `desktop/macos_capture.py` | Captures verified windows and displays through ScreenCaptureKit |
+| `desktop/native_config.py` | Validates and persists private native-helper configuration |
+| `desktop/native_protocol.py` | Parses and bounds requests on the local NDJSON channel |
+| `desktop/native_host.py` | Owns helper setup, runtime lifecycle, local control, and stdio dispatch |
+| `desktop/native_entry.py` | Starts the packaged native desktop helper |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |

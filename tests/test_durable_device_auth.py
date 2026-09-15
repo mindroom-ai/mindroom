@@ -29,7 +29,13 @@ def test_replayed_identity_requires_current_device_and_pin(change: str | None) -
             "sender": device.user_id,
             "content": {"algorithm": "m.olm.v1.curve25519-aes-sha2", "sender_key": "curve"},
         },
-        clear={"type": "org.example.call", "sender": device.user_id, "content": {"value": "hello"}},
+        clear={
+            "type": "org.example.call",
+            "sender": device.user_id,
+            "sender_device": device.device_id,
+            "keys": {"ed25519": device.ed25519},
+            "content": {"value": "hello"},
+        },
         crypto=CryptoEvidence(None, "curve", authenticated_sender=identity),
         route="to_device",
     )
