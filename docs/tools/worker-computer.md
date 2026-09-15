@@ -115,9 +115,11 @@ agents:
     worker_scope: user_agent
 ```
 
-Metadata and link-local addresses stay blocked even with this option. Callback errors and timeouts deny requests;
-service workers are blocked. This request guard does not promise DNS-rebinding protection, coverage of every
-network protocol, or confinement of malicious shell code. Persistent workspace files remain intentionally shared
+Metadata and link-local addresses stay blocked even with this option. A worker-local destination proxy checks
+HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
+The browser keeps normal TLS, origins, and redirect behavior. The URL callback also restricts request schemes;
+callback errors and timeouts deny requests, and service workers are blocked. This guard does not promise DNS-rebinding
+protection, coverage of every network protocol, or confinement of malicious shell code. Persistent workspace files remain intentionally shared
 with the agent's other worker tools.
 
 ## Browser and container sandboxing

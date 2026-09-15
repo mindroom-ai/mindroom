@@ -262,7 +262,7 @@ def validate_server_fetch_redirect_url(
     return validate_server_fetch_url(urljoin(current_url, location), allow_private_networks=allow_private_networks)
 
 
-def _validated_connect_addresses(
+def validated_connect_addresses(
     host: str,
     *,
     port: int,
@@ -294,7 +294,7 @@ class _ServerFetchSyncNetworkBackend(httpcore.NetworkBackend):
         socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.NetworkStream:
         return _connect_validated_sync(
-            _validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+            validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
             lambda address: self._backend.connect_tcp(
                 address.compressed,
                 port,
@@ -332,7 +332,7 @@ class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
         socket_options: Iterable[SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         return await _connect_validated_async(
-            _validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
+            validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
             lambda address: self._backend.connect_tcp(
                 address.compressed,
                 port,
