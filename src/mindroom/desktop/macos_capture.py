@@ -34,9 +34,6 @@ def _frameworks() -> tuple[Any, Any]:
     except ImportError as exc:
         msg = "ScreenCaptureKit is missing; reinstall MindRoom with the 'desktop' extra."
         raise MacOSCaptureError(msg) from exc
-    if not hasattr(ScreenCaptureKit, "SCScreenshotManager"):
-        msg = "Desktop screenshots require macOS 14 and current ScreenCaptureKit bindings."
-        raise MacOSCaptureError(msg)
     return ScreenCaptureKit, objc
 
 

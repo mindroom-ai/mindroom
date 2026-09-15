@@ -47,6 +47,7 @@ final class DesktopBridgeProcess: ObservableObject {
     private var stdoutHandle: FileHandle?
     private var stderrHandle: FileHandle?
     private var activeProcessID: UUID?
+    private var stdoutFinished = false
 
     init(runtime: MindRoomRuntime = MindRoomRuntime()) {
         self.runtime = runtime
@@ -81,6 +82,7 @@ final class DesktopBridgeProcess: ObservableObject {
         }
         process = child
         activeProcessID = processID
+        stdoutFinished = false
         input = stdinPipe.fileHandleForWriting
         do {
             try child.run()
@@ -105,6 +107,11 @@ final class DesktopBridgeProcess: ObservableObject {
                 let data = try Self.readAvailableChunk(handle)
                 guard !data.isEmpty else {
                     handle.readabilityHandler = nil
+                    DispatchQueue.main.sync {
+                        MainActor.assumeIsolated {
+                            self?.didFinishStdout(processID: processID)
+                        }
+                    }
                     return
                 }
                 DispatchQueue.main.sync {
@@ -321,7 +328,7 @@ final class DesktopBridgeProcess: ObservableObject {
     }
 
     private func didExit(processID: UUID) {
-        guard activeProcessID == processID else { return }
+        guard activeProcessID == processID, stdoutFinished else { return }
         let completion = shutdownCompletion
         shutdownCompletion = nil
         terminateFallback?.cancel()
@@ -363,9 +370,21 @@ final class DesktopBridgeProcess: ObservableObject {
     }
 
     private func protocolReadFailed(processID: UUID) {
-        guard activeProcessID == processID, process?.isRunning == true else { return }
+        guard activeProcessID == processID else { return }
+        stdoutFinished = true
         failAll(DesktopBridgeProcessError.malformedResponse)
         terminateImmediately()
+        if process?.isRunning == false {
+            didExit(processID: processID)
+        }
+    }
+
+    private func didFinishStdout(processID: UUID) {
+        guard activeProcessID == processID else { return }
+        stdoutFinished = true
+        if process?.isRunning == false {
+            didExit(processID: processID)
+        }
     }
 
     private func failAll(_ error: Error) {

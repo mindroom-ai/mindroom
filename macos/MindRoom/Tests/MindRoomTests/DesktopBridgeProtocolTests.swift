@@ -139,6 +139,39 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         }
     }
 
+    func testFinalResponseResolvesBeforeImmediateHelperExit() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("MindRoom.app", isDirectory: true)
+        let executable = bundle.appendingPathComponent(
+            "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+        )
+        try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let script = """
+        #!/bin/sh
+        IFS= read -r line || exit 1
+        request_id=$(printf '%s\\n' "$line" | sed -n 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+        test -n "$request_id" || exit 2
+        printf '{"v":1,"type":"response","request_id":"%s","ok":true,"result":{"completed":true}}\\n' "$request_id"
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let runtime = MindRoomRuntime(homeURL: root, bundleURL: bundle, environment: [:])
+        let helper = DesktopBridgeProcess(runtime: runtime)
+
+        for iteration in 0 ..< 12 {
+            let exited = expectation(description: "fixture helper exited after response \(iteration)")
+            helper.onExit = { exited.fulfill() }
+
+            let result = try await helper.request(action: "status", timeout: .seconds(3))
+
+            XCTAssertEqual(result["completed"] as? Bool, true)
+            await fulfillment(of: [exited], timeout: 3)
+        }
+        helper.onExit = nil
+    }
+
     func testOrderedReaderHydratesBrowserOnlyAfterLiveStatus() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
