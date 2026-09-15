@@ -406,7 +406,12 @@ class Fixture:
     async def prepare_page(self) -> dict[str, Any]:
         """Serve deterministic page/download content inside the worker loopback network."""
         html = json.dumps((ASSETS / "page.html").read_text())
-        source = """require('http').createServer((req,res)=>{
+        source = """const fs=require('fs');require('http').createServer((req,res)=>{
+if(req.url==='/active'){
+ fs.writeFileSync('active-started','1');
+ const timer=setInterval(()=>{if(fs.existsSync('active-release')){clearInterval(timer);res.end('active-done');}},25);
+ res.on('close',()=>clearInterval(timer));return;
+}
 if(req.url==='/download'){
  res.writeHead(200,{'Content-Type':'text/plain','Content-Disposition':'attachment; filename="fixture.txt"'});
  res.end('worker-shared-download-ok'); return;
@@ -511,6 +516,9 @@ async def connect(page: Page, session: dict[str, Any]) -> None:
 async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - sequential acceptance scenario
     """Check gateway auth, shared browser/files, takeover, foreground and persistence."""
     result: dict[str, Any] = {"provider": fixture.args.provider}
+    framebuffer = (
+        FRAMEBUFFER.replace("1200, 700", "900, 700") if fixture.args.provider == "browser_mcp" else FRAMEBUFFER
+    )
     async with httpx.AsyncClient(base_url=fixture.origin, timeout=100) as client:
 
         async def create(user: str = "alice") -> dict[str, Any]:
@@ -644,7 +652,7 @@ with sync_playwright() as playwright:
                 )
                 await page.goto(fixture.origin)
                 await connect(page, session)
-                await page.wait_for_function(FRAMEBUFFER)
+                await page.wait_for_function(framebuffer)
                 await page.evaluate("window.rfb.sendKey(120,'KeyX')")
                 await asyncio.sleep(0.2)
                 assert await fixture.evaluate("()=>document.querySelector('#shared-input').value") == ""
@@ -718,7 +726,17 @@ with sync_playwright() as playwright:
                     assert response.status_code == 200, response.text
                     return response.json()
 
-                assert (await control("take"))["mode"] == "control"
+                active = asyncio.create_task(fixture.evaluate("async()=>await(await fetch('/active')).text()"))
+                async with asyncio.timeout(10):
+                    while "ready" not in await fixture.shell(["sh", "-c", "test -e active-started && printf ready"]):  # noqa: ASYNC110 - observe worker-side start before testing the gate
+                        await asyncio.sleep(0.05)
+                taking = asyncio.create_task(control("take"))
+                await asyncio.sleep(0.1)
+                assert not taking.done(), "Takeover bypassed an active browser call"
+                await fixture.shell(["touch", "active-release"])
+                assert await active == "active-done"
+                assert (await taking)["mode"] == "control"
+                result["takeover_waits_for_active_call"] = True
                 await page.evaluate("window.rfb.sendKey(121,'KeyY')")
                 await asyncio.sleep(0.2)
                 blocked = await fixture.execute(
@@ -734,12 +752,13 @@ with sync_playwright() as playwright:
                     while await fixture.evaluate("()=>document.querySelector('#shared-input').value") != "y":  # noqa: ASYNC110 - remote browser input readiness
                         await asyncio.sleep(0.05)
                 snapshot = await fixture.browser(action="snapshot")
-                assert ": y" in snapshot["snapshot"], snapshot
+                expected_text = ': "y"' if fixture.args.provider == "browser_mcp" else ": y"
+                assert expected_text in snapshot["snapshot"], snapshot
                 (fixture.args.output / "agent-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
                 result["agent_snapshot_sees_typed_text"] = True
                 result["takeover_and_release"] = True
                 await connect(page, session)
-                await page.wait_for_function(FRAMEBUFFER)
+                await page.wait_for_function(framebuffer)
                 await page.screenshot(path=str(fixture.args.output / "typed-visible.png"))
 
                 for action in ("focus", "navigate"):
@@ -750,7 +769,7 @@ with sync_playwright() as playwright:
                         window.rfb.sendKey(116, 'KeyT');
                         window.rfb.sendKey(0xffe3, 'ControlLeft', false);
                     }""")
-                    await page.wait_for_function("!(" + FRAMEBUFFER + ")()")
+                    await page.wait_for_function("!(" + framebuffer + ")()")
                     await control("release")
                     await page.wait_for_function("window.probe.disconnected")
                     native_tabs = await fixture.browser(action="tabs")
@@ -766,7 +785,7 @@ with sync_playwright() as playwright:
                     )
                     assert selected["targetId"] == opened["targetId"]
                     await connect(page, session)
-                    await page.wait_for_function(FRAMEBUFFER)
+                    await page.wait_for_function(framebuffer)
                     await page.screenshot(path=str(fixture.args.output / (action + "-visible.png")))
                     result[action + "_visibly_selected"] = True
 
