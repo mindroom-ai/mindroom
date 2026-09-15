@@ -1123,6 +1123,8 @@ class BrowserTools(Toolkit):
         page = await state.context.new_page()
         target_id = self._register_tab(state, page)
         await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+        if self._worker_display is not None:
+            await page.bring_to_front()
         state.active_target_id = target_id
         return {
             "action": "open",
@@ -1138,8 +1140,10 @@ class BrowserTools(Toolkit):
         if target_id not in state.tabs or state.tabs[target_id].page.is_closed():
             msg = f"tab not found: {target_id}"
             raise ValueError(msg)
-        state.active_target_id = target_id
         page = state.tabs[target_id].page
+        if self._worker_display is not None:
+            await page.bring_to_front()
+        state.active_target_id = target_id
         return {
             "action": "focus",
             "profile": profile_name,
@@ -1655,14 +1659,20 @@ class BrowserTools(Toolkit):
         if resolved_target_id is not None:
             tab = state.tabs.get(resolved_target_id)
             if tab is not None and not tab.page.is_closed():
+                if self._worker_display is not None:
+                    await tab.page.bring_to_front()
                 state.active_target_id = resolved_target_id
                 return resolved_target_id, tab
         for candidate_id, tab in state.tabs.items():
             if not tab.page.is_closed():
+                if self._worker_display is not None:
+                    await tab.page.bring_to_front()
                 state.active_target_id = candidate_id
                 return candidate_id, tab
         page = await state.context.new_page()
         candidate_id = self._register_tab(state, page)
+        if self._worker_display is not None:
+            await page.bring_to_front()
         state.active_target_id = candidate_id
         return candidate_id, state.tabs[candidate_id]
 

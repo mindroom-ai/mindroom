@@ -1494,6 +1494,38 @@ async def test_worker_browser_launch_uses_private_display_and_persistent_profile
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [True, False])
+@pytest.mark.parametrize("action", ["focus", "navigate"])
+async def test_selected_worker_tab_is_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    managed: bool,
+    action: str,
+) -> None:
+    """Selecting an existing headed tab must change the visible native page."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    if managed:
+        browser.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser()
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    try:
+        opened = json.loads(await browser.browser("open", targetUrl="https://example.org"))
+        fixture_page = adapter.pages[-1]
+        fixture_page.foreground = False
+        adapter.add_native_page("chrome://newtab")
+
+        selected = json.loads(
+            await browser.browser(action, targetId=opened["targetId"], targetUrl="https://example.org/selected"),
+        )
+
+        assert selected["targetId"] == opened["targetId"]
+        assert fixture_page.foreground is managed
+    finally:
+        await browser.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["driver_start", "launch", "route", "new_page"])
 async def test_worker_cancelled_startup_releases_partial_resources(
     tmp_path: Path,

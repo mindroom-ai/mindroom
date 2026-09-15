@@ -16,7 +16,12 @@ class LifecyclePage:
     def __init__(self, url: str = "about:blank") -> None:
         self.url = url
         self.closed = False
+        self.foreground = False
         self.listeners: dict[str, list[Callable[..., object]]] = {}
+
+    async def bring_to_front(self) -> None:
+        """Expose the page selected by the browser's native tab strip."""
+        self.foreground = True
 
     def on(self, event: str, callback: Callable[..., object]) -> None:
         """Register a native page event listener."""

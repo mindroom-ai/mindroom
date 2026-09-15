@@ -1,0 +1,529 @@
+"""Exercise the real Docker worker, public computer gateway and native noVNC.
+
+Use --help for inputs. All identities and services belong to disposable local
+fixtures. --serve keeps the gateway alive for the Chat Playwright spec.
+"""
+
+from __future__ import annotations
+
+# ruff: noqa: N999 - command name follows the existing script CLI convention
+import argparse
+import asyncio
+import json
+import secrets
+import shutil
+import socket
+import threading
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, urlsplit
+
+import httpx
+import uvicorn
+import yaml
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from playwright.async_api import async_playwright
+from testing.worker_computer_matrix import create_matrix_fixture
+
+from mindroom.api import computers, config_lifecycle
+from mindroom.api.main import _RuntimeDashboardCorsMiddleware
+from mindroom.config.main import Config
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
+from mindroom.workers.models import WorkerSpec
+from mindroom.workers.runtime import shutdown_primary_worker_manager
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from playwright.async_api import Page
+
+ASSETS = Path(__file__).resolve().parents[1] / "tests/fixtures/worker_computer"
+FRAMEBUFFER = """() => {
+    const c = document.querySelector('canvas');
+    if (!c || c.width !== 1280 || c.height !== 800) return false;
+    const p = c.getContext('2d').getImageData(1200, 700, 1, 1).data;
+    return p[0] === 17 && p[1] === 51 && p[2] === 85 && p[3] === 255;
+}"""
+
+
+def loopback_origin(value: str) -> str:
+    """Reject fixture inputs that could contact an external service."""
+    url = urlsplit(value)
+    if url.scheme != "http" or url.hostname not in {"127.0.0.1", "localhost", "::1"} or url.path not in {"", "/"}:
+        message = "Fixture services must use a loopback HTTP origin."
+        raise argparse.ArgumentTypeError(message)
+    return value.rstrip("/")
+
+
+async def command(*args: str) -> str:
+    """Run a fixture-owned process and surface failures."""
+    process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE)
+    output, _ = await process.communicate()
+    assert process.returncode == 0, args
+    return output.decode().strip()
+
+
+class Fixture:
+    """Local authorization boundary around the real gateway and Docker manager."""
+
+    def __init__(self, args: argparse.Namespace, origin: str) -> None:
+        self.args = args
+        self.origin = origin
+        self.token = secrets.token_urlsafe(32)
+        self.container_ids: set[str] = set()
+        self.matrix = json.loads(args.matrix_fixture.read_text()) if args.matrix_fixture else None
+        if self.matrix:
+            loopback_origin(self.matrix["homeserver"])
+        self.server_name = self.matrix["server_name"] if self.matrix else "computer.localhost"
+        self.room = self.matrix["room_id"] if self.matrix else "!fixture:computer.localhost"
+        self.agent = (
+            self.matrix["users"]["mindroom_writer"]["user_id"] if self.matrix else "@mindroom_writer:computer.localhost"
+        )
+        self.viewer = self.matrix["users"]["computer_viewer"]["user_id"] if self.matrix else "@alice:computer.localhost"
+        self.other = self.matrix["users"]["computer_other"]["user_id"] if self.matrix else "@bob:computer.localhost"
+        self.config = Config.model_validate(
+            {
+                "agents": {
+                    "writer": {
+                        "display_name": "Writer",
+                        "role": "Browser fixture",
+                        "model": "default",
+                        "tools": ["browser", "shell"],
+                        "worker_tools": ["browser", "shell"],
+                        "worker_scope": "user_agent",
+                    },
+                },
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+            },
+        )
+        (args.output / "config.yaml").write_text(yaml.safe_dump(self.config.model_dump(mode="json")))
+        self.paths = resolve_primary_runtime_paths(
+            config_path=args.output / "config.yaml",
+            storage_path=args.output / "data",
+            process_env={
+                "MATRIX_HOMESERVER": self.matrix["homeserver"] if self.matrix else origin,
+                "MATRIX_SERVER_NAME": self.server_name,
+                "MINDROOM_WORKER_COMPUTER_ENABLED": "1",
+                "MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(
+                    [origin, *([args.chat_origin] if args.chat_origin else [])],
+                ),
+                "MINDROOM_WORKER_BACKEND": "docker",
+                "MINDROOM_SANDBOX_PROXY_TOKEN": self.token,
+                "MINDROOM_DOCKER_WORKER_IMAGE": args.image,
+                "MINDROOM_DOCKER_WORKER_NAME_PREFIX": "mindroom-computer-test-" + secrets.token_hex(4),
+                "MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS": "90",
+            },
+        )
+
+    def identity(self, user: str) -> ToolExecutionIdentity:
+        """Use the same requester/agent scope as normal browser and shell routing."""
+        return ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="writer",
+            requester_id=user,
+            room_id=self.room,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="fixture",
+        )
+
+    def target(self, user: str) -> ComputerTarget:
+        """Resolve the fixture's dedicated user-agent worker."""
+        key = resolve_worker_key("user_agent", self.identity(user), agent_name="writer")
+        return ComputerTarget(
+            user,
+            self.room,
+            self.agent,
+            WorkerSpec(key, private_agent_names=frozenset(), mirrored_credential_services=frozenset()),
+            "local-fixture",
+        )
+
+    async def authorize(self, requester: str, room: str, agent: str) -> ComputerTarget:
+        """Replace orchestrator policy only; optionally check actual local Matrix membership."""
+        if requester not in {self.viewer, self.other} or (room, agent) != (self.room, self.agent):
+            raise ComputerError(403, "Fixture access denied.")
+        if self.matrix:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(
+                    self.matrix["homeserver"] + "/_matrix/client/v3/rooms/" + quote(room, safe="") + "/joined_members",
+                    headers={"Authorization": "Bearer " + self.matrix["users"]["mindroom_writer"]["access_token"]},
+                )
+                response.raise_for_status()
+                joined = response.json()["joined"]
+                if requester not in joined or agent not in joined:
+                    raise ComputerError(403, "Fixture membership denied.")
+        return self.target(requester)
+
+    async def execute(
+        self,
+        tool: str,
+        function: str,
+        kwargs: dict[str, Any],
+        *,
+        user: str | None = None,
+    ) -> dict[str, Any]:
+        """Send an actual validated runner request to the configured primary manager worker."""
+        user = user or self.viewer
+        target = self.target(user)
+        handle = await asyncio.to_thread(computers._resolve_worker, self.config, self.paths, target, start=False)
+        container_id = await command("docker", "inspect", "--format", "{{.Id}}", handle.worker_id)
+        self.container_ids.add(container_id)
+        (self.args.output / "containers.json").write_text(json.dumps(sorted(self.container_ids)) + "\n")
+        payload = {
+            "tool_name": tool,
+            "function_name": function,
+            "worker_key": target.spec.worker_key,
+            "worker_scope": "user_agent",
+            "routing_agent_name": "writer",
+            "execution_identity": asdict(self.identity(user)),
+            "private_agent_names": [],
+            "kwargs": kwargs,
+        }
+        if tool == "browser":
+            payload["tool_config_overrides"] = {"allow_private_networks": True}
+        async with httpx.AsyncClient(timeout=100) as client:
+            response = await client.post(
+                handle.endpoint,
+                headers={"X-Mindroom-Sandbox-Token": self.token},
+                json=payload,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def browser(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401 - browser tool JSON schema
+        """Return the public tool result, failing on runner errors."""
+        body = await self.execute("browser", "browser_control", kwargs)
+        assert body["ok"], body
+        return json.loads(body["result"])
+
+    async def evaluate(self, expression: str) -> Any:  # noqa: ANN401 - arbitrary page JSON
+        """Read page state through the agent browser contract."""
+        return (await self.browser(action="act", request={"kind": "evaluate", "fn": expression}))["result"]
+
+    async def shell(self, args: list[str], *, background: bool = False, user: str | None = None) -> str:
+        """Run commands in the exact worker used by the browser."""
+        kwargs: dict[str, Any] = {"args": args}
+        if background:
+            kwargs["timeout"] = 0
+        body = await self.execute("shell", "run_shell_command", kwargs, user=user)
+        assert body["ok"], body
+        return body["result"]
+
+    async def prepare_page(self) -> dict[str, Any]:
+        """Serve deterministic page/download content inside the worker loopback network."""
+        html = json.dumps((ASSETS / "page.html").read_text())
+        source = """require('http').createServer((req,res)=>{
+if(req.url==='/download'){
+ res.writeHead(200,{'Content-Type':'text/plain','Content-Disposition':'attachment; filename="fixture.txt"'});
+ res.end('worker-shared-download-ok'); return;
+}
+res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
+}).listen(8767,'127.0.0.1');""".replace("HTML", html)
+        await self.shell(["node", "-e", source], background=True)
+        return await self.browser(action="open", targetUrl="http://127.0.0.1:8767/")
+
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+        """Own only this run's manager, stream sessions and worker containers."""
+        state = config_lifecycle.ensure_app_state(app)
+        state.api_state = config_lifecycle.ApiState(
+            threading.Lock(),
+            config_lifecycle.ApiSnapshot(
+                1,
+                self.paths,
+                self.config.model_dump(),
+                runtime_config=self.config,
+            ),
+        )
+        state.computer_runtime = computers.ComputerRuntime(self.authorize, 1, self.config)
+        try:
+            if self.args.serve:
+                await asyncio.to_thread(
+                    computers._resolve_worker,
+                    self.config,
+                    self.paths,
+                    self.target(self.viewer),
+                    start=True,
+                )
+                await self.prepare_page()
+                metadata = {
+                    "api_origin": self.origin,
+                    "ui_origin": self.args.chat_origin,
+                    "homeserver": self.matrix["homeserver"],
+                    "room_id": self.room,
+                    "thread_id": self.matrix["thread_id"],
+                    "agent_user_id": self.agent,
+                    "viewer": self.matrix["users"]["computer_viewer"],
+                }
+                path = self.args.output / "chat-fixture.json"
+                path.touch(mode=0o600)
+                path.write_text(json.dumps(metadata, indent=2) + "\n")
+                print(f"Chat fixture ready: {path}", flush=True)
+            yield
+        finally:
+            if state.computer_sessions is not None:
+                state.computer_sessions.close_all()
+            await asyncio.to_thread(shutdown_primary_worker_manager)
+            # Verify exact IDs, never delete by a name prefix or global prune.
+            remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+            for container_id in sorted(self.container_ids & remaining):
+                await command("docker", "rm", "-f", container_id)
+            remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+            assert not self.container_ids & remaining
+            print("Exact fixture workers removed.", flush=True)
+
+    def app(self) -> FastAPI:
+        """Expose actual public routes plus loopback-only fixture helpers."""
+        app = FastAPI(lifespan=self.lifespan)
+        app.include_router(computers.router)
+        app.add_middleware(_RuntimeDashboardCorsMiddleware, api_app=app, fallback_runtime_paths=self.paths)
+        if self.args.novnc:
+            app.mount("/novnc", StaticFiles(directory=self.args.novnc))
+
+        @app.get("/_matrix/federation/v1/openid/userinfo")
+        async def openid(request: Request) -> JSONResponse:
+            token = request.query_params.get("access_token", "")
+            subjects = {"fixture-alice": self.viewer, "fixture-bob": self.other}
+            if self.matrix or token not in subjects:
+                return JSONResponse({"error": "Rejected fixture token"}, status_code=401)
+            return JSONResponse({"sub": subjects[token]})
+
+        @app.get("/")
+        async def viewer() -> HTMLResponse:
+            return HTMLResponse((ASSETS / "viewer.html").read_text())
+
+        @app.get("/fixture/text")
+        async def text_value() -> JSONResponse:
+            # Test-only readback route; this fixture binds only to loopback.
+            return JSONResponse({"value": await self.evaluate("()=>document.querySelector('#shared-input').value")})
+
+        return app
+
+
+async def connect(page: Page, session: dict[str, Any]) -> None:
+    """Wait for a real connected noVNC stream."""
+    await page.evaluate("session=>window.connectComputer(session)", session)
+    await page.wait_for_function("window.probe.connected || window.probe.disconnected")
+    assert await page.evaluate("window.probe.connected && !window.probe.disconnected")
+
+
+async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - sequential acceptance scenario
+    """Check gateway auth, shared browser/files, takeover, foreground and persistence."""
+    result: dict[str, Any] = {}
+    async with httpx.AsyncClient(base_url=fixture.origin, timeout=100) as client:
+
+        async def create(user: str = "alice") -> dict[str, Any]:
+            response = await client.post(
+                "/api/computers/sessions",
+                json={
+                    "openid_token": {
+                        "access_token": "fixture-" + user,
+                        "token_type": "Bearer",
+                        "matrix_server_name": fixture.server_name,
+                        "expires_in": 60,
+                    },
+                    "room_id": fixture.room,
+                    "agent_user_id": fixture.agent,
+                },
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        denied = await client.post(
+            "/api/computers/sessions",
+            json={
+                "openid_token": {
+                    "access_token": "bad-token",
+                    "token_type": "Bearer",
+                    "matrix_server_name": fixture.server_name,
+                    "expires_in": 60,
+                },
+                "room_id": fixture.room,
+                "agent_user_id": fixture.agent,
+            },
+        )
+        assert denied.status_code == 401
+        session = await create()
+        opened = await fixture.prepare_page()
+        tabs = await fixture.browser(action="tabs")
+        assert tabs["activeTargetId"] == opened["targetId"]
+        result["same_target_across_requests"] = opened["targetId"]
+        await fixture.evaluate(
+            "()=>{document.querySelector('#shared-input').focus();localStorage.setItem('persist','yes');}",
+        )
+        await fixture.shell(["sh", "-c", "printf alice-only > isolation-marker.txt"])
+        await fixture.browser(action="act", request={"kind": "click", "ref": "#download"})
+        async with asyncio.timeout(20):
+            while "worker-shared-download-ok" not in await fixture.shell(  # noqa: ASYNC110 - remote filesystem readiness
+                ["find", ".", "-name", "*-fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
+            ):
+                await asyncio.sleep(0.1)
+        result["download_read_through_shell"] = True
+        await fixture.evaluate("()=>document.querySelector('#shared-input').focus()")
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                executable_path=fixture.args.chromium,
+                headless=True,
+                args=["--no-sandbox"],
+            )
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                errors: list[str] = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                await page.goto(fixture.origin)
+                await connect(page, session)
+                await page.wait_for_function(FRAMEBUFFER)
+                await page.evaluate("window.rfb.sendKey(120,'KeyX')")
+                await asyncio.sleep(0.2)
+                assert await fixture.evaluate("()=>document.querySelector('#shared-input').value") == ""
+                result["watch_input_rejected"] = True
+                path = "/api/computers/sessions/" + session["session_id"]
+                headers = {"Authorization": "Bearer " + session["session_token"]}
+
+                async def control(action: str) -> dict[str, Any]:
+                    response = await client.post(path + "/control", headers=headers, json={"action": action})
+                    assert response.status_code == 200, response.text
+                    return response.json()
+
+                assert (await control("take"))["mode"] == "control"
+                await page.evaluate("window.rfb.sendKey(121,'KeyY')")
+                await asyncio.sleep(0.2)
+                blocked = await fixture.execute("browser", "browser_control", {"action": "tabs"})
+                assert not blocked["ok"], blocked
+                assert "control" in json.dumps(blocked).lower(), blocked
+                await control("release")
+                await page.wait_for_function("window.probe.disconnected")
+                assert await fixture.evaluate("()=>document.querySelector('#shared-input').value") == "y"
+                result["takeover_and_release"] = True
+                await connect(page, session)
+
+                for action in ("focus", "navigate"):
+                    await control("take")
+                    # Native Ctrl+T changes Chromium's tab strip, bypassing tool state.
+                    await page.evaluate("""() => {
+                        window.rfb.sendKey(0xffe3, 'ControlLeft', true);
+                        window.rfb.sendKey(116, 'KeyT');
+                        window.rfb.sendKey(0xffe3, 'ControlLeft', false);
+                    }""")
+                    await page.wait_for_function("!(" + FRAMEBUFFER + ")()")
+                    await control("release")
+                    await page.wait_for_function("window.probe.disconnected")
+                    native_tabs = await fixture.browser(action="tabs")
+                    assert any(tab["title"] == "New Tab" for tab in native_tabs["tabs"]), native_tabs
+                    selected = await fixture.browser(
+                        action=action,
+                        targetId=opened["targetId"],
+                        targetUrl="http://127.0.0.1:8767/",
+                    )
+                    assert selected["targetId"] == opened["targetId"]
+                    await connect(page, session)
+                    await page.wait_for_function(FRAMEBUFFER)
+                    await page.screenshot(path=str(fixture.args.output / (action + "-visible.png")))
+                    result[action + "_visibly_selected"] = True
+
+                await page.evaluate("window.rfb.disconnect()")
+                await page.wait_for_function("window.probe.disconnected")
+                await connect(page, session)
+                assert (await control("stop"))["state"] == "stopped"
+                await page.wait_for_function("window.probe.disconnected")
+                assert (await client.get(path, headers=headers)).status_code == 401
+                new_session = await create()
+                assert new_session["session_id"] != session["session_id"]
+                await fixture.browser(action="open", targetUrl="http://127.0.0.1:8767/")
+                assert await fixture.evaluate("()=>localStorage.getItem('persist')") == "yes"
+                assert "worker-shared-download-ok" in await fixture.shell(
+                    ["find", ".", "-name", "*-fixture.txt", "-type", "f", "-exec", "cat", "{}", "+"],
+                )
+                result["profile_and_download_after_restart"] = True
+                await create("bob")
+                assert "isolated" in await fixture.shell(
+                    ["sh", "-c", "test ! -e isolation-marker.txt && printf isolated"],
+                    user=fixture.other,
+                )
+                assert len(fixture.container_ids) == 2
+                result["requester_isolation"] = True
+                assert not errors, errors
+                result["page_errors"] = errors
+            finally:
+                await browser.close()
+    return result
+
+
+async def main() -> None:  # noqa: PLR0915 - CLI setup and owned service lifetime
+    """Run acceptance once or keep a loopback Chat fixture alive until interrupted."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", default="mindroom-worker-computer-test:local")
+    parser.add_argument("--build", action="store_true", help="Build the existing full worker Dockerfile first.")
+    parser.add_argument("--output", type=Path, required=True, help="New persistent directory for state and evidence.")
+    parser.add_argument("--novnc", type=Path, help="Path to @novnc/novnc 1.7.0 package (for standalone acceptance).")
+    parser.add_argument("--chromium", default=shutil.which("chromium") or shutil.which("chromium-browser"))
+    parser.add_argument("--serve", action="store_true", help="Serve the Chat fixture until Ctrl+C.")
+    parser.add_argument("--chat-origin", type=loopback_origin)
+    parser.add_argument("--matrix-fixture", type=Path, help="Disposable loopback Matrix fixture JSON (see docs).")
+    parser.add_argument(
+        "--matrix-image",
+        default="ghcr.io/mindroom-ai/mindroom-tuwunel:latest",
+        help="Locally available Matrix image used by --serve when no fixture is supplied.",
+    )
+    args = parser.parse_args()
+    if args.serve:
+        if not args.chat_origin:
+            parser.error("--serve requires --chat-origin")
+    elif not args.novnc or args.matrix_fixture:
+        parser.error("Standalone acceptance requires --novnc and uses its own controlled Matrix verifier")
+    args.output = args.output.resolve()
+    args.output.mkdir(parents=True, exist_ok=False)
+    if args.build:
+        await command(
+            "docker",
+            "build",
+            "-t",
+            args.image,
+            "-f",
+            "local/instances/deploy/Dockerfile.mindroom",
+            str(ASSETS.parents[2]),
+        )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    if args.serve:
+        owned_matrix = None
+        try:
+            if not args.matrix_fixture:
+                owned_matrix = await asyncio.to_thread(create_matrix_fixture, args.output, args.matrix_image)
+                args.matrix_fixture = args.output / "matrix-fixture.json"
+            fixture = Fixture(args, f"http://127.0.0.1:{listener.getsockname()[1]}")
+            server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning"))
+            await server.serve(sockets=[listener])
+        finally:
+            listener.close()
+            if owned_matrix:
+                await command("docker", "rm", "-f", owned_matrix["container_id"])
+        return
+    fixture = Fixture(args, f"http://127.0.0.1:{listener.getsockname()[1]}")
+    server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        async with asyncio.timeout(10):
+            while not server.started:
+                if serving.done():
+                    await serving
+                    message = "Fixture server failed to start"
+                    raise RuntimeError(message)
+                await asyncio.sleep(0.01)
+        result = await exercise(fixture)
+        (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result), flush=True)
+    finally:
+        server.should_exit = True
+        await serving
+        listener.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

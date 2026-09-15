@@ -52,6 +52,8 @@ services:
       - traefik.http.routers.${INSTANCE_NAME:-mindroom}-v1.priority=100
       - traefik.http.services.${INSTANCE_NAME:-mindroom}-v1.loadbalancer.server.port=8765
 
+  # Shared sidecar: interactive computers require dedicated Docker/Kubernetes
+  # workers instead. See docs/tools/worker-computer.md for the opt-in setup.
   sandbox-runner:
     image: ${MINDROOM_IMAGE:-deploy-mindroom:latest}
     build:
