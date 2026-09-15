@@ -11,14 +11,13 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
 
 
-def test_helper_build_passes_exact_uv_arguments(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("architecture", "python_arch"), [("arm64", "aarch64"), ("x86_64", "x86_64")])
+def test_helper_build_uses_matching_python_and_wheels(tmp_path: Path, architecture: str, python_arch: str) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     argument_log = tmp_path / "arguments"
@@ -29,14 +28,16 @@ def test_helper_build_passes_exact_uv_arguments(tmp_path: Path) -> None:
     fake_uv.write_text(
         """#!/bin/sh
 set -eu
-: > "$ARGUMENT_LOG"
+: > "$ARGUMENT_LOG.$1"
+log="$ARGUMENT_LOG.$1"
 distpath=""
 previous=""
 for argument in "$@"; do
-    printf '%s\\n' "$argument" >> "$ARGUMENT_LOG"
+    printf '%s\\n' "$argument" >> "$log"
     if [ "$previous" = "--distpath" ]; then distpath="$argument"; fi
     previous="$argument"
 done
+[ -n "$distpath" ] || exit 0
 mkdir -p "$distpath/MindRoom Desktop Helper.app/Contents/MacOS"
 : > "$distpath/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
 chmod +x "$distpath/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
@@ -47,7 +48,7 @@ chmod +x "$distpath/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop 
     output = tmp_path / "output"
 
     subprocess.run(
-        [str(repository / "macos" / "build-desktop-helper.sh"), "--output", str(output)],
+        [str(repository / "macos" / "build-desktop-helper.sh"), "--output", str(output), "--arch", architecture],
         check=True,
         env={
             **os.environ,
@@ -59,30 +60,52 @@ chmod +x "$distpath/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop 
         text=True,
     )
 
-    arguments = argument_log.read_text().splitlines()
-    assert "+" not in arguments
-    assert arguments[:12] == [
-        "run",
-        "--isolated",
+    sync_arguments = argument_log.with_suffix(".sync").read_text().splitlines()
+    assert sync_arguments == [
+        "sync",
         "--locked",
         "--project",
         str(repository),
-        "--no-default-groups",
-        "--extra",
-        "desktop",
+        "--only-group",
+        "desktop-helper",
         "--python",
-        "3.13",
-        "--with",
-        "pyinstaller==6.16.0",
+        f"cpython-3.13-macos-{python_arch}-none",
+        "--python-platform",
+        f"{python_arch}-apple-darwin",
     ]
-    assert "pyinstaller==6.16.0" in arguments
+    assert argument_log.with_suffix(".pip").read_text().splitlines() == [
+        "pip",
+        "install",
+        "--python",
+        str(output / "environment/bin/python"),
+        "--no-deps",
+        "--editable",
+        str(repository),
+    ]
+    arguments = argument_log.with_suffix(".run").read_text().splitlines()
+    assert arguments[:10] == [
+        "run",
+        "--no-project",
+        "--python",
+        str(output / "environment/bin/python"),
+        "/usr/bin/arch",
+        f"-{architecture}",
+        "python",
+        "-m",
+        "PyInstaller",
+        "--clean",
+    ]
     assert arguments[-1] == str(repository / "macos" / "MindRoomDesktopHelper.spec")
 
 
 def test_helper_spec_supplies_build_version_for_plist_stamping(monkeypatch: pytest.MonkeyPatch) -> None:
     """Execute the spec and require the build-version key consumed by PlistBuddy Set."""
     spec = Path(__file__).resolve().parents[1] / "macos" / "MindRoomDesktopHelper.spec"
-    hooks = SimpleNamespace(collect_all=lambda _name: ([], [], []), collect_submodules=lambda _name: [])
+    hooks = SimpleNamespace(
+        collect_all=lambda _name: ([], [], []),
+        collect_submodules=lambda _name: [],
+        copy_metadata=lambda _name: [],
+    )
     monkeypatch.setitem(sys.modules, "PyInstaller.utils.hooks", hooks)
     bundle = Mock()
     runpy.run_path(

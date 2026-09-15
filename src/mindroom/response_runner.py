@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from uuid import uuid4
@@ -79,6 +79,7 @@ from mindroom.orchestration.runtime import (
     log_cancelled_response_source,
     request_task_cancel,
 )
+from mindroom.participation import ParticipationGate
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_shutdown_diagnostics import (
@@ -183,6 +184,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
+    from mindroom.config.participation import RoomParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
@@ -469,6 +471,7 @@ class ResponseRequest:
     prompt: str
     response_envelope: MessageEnvelope
     sources: ResponseSources
+    participation: RoomParticipationConfig | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
@@ -529,6 +532,38 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
+def _participation_for_request(request: ResponseRequest) -> ParticipationGate | None:
+    """Own one participation decision from locked preparation through delivery."""
+    if request.participation is None:
+        return None
+    gate = ParticipationGate(instructions=request.participation.instructions)
+    if request.existing_event_id is not None:
+        gate.approve_existing_response()
+    return gate
+
+
+def _skipped_participation_outcome() -> FinalDeliveryOutcome:
+    """Describe quiet completion without claiming successful response generation."""
+    return FinalDeliveryOutcome(
+        terminal_status="completed",
+        event_id=None,
+        suppressed=True,
+        failure_reason="participation_declined",
+    )
+
+
+def _skip_unapproved_response(
+    participation: ParticipationGate | None,
+    turn_recorder: TurnRecorder | None = None,
+) -> FinalDeliveryOutcome | None:
+    """Settle a pre-approval failure before failed-turn persistence or delivery."""
+    if participation is None or not participation.decline("run_failed_before_decision"):
+        return None
+    if turn_recorder is not None:
+        turn_recorder.mark_skipped()
+    return _skipped_participation_outcome()
+
+
 def _is_silent_schedule_response(request: ResponseRequest) -> bool:
     """Return whether one response must avoid provisional Matrix activity."""
     return request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
@@ -563,20 +598,42 @@ async def _response_typing_indicator(
     request: ResponseRequest,
     *,
     response_run_id: str | None,
+    participation: ParticipationGate | None = None,
 ) -> AsyncIterator[None]:
     """Expose typing only for response kinds whose progress may be visible."""
     if _is_silent_schedule_response(request):
         yield
         return
-    async with typing_indicator(
-        client,
-        request.room_id,
-        log_context=_response_typing_log_context(
-            request,
-            response_run_id=response_run_id,
-        ),
-    ):
+
+    @asynccontextmanager
+    async def show_typing() -> AsyncIterator[None]:
+        async with typing_indicator(
+            client,
+            request.room_id,
+            log_context=_response_typing_log_context(request, response_run_id=response_run_id),
+        ):
+            yield
+
+    if participation is None:
+        async with show_typing():
+            yield
+        return
+    finished = asyncio.Event()
+
+    async def approved_typing() -> None:
+        await participation.decided.wait()
+        if participation.approved:
+            async with show_typing():
+                await finished.wait()
+
+    task = asyncio.create_task(approved_typing())
+    try:
         yield
+    finally:
+        finished.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
@@ -726,6 +783,7 @@ class _PreparedResponseRuntime:
     active_model_name: str
     show_tool_calls: bool
     tool_dispatch: ToolDispatchContext
+    participation: ParticipationGate | None = None
 
 
 @dataclass
@@ -2008,7 +2066,7 @@ class ResponseRunner:
         """Persist one failed or interrupted turn that never completed."""
         if current_task_is_process_shutdown():
             return
-        if recorder.outcome in {"completed", "suspended"} or recorder.original_status is RunStatus.cancelled:
+        if recorder.outcome in {"completed", "suspended", "skipped"} or recorder.original_status is RunStatus.cancelled:
             return
         if recorder.outcome == "pending":
             recorder.mark_interrupted(RunStatus.error)
@@ -2765,7 +2823,7 @@ class ResponseRunner:
         request: ResponseRequest,
     ) -> MatrixCompactionLifecycle | None:
         """Build the ordered foreground compaction notice adapter for one response."""
-        if _is_silent_schedule_response(request):
+        if _is_silent_schedule_response(request) or request.participation is not None:
             return None
         reply_to_event_id = (
             request.existing_event_id
@@ -2963,6 +3021,7 @@ class ResponseRunner:
                 matrix_target_item,
             ),
             system_enrichment_items=tuple(system_enrichment_items),
+            participation=runtime.participation,
             allow_no_report_response=_is_silent_schedule_response(request),
             scheduled_history_budget=request.scheduled_history_budget,
         )
@@ -3441,6 +3500,7 @@ class ResponseRunner:
         | None = None,
         approval_suspension_handler: Callable[[PausedAttempt], Awaitable[FinalDeliveryOutcome]] | None = None,
         show_tool_calls: bool | None = None,
+        participation: ParticipationGate | None = None,
     ) -> str | None:
         """Run generation and settle its terminal lifecycle exactly once."""
         deferred_error: BaseException | None = None
@@ -3501,7 +3561,17 @@ class ResponseRunner:
                 ):
                     raise error.error from error
                 raise
-            if isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
+            if (
+                not progress.stage_started
+                and progress.delivery_outcome is None
+                and not (
+                    isinstance(error, StreamingDeliveryError) and error.transport_outcome.terminal_status == "cancelled"
+                )
+                and (skipped := _skip_unapproved_response(participation)) is not None
+            ):
+                self.deps.logger.exception("Response skipped before participation", error=str(error))
+                progress.settle(skipped)
+            elif isinstance(error, StreamingDeliveryError) and streaming_delivery_error_handler is not None:
                 progress.settle(await streaming_delivery_error_handler(error))
             elif progress.stage_started or progress.delivery_outcome is not None:
                 # Do not touch a tracked event after delivery starts: an adopted
@@ -4289,6 +4359,7 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         active_model_name: str | None = None,
+        participation: ParticipationGate | None = None,
     ) -> _PreparedResponseRuntime:
         """Resolve shared runtime context for one streaming or non-streaming response."""
         resolved_target = request.response_envelope.target
@@ -4322,6 +4393,7 @@ class ResponseRunner:
             active_model_name=active_model_name,
             show_tool_calls=self._show_tool_calls(),
             tool_dispatch=tool_dispatch,
+            participation=participation if participation is not None else _participation_for_request(request),
         )
 
     @timed("non_streaming_response_generation")
@@ -4401,6 +4473,7 @@ class ResponseRunner:
                 self._client(),
                 request,
                 response_run_id=run_id,
+                participation=runtime.participation,
             ):
                 response_text = await self._run_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
@@ -4504,6 +4577,7 @@ class ResponseRunner:
                 self._client(),
                 request,
                 response_run_id=run_id,
+                participation=runtime.participation,
             ):
                 wrapped_response_stream = self._stream_in_tool_context(
                     tool_dispatch=runtime.tool_dispatch,
@@ -4530,6 +4604,9 @@ class ResponseRunner:
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
+                        allow_new_terminal_message=lambda: (
+                            runtime.participation is None or runtime.participation.approved
+                        ),
                     ),
                 )
                 if request.pipeline_timing is not None:
@@ -4559,7 +4636,7 @@ class ResponseRunner:
             )
             raise
 
-    async def _process_and_respond(  # noqa: C901
+    async def _process_and_respond(  # noqa: C901, PLR0912, PLR0915
         self,
         request: ResponseRequest,
         *,
@@ -4623,6 +4700,9 @@ class ResponseRunner:
                     attempt_run_id_collector=attempt_run_ids,
                     pipeline_timing=request.pipeline_timing,
                 )
+            except Exception:
+                _skip_unapproved_response(runtime.participation, turn_recorder)
+                raise
             finally:
                 if not current_task_is_process_shutdown():
                     await lifecycle.emit_session_started(session_started_watch)
@@ -4655,7 +4735,12 @@ class ResponseRunner:
             )
         except Exception as error:
             self.deps.logger.exception("Error in non-streaming response", error=str(error))
+            if skipped := _skip_unapproved_response(runtime.participation, turn_recorder):
+                return build_outcome(skipped)
             raise
+
+        if runtime.participation is not None and runtime.participation.is_silent:
+            return build_outcome(_skipped_participation_outcome())
 
         response_extra_content = _merge_response_extra_content(
             generation.run_metadata_content,
@@ -4839,6 +4924,8 @@ class ResponseRunner:
             if current_task_is_process_shutdown():
                 raise
             self.deps.logger.exception("Error in streaming response", error=str(error))
+            if skipped := _skip_unapproved_response(runtime.participation, turn_recorder):
+                return build_outcome(skipped)
             return build_outcome(
                 await self.deps.delivery_gateway.finalize_streamed_response(
                     FinalizeStreamedResponseRequest(
@@ -4866,6 +4953,9 @@ class ResponseRunner:
                     ),
                 ),
             )
+
+        if runtime.participation is not None and runtime.participation.is_silent:
+            return build_outcome(_skipped_participation_outcome())
 
         response_extra_content = _merge_response_extra_content(
             run_metadata_content,
@@ -4904,8 +4994,46 @@ class ResponseRunner:
         resolved_target: MessageTarget,
         early_placeholder_state: _EarlyPlaceholderState | None = None,
     ) -> str | None:
-        """Generate one agent response after acquiring the per-thread lock."""
+        """Own participation before any fallible locked request preparation."""
+        participation = _participation_for_request(request)
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
+        try:
+            return await self._generate_response_with_participation_locked(
+                request,
+                resolved_target=resolved_target,
+                early_placeholder_state=placeholder_state,
+                participation=participation,
+            )
+        except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
+            raise
+        except Exception as error:
+            if participation is None or participation.decision is not None or placeholder_state.settlement_started:
+                raise
+            participation.decline("preparation_failed")
+            self.deps.logger.exception("Response preparation skipped before participation", error=str(error))
+            lifecycle = self._build_lifecycle(
+                identity=self._response_identity(request, response_kind="ai"),
+                request=request,
+            )
+            await lifecycle.finalize(
+                _skipped_participation_outcome(),
+                build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
+                post_response_deps=lambda: self._post_response_deps(request),
+            )
+            if request.on_no_response_handled is not None:
+                await request.on_no_response_handled()
+            return None
+
+    async def _generate_response_with_participation_locked(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        early_placeholder_state: _EarlyPlaceholderState,
+        participation: ParticipationGate | None,
+    ) -> str | None:
+        """Prepare and generate one admitted response under its participation owner."""
+        placeholder_state = early_placeholder_state
         request = replace(request, participating_agent_names=(self.deps.agent_name,))
         history_scope = self.deps.state_writer.history_scope()
         execution_identity = self.deps.tool_runtime.build_execution_identity(
@@ -4942,7 +5070,9 @@ class ResponseRunner:
             resolved_target=resolved_target,
             history_scope=history_scope,
             execution_identity=execution_identity,
-            placeholder_message=None if _is_silent_schedule_response(request) else "Thinking...",
+            placeholder_message=None
+            if _is_silent_schedule_response(request) or request.participation is not None
+            else "Thinking...",
             early_placeholder_state=placeholder_state,
         )
         if prepared_request is None:
@@ -4979,6 +5109,7 @@ class ResponseRunner:
         runtime = await self.prepare_response_runtime(
             normalized_request,
             active_model_name=active_model_name,
+            participation=participation,
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
@@ -5047,7 +5178,7 @@ class ResponseRunner:
                 run_succeeded=(
                     generation.run_succeeded
                     if generation is not None
-                    else final_delivery_outcome.terminal_status == "completed"
+                    else final_delivery_outcome.terminal_status == "completed" and not final_delivery_outcome.suppressed
                 ),
                 response_target=resolved_target,
                 thread_summary_room_id=(request.room_id if resolved_target.resolved_thread_id is not None else None),
@@ -5090,4 +5221,5 @@ class ResponseRunner:
                 show_tool_calls=runtime.show_tool_calls,
             ),
             show_tool_calls=runtime.show_tool_calls,
+            participation=participation,
         )

@@ -9,6 +9,7 @@ from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIB
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.event_journal import DeliveryStage
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
+from mindroom.model_selection import command_result_content_to_dict
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
@@ -203,6 +204,7 @@ class VisibleResponseReconciler:
             SendTextRequest(
                 target=target,
                 response_text=response_text,
+                extra_content=command_result_content_to_dict(handled_turn.command_result_extra_content),
                 skip_mentions=skip_mentions,
                 delivery_turn_id=delivery_turn_id or handled_turn.anchor_event_id,
                 delivery_stage=DeliveryStage.INITIAL if as_placeholder else DeliveryStage.FINAL,

@@ -5,7 +5,7 @@ The native app and its desktop helper require macOS 14 or newer.
 The menu app includes a Python desktop helper at:
 
 ```text
-MindRoom.app/Contents/Helpers/MindRoom Desktop Helper.app
+MindRoom.app/Contents/Helpers/<architecture>/MindRoom Desktop Helper.app
 ```
 
 The helper has the fixed bundle identifier `chat.mindroom.desktophelper`.
@@ -20,13 +20,15 @@ macos/build-macos-app.sh
 macos/build-macos-app.sh --universal --dmg
 ```
 
-`build-macos-app.sh` invokes `build-desktop-helper.sh`, which creates a PyInstaller onedir app in an isolated uv environment.
+`build-macos-app.sh` invokes `build-desktop-helper.sh`, which creates a PyInstaller onedir app in an isolated uv environment using the locked `desktop-helper` dependency group.
 It copies the helper into the parent, stamps matching versions, signs the helper before the parent, and runs `verify-desktop-helper.sh`.
 The helper build does not modify the project environment.
 
-For a universal release, `HELPER_PYTHON` may select a Python 3.13 executable containing both arm64 and x86_64 slices.
-The build fails before PyInstaller when that interpreter is not universal, then verifies both slices in every Mach-O file collected into the helper.
-Native dependencies must also provide both slices.
+Universal releases contain separate `arm64` and `x86_64` helper apps; the native app selects the helper matching its compiled architecture.
+Each helper uses matching Python 3.13 and dependency wheels, and every collected Mach-O file is checked for that architecture.
+`HELPER_PYTHON` may override the matching managed interpreter, provided it supports the requested architecture.
+Building and testing the Intel helper on Apple silicon requires Rosetta.
+The helper build group excludes the backend's ML dependencies, which the desktop bridge does not use.
 
 ## Runtime contract
 
@@ -54,7 +56,7 @@ Portable tests cover protocol bounds, durable configuration, setup import, lifec
 A release still requires these checks on macOS:
 
 1. `swift test --package-path macos/MindRoom`.
-2. Build the universal app and verify both nested and parent signatures.
+2. Build the universal app, verify both nested and parent signatures, and run `smoke-desktop-helper.py` against each helper.
 3. Confirm Accessibility and Screen Recording prompts name the packaged helper.
 4. Upgrade over a prior signed build and confirm permission continuity.
 5. Exercise keyboard and VoiceOver navigation in Desktop Control.

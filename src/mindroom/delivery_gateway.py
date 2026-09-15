@@ -434,6 +434,7 @@ class StreamingDeliveryRequest:
     visible_event_id_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     completed_edit_record: Callable[[], TurnRecord | None] | None = None
+    allow_new_terminal_message: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -2062,6 +2063,7 @@ class DeliveryGateway:
             transport_is_current=self._stream_transport_gate(delivery_turn_id, request.target.room_id),
             interactive_creator_agent=self.deps.agent_name,
             interactive_source_event_id=delivery_turn_id,
+            allow_new_terminal_message=request.allow_new_terminal_message,
         )
 
     def _stream_transport_gate(

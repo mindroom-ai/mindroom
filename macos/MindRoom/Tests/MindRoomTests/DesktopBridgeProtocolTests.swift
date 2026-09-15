@@ -5,6 +5,13 @@ import XCTest
 
 @MainActor
 final class DesktopBridgeProtocolTests: XCTestCase {
+    #if arch(arm64)
+    private static let helperExecutablePath =
+        "Contents/Helpers/arm64/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+    #else
+    private static let helperExecutablePath =
+        "Contents/Helpers/x86_64/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+    #endif
     private static let completeStatusData = """
     {
       "config":{"state":"ready","revision":2,"enabled":true,"controller_user_id":"@controller:example.org","controller_device_id":"CLOUD","allowed_requester_ids":["@me:example.org"],"allowed_agent_names":["assistant"],"allowed_app_ids":["com.example.Editor"]},
@@ -54,7 +61,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         let invocation = runtime.desktopHelperInvocation()
         XCTAssertEqual(
             invocation.executableURL.path,
-            "/Applications/MindRoom.app/Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+            "/Applications/MindRoom.app/" + Self.helperExecutablePath
         )
         XCTAssertEqual(
             invocation.arguments,
@@ -97,7 +104,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         defer { try? fileManager.removeItem(at: root) }
         let bundle = root.appendingPathComponent("MindRoom.app", isDirectory: true)
         let executable = bundle.appendingPathComponent(
-            "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+            Self.helperExecutablePath
         )
         try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
         let script = """
@@ -145,7 +152,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         defer { try? fileManager.removeItem(at: root) }
         let bundle = root.appendingPathComponent("MindRoom.app", isDirectory: true)
         let executable = bundle.appendingPathComponent(
-            "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+            Self.helperExecutablePath
         )
         try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
         let script = """
@@ -178,7 +185,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         defer { try? fileManager.removeItem(at: root) }
         let bundle = root.appendingPathComponent("MindRoom.app", isDirectory: true)
         let executable = bundle.appendingPathComponent(
-            "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+            Self.helperExecutablePath
         )
         try fileManager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
         let statusObject = try JSONSerialization.jsonObject(with: Self.completeStatusData)

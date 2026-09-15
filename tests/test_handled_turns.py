@@ -756,6 +756,13 @@ async def test_command_execution_checkpoint_persists_across_restart(journal_stor
             completed=False,
             command_execution_started=True,
             command_result_text="✅ Applied once",
+            command_result_extra_content={
+                "io.mindroom.model_selection_result": {
+                    "command_event_id": "$command",
+                    "status": "applied",
+                    "override": "default",
+                },
+            },
         ),
     )
 
@@ -766,6 +773,13 @@ async def test_command_execution_checkpoint_persists_across_restart(journal_stor
     assert recovered.completed is False
     assert recovered.command_execution_started
     assert recovered.command_result_text == "✅ Applied once"
+    assert recovered.command_result_extra_content == {
+        "io.mindroom.model_selection_result": {
+            "command_event_id": "$command",
+            "status": "applied",
+            "override": "default",
+        },
+    }
 
 
 @pytest.mark.asyncio

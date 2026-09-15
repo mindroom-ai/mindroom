@@ -29,6 +29,20 @@ SENDER = "@cloud:example.org"
 RECIPIENT = "@desktop:example.org"
 
 
+@pytest.mark.asyncio
+async def test_catalog_transport_preserves_unverified_device_trust() -> None:
+    """An authenticated request permits a private reply without granting device trust."""
+    async with olm_transport() as (client, peer, requests, _):
+        assert client.olm is not None
+        assert peer.olm is not None
+        target = PinnedMatrixDevice(RECIPIENT, "DESKTOP", peer.olm.account.identity_keys["ed25519"])
+        await send_encrypted_to_device(client, target, event_type="io.mindroom.test", content={})
+        assert not client.olm.device_store[RECIPIENT]["DESKTOP"].verified
+        messages = requests[-1]["body"]["messages"]
+        assert set(messages) == {RECIPIENT}
+        assert set(messages[RECIPIENT]) == {"DESKTOP"}
+
+
 @pytest.mark.parametrize("user_id", ["@:", "@:example.org", "@desktop:"])
 def test_pinned_matrix_device_rejects_empty_user_id_components(user_id: str) -> None:
     with pytest.raises(ValueError, match="@user:server"):
@@ -36,13 +50,17 @@ def test_pinned_matrix_device_rejects_empty_user_id_components(user_id: str) -> 
 
 
 @asynccontextmanager
-async def olm_transport() -> AsyncIterator[tuple[MindRoomAsyncClient, nio.AsyncClient, list[dict], dict]]:
+async def olm_transport(
+    *,
+    sender: str = SENDER,
+    recipient: str = RECIPIENT,
+) -> AsyncIterator[tuple[MindRoomAsyncClient, nio.AsyncClient, list[dict], dict]]:
     """Exercise public nio calls against actual signed keys and local HTTP."""
     requests: list[dict] = []
     query_override: dict = {}
     config = nio.AsyncClientConfig(store=SqliteMemoryStore)
-    peer = MindRoomAsyncClient("https://unused.invalid", RECIPIENT, "DESKTOP", config=config)
-    peer.restore_login(RECIPIENT, "DESKTOP", "test-token")
+    peer = MindRoomAsyncClient("https://unused.invalid", recipient, "DESKTOP", config=config)
+    peer.restore_login(recipient, "DESKTOP", "test-token")
     assert peer.olm is not None
     peer_keys = peer.olm.share_keys()
 
@@ -51,11 +69,11 @@ async def olm_transport() -> AsyncIterator[tuple[MindRoomAsyncClient, nio.AsyncC
         requests.append({"path": request.path, "body": body})
         if request.path.endswith("/keys/query"):
             return web.json_response(
-                query_override or {"device_keys": {RECIPIENT: {"DESKTOP": peer_keys["device_keys"]}}},
+                query_override or {"device_keys": {recipient: {"DESKTOP": peer_keys["device_keys"]}}},
             )
         if request.path.endswith("/keys/claim"):
             first = next(iter(peer_keys["one_time_keys"].items()))
-            return web.json_response({"one_time_keys": {RECIPIENT: {"DESKTOP": dict([first])}}})
+            return web.json_response({"one_time_keys": {recipient: {"DESKTOP": dict([first])}}})
         assert "/sendToDevice/m.room.encrypted/" in request.path
         return web.json_response({})
 
@@ -67,8 +85,8 @@ async def olm_transport() -> AsyncIterator[tuple[MindRoomAsyncClient, nio.AsyncC
     await site.start()
     assert site._server is not None
     port = site._server.sockets[0].getsockname()[1]
-    client = MindRoomAsyncClient(f"http://127.0.0.1:{port}", SENDER, "CLOUD", config=config)
-    client.restore_login(SENDER, "CLOUD", "test-token")
+    client = MindRoomAsyncClient(f"http://127.0.0.1:{port}", sender, "CLOUD", config=config)
+    client.restore_login(sender, "CLOUD", "test-token")
     try:
         yield client, peer, requests, query_override
     finally:

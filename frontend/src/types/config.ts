@@ -14,6 +14,8 @@ export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
+  display_name?: string | null;
+  icon?: string | null;
   api?: "responses" | "chat_completions" | null;
   context_window?: number | null;
   host?: string; // For ollama

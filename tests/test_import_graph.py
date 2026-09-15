@@ -243,6 +243,14 @@ def test_slim_entry_point_import_contract(module: str) -> None:
     )
 
 
+def test_participation_state_has_no_framework_dependencies() -> None:
+    """Using turn participation state must not load execution or provider integration."""
+    _assert_probe_clean(
+        "mindroom.participation",
+        ("agno", "mindroom.provider_tool_policy", "mindroom.hooks"),
+    )
+
+
 def test_primary_runtime_defers_heavy_optional_dependencies() -> None:
     """The orchestrator import must leave provider, storage, and ML/data engines unloaded."""
     _assert_probe_clean("mindroom.orchestrator", _HEAVY_OPTIONAL_RUNTIME_ROOTS)

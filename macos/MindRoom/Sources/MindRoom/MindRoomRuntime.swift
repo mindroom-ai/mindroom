@@ -22,8 +22,15 @@ struct MindRoomCommandInvocation: Equatable {
 
 struct MindRoomRuntime {
     private static let bundledUVRelativePath = "Contents/Resources/bin/uv"
+    #if arch(arm64)
+    private static let desktopHelperArchitecture = "arm64"
+    #elseif arch(x86_64)
+    private static let desktopHelperArchitecture = "x86_64"
+    #else
+    #error("Unsupported desktop helper architecture")
+    #endif
     private static let desktopHelperRelativePath =
-        "Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
+        "Contents/Helpers/\(desktopHelperArchitecture)/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
     private let homeURL: URL
     private let bundleURL: URL
     private let baseEnvironment: [String: String]

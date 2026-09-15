@@ -6,7 +6,7 @@ import base64
 import math
 import os
 import struct
-from copy import copy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -46,6 +46,7 @@ from mindroom.openai_tool_search import (
     model_deferred_tool_names,
     request_params_with_deferred_tool_search,
 )
+from mindroom.provider_tool_policy import disable_tool_selection, provider_tools_disabled
 from mindroom.token_budget import approximate_o200k_tokens, stable_serialize
 
 if TYPE_CHECKING:
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from agno.models.message import Message
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.tools.function import Function
     from openai.types.chat import ChatCompletion
     from openai.types.responses import Response, ResponseStreamEvent
@@ -69,6 +71,45 @@ class OpenAIChatProviderCompat:
     ``OpenAIChat`` field defaults over provider-specific ones (base URL, name)
     during dataclass field collection.
     """
+
+    def get_request_params(
+        self,
+        response_format: dict[Any, Any] | type[BaseModel] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        run_response: RunOutput | TeamRunOutput | None = None,
+    ) -> dict[str, Any]:
+        """Reject mandatory native search before reaching a Chat Completions client."""
+        request_params = super().get_request_params(  # ty: ignore[unresolved-attribute]
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            run_response=run_response,
+        )
+        if provider_tools_disabled():
+            extra_body = request_params.get("extra_body")
+            sources = [request_params, extra_body] if isinstance(extra_body, dict) else [request_params]
+            model_ids = [cast("OpenAIChat", self).id, *(str(source.get("model", "")) for source in sources)]
+            model_ids.extend(str(model_id) for source in sources for model_id in source.get("models") or [])
+            if any(source.get("web_search_options") is not None for source in sources) or any(
+                marker in model_id.casefold() for model_id in model_ids for marker in ("-search-api", "-search-preview")
+            ):
+                msg = "Participation decisions cannot disable native Chat Completions search"
+                raise ValueError(msg)
+            # OpenRouter runs online variants and web plugins once before generation.
+            # Respect the SDK's final extra_body override, including enabled=False.
+            plugins = (
+                extra_body.get("plugins", request_params.get("plugins"))
+                if isinstance(extra_body, dict)
+                else request_params.get("plugins")
+            )
+            if any("online" in model_id.casefold().split(":")[1:] for model_id in model_ids) or any(
+                isinstance(plugin, dict) and plugin.get("id") == "web" and plugin.get("enabled") is not False
+                for plugin in plugins or []
+            ):
+                msg = "Participation decisions cannot disable native OpenRouter search"
+                raise ValueError(msg)
+        return disable_tool_selection(request_params)
 
     def _parse_provider_response(self, response: ChatCompletion, **kwargs: object) -> ModelResponse:
         """Retain the terminal reason Agno drops when parsing Chat Completions."""
@@ -359,6 +400,9 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
         run_response: RunOutput | None = None,
     ) -> dict[str, Any]:
         """Tag deferred functions and add hosted tool search."""
+        if provider_tools_disabled():
+            # Agno mutates nested function schemas and inserts deep-research tools.
+            tools = deepcopy(tools)
         if messages is not None:
             messages, _ = _prepare_response_continuation(messages, explicit_replay=self._portable_replay)
         request_params = super().get_request_params(
@@ -382,7 +426,16 @@ class MindRoomOpenAIResponses(NativeCompactionModel, OpenAIResponses):
             request_params["context_management"] = [
                 {"type": "compaction", "compact_threshold": self.native_compaction.threshold},
             ]
-        return request_params_with_deferred_tool_search(request_params, model_deferred_tool_names(self))
+        request_params = request_params_with_deferred_tool_search(request_params, model_deferred_tool_names(self))
+        return disable_tool_selection(request_params)
+
+    def _format_tool_params(
+        self,
+        messages: list[Message],
+        tools: list[Function | dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Avoid eager file-search uploads during a decision that cannot use them."""
+        return super()._format_tool_params([] if provider_tools_disabled() else messages, tools)
 
     def _format_messages(
         self,

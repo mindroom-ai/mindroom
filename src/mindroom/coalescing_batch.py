@@ -95,6 +95,7 @@ class PendingEvent:
     event: PreparedIngress
     room: nio.MatrixRoom
     enqueue_time: float = field(default_factory=time.time)
+    text_debounce_seconds: float = 0.0
     dispatch_metadata: tuple[PendingDispatchMetadata, ...] = ()
 
 
