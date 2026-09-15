@@ -17,7 +17,7 @@ def _matrix_message_function() -> Function:
     return function
 
 
-def test_matrix_message_schema_exposes_four_actions_and_ten_arguments() -> None:
+def test_matrix_message_schema_exposes_four_actions_and_eleven_arguments() -> None:
     """Agents should only see supported actions and the consolidated targeting contract."""
     function = _matrix_message_function()
     properties = function.parameters["properties"]
@@ -32,6 +32,7 @@ def test_matrix_message_schema_exposes_four_actions_and_ten_arguments() -> None:
         "attachments",
         "message_extras",
         "limit",
+        "idempotency_key",
     }
     assert properties["action"]["enum"] == ["send", "read", "edit", "react"]
     assert function.parameters["required"] == []
