@@ -378,3 +378,5 @@ _collections_to_query  # Agno calls this hook to resolve the exact published rea
 
 response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
+
+agent_user_ids  # ModelPickerScope wire field consumed by Matrix model catalog discovery.

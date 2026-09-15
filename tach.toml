@@ -279,6 +279,7 @@ visibility = [
     "mindroom.conversation_resolver",
     "mindroom.matrix.conversation_reads",
     "mindroom.thread_export.projected_history",
+    "mindroom.model_selection_scope",
 ]
 
 [[modules]]
@@ -3609,6 +3610,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.model_commands"
 depends_on = [
+    "mindroom.model_selection_scope",
+    "mindroom.model_selection",
     "mindroom.thread_models",
 ]
 
@@ -3647,6 +3650,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.handler"
 depends_on = [
+    "mindroom.model_selection",
     "mindroom.matrix.room_membership",
     "mindroom.authorization",
     "mindroom.commands.config_commands",
@@ -4010,6 +4014,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.turn_record"
 depends_on = [
+    "mindroom.model_selection",
     "mindroom.history.types",
     "mindroom.legacy_revision_replay",
     "mindroom.message_target",
@@ -4061,6 +4066,7 @@ visibility = ["mindroom.turn_controller"]
 [[modules]]
 path = "mindroom.command_turn_executor"
 depends_on = [
+    "mindroom.model_selection",
     "mindroom.commands.handler",
     "mindroom.commands.parsing",
     "mindroom.constants",
@@ -4097,6 +4103,7 @@ visibility = [
 [[modules]]
 path = "mindroom.visible_response_reconciliation"
 depends_on = [
+    "mindroom.model_selection",
     "mindroom.matrix.room_history_reads",
     "mindroom.constants",
     "mindroom.delivery_gateway",
@@ -5902,3 +5909,17 @@ visibility = [
 path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
 visibility = ["mindroom.event_journal"]
+
+[[modules]]
+path = "mindroom.model_selection"
+depends_on = []
+
+[[modules]]
+path = "mindroom.model_selection_scope"
+depends_on = [
+    "mindroom.matrix.event_info",
+    "mindroom.authorization",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.conversation_hydration",
+]
