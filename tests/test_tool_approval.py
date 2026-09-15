@@ -46,6 +46,7 @@ from mindroom.event_journal import (
     delivery_transaction_id,
 )
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval import (
     MatrixApprovalAction,
     ToolApprovalScriptError,
@@ -592,7 +593,7 @@ async def test_click_binds_a_card_accepted_before_its_acknowledgement(tmp_path: 
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=(source_event_id,),
+        sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -1180,7 +1181,7 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=(source_event_id,),
+        sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(),
         state="claimed",
         runtime_generation="old-runtime",
@@ -1191,6 +1192,7 @@ async def test_removed_owner_cleanup_recovers_any_frozen_final_through_original_
         stage=DeliveryStage.FINAL,
         room_id="!room:localhost",
         thread_id="$thread",
+        edits_event_id="$waiting",
         payload={
             "msgtype": "m.text",
             "body": "finished",
@@ -1282,7 +1284,7 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id=waiting_event_id,
-        source_event_ids=(source_event_id,),
+        sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -1416,7 +1418,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=(source_event_id,),
+        sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
@@ -1528,7 +1530,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         thread_id="$thread",
         requester_id="@user:localhost",
         response_event_id="$waiting",
-        source_event_ids=(source_event_id,),
+        sources=ResponseSources((source_event_id,), (source_event_id,)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",

@@ -73,6 +73,7 @@ from mindroom.response_runner import (
     _ResponseGenerationOutcome,
     _with_matrix_message_target,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import StreamingDeliveryError
@@ -107,6 +108,7 @@ from tests.conftest import (
     runtime_paths_for,
     seed_session,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
@@ -217,6 +219,10 @@ class TestAgentBot(AgentBotTestBase):
         bot._response_runner.deps = replace(bot._response_runner.deps, request_preparer=preparer)
         prepared = await bot._response_runner._prepare_request_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=(envelope.source_event_id,),
+                    logical_source_event_ids=(envelope.source_event_id,),
+                ),
                 thread_history=[],
                 prompt="Check for updates",
                 user_id="@user:localhost",
@@ -254,6 +260,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = AsyncMock()
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         room.name = "Engineering"
@@ -308,6 +315,7 @@ class TestAgentBot(AgentBotTestBase):
         """The immutable response source alone controls first-empty acceptance."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -366,6 +374,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = AsyncMock()
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
@@ -487,6 +496,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = AsyncMock()
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
@@ -546,6 +556,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = AsyncMock()
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
         bot.client.rooms = {room.room_id: room}
@@ -700,6 +711,7 @@ class TestAgentBot(AgentBotTestBase):
         """Non-streaming responses should persist attachment IDs in message metadata."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -1060,6 +1072,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -1100,6 +1113,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -1325,6 +1339,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-deliver-suppress",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -1386,6 +1401,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-deliver-existing-suppress",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -1443,6 +1459,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-deliver-suppress-fail",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -1505,6 +1522,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-finalize-stream-visible-failure",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -1553,6 +1571,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-finalize-stream-cancelled-placeholder",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -1611,6 +1630,10 @@ class TestAgentBot(AgentBotTestBase):
                                 response_kind="ai",
                                 response_envelope=response_envelope,
                                 correlation_id="corr-process-shutdown-placeholder",
+                                sources=ResponseSources(
+                                    (response_envelope.source_event_id,),
+                                    (response_envelope.source_event_id,),
+                                ),
                             ),
                             tool_trace=None,
                             extra_content=None,
@@ -1678,6 +1701,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-finalize-stream-placeholder-cleanup-failed",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -1859,6 +1883,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -1925,6 +1950,7 @@ class TestAgentBot(AgentBotTestBase):
             tmp_path,
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
@@ -2063,6 +2089,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="What time is it?",
                     thread_history=thread_history,
                     user_id="@alice:localhost",
@@ -2184,6 +2214,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="What time is it?",
                     thread_history=thread_history,
                     user_id="@alice:localhost",
@@ -2280,6 +2314,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2354,6 +2392,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2428,6 +2470,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             response_event_id = await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2510,6 +2556,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2554,6 +2604,10 @@ class TestAgentBot(AgentBotTestBase):
 
         event_id = await bot._response_runner.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$terminal-event",),
+                    logical_source_event_ids=("$terminal-event",),
+                ),
                 prompt="Check for updates",
                 thread_history=[],
                 user_id="@alice:localhost",
@@ -2669,6 +2723,10 @@ class TestAgentBot(AgentBotTestBase):
             async with bot._conversation_resolver.turn_lookup_scope():
                 resolution = await bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=("$event",),
+                            logical_source_event_ids=("$event",),
+                        ),
                         prompt="Continue",
                         thread_history=stale_history,
                         user_id="@alice:localhost",
@@ -2774,6 +2832,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(envelope.source_event_id,),
+                        logical_source_event_ids=(envelope.source_event_id,),
+                    ),
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -2823,6 +2885,7 @@ class TestAgentBot(AgentBotTestBase):
 
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
             return_value=_KnowledgeResolution(knowledge=None),
@@ -2868,6 +2931,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Summarize this thread",
                     thread_history=thread_history,
                     user_id="@alice:localhost",
@@ -2948,6 +3015,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.thread_summary_first_threshold = 1
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
             return_value=_KnowledgeResolution(knowledge=None),
@@ -2998,6 +3066,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(response_envelope.source_event_id,),
+                        logical_source_event_ids=(response_envelope.source_event_id,),
+                    ),
                     prompt="Start a thread here",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -3057,6 +3129,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Please answer",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -3116,6 +3192,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Please answer",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -3185,6 +3265,10 @@ class TestAgentBot(AgentBotTestBase):
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=("$event",),
+                            logical_source_event_ids=("$event",),
+                        ),
                         prompt="Summarize this thread",
                         thread_history=[],
                         user_id="@alice:localhost",
@@ -3223,6 +3307,10 @@ class TestAgentBot(AgentBotTestBase):
             events.append("source_settled")
 
         request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=("$event",),
+                logical_source_event_ids=("$event",),
+            ),
             prompt="Check for updates",
             thread_history=[],
             user_id="@alice:localhost",
@@ -3289,6 +3377,10 @@ class TestAgentBot(AgentBotTestBase):
             agent_name=bot.agent_name,
         )
         request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=(target.source_event_id,),
+                logical_source_event_ids=(target.source_event_id,),
+            ),
             prompt="Run it",
             thread_history=[],
             user_id="@alice:localhost",

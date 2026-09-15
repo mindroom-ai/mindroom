@@ -26,6 +26,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,6 +70,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
+    install_direct_response_admission(bot)
 
     # Mock the orchestrator and client
     mock_orchestrator = MagicMock()

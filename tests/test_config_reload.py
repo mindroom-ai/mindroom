@@ -43,6 +43,7 @@ from mindroom.orchestration.runtime import log_startup_phase_finished, log_start
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -1657,6 +1658,10 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
 
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$reply",),
+            logical_source_event_ids=("$reply",),
+        ),
         thread_history=(),
         prompt="Hello",
         response_envelope=request_envelope(
@@ -3173,6 +3178,10 @@ async def test_in_flight_response_count_nonzero_during_send_response(
 
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$reply",),
+            logical_source_event_ids=("$reply",),
+        ),
         thread_history=(),
         prompt="Hello",
         response_envelope=request_envelope(
@@ -3261,6 +3270,10 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     task = asyncio.create_task(
         busy_runner._run_locked_response_lifecycle(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$reply",),
+                    logical_source_event_ids=("$reply",),
+                ),
                 thread_history=(),
                 prompt="Hello",
                 response_envelope=request_envelope(
@@ -3321,6 +3334,10 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     task = asyncio.create_task(
         runner._run_locked_response_lifecycle(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$reply",),
+                    logical_source_event_ids=("$reply",),
+                ),
                 thread_history=(),
                 prompt="Hello",
                 response_envelope=request_envelope(
@@ -3383,6 +3400,10 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     task = bot._response_runner.track_inbox_response(
         bot._response_runner.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$reply",),
+                    logical_source_event_ids=("$reply",),
+                ),
                 thread_history=(),
                 prompt="Hello",
                 response_envelope=request_envelope(

@@ -78,6 +78,7 @@ from mindroom.matrix_delivery import (
     TurnHandoff,
 )
 from mindroom.response_shutdown_diagnostics import ResponseShutdownPhase, response_shutdown_phase
+from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import (
@@ -183,6 +184,7 @@ class ResponseIdentity:
     response_kind: str
     response_envelope: MessageEnvelope
     correlation_id: str
+    sources: ResponseSources
     participating_agent_names: tuple[str, ...] = ()
 
 
@@ -314,6 +316,7 @@ class SendTextRequest:  # noqa: D101
     delivery_stage: DeliveryStage = DeliveryStage.FINAL
     defer_source_handoff: bool = False
     delivery_result: dict[str, object] | None = None
+    response_attempt: ResponseAttempt | None = None
 
 
 @dataclass(frozen=True)
@@ -330,6 +333,7 @@ class EditTextRequest:  # noqa: D101
     delivery_turn_id: str | None = None
     defer_source_handoff: bool = False
     delivery_result: dict[str, object] | None = None
+    response_attempt: ResponseAttempt | None = None
 
 
 @dataclass(frozen=True)
@@ -750,6 +754,7 @@ class DeliveryGateway:
                     extra_content=failure_extra_content,
                     retry_sync_recovery=True,
                     delivery_turn_id=turn_id,
+                    response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
                     defer_source_handoff=request.defer_source_handoff,
                 ),
             )
@@ -782,6 +787,7 @@ class DeliveryGateway:
                 extra_content=failure_extra_content,
                 retry_sync_recovery=True,
                 delivery_turn_id=turn_id,
+                response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
                 defer_source_handoff=request.defer_source_handoff,
             ),
         )
@@ -1271,6 +1277,7 @@ class DeliveryGateway:
                 thread_id=request.target.resolved_thread_id,
                 payload=content,
                 result=delivery_result,
+                response_attempt=request.response_attempt,
                 permanent_failure_reason=(
                     _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
                 ),
@@ -1434,6 +1441,7 @@ class DeliveryGateway:
                 thread_id=request.target.resolved_thread_id,
                 payload=envelope,
                 result=delivery_result,
+                response_attempt=request.response_attempt,
                 edits_event_id=request.event_id,
                 permanent_failure_reason=(
                     _matrix_delivery_failure_reason(preparation_failure) if preparation_failure is not None else None
@@ -1679,6 +1687,7 @@ class DeliveryGateway:
                     tool_trace=draft.tool_trace,
                     extra_content=delivery_extra_content,
                     delivery_turn_id=request.identity.response_envelope.source_event_id,
+                    response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
                     retry_sync_recovery=True,
                     defer_source_handoff=request.defer_source_handoff,
                     delivery_result=delivery_result,
@@ -1727,6 +1736,7 @@ class DeliveryGateway:
                 # ledger already keys on it, and it re-derives to the same
                 # value after a restart, which a generated ID would not.
                 delivery_turn_id=request.identity.response_envelope.source_event_id,
+                response_attempt=ResponseAttempt(self.deps.agent_name, request.identity.sources),
                 defer_source_handoff=request.defer_source_handoff,
                 delivery_result=delivery_result,
             ),
@@ -2036,8 +2046,18 @@ class DeliveryGateway:
                 request.preserve_existing_visible_on_empty_terminal
                 or (request.existing_event_id is not None and not request.adopt_existing_placeholder)
             ),
-            terminal_edit=self._durable_terminal_edit(delivery_turn_id, request.target, request.completed_edit_record),
-            terminal_send=self._durable_terminal_send(delivery_turn_id, request.target, request.completed_edit_record),
+            terminal_edit=self._durable_terminal_edit(
+                delivery_turn_id,
+                request.target,
+                ResponseAttempt(self.deps.agent_name, request.identity.sources),
+                request.completed_edit_record,
+            ),
+            terminal_send=self._durable_terminal_send(
+                delivery_turn_id,
+                request.target,
+                ResponseAttempt(self.deps.agent_name, request.identity.sources),
+                request.completed_edit_record,
+            ),
             final_text_transform=self._final_text_transform(request.identity),
             transport_is_current=self._stream_transport_gate(delivery_turn_id, request.target.room_id),
             interactive_creator_agent=self.deps.agent_name,
@@ -2066,6 +2086,7 @@ class DeliveryGateway:
         self,
         turn_id: str,
         target: MessageTarget,
+        response_attempt: ResponseAttempt,
         completed_edit_record: Callable[[], TurnRecord | None] | None = None,
     ) -> TerminalSend:
         """Return a sender that records a stream's terminal *send* before making it.
@@ -2104,6 +2125,7 @@ class DeliveryGateway:
                     delivery_result=self._prepared_edit_result(completed_edit_record, content),
                     retry_sync_recovery=retry_sync_recovery,
                     delivery_turn_id=turn_id,
+                    response_attempt=response_attempt,
                     delivery_stage=DeliveryStage.FINAL,
                 ),
                 target.room_id,
@@ -2219,6 +2241,7 @@ class DeliveryGateway:
         self,
         turn_id: str,
         target: MessageTarget,
+        response_attempt: ResponseAttempt,
         completed_edit_record: Callable[[], TurnRecord | None] | None = None,
     ) -> TerminalEdit:
         """Return a sender that records a stream's terminal edit before making it.
@@ -2261,6 +2284,7 @@ class DeliveryGateway:
                     delivery_result=self._prepared_edit_result(completed_edit_record, content),
                     retry_sync_recovery=retry_sync_recovery,
                     delivery_turn_id=turn_id,
+                    response_attempt=response_attempt,
                 ),
                 target.room_id,
                 content,

@@ -49,6 +49,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_sources import ResponseSources
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_record import EditPreparation, RevisionReplay
 from mindroom.turn_store import TurnStore, TurnStoreDeps
@@ -3343,6 +3344,10 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
     if context_only:
         runner = ResponseRunner(deps=MagicMock())
         request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=("$user_msg",),
+                logical_source_event_ids=("$user_msg",),
+            ),
             prompt="CURRENT_SOURCE",
             thread_history=[],
             user_id="@user:example.org",

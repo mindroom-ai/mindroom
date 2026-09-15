@@ -98,6 +98,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
@@ -1188,6 +1189,11 @@ async def test_coalesced_router_relays_index_every_human_source_for_edit_lookup(
     await harness.controller.handle_prepared_turn(batch)
     await harness.runner.settle_inbox_responses()
 
+    assert harness.runner.requests[0].sources == ResponseSources(
+        pending_event_ids=("$relay-two:localhost", "$relay-one:localhost"),
+        logical_source_event_ids=("$relay-one:localhost", "$relay-two:localhost"),
+        discovery_event_ids=("$human-one:localhost", "$human-two:localhost"),
+    )
     first_lookup = harness.turn_store.get_turn_record("$human-one:localhost")
     second_lookup = harness.turn_store.get_turn_record("$human-two:localhost")
     assert first_lookup is not None
@@ -1739,6 +1745,10 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     assert request.member_display_names == {_SENDER: _SENDER, general_user_id: general_user_id}
     assert request.response_envelope.requester_id == _SENDER
     assert request.response_envelope.target.room_id == _ROOM_ID
+    assert request.sources == ResponseSources(
+        pending_event_ids=(event.event_id,),
+        logical_source_event_ids=(event.event_id,),
+    )
     # A rootable room-level message becomes its own thread root.
     assert request.response_envelope.target.resolved_thread_id == event.event_id
 
@@ -3864,6 +3874,11 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
     assert request.existing_event_is_placeholder is True
     assert request.response_envelope.target.reply_to_event_id == selection.question_event_id
     assert request.response_envelope.target.resolved_thread_id == selection.thread_id
+    assert request.sources == ResponseSources(
+        pending_event_ids=("$selection:localhost",),
+        logical_source_event_ids=("$selection:localhost",),
+        discovery_event_ids=(selection.question_event_id,),
+    )
     metadata = request.matrix_run_metadata
     assert metadata is not None
     assert metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] == ["$selection:localhost"]

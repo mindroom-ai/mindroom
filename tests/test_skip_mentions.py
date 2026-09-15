@@ -29,6 +29,7 @@ from mindroom.hooks import MessageEnvelope, ResponseDraft
 from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.response_sources import ResponseSources
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -457,6 +458,10 @@ async def test_delivery_gateway_deliver_stream_labels_latest_thread_lookup(tmp_p
                     response_kind="ai",
                     response_envelope=_delivery_envelope(),
                     correlation_id="corr-stream",
+                    sources=ResponseSources(
+                        (_delivery_envelope().source_event_id,),
+                        (_delivery_envelope().source_event_id,),
+                    ),
                 ),
                 existing_event_id="$existing",
             ),
@@ -544,6 +549,10 @@ async def test_delivery_gateway_deliver_final_uses_send_text_for_new_messages(tm
                     response_kind="ai",
                     response_envelope=_delivery_envelope(),
                     correlation_id="corr-1",
+                    sources=ResponseSources(
+                        (_delivery_envelope().source_event_id,),
+                        (_delivery_envelope().source_event_id,),
+                    ),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -586,6 +595,10 @@ async def test_delivery_gateway_deliver_final_uses_edit_text_for_existing_messag
                     response_kind="ai",
                     response_envelope=_delivery_envelope(),
                     correlation_id="corr-2",
+                    sources=ResponseSources(
+                        (_delivery_envelope().source_event_id,),
+                        (_delivery_envelope().source_event_id,),
+                    ),
                 ),
                 tool_trace=None,
                 extra_content=None,

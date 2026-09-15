@@ -32,6 +32,7 @@ from mindroom.event_journal import (
 from mindroom.matrix.large_messages import content_fits_normal_event
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
+from mindroom.response_sources import ResponseSources
 from mindroom.tool_approval_grants import ApprovalOperation, grant_operation
 from tests.conftest import test_runtime_paths
 from tests.journal_membership_helpers import admit_room_membership
@@ -171,7 +172,7 @@ async def test_only_policy_pause_offers_timed_approval(
         thread_id="$thread",
         requester_id="@human:test",
         response_event_id="$waiting",
-        source_event_ids=("$source-authored",),
+        sources=ResponseSources(("$source-authored",), ("$source-authored",)),
         calls=plan.calls,
         state="waiting",
         runtime_generation="runtime",
@@ -267,7 +268,7 @@ async def test_policy_pause_receipt_accepts_timed_authorization_without_claiming
                     thread_id="$thread",
                     requester_id="@human:test",
                     response_event_id="$waiting-" + name,
-                    source_event_ids=("$source-" + name,),
+                    sources=ResponseSources(("$source-" + name,), ("$source-" + name,)),
                     calls=plan.calls,
                     state="waiting",
                     runtime_generation="runtime",
@@ -1147,7 +1148,7 @@ async def _card(
         thread_id=thread,
         requester_id=requester,
         response_event_id="$waiting-" + name,
-        source_event_ids=("$source-" + name,),
+        sources=ResponseSources(("$source-" + name,), ("$source-" + name,)),
         calls=(
             ApprovalCall(
                 tool_call_id="call-" + name,

@@ -58,6 +58,7 @@ if TYPE_CHECKING:
         TerminalTurnWrite,
     )
     from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import ResponseAttempt
 
 pytestmark = pytest.mark.asyncio
 
@@ -109,6 +110,7 @@ class _WatchedOutbox:
         thread_id: str | None,
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
+        response_attempt: ResponseAttempt | None = None,
         edits_event_id: str | None = None,
         settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
@@ -123,6 +125,7 @@ class _WatchedOutbox:
             thread_id=thread_id,
             payload=payload,
             result=result,
+            response_attempt=response_attempt,
             edits_event_id=edits_event_id,
             settle_source_event_ids=settle_source_event_ids,
             permanent_failure_reason=permanent_failure_reason,

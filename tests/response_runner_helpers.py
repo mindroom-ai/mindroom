@@ -13,6 +13,7 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -25,6 +26,7 @@ from tests.conftest import (
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -59,6 +61,7 @@ def _bot(tmp_path: Path) -> AgentBot:
         user_id="@mindroom_general:localhost",
     )
     bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
+    install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_journal_support(bot)
     wrap_extracted_collaborators(bot)
@@ -92,6 +95,10 @@ def _plain_request(target: MessageTarget, *, source_event_id: str = "$event") ->
         prompt="hello",
         user_id="@user:localhost",
         response_envelope=_envelope(target, source_event_id=source_event_id),
+        sources=ResponseSources(
+            pending_event_ids=(source_event_id,),
+            logical_source_event_ids=(source_event_id,),
+        ),
     )
 
 

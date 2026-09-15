@@ -14,7 +14,7 @@ import pytest
 from mindroom.cancellation import request_task_cancel
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import FinalDeliveryRequest
-from mindroom.event_journal import DeliveryStage, EventClass, EventKind
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.handled_turns import TurnRecord, _reset_handled_turn_ledger_runtime
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -22,6 +22,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import canonicalize_turn_record
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.journal_membership_helpers import admit_room_membership
@@ -208,6 +209,18 @@ async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publ
     """A cached pre-ACK mutation cannot overwrite proof before cache repair runs."""
     store = await _store(journal_store)
     principal = journal_store.principal("agent@alice")
+    await principal.admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=20,
+            source={},
+        ),
+    )
     await store.record_responded_turn(
         TurnRecord.create(
             ["$source"],
@@ -268,7 +281,10 @@ async def test_stale_ledger_write_after_ack_cannot_erase_consumption_before_publ
                     target=MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True),
                     existing_event_id="$answer",
                     response_text="answer",
-                    identity=_identity("$edit"),
+                    identity=replace(
+                        _identity("$edit"),
+                        sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1),
+                    ),
                     tool_trace=None,
                     extra_content=None,
                     prepared_edit_record=selected,
@@ -305,6 +321,18 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
     """Only the winning active acknowledgement can consume its frozen selected edit."""
     store = await _store(journal_store)
     principal = journal_store.principal("agent@alice")
+    await principal.admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=20,
+            source={},
+        ),
+    )
     target = MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True)
     original = TurnRecord.create(
         ["$source"],
@@ -361,7 +389,7 @@ async def test_edit_delivery_process_boundaries(  # noqa: C901, PLR0915
         target=target,
         existing_event_id="$answer",
         response_text="generated answer",
-        identity=_identity("$edit"),
+        identity=replace(_identity("$edit"), sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1)),
         tool_trace=None,
         extra_content=None,
         prepared_edit_record=selected,
@@ -430,6 +458,18 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
     """Durable acknowledgement and cache publication preserve current revision and STOP owners."""
     store = await _store(journal_store)
     principal = journal_store.principal("agent@alice")
+    await principal.admit(
+        InboundEvent(
+            event_id="$edit",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=20,
+            source={},
+        ),
+    )
     await store.record_responded_turn(
         TurnRecord.create(
             ["$source"],
@@ -485,7 +525,10 @@ async def test_edit_acknowledgement_preserves_intervening_authority(  # noqa: C9
                 target=MessageTarget.resolve("!room:localhost", None, "$source", room_mode=True),
                 existing_event_id="$answer",
                 response_text="answer",
-                identity=_identity("$edit"),
+                identity=replace(
+                    _identity("$edit"),
+                    sources=ResponseSources(("$edit",), ("$source",), edit_receipt_order=1),
+                ),
                 tool_trace=None,
                 extra_content=None,
                 prepared_edit_record=selected,

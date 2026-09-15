@@ -23,6 +23,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
@@ -38,6 +39,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -171,6 +173,7 @@ async def test_preformed_team_bot_responds_when_mentioned(config_with_team: Conf
         team_mode="coordinate",
         enable_streaming=False,
     )
+    install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
 
@@ -274,6 +277,10 @@ async def test_preformed_team_bot_schedules_memory_save_for_all_file_members(
         ]
         await bot._run_regenerated_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$evt1",),
+                    logical_source_event_ids=("$evt1",),
+                ),
                 prompt="@team remember this",
                 thread_history=thread_history,
                 user_id="@user:localhost",
@@ -318,6 +325,7 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
         team_mode="coordinate",
         enable_streaming=False,
     )
+    install_direct_response_admission(bot)
     bot.client = _make_matrix_client_mock()
     install_runtime_journal_support(bot)
     bot.orchestrator = MagicMock()
@@ -334,6 +342,10 @@ async def test_preformed_team_rejection_edits_existing_message(config_with_team:
     ) as mock_edit:
         resolution = await bot._run_regenerated_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$evt1",),
+                    logical_source_event_ids=("$evt1",),
+                ),
                 prompt="@t1 please retry",
                 thread_history=[],
                 existing_event_id="$existing_response",

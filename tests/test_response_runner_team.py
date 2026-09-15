@@ -37,6 +37,7 @@ from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams import TeamIntent, TeamMemberStatus, TeamMode, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.thread_summary import thread_summary_message_count_hint
@@ -69,6 +70,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import entity_ids
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import _PersistenceSeamProbe
 
 if TYPE_CHECKING:
@@ -109,6 +111,7 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=runtime_paths,
             team_mode="coordinate",
         )
+        install_direct_response_admission(bot)
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
@@ -118,6 +121,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         runner = unwrap_extracted_collaborator(bot._response_runner)
         request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=("$source",),
+                logical_source_event_ids=("$source",),
+            ),
             thread_history=[],
             user_id="@user:localhost",
             prompt="team prompt",
@@ -269,6 +276,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await coordinator.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="team prompt",
@@ -332,6 +343,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await coordinator.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="team prompt",
@@ -392,6 +407,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="team prompt",
@@ -433,6 +452,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         bot.orchestrator = MagicMock(
@@ -458,6 +478,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="team prompt",
@@ -488,6 +512,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -513,6 +538,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="team prompt",
@@ -535,6 +564,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -561,6 +591,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="Summarize the latest invoice.",
@@ -593,6 +627,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -620,6 +655,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="What time is it?",
@@ -660,6 +699,7 @@ class TestAgentBot(AgentBotTestBase):
         config.defaults.show_stop_button = False
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock(
             current_config=config,
@@ -699,6 +739,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(envelope.source_event_id,),
+                        logical_source_event_ids=(envelope.source_event_id,),
+                    ),
                     thread_history=[],
                     user_id="@user:localhost",
                     prompt="team prompt",
@@ -772,6 +816,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             delivery_resolution = await bot._run_regenerated_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Team, summarize this thread",
                     thread_history=[],
                     existing_event_id="$existing",
@@ -867,6 +915,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             result = await bot._run_regenerated_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Team, summarize this thread",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -962,6 +1014,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._run_regenerated_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Team, summarize this thread",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -1070,6 +1126,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._run_regenerated_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Team, summarize this thread",
                     thread_history=thread_history,
                     user_id="@alice:localhost",
@@ -1192,6 +1252,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._run_regenerated_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Team, summarize this thread",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -1304,6 +1368,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -1385,6 +1453,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -1449,6 +1521,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$ad-hoc-silent-run",),
+                        logical_source_event_ids=("$ad-hoc-silent-run",),
+                    ),
                     prompt="Check for updates",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -1535,6 +1611,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",
@@ -1583,6 +1663,10 @@ class TestAgentBot(AgentBotTestBase):
         ):
             resolution = await bot._response_runner.generate_team_response_helper(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     prompt="Continue",
                     thread_history=[],
                     user_id="@alice:localhost",

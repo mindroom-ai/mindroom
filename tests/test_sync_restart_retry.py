@@ -19,6 +19,7 @@ from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest, ResponseRunner
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.sync_restart_retry import InterruptedTurnRooms, interrupted_source_needs_retry
 from tests.conftest import delivered_matrix_event, request_envelope, unwrap_extracted_collaborator
@@ -238,6 +239,10 @@ async def test_team_resolution_fallback_without_terminal_note_does_not_register_
 
 def _request(on_interrupted_response_recoverable: Callable[[], None] | None = None) -> ResponseRequest:
     return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$event",),
+            logical_source_event_ids=("$event",),
+        ),
         thread_history=[],
         prompt="Hello",
         response_envelope=request_envelope(thread_id="$thread"),
