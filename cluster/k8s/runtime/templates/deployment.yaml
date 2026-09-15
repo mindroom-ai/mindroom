@@ -238,6 +238,8 @@ spec:
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
             {{- else if eq .Values.workers.backend "kubernetes" }}
+            - name: MINDROOM_WORKER_COMPUTER_ENABLED
+              value: {{ .Values.workers.computerEnabled | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_NAMESPACE
               value: {{ include "mindroom-runtime.workerNamespace" . | quote }}
             {{- if $workerAuthSecretName }}

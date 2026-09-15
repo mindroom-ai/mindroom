@@ -74,6 +74,8 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
     visible_state_roots_for_worker_key,
 )
+from mindroom.worker_computer.protocol import BrowserSession
+from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
@@ -1655,8 +1657,96 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     )
 
 
+async def _execute_computer_browser(
+    computer: WorkerComputerRuntime,
+    payload: SandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None,
+    runner_token: str | None,
+) -> SandboxRunnerExecuteResponse:
+    """Bind only the validated built-in browser to the persistent ASGI runtime."""
+    # Playwright and browser dependencies stay out of slim runner startup imports.
+    from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
+    from mindroom.tools.browser import browser_tools  # noqa: PLC0415
+
+    if (
+        prepared_worker is None
+        or not sandbox_exec.runner_uses_dedicated_worker(runtime_paths)
+        or payload.worker_key is None
+        or resolved_worker_key_scope(payload.worker_key) != "user_agent"
+        or payload.worker_scope != "user_agent"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Worker computer requires an unambiguous dedicated user_agent worker.",
+        )
+    _ensure_registry_loaded_with_config(runtime_paths, config)
+    if TOOL_METADATA["browser"].factory is not browser_tools:
+        raise HTTPException(status_code=400, detail="Worker computer requires the built-in browser factory.")
+    prepared_context = _prepare_execute_request(
+        payload,
+        runtime_paths,
+        prepared_worker,
+        config=config,
+        runner_token=runner_token,
+    )
+    prepared = prepared_context.request
+    workspace = prepared.tool_output_workspace_root or prepared.runtime_overrides.get("base_dir")
+    if not isinstance(workspace, str):
+        raise HTTPException(status_code=400, detail="Worker browser requires a prepared output workspace.")
+    browser_paths = replace(prepared_context.runtime_paths, storage_root=prepared_worker.paths.root)
+    identity = _request_execution_identity(payload)
+    with tool_execution_identity(identity):
+        toolkit, entrypoint = _resolve_entrypoint(
+            runtime_paths=browser_paths,
+            config=config,
+            tool_name="browser",
+            function_name="browser_control",
+            execution_identity=identity,
+            credential_overrides=prepared.credential_overrides or None,
+            tool_config_overrides=prepared.tool_config_overrides or None,
+            tool_init_overrides=prepared.tool_init_overrides or None,
+            runtime_overrides=prepared.runtime_overrides or None,
+            worker_scope=prepared.worker_scope,
+            routing_agent_name=prepared.routing_agent_name,
+            private_agent_names=_freeze_private_agent_names(prepared.private_agent_names),
+            tool_output_workspace_root=Path(workspace),
+        )
+        if type(toolkit) is not BrowserTools:
+            raise HTTPException(status_code=400, detail="Worker computer requires the built-in browser tool.")
+        try:
+            browser_config_key = toolkit.bind_worker_display(computer.display.display, Path(workspace))
+
+            async def execute(*args: object, **kwargs: object) -> object:
+                async with asyncio.timeout(sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)):
+                    return await _run_toolkit_entrypoint(toolkit, entrypoint, list(args), kwargs)
+
+            def factory(_display: str) -> BrowserSession:
+                return BrowserSession(execute=execute, close=toolkit.aclose)
+
+            binding_key = json.dumps(
+                {
+                    "browser": browser_config_key,
+                    "worker_key": payload.worker_key,
+                    "runtime": constants.serialize_runtime_paths(browser_paths),
+                    "config": config.model_dump(mode="json"),
+                    "workspace": workspace,
+                },
+                sort_keys=True,
+            )
+            result = await computer.run_browser_call(binding_key, factory, prepared.args, prepared.kwargs)
+        except Exception as exc:
+            return SandboxRunnerExecuteResponse(
+                ok=False,
+                error=f"Sandbox tool execution failed: {type(exc).__name__}: {exc}",
+                failure_kind="tool",
+            )
+    return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
+
+
 @router.post("/execute", response_model=SandboxRunnerExecuteResponse)
-async def execute_tool_call(
+async def execute_tool_call(  # noqa: C901 - validated dispatch branches
     request: Request,
     payload: SandboxRunnerExecuteRequest,
 ) -> SandboxRunnerExecuteResponse:
@@ -1691,6 +1781,20 @@ async def execute_tool_call(
             if exc.failure_kind == "worker":
                 return SandboxRunnerExecuteResponse(ok=False, error=str(exc), failure_kind="worker")
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.tool_name == "browser" and payload.function_name == "browser_control":
+        try:
+            computer = request.app.state.worker_computer
+        except AttributeError:
+            computer = None
+        if isinstance(computer, WorkerComputerRuntime):
+            return await _execute_computer_browser(
+                computer,
+                payload,
+                runtime_paths,
+                config,
+                prepared_worker,
+                runner_token,
+            )
     if sandbox_exec.runner_uses_subprocess(runtime_paths):
         return await _execute_request_subprocess(
             payload,
