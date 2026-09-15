@@ -39,7 +39,8 @@ final class DesktopControlStore: ObservableObject {
     private var observedConfigRevision = 0
     private var pendingOperationCount = 0
 
-    init(helper: DesktopBridgeProcess = DesktopBridgeProcess()) {
+    init(helper: DesktopBridgeProcess? = nil) {
+        let helper = helper ?? DesktopBridgeProcess()
         self.helper = helper
         helper.$status
             .receive(on: RunLoop.main)

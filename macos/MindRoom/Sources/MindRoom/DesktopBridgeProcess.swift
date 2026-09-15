@@ -162,7 +162,7 @@ final class DesktopBridgeProcess: ObservableObject {
                     self?.timeout(requestID)
                 }
                 if Task.isCancelled {
-                    timeout(requestID)
+                    self.timeout(requestID)
                     return
                 }
                 queuedInputWrites += 1
