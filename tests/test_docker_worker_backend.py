@@ -3514,6 +3514,42 @@ knowledge_bases:
     assert projected["agents"]["alpha"]["context_files"] == ["AGENTS.md"]
 
 
+def test_docker_mounted_context_resolves_absolute_workspace_symlinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Valid host workspace links must also load inside the mounted worker view."""
+    workspace = tmp_path / "agents/alpha/workspace"
+    workspace.mkdir(parents=True)
+    persona = workspace / "persona.md"
+    persona.write_text("Canonical persona\n")
+    (workspace / "AGENTS.md").symlink_to(persona)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="agents:\n  alpha:\n    worker_scope: shared\n    context_files: [AGENTS.md]\n",
+    )
+    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    projection = _projection_root(volumes)
+    projected = yaml.safe_load((projection / "config.yaml").read_text())
+    # Docker preserves the link text, but its host-absolute target is outside
+    # the worker workspace. A relative reference to persona.md remains valid.
+    worker_storage = tmp_path / "worker-view"
+    worker_workspace = worker_storage / "agents/alpha/workspace"
+    worker_workspace.mkdir(parents=True)
+    (worker_workspace / "persona.md").write_text("Canonical persona\n")
+    (worker_workspace / "AGENTS.md").symlink_to(persona)
+    runtime_paths = resolve_runtime_paths(config_path=projection / "config.yaml", storage_path=worker_storage)
+    loaded = _load_context_files(
+        projected["agents"]["alpha"]["context_files"],
+        runtime_paths,
+        agent_name="alpha",
+        storage_path=worker_storage,
+    )
+    assert [chunk.body for chunk in loaded] == ["Canonical persona"]
+
+
 def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -21,6 +21,7 @@ from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
+    agent_workspace_root_path,
     normalize_worker_key_part,
     resolve_agent_owned_path,
     resolved_worker_key_scope,
@@ -834,7 +835,11 @@ class DockerProjectionManager:
             )
             # Context config remains workspace-relative when its canonical files
             # are already available through the worker's agent storage mount.
-            context_files[index] = raw_context_file if PurePosixPath(projected_path).is_absolute() else projected_path
+            if PurePosixPath(projected_path).is_absolute():
+                workspace = agent_workspace_root_path(self._runtime_paths.storage_root, agent_name).resolve()
+                context_files[index] = host_path.relative_to(workspace).as_posix()
+            else:
+                context_files[index] = projected_path
 
     def _rewrite_projected_private_template_dir(
         self,
