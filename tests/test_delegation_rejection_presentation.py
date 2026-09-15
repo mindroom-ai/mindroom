@@ -13,6 +13,7 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.delegate import DelegateTools
@@ -98,7 +99,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
                 config.agents["leader"].delegate_to = []
             decisions = None
             if rejection == "policy":
-                response = await drive_delegations(parent, response, **options)
+                response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
                 assert isinstance(response, RunOutput)
                 assert response.status == RunStatus.paused
                 state = DelegationState.from_metadata(response.metadata)
@@ -111,6 +112,7 @@ async def test_rejected_subagent_closes_streaming_tool_trace(  # noqa: C901
             async for event in drive_delegation_stream(
                 parent,
                 stored_run(),
+                run_child=run_delegated_child_response,
                 **options,
                 decisions=decisions,
                 denial_reasons=dict.fromkeys(decisions or {}),

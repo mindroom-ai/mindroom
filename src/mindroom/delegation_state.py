@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
 
@@ -104,3 +109,20 @@ class DelegationState:
         self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None
+
+
+class ChildResponseRunner(Protocol):
+    """Normal response envelope supplied by the caller of the native driver."""
+
+    async def __call__(
+        self,
+        child: DelegationChild,
+        *,
+        prompt: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        refresh_scheduler: KnowledgeRefreshScheduler | None,
+        supports_native_tool_approval: bool,
+    ) -> str:
+        """Execute a child response in its retained scope, reporting exact run IDs."""
+        ...

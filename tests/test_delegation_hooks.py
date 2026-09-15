@@ -14,12 +14,14 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation_execution import _cancel_delegations, drive_delegations
+from mindroom.delegation_execution import drive_delegations
 from mindroom.delegation_hooks import before_delegation
+from mindroom.delegation_recovery import _cancel_delegations
 from mindroom.delegation_state import DelegationState
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
@@ -146,10 +148,10 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
             response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
             if outcome == "live_cancel":
                 with pytest.raises(asyncio.CancelledError):
-                    await drive_delegations(parent, response, **options)
+                    await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
                 paused = response
             else:
-                paused = await drive_delegations(parent, response, **options)
+                paused = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
             if outcome in {"approved", "cancel", "recovery_cancel", "revoke"}:
                 assert paused.status == RunStatus.paused
                 assert calls == [("before", "leader", identity.session_id)]
@@ -170,6 +172,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
                     await drive_delegations(
                         parent,
                         stored,
+                        run_child=run_delegated_child_response,
                         **options,
                         decisions=decisions,
                         denial_reasons=dict.fromkeys(decisions),

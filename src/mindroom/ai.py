@@ -8,6 +8,7 @@ from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.metrics import RunMetrics
@@ -26,6 +27,7 @@ from agno.run.agent import (
 from agno.run.base import RunStatus
 
 from mindroom import ai_runtime
+from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
@@ -35,8 +37,13 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
-from mindroom.delegation_audit import observe_child_event
 from mindroom.delegation_execution import drive_delegation_stream, drive_delegations
+from mindroom.delegation_lifecycle import (
+    authorize_delegation,
+    child_execution_identity,
+    note_child_run_id,
+    observe_child_event,
+)
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
 from mindroom.history.interrupted_replay import (
@@ -52,6 +59,7 @@ from mindroom.history.session_context import (
     close_agent_runtime_state_dbs,
     open_resolved_scope_session_context,
 )
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.hooks import (
     EnrichmentItem,
@@ -59,6 +67,7 @@ from mindroom.hooks import (
     render_system_enrichment_block,
     render_transient_context,
 )
+from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm_request_logging import (
     bind_llm_request_log_context,
     build_llm_request_log_context,
@@ -101,6 +110,7 @@ from mindroom.tool_system.events import (
     complete_pending_tool_block,
     format_tool_combined,
 )
+from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
@@ -115,7 +125,7 @@ if TYPE_CHECKING:
     from mindroom.ai_turn_state import AITurnState
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
-    from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.delegation_state import DelegationChild
     from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -130,6 +140,7 @@ __all__ = [
     "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
+    "run_delegated_child_response",
     "stream_agent_response",
 ]
 AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
@@ -1304,6 +1315,80 @@ async def _prepare_agent_run_context(
         )
 
 
+async def run_delegated_child_response(
+    child: DelegationChild,
+    *,
+    prompt: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    supports_native_tool_approval: bool,
+) -> str:
+    """Execute the normal response envelope for a prepared child owned by either adapter."""
+    identity = child_execution_identity(child)
+    active_config = authorize_delegation(
+        child.caller_agent_name,
+        child.child_agent_name,
+        prompt,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=replace(identity, agent_name=child.caller_agent_name),
+        depth=child.depth - 1,
+    )
+    if isinstance(active_config, str):
+        return active_config
+    knowledge = await resolve_agent_knowledge_access_async(
+        child.child_agent_name,
+        active_config,
+        runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        execution_identity=identity,
+    )
+    context = get_tool_runtime_context()
+    child_context = (
+        replace(
+            context,
+            agent_name=child.child_agent_name,
+            active_model_name=child.model_name,
+            target=replace(context.target, session_id=child.session_id),
+        )
+        if context is not None
+        else None
+    )
+    turn = ResponseTurnContext(
+        entity_label=child.child_agent_name,
+        session_id=child.session_id,
+        run_id=child.run_id,
+        correlation_id=(child_context.correlation_id if child_context is not None else None) or uuid4().hex,
+        reply_to_event_id=None,
+        room_id=identity.room_id,
+        thread_id=identity.resolved_thread_id,
+        requester_id=identity.requester_id,
+        matrix_run_metadata=None,
+        active_model_name=child.model_name,
+        transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
+    )
+    with tool_runtime_context(child_context):
+        return await ai_response(
+            turn,
+            prompt=prompt,
+            runtime_paths=runtime_paths,
+            config=active_config,
+            knowledge=knowledge.knowledge,
+            run_id_callback=lambda run_id: note_child_run_id(child, run_id, runtime_paths),
+            include_interactive_questions=False,
+            include_openai_compat_guidance=identity.channel == "openai_compat",
+            tool_function_filter=context.tool_function_filter if context is not None else None,
+            execution_identity=identity,
+            delegation_depth=child.depth,
+            refresh_scheduler=refresh_scheduler,
+            attempt_model_runtime=ToolRuntimeModelBinding(),
+            supports_native_tool_approval=supports_native_tool_approval,
+            collect_streamed_response=True,
+            turn_recorder=TurnRecorder(user_message=prompt),
+        )
+
+
 async def ai_response(  # noqa: C901, PLR0915
     ctx: ResponseTurnContext,
     prompt: str,
@@ -1521,6 +1606,7 @@ async def ai_response(  # noqa: C901, PLR0915
                 await drive_delegations(
                     prepared_run.agent,
                     response,
+                    run_child=run_delegated_child_response,
                     agent_name=agent_name,
                     config=config,
                     runtime_paths=runtime_paths,
@@ -2044,6 +2130,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     lambda events: drive_delegation_stream(
                         prepared_run.agent,
                         events,
+                        run_child=run_delegated_child_response,
                         agent_name=agent_name,
                         config=config,
                         runtime_paths=runtime_paths,

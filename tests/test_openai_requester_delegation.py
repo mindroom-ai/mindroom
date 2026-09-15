@@ -126,7 +126,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     with (
         patch.object(openai_compat, "ai_response", side_effect=delegate),
         patch.object(openai_compat, "stream_agent_response", side_effect=streaming),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=child),
+        patch("mindroom.ai.ai_response", side_effect=child),
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -160,7 +160,7 @@ def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> Non
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=delegate),
-        patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as child,
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -240,7 +240,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=parent),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=child) as child_mock,
+        patch("mindroom.ai.ai_response", side_effect=child) as child_mock,
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -271,7 +271,7 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=parent),
-        patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as child,
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -295,7 +295,7 @@ def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=parent),
-        patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as child,
+        patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
             "/v1/chat/completions",

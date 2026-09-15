@@ -17,7 +17,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
 )
-from mindroom.delegation_execution import cancel_approval_delegations
+from mindroom.delegation_recovery import cancel_approval_delegations
 from mindroom.delivery_gateway import DeliveryStage, EditTextRequest
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal import ApprovalDecision as ContinuationDecision

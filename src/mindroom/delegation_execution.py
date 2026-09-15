@@ -9,10 +9,10 @@ from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, NotRequired, TypedDict, Unpack, cast
 from uuid import uuid4
 
-from agno.db.base import BaseDb, SessionType
+from agno.db.base import BaseDb
 from agno.models.response import ToolExecution
 from agno.run.agent import RunOutput, RunPausedEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
@@ -20,31 +20,32 @@ from agno.run.requirement import RunRequirement
 from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
-from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.approval_receipt import install_approval_receipt_hooks
-from mindroom.delegation_audit import (
-    child_audit_context,
-    finish_child_record,
-    observe_child_event,
-    record_child_response,
-    start_child_record,
-)
 from mindroom.delegation_hooks import after_delegation, before_delegation
+from mindroom.delegation_lifecycle import (
+    authorize_delegation,
+    child_execution_identity,
+    child_run_context,
+    finish_child_turn,
+    note_child_run_id,
+    observe_child_event,
+    prepare_child_turn,
+    reserve_child_turn,
+    settle_child_response,
+    start_child_turn,
+)
+from mindroom.delegation_recovery import interrupt_child, read_child_run, resolve_subagent
 from mindroom.delegation_sessions import (
     SubagentSessionError,
-    reserve_subagent_turn,
     subagent_liveness,
-    update_subagent_turn,
-    update_subagent_turn_sync,
 )
 from mindroom.delegation_state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
-from mindroom.delegation_storage import delegation_storage_config, freeze_delegation_storage
+from mindroom.delegation_storage import freeze_delegation_storage
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import close_agent_runtime_state_dbs, create_scope_session_storage
-from mindroom.history.types import HistoryScope
+from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_system.output_files import (
@@ -57,9 +58,7 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
-    parse_tool_execution_identity_payload,
     run_with_tool_execution_identity,
-    serialize_tool_execution_identity,
 )
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
@@ -67,12 +66,12 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
 
     from agno.agent import Agent
+    from agno.session.agent import AgentSession
     from agno.team import Team
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.custom_tools.delegate import DelegateTools
-    from mindroom.event_journal import ApprovalContinuation
+    from mindroom.delegation_state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -81,6 +80,7 @@ class _DelegationOptions(TypedDict):
     """Explicit dependencies shared by blocking and streaming delegation drivers."""
 
     agent_name: str
+    run_child: ChildResponseRunner
     config: Config
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity | None
@@ -122,210 +122,10 @@ async def _persist(entity: Agent | Team, response: RunOutput | TeamRunOutput, st
     )
 
 
-def _toolkit(
-    caller: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    identity: ToolExecutionIdentity,
-    depth: int,
-    refresh_scheduler: KnowledgeRefreshScheduler | None,
-) -> DelegateTools:
-    # Delegation invokes the normal agent envelope, which imports this driver.
-    from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
-
-    caller_config = config.agents.get(caller)
-    return DelegateTools(
-        caller,
-        list(caller_config.delegate_to) if caller_config else [],
-        runtime_paths,
-        config,
-        execution_identity=replace(identity, agent_name=caller),
-        delegation_depth=depth,
-        refresh_scheduler=refresh_scheduler,
-    )
-
-
-def _child_identity(child: DelegationChild) -> ToolExecutionIdentity:
-    identity = parse_tool_execution_identity_payload(child.execution_identity, strict=True)
-    if identity is None or identity.agent_name != child.child_agent_name or identity.session_id != child.session_id:
-        msg = "Delegation child execution identity does not match its retained wait"
-        raise RuntimeError(msg)
-    return identity
-
-
-async def _read_child(
-    child: DelegationChild,
-    config: Config,
-    paths: RuntimePaths,
-    *,
-    run_id: str | None = None,
-) -> RunOutput | None:
-    config = delegation_storage_config(config, child.storage_bindings)
-
-    def read() -> RunOutput | None:
-        storage = create_session_storage(
-            child.child_agent_name,
-            config,
-            paths,
-            execution_identity=_child_identity(child),
-        )
-        try:
-            session = storage.get_session(child.session_id, session_type=SessionType.AGENT)
-            # Each turn owns its exact run even after later follow-ups reuse the session.
-            runs = reversed(session.runs or ()) if isinstance(session, AgentSession) else ()
-            response = next((run for run in runs if run.run_id == (run_id or child.run_id)), None)
-            return deepcopy(response) if isinstance(response, RunOutput) else None
-        finally:
-            storage.close()
-
-    response = await asyncio.to_thread(read)
-    if response is not None and (
-        not response.run_id
-        or response.session_id != child.session_id
-        or response.user_id != _child_identity(child).requester_id
-    ):
-        msg = "Delegation session contains an outcome outside its requester identity"
-        raise RuntimeError(msg)
-    return response
-
-
-async def recover_subagent_turn(child: DelegationChild, *, config: Config, runtime_paths: RuntimePaths) -> None:
-    """Reconcile an abandoned running claim while its exclusive liveness lock is held."""
-    response = await _read_child(child, config, runtime_paths, run_id=child.run_id)
-    if response is not None and response.status == RunStatus.paused:
-        child.status = "paused"
-        await update_subagent_turn(child, runtime_paths)
-        return
-    await _settle_interrupted_child(
-        child,
-        config=config,
-        runtime_paths=runtime_paths,
-        reason="Subagent turn was interrupted by a restart. Send a follow-up to continue its history.",
-        status="failed",
-    )
-    await update_subagent_turn(child, runtime_paths)
-
-
-async def _settle_interrupted_child(
-    child: DelegationChild,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    reason: str,
-    status: Literal["cancelled", "failed"] = "cancelled",
-    run_id: str | None = None,
-) -> None:
-    config = delegation_storage_config(config, child.storage_bindings)
-    response = await _read_child(child, config, runtime_paths, run_id=run_id)
-    if response is not None and response.status == RunStatus.completed:
-        await record_child_response(child, response, config=config, runtime_paths=runtime_paths)
-        await finish_child_record(child, config=config, runtime_paths=runtime_paths)
-        return
-    if response is not None:
-        await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
-        response.content = reason
-        response.requirements = []
-        for tool in response.tools or ():
-            if tool.is_paused:
-                tool.result = reason
-                tool.tool_call_error = True
-            tool.requires_confirmation = False
-            tool.external_execution_required = False
-            tool.requires_user_input = False
-
-        def persist() -> None:
-            storage = create_session_storage(
-                child.child_agent_name,
-                config,
-                runtime_paths,
-                execution_identity=_child_identity(child),
-            )
-            try:
-                storage.upsert_run(run=response, session_id=child.session_id, user_id=response.user_id)
-            finally:
-                storage.close()
-
-        await asyncio.to_thread(persist)
-    child.status = status
-    child.result = reason
-    if child.record_locator:
-        await finish_child_record(child, config=config, runtime_paths=runtime_paths, reason=reason)
-
-
-async def _cancel_delegations(
-    response: RunOutput | TeamRunOutput,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    reason: str = "Delegation cancelled.",
-) -> None:
-    """Cancel retained descendants without running any of their pending tools."""
-    state = DelegationState.from_metadata(response.metadata)
-    for child in state.children:
-        if child.status not in {"completed", "failed", "cancelled", "denied"}:
-            await _settle_interrupted_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
-    for requirement_id, hook_state in state.hooks.items():
-        child = next((item for item in state.children if item.parent_requirement_id == requirement_id), None)
-        await after_delegation(
-            hook_state,
-            config=config,
-            runtime_paths=runtime_paths,
-            result=child.result if child is not None else None,
-            error=asyncio.CancelledError(reason) if child is None or child.status == "cancelled" else None,
-        )
-    state.clear_pending()
-    if (response.metadata or {}).get(DELEGATION_STATE_KEY):
-        response.metadata = {**(response.metadata or {}), DELEGATION_STATE_KEY: state.to_dict()}
-
-
-async def cancel_approval_delegations(
-    continuation: ApprovalContinuation,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    reason: str,
-) -> None:
-    """Read the frozen root scope and settle its retained child waits on failure."""
-    if not continuation.execution_identity:
-        return
-    config = delegation_storage_config(config, continuation.delegation_storage_bindings)
-    identity = parse_tool_execution_identity_payload(continuation.execution_identity, strict=True)
-    if identity is None:
-        return
-    scope = continuation.history_scope
-    if scope is None:
-        if continuation.entity_kind == "team":
-            return
-        scope = HistoryScope(kind="agent", scope_id=continuation.entity_name)
-    if scope.kind == "agent" and continuation.entity_name not in config.agents:
-        return
-    storage = await asyncio.to_thread(
-        create_scope_session_storage,
-        scope=scope,
-        agent_name=continuation.entity_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=identity,
-    )
-    try:
-        response = await asyncio.to_thread(storage.get_run, continuation.run_id)
-        if isinstance(response, (RunOutput, TeamRunOutput)) and has_delegation_state(response):
-            await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-            await asyncio.to_thread(
-                storage.upsert_run,
-                run=response,
-                session_id=continuation.session_id,
-                user_id=continuation.requester_id,
-            )
-    finally:
-        storage.close()
-
-
 async def _run_child(
     child: DelegationChild,
     *,
-    toolkit: DelegateTools,
+    run_child: ChildResponseRunner,
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
@@ -335,12 +135,12 @@ async def _run_child(
 ) -> RunOutput:
     token = _RUNNING_CHILD_ID.set(child.delegation_id)
     try:
-        async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
+        async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
             response = await run_with_tool_execution_identity(
-                _child_identity(child),
+                child_execution_identity(child),
                 operation=lambda: _execute_child(
                     child,
-                    toolkit=toolkit,
+                    run_child=run_child,
                     config=config,
                     runtime_paths=runtime_paths,
                     refresh_scheduler=refresh_scheduler,
@@ -349,16 +149,17 @@ async def _run_child(
                     fresh=fresh,
                 ),
             )
-            await record_child_response(child, response, config=config, runtime_paths=runtime_paths)
+            observation.response = response
+            observation.terminal = None
             return response
     finally:
         _RUNNING_CHILD_ID.reset(token)
 
 
-async def _execute_child(  # noqa: C901
+async def _execute_child(
     child: DelegationChild,
     *,
-    toolkit: DelegateTools,
+    run_child: ChildResponseRunner,
     config: Config,
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
@@ -371,7 +172,7 @@ async def _execute_child(  # noqa: C901
     from mindroom.agents import create_agent  # noqa: PLC0415
     from mindroom.knowledge.utils import resolve_agent_knowledge_access_async  # noqa: PLC0415
 
-    identity = _child_identity(child)
+    identity = child_execution_identity(child)
     context = get_tool_runtime_context()
     if context is None or context.requester_id != identity.requester_id or context.room_id != identity.room_id:
         msg = "Delegation requester context does not match its retained wait"
@@ -383,15 +184,22 @@ async def _execute_child(  # noqa: C901
         target=replace(context.target, session_id=child.session_id),
     )
     if fresh:
-        return await _start_child_envelope(child, toolkit, config, runtime_paths, prompt=child.task)
-    persisted = await _read_child(child, config, runtime_paths)
+        return await _start_child_envelope(
+            child,
+            run_child,
+            config,
+            runtime_paths,
+            prompt=child.task,
+            refresh_scheduler=refresh_scheduler,
+        )
+    persisted = await read_child_run(child, config, runtime_paths)
     if persisted is None:
         msg = "Delegated run was interrupted before retaining an outcome"
         raise RuntimeError(msg)
     if persisted.status != RunStatus.paused:
         return persisted
     if decisions is not None:
-        await record_child_response(
+        await settle_child_response(
             child,
             persisted,
             config=config,
@@ -442,6 +250,7 @@ async def _execute_child(  # noqa: C901
         with tool_runtime_context(child_context):
             response = await _continue_child(
                 agent,
+                run_child,
                 child,
                 persisted,
                 config=config,
@@ -458,46 +267,49 @@ async def _execute_child(  # noqa: C901
     if response.status == RunStatus.completed:
         decision = continuation_decision_from_tools(response.tools, original_prompt=child.task, continuation_count=0)
         if decision.next_prompt is not None:
-            if decision.model_switch_when == "after-toolcall" and decision.model_switch_name is not None:
-                child.model_name = decision.model_switch_name
-            child.run_id = uuid4().hex
-            return await _start_child_envelope(child, toolkit, config, runtime_paths, prompt=decision.next_prompt)
+            model_name = (
+                decision.model_switch_name
+                if decision.model_switch_when == "after-toolcall" and decision.model_switch_name is not None
+                else child.model_name
+            )
+            note_child_run_id(child, uuid4().hex, runtime_paths, model_name=model_name)
+            return await _start_child_envelope(
+                child,
+                run_child,
+                config,
+                runtime_paths,
+                prompt=decision.next_prompt,
+                refresh_scheduler=refresh_scheduler,
+            )
     return response
 
 
 async def _start_child_envelope(
     child: DelegationChild,
-    toolkit: DelegateTools,
+    run_child: ChildResponseRunner,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     prompt: str,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> RunOutput:
     """Run the normal response loop in the child's retained conversation scope."""
     from mindroom.response_turn import ResponsePausedForApproval  # noqa: PLC0415
 
-    def note_child_run_id(run_id: str) -> None:
-        child.run_id = run_id
-        context = get_tool_runtime_context()
-        if context is not None and context.active_model_name is not None:
-            child.model_name = context.active_model_name
-        update_subagent_turn_sync(child, runtime_paths)
-
     result = None
     try:
-        result = await toolkit.run_delegated_task(
-            child.child_agent_name,
-            prompt,
-            session_id=child.session_id,
-            run_id=child.run_id,
-            active_model_name=child.model_name,
+        result = await run_child(
+            child,
+            prompt=prompt,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=True,
-            run_id_callback=note_child_run_id,
         )
     except ResponsePausedForApproval as suspension:
         if suspension.paused.runtime_model_name is not None:
-            child.model_name = suspension.paused.runtime_model_name
-    response = await _read_child(child, config, runtime_paths, run_id=child.run_id)
+            note_child_run_id(child, child.run_id, runtime_paths, model_name=suspension.paused.runtime_model_name)
+    response = await read_child_run(child, config, runtime_paths, run_id=child.run_id)
     if response is None:
         msg = result or "Delegated execution did not retain its exact run outcome"
         raise RuntimeError(msg)
@@ -506,6 +318,7 @@ async def _start_child_envelope(
 
 async def _continue_child(
     agent: Agent,
+    run_child: ChildResponseRunner,
     child: DelegationChild,
     persisted: RunOutput,
     *,
@@ -526,6 +339,7 @@ async def _continue_child(
                 agent,
                 persisted,
                 agent_name=child.child_agent_name,
+                run_child=run_child,
                 config=config,
                 runtime_paths=runtime_paths,
                 execution_identity=identity,
@@ -566,6 +380,7 @@ async def _continue_child(
             agent,
             continued,
             agent_name=child.child_agent_name,
+            run_child=run_child,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=identity,
@@ -605,7 +420,7 @@ async def _resolved_child_tool(
     runtime_paths: RuntimePaths,
 ) -> ToolExecution | None:
     """Read the exact approved attempt, even after the child starts another run."""
-    response = await _read_child(source.child, config, runtime_paths, run_id=source.child.run_id)
+    response = await read_child_run(source.child, config, runtime_paths, run_id=source.child.run_id)
     if response is None:
         return None
     for tool in response.tools or ():
@@ -706,6 +521,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
     response: RunOutput | TeamRunOutput,
     *,
     agent_name: str,
+    run_child: ChildResponseRunner,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
@@ -782,7 +598,6 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 if not caller:
                     msg = "Delegation requirement has no frozen member config identity"
                     raise RuntimeError(msg)
-            toolkit = _toolkit(caller, config, runtime_paths, execution_identity, delegation_depth, refresh_scheduler)
             args = tool.tool_args or {}
             retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             previous_child = None
@@ -798,7 +613,13 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     )
                     continue
                 try:
-                    previous_child = retained or await toolkit.resolve_subagent(subagent_id)
+                    previous_child = retained or await resolve_subagent(
+                        subagent_id,
+                        owner=replace(execution_identity, agent_name=caller),
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        depth=delegation_depth,
+                    )
                 except SubagentSessionError as error:
                     _resolve_delegation_requirement(requirement, str(error), response, agent_name, on_event)
                     continue
@@ -819,7 +640,15 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     on_event,
                 )
                 continue
-            authorization = toolkit.authorize(child_name, task)
+            authorization = authorize_delegation(
+                caller,
+                child_name,
+                task,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=replace(execution_identity, agent_name=caller),
+                depth=delegation_depth,
+            )
             output_request = None
             if not isinstance(authorization, str):
                 prepared_output = _prepare_delegation_output(
@@ -837,7 +666,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             if isinstance(authorization, str):
                 retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
                 if retained is not None:
-                    await _settle_interrupted_child(
+                    await interrupt_child(
                         retained,
                         config=config,
                         runtime_paths=runtime_paths,
@@ -902,37 +731,20 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
             child = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             fresh = child is None
             if child is None:
-                delegation_id = uuid4().hex
-                session_id = f"delegate:{caller}:{child_name}:{delegation_id}"
-                identity = replace(execution_identity, agent_name=child_name, session_id=session_id)
-                model_name = config.resolve_runtime_model(
-                    entity_name=child_name,
-                    room_id=identity.room_id,
-                    thread_id=identity.resolved_thread_id,
-                    runtime_paths=runtime_paths,
-                ).model_name
-                if previous_child is not None:
-                    session_id = previous_child.session_id
-                    identity = _child_identity(previous_child)
-                    model_name = previous_child.model_name
-                child = DelegationChild(
-                    delegation_id,
-                    tool.tool_call_id,
+                child = prepare_child_turn(
                     caller,
                     child_name,
                     task,
-                    session_id,
-                    uuid4().hex,
-                    model_name,
-                    delegation_depth + 1,
-                    serialize_tool_execution_identity(identity),
-                    subagent_id=previous_child.subagent_id if previous_child is not None else delegation_id,
-                    previous_delegation_id=previous_child.delegation_id if previous_child is not None else None,
+                    owner=execution_identity,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    depth=delegation_depth,
+                    previous=previous_child,
+                    parent_tool_call_id=tool.tool_call_id,
                     parent_requirement_id=requirement.id,
-                    storage_bindings=freeze_delegation_storage(config, (caller, child_name)),
                 )
                 state.children.append(child)
-                await start_child_record(
+                await start_child_turn(
                     child,
                     parent_run_id=response.run_id,
                     parent_delegation_id=_RUNNING_CHILD_ID.get(),
@@ -946,7 +758,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 if child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings):
                     msg = "Delegation storage scope changed while awaiting approval"
                     raise RuntimeError(msg)
-                if replace(_child_identity(child), thread_id=execution_identity.resolved_thread_id) != replace(
+                if replace(child_execution_identity(child), thread_id=execution_identity.resolved_thread_id) != replace(
                     execution_identity,
                     thread_id=execution_identity.resolved_thread_id,
                     agent_name=child.child_agent_name,
@@ -972,14 +784,14 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     pending_id = None
                 try:
                     async with subagent_liveness(child, runtime_paths):
-                        await reserve_subagent_turn(
+                        await reserve_child_turn(
                             child,
                             owner=replace(execution_identity, agent_name=caller),
                             runtime_paths=runtime_paths,
                         )
                         child_response = await _run_child(
                             child,
-                            toolkit=toolkit,
+                            run_child=run_child,
                             config=authorization,
                             runtime_paths=runtime_paths,
                             refresh_scheduler=refresh_scheduler,
@@ -998,12 +810,11 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                             if completed_tool is not None:
                                 on_event(_child_completion_event(response, completed_tool))
                     if child_response.status == RunStatus.paused:
-                        child.status = "paused"
                         _pending_child(state, child, child_response)
                         await _persist(entity, response, state)
                         return response
                 except asyncio.CancelledError:
-                    await _settle_interrupted_child(
+                    await interrupt_child(
                         child,
                         config=config,
                         runtime_paths=runtime_paths,
@@ -1020,7 +831,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     await _persist(entity, response, state)
                     raise
                 except Exception as error:
-                    await _settle_interrupted_child(
+                    await interrupt_child(
                         child,
                         config=config,
                         runtime_paths=runtime_paths,
@@ -1031,7 +842,7 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                     if child_decisions is not None and on_event is not None:
                         _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
                 await _persist(entity, response, state)
-            receipt = await finish_child_record(child, config=config, runtime_paths=runtime_paths)
+            receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
             result = child.result or "Agent completed the task but returned no content."
             if child.status != "completed":
                 result = f"Delegation to '{child_name}' {child.status}: {result}"

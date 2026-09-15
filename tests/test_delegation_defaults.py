@@ -13,6 +13,7 @@ from agno.team import Team
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -120,7 +121,7 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
             }
             try:
                 response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                response = await drive_delegations(parent, response, **options)
+                response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
                 if expect_child:
                     assert response.status == RunStatus.paused
                     state = DelegationState.from_metadata(response.metadata)
@@ -129,6 +130,7 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
                     response = await drive_delegations(
                         parent,
                         response,
+                        run_child=run_delegated_child_response,
                         **options,
                         decisions={str(tool["tool_call_id"]): True for tool in state.pending_tools},
                         denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},

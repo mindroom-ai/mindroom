@@ -13,6 +13,7 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
@@ -97,7 +98,7 @@ async def test_native_delegation_obeys_output_file_policy(
     try:
         with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
             response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-            result = await drive_delegations(parent, response, **options)
+            result = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
             if mode.startswith("resumed"):
                 assert result.status == RunStatus.paused
                 assert not (workspace / "report.txt").exists()
@@ -115,6 +116,7 @@ async def test_native_delegation_obeys_output_file_policy(
                         model=DelegationModel(id="parent", responses=[ModelResponse(content="Parent done")]),
                     ),
                     stored,
+                    run_child=run_delegated_child_response,
                     **options,
                     decisions={str(tool["tool_call_id"]): True for tool in state.pending_tools},
                     denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},

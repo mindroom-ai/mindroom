@@ -28,7 +28,6 @@ from mindroom.delegation_records import (
     DelegationRecordOwner,
     DelegationTerminalStatus,
 )
-from mindroom.delegation_sessions import update_subagent_turn
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -50,8 +49,6 @@ class _ChildAuditBinding:
     owner: DelegationRecordOwner
     locator: DelegationRecordLocator
     pending_content: list[tuple[int | None, object]] = field(default_factory=list)
-    terminal_response: RunOutput | None = None
-    terminal_event: tuple[str, DelegationTerminalStatus, str] | None = None
 
 
 _CHILD_AUDIT: ContextVar[_ChildAuditBinding | None] = ContextVar(
@@ -68,8 +65,8 @@ async def start_child_record(
     runtime_paths: RuntimePaths,
     caller_execution_identity: ToolExecutionIdentity | None,
     parent_delegation_id: str | None = None,
-) -> None:
-    """Start a child record before execution and retain its restart locator."""
+) -> DelegationRecordLocator:
+    """Start an audit projection and return its locator to the lifecycle owner."""
     child_identity = _child_identity(child)
     handle = await DelegationRecordOwner(config, runtime_paths).start(
         DelegationMetadata(
@@ -90,7 +87,7 @@ async def start_child_record(
         child_execution_identity=child_identity,
         delegation_id=child.delegation_id,
     )
-    child.record_locator = handle.locator.to_dict()
+    return handle.locator
 
 
 @asynccontextmanager
@@ -113,7 +110,6 @@ async def child_audit_context(
         try:
             handle = await binding.owner.reopen(binding.locator)
             await _flush_pending_content(binding, handle)
-            await _settle_binding(binding)
         finally:
             _CHILD_AUDIT.reset(token)
 
@@ -148,24 +144,8 @@ async def observe_child_event(event: object) -> None:  # noqa: C901, PLR0911
             event,
             run_id=binding.child.run_id,
         )
-        binding.terminal_response = event
-        binding.terminal_event = None
         return
-    if isinstance(event, RunCancelledEvent):
-        binding.terminal_response = None
-        binding.terminal_event = (
-            binding.child.run_id,
-            "cancelled",
-            event.reason or "Delegation cancelled.",
-        )
-        return
-    if isinstance(event, RunErrorEvent):
-        binding.terminal_response = None
-        binding.terminal_event = (
-            binding.child.run_id,
-            "failed",
-            event.content or event.error_type or "Delegated run failed.",
-        )
+    if isinstance(event, (RunCancelledEvent, RunErrorEvent)):
         return
     if isinstance(event, ToolCallStartedEvent):
         if event.tool is not None:
@@ -209,10 +189,6 @@ async def record_child_response(
 ) -> None:
     """Record one retained child snapshot and settle only its explicit status."""
     _validate_response_identity(child, response)
-    binding = _CHILD_AUDIT.get()
-    if binding is not None and binding.child is child:
-        binding.terminal_response = response
-        binding.terminal_event = None
     run_id = child.run_id
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
     usage, pending_approval = await _append_response_events(
@@ -225,8 +201,6 @@ async def record_child_response(
     )
 
     if response.status == RunStatus.paused:
-        child.status = "paused"
-        await update_subagent_turn(child, runtime_paths)
         if not pending_approval:
             await owner.append_event(
                 handle,
@@ -239,21 +213,20 @@ async def record_child_response(
             )
         return
     if response.status == RunStatus.completed:
-        child.status = "completed"
-        child.result = str(response.content or "Agent completed the task but returned no content.")
-        await owner.finish(handle, status="completed", output=child.result, usage=usage)
+        result = str(response.content or "Agent completed the task but returned no content.")
+        await owner.finish(handle, status="completed", output=result, usage=usage)
         return
     if response.status == RunStatus.cancelled:
-        child.status = "cancelled"
-        child.result = str(response.content or "Delegation cancelled.")
-        await owner.finish(handle, status="cancelled", error=child.result, usage=usage)
+        await owner.finish(
+            handle,
+            status="cancelled",
+            error=str(response.content or "Delegation cancelled."),
+            usage=usage,
+        )
         return
     if response.status in {RunStatus.error, RunStatus.regenerated}:
-        child.status = "failed"
-        child.result = str(response.content or response.status)
-        await owner.finish(handle, status="failed", error=child.result, usage=usage)
+        await owner.finish(handle, status="failed", error=str(response.content or response.status), usage=usage)
         return
-    child.status = "running"
 
 
 async def _append_response_events(
@@ -345,7 +318,6 @@ async def finish_child_record(
         output=result if status == "completed" else None,
         error=result if status != "completed" else None,
     )
-    await update_subagent_turn(child, runtime_paths)
     receipt = handle.to_receipt()
     return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt
 
@@ -474,29 +446,6 @@ async def _flush_pending_content(
             event_id=event_id,
             data={"content": content},
         ),
-    )
-
-
-async def _settle_binding(binding: _ChildAuditBinding) -> None:
-    response = binding.terminal_response
-    if response is not None and response.run_id == binding.child.run_id:
-        await record_child_response(
-            binding.child,
-            response,
-            config=binding.owner.config,
-            runtime_paths=binding.owner.runtime_paths,
-        )
-        return
-    terminal = binding.terminal_event
-    if terminal is None or terminal[0] != binding.child.run_id:
-        return
-    _, status, reason = terminal
-    binding.child.status = status
-    binding.child.result = reason
-    await finish_child_record(
-        binding.child,
-        config=binding.owner.config,
-        runtime_paths=binding.owner.runtime_paths,
     )
 
 

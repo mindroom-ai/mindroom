@@ -20,6 +20,7 @@ from agno.run.base import RunStatus
 from mindroom import ai_runtime
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
+from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.delegation_execution import drive_delegation_stream, has_delegation_state
@@ -150,6 +151,7 @@ async def _continue_persisted_agent(
     events = drive_delegation_stream(
         agent,
         cast("AsyncIterator[object]", native_events),
+        run_child=run_delegated_child_response,
         agent_name=continuation.entity_name,
         config=config,
         runtime_paths=runtime_paths,

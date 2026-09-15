@@ -24,7 +24,7 @@ from mindroom.approval_transport import ApprovalMatrixTransport
 from mindroom.attachments import wait_for_attachment_cleanup_tasks
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.delegation_execution import cancel_approval_delegations
+from mindroom.delegation_recovery import cancel_approval_delegations
 from mindroom.desktop.identity import controller_identity_for_live_bot
 from mindroom.embedder_health import check_embedder_health, handle_embedder_config_reload
 from mindroom.entity_resolution import (

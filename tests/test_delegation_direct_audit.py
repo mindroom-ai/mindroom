@@ -15,9 +15,10 @@ from agno.run.agent import RunErrorEvent, RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation_audit import observe_child_event
+from mindroom.delegation_lifecycle import observe_child_event, prepare_child_turn
 from mindroom.tool_schema_cache import cached_processed_schema
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -110,7 +111,7 @@ async def test_direct_delegation_does_not_infer_success_from_unretained_text(tmp
     with (
         tool_runtime_context(context),
         patch(
-            "mindroom.custom_tools.delegate.ai_response",
+            "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="child answer",
         ),
@@ -167,7 +168,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
 
     with (
         tool_runtime_context(context),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=run_real_envelope),
+        patch("mindroom.ai.ai_response", side_effect=run_real_envelope),
     ):
         result = await tools.run_subagent(agent_name="child", task="Do the work")
 
@@ -228,7 +229,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     )
     with (
         tool_runtime_context(context),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=complete_child),
+        patch("mindroom.ai.ai_response", side_effect=complete_child),
     ):
         response = await parent.arun(
             "delegate",
@@ -292,7 +293,7 @@ async def test_denied_outer_hook_clears_direct_provenance(tmp_path: Path) -> Non
 
     with (
         tool_runtime_context(context),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=complete_child),
+        patch("mindroom.ai.ai_response", side_effect=complete_child),
     ):
         await tools.run_subagent(agent_name="child", task="Run later")
 
@@ -310,7 +311,7 @@ async def test_direct_delegation_records_failure_and_returns_receipt(tmp_path: P
     with (
         tool_runtime_context(context),
         patch(
-            "mindroom.custom_tools.delegate.ai_response",
+            "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             side_effect=RuntimeError("child exploded"),
         ),
@@ -333,7 +334,7 @@ async def test_direct_delegation_records_cancellation_before_propagating(tmp_pat
     with (
         tool_runtime_context(context),
         patch(
-            "mindroom.custom_tools.delegate.ai_response",
+            "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             side_effect=asyncio.CancelledError,
         ),
@@ -372,7 +373,7 @@ async def test_direct_delegation_preserves_completed_outcome_after_envelope_erro
 
     with (
         tool_runtime_context(context),
-        patch("mindroom.custom_tools.delegate.ai_response", side_effect=complete_then_interrupt),
+        patch("mindroom.ai.ai_response", side_effect=complete_then_interrupt),
     ):
         if error_type is asyncio.CancelledError:
             with pytest.raises(asyncio.CancelledError) as caught:
@@ -391,23 +392,32 @@ async def test_direct_delegation_preserves_completed_outcome_after_envelope_erro
 @pytest.mark.asyncio
 async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Path) -> None:
     """Starting a second record from the native execution envelope must fail this test."""
-    tools, config, runtime_paths = _tools(tmp_path)
+    _toolkit, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
     with (
         tool_runtime_context(context),
         patch(
-            "mindroom.custom_tools.delegate.ai_response",
+            "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="native child answer",
         ) as response,
     ):
-        result = await tools.run_delegated_task(
+        child = prepare_child_turn(
+            "leader",
             "child",
             "Do the work",
-            session_id="native-session",
-            run_id="native-run",
-            active_model_name="default",
+            owner=_identity(),
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=0,
+        )
+        result = await run_delegated_child_response(
+            child,
+            prompt=child.task,
+            config=config,
+            runtime_paths=runtime_paths,
+            refresh_scheduler=None,
             supports_native_tool_approval=True,
         )
 

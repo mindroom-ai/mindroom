@@ -14,6 +14,7 @@ from agno.run.base import RunStatus
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -197,6 +198,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
             paused = await drive_delegations(
                 parent,
                 response,
+                run_child=run_delegated_child_response,
                 agent_name="leader",
                 config=config,
                 runtime_paths=paths,
@@ -213,6 +215,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
                 completed = await drive_delegations(
                     parent,
                     persisted,
+                    run_child=run_delegated_child_response,
                     agent_name="leader",
                     config=config,
                     runtime_paths=paths,

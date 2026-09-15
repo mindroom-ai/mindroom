@@ -36,6 +36,7 @@ from mindroom import ai_runtime, model_loading
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent, enable_all_history_replay
+from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
@@ -2537,6 +2538,7 @@ def _team_approval_events(
     return drive_delegation_stream(
         team,
         events,
+        run_child=run_delegated_child_response,
         agent_name=configured_team_name,
         config=config,
         runtime_paths=runtime_paths,
@@ -2983,6 +2985,7 @@ async def team_response(  # noqa: C901, PLR0915
                 response = await drive_delegations(
                     team,
                     response,
+                    run_child=run_delegated_child_response,
                     agent_name=configured_team_name or team_name,
                     config=config,
                     runtime_paths=orchestrator.runtime_paths,
@@ -3515,6 +3518,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             drive_delegation_stream(
                 team,
                 raw_stream,
+                run_child=run_delegated_child_response,
                 agent_name=configured_team_name or team_label,
                 config=config,
                 runtime_paths=orchestrator.runtime_paths,

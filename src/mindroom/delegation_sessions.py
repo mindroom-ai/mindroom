@@ -82,21 +82,13 @@ async def load_subagent(
     if child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings):
         msg = "Subagent storage scope changed; start a new subagent."
         raise SubagentSessionError(msg)
-    if child.status == "running":
-        with _recovery_lock(_path(subagent_id, runtime_paths)) as acquired:
-            if acquired:
-                child = await asyncio.to_thread(_read, _path(subagent_id, runtime_paths), owner)
-                if child.status == "running":
-                    # Recovery needs the execution driver's exact-run settlement; defer the cycle.
-                    from mindroom.delegation_execution import recover_subagent_turn  # noqa: PLC0415
-
-                    await recover_subagent_turn(child, config=config, runtime_paths=runtime_paths)
     return child
 
 
 @contextmanager
-def _recovery_lock(path: Path) -> Iterator[bool]:
+def subagent_recovery_lock(subagent_id: str, runtime_paths: RuntimePaths) -> Iterator[bool]:
     """Recover only while no process is executing or claiming a turn on this handle."""
+    path = _path(subagent_id, runtime_paths)
     with path.with_suffix(".active.lock").open("a") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -135,22 +127,19 @@ async def reserve_subagent_turn(
     *,
     owner: ToolExecutionIdentity,
     runtime_paths: RuntimePaths,
-) -> None:
-    """Atomically reserve a fresh turn; only its exact owner may re-enter a paused turn."""
+) -> DelegationChild | None:
+    """Reserve a fresh turn or return the retained snapshot for exact-owner reentry."""
     if child.subagent_id is None:
-        return
+        return None
     path = _path(child.subagent_id, runtime_paths)
 
-    def reserve() -> None:
+    def reserve() -> DelegationChild | None:
         create_directory_durable(path.parent, mode=0o700)
         with advisory_file_lock(path.with_suffix(".lock")):
             if path.exists():
                 previous = _read(path, owner)
                 if previous.delegation_id == child.delegation_id:
-                    # The parent snapshot can predate a retry or model switch.
-                    child.run_id = previous.run_id
-                    child.model_name = previous.model_name
-                    return
+                    return previous
                 if previous.status not in _TERMINAL:
                     msg = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
                     raise SubagentSessionError(msg)
@@ -160,8 +149,9 @@ async def reserve_subagent_turn(
             elif child.previous_delegation_id is not None:
                 raise SubagentSessionError(_UNAVAILABLE)
             write_json_file_durable(path, {"owner": _owner(owner), "child": asdict(child)}, strict_atomic_replace=True)
+        return None
 
-    await run_blocking_until_complete(reserve)
+    return await run_blocking_until_complete(reserve)
 
 
 async def update_subagent_turn(child: DelegationChild, runtime_paths: RuntimePaths) -> None:

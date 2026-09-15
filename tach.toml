@@ -374,7 +374,11 @@ depends_on = [
     "mindroom.tool_system.events",
     "mindroom.user_turn_time",
     "mindroom.delegation_execution",
-    "mindroom.delegation_audit",
+    "mindroom.delegation_lifecycle",
+    "mindroom.agent_run_context",
+    "mindroom.history.turn_recorder",
+    "mindroom.knowledge.utils",
+    "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
@@ -481,6 +485,7 @@ depends_on = [
     "mindroom.tools",
     "mindroom.workers.runtime",
     "mindroom.workspaces",
+    "mindroom.delegation_lifecycle",
 ]
 
 [[modules]]
@@ -538,6 +543,7 @@ visibility = [
     "mindroom.teams",
     "mindroom.turn_store",
     "mindroom.delegation_execution",
+    "mindroom.delegation_recovery",
 ]
 
 [[modules]]
@@ -608,10 +614,10 @@ depends_on = [
 ]
 visibility = [
     "mindroom.api.openai_compat",
-    "mindroom.custom_tools.delegate",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
     "mindroom.teams",
+    "mindroom.ai",
 ]
 
 [[modules]]
@@ -754,6 +760,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.delegation_execution",
+    "mindroom.ai",
 ]
 visibility = ["mindroom.response_runner"]
 
@@ -770,7 +777,6 @@ visibility = [
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
-    "mindroom.delegation_execution",
     "mindroom.approval_failure",
     "mindroom.approval_manager",
     "mindroom.constants",
@@ -779,6 +785,7 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.tool_approval",
     "mindroom.tool_system.events",
+    "mindroom.delegation_recovery",
 ]
 visibility = ["mindroom.response_runner"]
 
@@ -948,21 +955,14 @@ depends_on = [
 path = "mindroom.custom_tools.delegate"
 depends_on = [
     "mindroom.delegation_sessions",
-    "mindroom.delegation_storage",
-    "mindroom.history.turn_recorder",
-    "mindroom.delegation_audit",
-    "mindroom.delegation_state",
-    "mindroom.delegation_records",
-    "mindroom.knowledge.utils",
-    "mindroom.agent_run_context",
     "mindroom.agent_descriptions",
     "mindroom.ai",
-    "mindroom.config.main",
-    "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.response_turn",
+    "mindroom.delegation_lifecycle",
+    "mindroom.delegation_recovery",
 ]
 
 [[modules]]
@@ -1754,7 +1754,6 @@ visibility = [
 path = "mindroom.history.turn_recorder"
 depends_on = ["mindroom.history.interrupted_replay"]
 visibility = [
-    "mindroom.custom_tools.delegate",
     "mindroom.ai",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.response_runner",
@@ -1966,7 +1965,6 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
-    "mindroom.delegation_execution",
     "mindroom.approval_manager",
     "mindroom.approval_recovery",
     "mindroom.matrix.room_reconciliation",
@@ -2012,6 +2010,7 @@ depends_on = [
     "mindroom.tool_approval",
     "mindroom.thread_export.workspace_sync",
     "mindroom.workers.runtime",
+    "mindroom.delegation_recovery",
 ]
 
 [[modules]]
@@ -3855,9 +3854,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.dynamic_toolkits"
 depends_on = [
-    "mindroom.custom_tools.delegate",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.declarations",
+    "mindroom.delegation_lifecycle",
 ]
 
 [[modules]]
@@ -4540,6 +4539,7 @@ expose = [
     "build_matrix_run_metadata",
     "ai_response",
     "stream_agent_response",
+    "run_delegated_child_response",
 ]
 from = ["mindroom.ai"]
 
@@ -5672,17 +5672,16 @@ depends_on = [
     "mindroom.delegation_storage",
     "mindroom.agent_storage",
     "mindroom.agents",
-    "mindroom.custom_tools.delegate",
     "mindroom.delegation_state",
     "mindroom.history.session_context",
-    "mindroom.history.types",
     "mindroom.knowledge.utils",
     "mindroom.response_turn",
     "mindroom.tool_approval",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.approval_receipt",
-    "mindroom.delegation_audit",
+    "mindroom.delegation_lifecycle",
+    "mindroom.delegation_recovery",
 ]
 
 [[modules]]
@@ -5710,7 +5709,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation_audit"
 depends_on = [
-    "mindroom.delegation_sessions",
     "mindroom.delegation_records",
     "mindroom.tool_system.worker_routing",
 ]
@@ -5718,7 +5716,12 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation_storage"
 depends_on = ["mindroom.config.agent"]
-visibility = ["mindroom.delegation_execution", "mindroom.custom_tools.delegate", "mindroom.delegation_sessions"]
+visibility = [
+    "mindroom.delegation_execution",
+    "mindroom.delegation_sessions",
+    "mindroom.delegation_lifecycle",
+    "mindroom.delegation_recovery",
+]
 
 [[modules]]
 path = "mindroom.history.agno_prompt_compat"
@@ -5783,6 +5786,7 @@ visibility = [
     "mindroom.pre_model_preparation",
     "mindroom.response_turn",
     "mindroom.teams",
+    "mindroom.delegation_recovery",
 ]
 
 [[modules]]
@@ -5807,6 +5811,44 @@ path = "mindroom.delegation_sessions"
 depends_on = [
     "mindroom.delegation_state",
     "mindroom.delegation_storage",
-    "mindroom.delegation_execution",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.delegation_lifecycle"
+depends_on = [
+    "mindroom.delegation_audit",
+    "mindroom.delegation_sessions",
+    "mindroom.delegation_state",
+    "mindroom.delegation_storage",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.ai",
+    "mindroom.agents",
+    "mindroom.custom_tools.delegate",
+    "mindroom.delegation_execution",
+    "mindroom.delegation_recovery",
+    "mindroom.tool_system.dynamic_toolkits",
+]
+
+[[modules]]
+path = "mindroom.delegation_recovery"
+depends_on = [
+    "mindroom.agent_storage",
+    "mindroom.delegation_hooks",
+    "mindroom.delegation_lifecycle",
+    "mindroom.delegation_sessions",
+    "mindroom.delegation_state",
+    "mindroom.delegation_storage",
+    "mindroom.history.session_context",
+    "mindroom.history.types",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = [
+    "mindroom.orchestrator",
+    "mindroom.approval_response",
+    "mindroom.custom_tools.delegate",
+    "mindroom.delegation_execution",
 ]

@@ -16,7 +16,8 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.custom_tools.delegate import MAX_DELEGATION_DEPTH, DelegateTools
+from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.delegation_lifecycle import MAX_DELEGATION_DEPTH
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import _KnowledgeResolution
@@ -268,7 +269,7 @@ class TestDelegateTools:
             delegation_depth=0,
         )
 
-        with patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response:
+        with patch("mindroom.ai.ai_response", new_callable=AsyncMock) as mock_ai_response:
             result = await tools.run_subagent(agent_name="code", task="Write a hello world program")
 
         assert "requester authorization is unavailable" in result
@@ -315,7 +316,7 @@ class TestDelegateTools:
 
         with (
             tool_runtime_context(runtime_context),
-            patch("mindroom.custom_tools.delegate.ai_response", new_callable=AsyncMock) as mock_ai_response,
+            patch("mindroom.ai.ai_response", new_callable=AsyncMock) as mock_ai_response,
         ):
             result = await tools.run_subagent(agent_name="code", task="Write a hello world program")
 
@@ -326,7 +327,7 @@ class TestDelegateTools:
     async def test_successful_delegation(self, tools: DelegateTools) -> None:
         """Test that a successful delegation returns the agent's response content."""
         with patch(
-            "mindroom.custom_tools.delegate.ai_response",
+            "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="Here is the generated code: print('hello')",
         ) as mock_ai_response:
@@ -342,7 +343,10 @@ class TestDelegateTools:
             assert call_kwargs["knowledge"] is None
             assert call_ctx.requester_id == "@alice:example.org"
             assert call_kwargs["include_interactive_questions"] is False
-            assert call_kwargs["execution_identity"] is None
+            identity = call_kwargs["execution_identity"]
+            assert identity.agent_name == "code"
+            assert identity.session_id == call_ctx.session_id
+            assert identity.requester_id == call_ctx.requester_id
             assert call_kwargs["delegation_depth"] == 1
             assert call_ctx.session_id.startswith("delegate:leader:code:")
             _assert_direct_result_with_receipt(result, "Here is the generated code: print('hello')")
@@ -412,7 +416,7 @@ class TestDelegateTools:
         with (
             tool_runtime_context(runtime_context),
             patch(
-                "mindroom.custom_tools.delegate.ai_response",
+                "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
                 return_value="done",
             ) as mock_ai_response,
@@ -426,7 +430,7 @@ class TestDelegateTools:
     async def test_delegation_with_no_content(self, tools: DelegateTools) -> None:
         """Test that delegation with None content returns a fallback message."""
         with patch(
-            "mindroom.custom_tools.delegate.ai_response",
+            "mindroom.ai.ai_response",
             new_callable=AsyncMock,
             return_value="",
         ):
@@ -437,7 +441,7 @@ class TestDelegateTools:
     async def test_delegation_error_handling(self, tools: DelegateTools) -> None:
         """Test that exceptions during delegation are caught and returned as error strings."""
         with patch(
-            "mindroom.custom_tools.delegate.ai_response",
+            "mindroom.ai.ai_response",
             side_effect=RuntimeError("Delegated run failed"),
         ):
             result = await tools.run_subagent(agent_name="code", task="Do something")
@@ -462,7 +466,7 @@ class TestDelegateTools:
         with (
             tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
             patch(
-                "mindroom.custom_tools.delegate.ai_response",
+                "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
                 return_value="done",
             ) as mock_ai_response,
@@ -492,7 +496,7 @@ class TestDelegateTools:
         with (
             tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
             patch(
-                "mindroom.custom_tools.delegate.ai_response",
+                "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
                 return_value="done",
             ) as mock_ai_response,
@@ -537,12 +541,12 @@ class TestDelegateKnowledge:
         with (
             tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
             patch(
-                "mindroom.custom_tools.delegate.resolve_agent_knowledge_access_async",
+                "mindroom.ai.resolve_agent_knowledge_access_async",
                 new_callable=AsyncMock,
                 return_value=_KnowledgeResolution(knowledge=mock_knowledge),
             ) as mock_get,
             patch(
-                "mindroom.custom_tools.delegate.ai_response",
+                "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
                 return_value="Found relevant docs",
             ) as mock_ai_response,
@@ -552,7 +556,9 @@ class TestDelegateKnowledge:
             mock_get.assert_awaited_once()
             args, kwargs = mock_get.await_args
             assert args == ("researcher", config, runtime_paths)
-            assert kwargs["execution_identity"] is None
+            identity = kwargs["execution_identity"]
+            assert identity.agent_name == "researcher"
+            assert identity == mock_ai_response.await_args.kwargs["execution_identity"]
             ai_kwargs = mock_ai_response.await_args.kwargs
             ai_ctx = mock_ai_response.await_args.args[0]
             assert ai_ctx.entity_label == "researcher"
@@ -633,7 +639,7 @@ class TestDelegateKnowledge:
             tool_runtime_context(_delegate_runtime_context(config, runtime_paths_for(config))),
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),
             patch(
-                "mindroom.custom_tools.delegate.ai_response",
+                "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
                 return_value="Found relevant docs",
             ),
@@ -669,7 +675,7 @@ class TestDelegateKnowledge:
         with (
             tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
             patch(
-                "mindroom.custom_tools.delegate.ai_response",
+                "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
                 return_value="done",
             ) as mock_ai_response,
@@ -723,7 +729,7 @@ class TestDelegateKnowledge:
                 ),
             ),
             patch(
-                "mindroom.custom_tools.delegate.ai_response",
+                "mindroom.ai.ai_response",
                 new_callable=AsyncMock,
                 return_value="done",
             ) as mock_ai_response,
@@ -819,7 +825,7 @@ class TestDelegateKnowledge:
 
         with (
             tool_runtime_context(runtime_context),
-            patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch("mindroom.ai.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         ):
             result = await tools.run_subagent(agent_name="worker", task="do work")
 
@@ -918,7 +924,7 @@ class TestDelegateKnowledge:
 
         with (
             tool_runtime_context(runtime_context),
-            patch("mindroom.custom_tools.delegate.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
+            patch("mindroom.ai.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         ):
             result = await tools.run_subagent(agent_name="worker", task="do work")
 

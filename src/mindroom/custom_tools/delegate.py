@@ -11,60 +11,45 @@ from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
-from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.ai import ResponseTurnContext, ai_response
-from mindroom.authorization import is_sender_allowed_for_responder
-from mindroom.delegation_audit import (
-    child_audit_context,
-    finish_child_record,
-    start_child_record,
+from mindroom.ai import run_delegated_child_response
+from mindroom.delegation_lifecycle import (
+    authorize_delegation,
+    child_run_context,
+    finish_child_turn,
+    prepare_child_turn,
+    reserve_child_turn,
+    start_child_turn,
 )
+from mindroom.delegation_recovery import resolve_subagent
 from mindroom.delegation_sessions import (
     SubagentSessionError,
-    load_subagent,
-    reserve_subagent_turn,
     subagent_liveness,
-    update_subagent_turn,
-    update_subagent_turn_sync,
 )
-from mindroom.delegation_state import DelegationChild
-from mindroom.delegation_storage import freeze_delegation_storage
-from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    ToolRuntimeModelBinding,
-    get_detached_requester_context,
     get_tool_runtime_context,
-    tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
-    parse_tool_execution_identity_payload,
-    serialize_tool_execution_identity,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from agno.run import RunContext
     from agno.tools.function import FunctionCall
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation_state import DelegationChild
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
-
-MAX_DELEGATION_DEPTH = 3
 
 
 @dataclass(frozen=True)
@@ -177,7 +162,7 @@ class DelegateTools(Toolkit):
             The delegated agent's response, or an error message if delegation failed.
 
         """
-        return await self.run_delegated_task(self._agent_name if agent_name is None else agent_name, task)
+        return await self._run_child(self._agent_name if agent_name is None else agent_name, task)
 
     def caller_identity(self) -> ToolExecutionIdentity:
         """Return the trusted current caller identity, including its parent session."""
@@ -196,7 +181,7 @@ class DelegateTools(Toolkit):
 
     async def resolve_subagent(self, subagent_id: str) -> DelegationChild:
         """Look up a child only within the current caller's originating conversation."""
-        return await load_subagent(
+        return await resolve_subagent(
             subagent_id,
             owner=self.caller_identity(),
             config=self._config,
@@ -225,347 +210,97 @@ class DelegateTools(Toolkit):
             child = await self.resolve_subagent(subagent_id)
         except SubagentSessionError as error:
             return str(error)
-        return await self.run_delegated_task(child.child_agent_name, message, continuation=child)
+        return await self._run_child(child.child_agent_name, message, continuation=child)
 
-    def authorize(self, agent_name: str, task: str) -> Config | str:  # noqa: PLR0911
-        """Recheck the current caller allowlist and requester authority."""
-        if not task or not task.strip():
-            return "Cannot delegate an empty task. Please provide a task description."
-
-        if agent_name not in self._delegate_to:
-            available = ", ".join(self._delegate_to)
-            return f"Cannot delegate to '{agent_name}'. Allowed subagents: {available}."
-
-        runtime_context = get_tool_runtime_context()
-        detached_context = get_detached_requester_context()
-        if runtime_context is not None:
-            active_config = runtime_context.current_config
-            requester_id = runtime_context.requester_id
-            authorization_room_id = runtime_context.room_id
-            membership_index = runtime_context.require_agent_reply_memberships()
-        elif (
-            detached_context is not None
-            and self._execution_identity is not None
-            and self._execution_identity.channel == "openai_compat"
-            and self._execution_identity.requester_id == detached_context.requester_id
-            and self._runtime_paths == detached_context.runtime_paths
-        ):
-            active_config = detached_context.config_provider()
-            requester_id = detached_context.requester_id
-            authorization_room_id = None
-            membership_index = detached_context.agent_reply_memberships
-        else:
-            return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
-        if active_config is None or agent_name not in active_config.agents:
-            return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-        caller_config = active_config.agents.get(self._agent_name)
-        caller_allows_target = caller_config is not None and agent_name in caller_config.delegate_to
-        if not caller_allows_target or not is_sender_allowed_for_responder(
-            requester_id,
-            agent_name,
-            authorization_room_id,
-            active_config,
-            self._runtime_paths,
-            membership_index,
-        ):
-            reason = (
-                "it is no longer an allowed target"
-                if not caller_allows_target
-                else "that agent is not allowed to reply to you"
-            )
-            return f"Cannot delegate to '{agent_name}': {reason}."
-
-        if self._delegation_depth >= MAX_DELEGATION_DEPTH:
-            return "Cannot delegate: the maximum delegation depth was reached."
-        return active_config
-
-    async def run_delegated_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _run_child(
         self,
         agent_name: str,
         task: str,
         *,
-        session_id: str | None = None,
-        run_id: str | None = None,
-        active_model_name: str | None = None,
-        supports_native_tool_approval: bool = False,
-        run_id_callback: Callable[[str], None] | None = None,
         continuation: DelegationChild | None = None,
     ) -> str:
-        """Execute an authorized fresh child, optionally owned by a durable parent."""
-        active_config = self.authorize(agent_name, task)
-        if isinstance(active_config, str):
-            return active_config
-        if continuation is not None:
-            if continuation.storage_bindings != freeze_delegation_storage(active_config, continuation.storage_bindings):
-                return "Subagent storage scope changed; start a new subagent."
-            session_id = continuation.session_id
-            active_model_name = continuation.model_name
-        runtime_context = get_tool_runtime_context()
-        provenance_stack = _DIRECT_DELEGATION_PROVENANCE.get()
-        direct_provenance = provenance_stack[-1] if provenance_stack else None
-        requester_id = (
-            runtime_context.requester_id
-            if runtime_context is not None
-            else self._execution_identity.requester_id
-            if self._execution_identity is not None
-            else None
+        """Run one direct child using the shared preparation and settlement owner."""
+        config = authorize_delegation(
+            self._agent_name,
+            agent_name,
+            task,
+            config=self._config,
+            runtime_paths=self._runtime_paths,
+            execution_identity=self._execution_identity,
+            depth=self._delegation_depth,
+            allowed_targets=self._delegate_to,
         )
-        record_child: DelegationChild | None = None
+        if isinstance(config, str):
+            return config
+        owner = self.caller_identity()
+        provenance = _DIRECT_DELEGATION_PROVENANCE.get()
+        parent = provenance[-1] if provenance else None
+        child = prepare_child_turn(
+            self._agent_name,
+            agent_name,
+            task,
+            owner=owner,
+            config=config,
+            runtime_paths=self._runtime_paths,
+            depth=self._delegation_depth,
+            previous=continuation,
+            parent_tool_call_id=(parent.tool_call_id or "") if parent is not None else "",
+        )
         liveness = AsyncExitStack()
         try:
-            session_id = session_id or f"delegate:{self._agent_name}:{agent_name}:{uuid4()}"
-            execution_identity = (
-                replace(self._execution_identity, agent_name=agent_name, session_id=session_id)
-                if self._execution_identity is not None
-                else None
+            await liveness.enter_async_context(subagent_liveness(child, self._runtime_paths))
+            try:
+                await reserve_child_turn(child, owner=owner, runtime_paths=self._runtime_paths)
+            except SubagentSessionError as error:
+                return str(error)
+            await start_child_turn(
+                child,
+                parent_run_id=parent.run_id if parent is not None else None,
+                config=config,
+                runtime_paths=self._runtime_paths,
+                caller_execution_identity=owner,
             )
-
-            if continuation is not None:
-                execution_identity = parse_tool_execution_identity_payload(continuation.execution_identity, strict=True)
-
-            knowledge_resolution = await resolve_agent_knowledge_access_async(
-                agent_name,
-                active_config,
-                self._runtime_paths,
-                refresh_scheduler=self._refresh_scheduler,
-                execution_identity=execution_identity,
-            )
-            transient_enrichment_items = append_knowledge_availability_enrichment(
-                (),
-                knowledge_resolution.unavailable,
-            )
-            logger.info(
-                "Delegating task",
-                from_agent=self._agent_name,
-                to_agent=agent_name,
-                requester_id=requester_id,
-                depth=self._delegation_depth + 1,
-                task_preview=task[:100],
-            )
-            room_id = _resolve_delegated_room_id(
-                runtime_context=runtime_context,
-                execution_identity=execution_identity,
-            )
-            thread_id = _resolve_delegated_thread_id(
-                runtime_context=runtime_context,
-                execution_identity=execution_identity,
-            )
-            active_model_name = (
-                active_model_name
-                or active_config.resolve_runtime_model(
-                    entity_name=agent_name,
-                    room_id=room_id,
-                    thread_id=thread_id,
+            async with child_run_context(child, config=config, runtime_paths=self._runtime_paths):
+                response = await run_delegated_child_response(
+                    child,
+                    prompt=task,
+                    config=config,
                     runtime_paths=self._runtime_paths,
-                ).model_name
-            )
-            run_id = run_id or uuid4().hex
-            if not supports_native_tool_approval:
-                child_record_identity = _record_execution_identity(
-                    agent_name=agent_name,
-                    session_id=session_id,
-                    runtime_context=runtime_context,
-                    configured_identity=self._execution_identity,
-                    runtime_paths=self._runtime_paths,
+                    refresh_scheduler=self._refresh_scheduler,
+                    supports_native_tool_approval=False,
                 )
-                child_record_identity = _require_record_identity(child_record_identity)
-                delegation_id = uuid4().hex
-                record_child = DelegationChild(
-                    delegation_id=delegation_id,
-                    subagent_id=continuation.subagent_id if continuation is not None else delegation_id,
-                    previous_delegation_id=continuation.delegation_id if continuation is not None else None,
-                    storage_bindings=freeze_delegation_storage(active_config, (self._agent_name, agent_name)),
-                    parent_tool_call_id=(direct_provenance.tool_call_id or "" if direct_provenance is not None else ""),
-                    caller_agent_name=self._agent_name,
-                    child_agent_name=agent_name,
-                    task=task,
-                    session_id=session_id,
-                    run_id=run_id,
-                    model_name=active_model_name,
-                    depth=self._delegation_depth + 1,
-                    execution_identity=serialize_tool_execution_identity(child_record_identity),
-                )
-                await liveness.enter_async_context(subagent_liveness(record_child, self._runtime_paths))
-                try:
-                    await reserve_subagent_turn(
-                        record_child,
-                        owner=self.caller_identity(),
-                        runtime_paths=self._runtime_paths,
-                    )
-                except SubagentSessionError as error:
-                    return str(error)
-                await start_child_record(
-                    record_child,
-                    parent_run_id=direct_provenance.run_id if direct_provenance is not None else None,
-                    config=active_config,
-                    runtime_paths=self._runtime_paths,
-                    caller_execution_identity=_record_execution_identity(
-                        agent_name=self._agent_name,
-                        session_id=runtime_context.session_id if runtime_context is not None else None,
-                        runtime_context=runtime_context,
-                        configured_identity=self._execution_identity,
-                        runtime_paths=self._runtime_paths,
-                    ),
-                )
-            delegated_runtime_context = self._build_delegated_runtime_context(
-                agent_name=agent_name,
-                session_id=session_id,
-                runtime_context=runtime_context,
-                active_model_name=active_model_name,
-            )
-            delegated_correlation_id = (
-                delegated_runtime_context.correlation_id if delegated_runtime_context is not None else None
-            )
-            turn_ctx = ResponseTurnContext(
-                entity_label=agent_name,
-                session_id=session_id,
-                run_id=run_id,
-                correlation_id=delegated_correlation_id or uuid4().hex,
-                reply_to_event_id=None,
-                room_id=room_id,
-                thread_id=thread_id,
-                requester_id=requester_id,
-                matrix_run_metadata=None,
-                active_model_name=active_model_name,
-                transient_enrichment_items=tuple(transient_enrichment_items),
-            )
-
-            def note_child_run_id(active_run_id: str) -> None:
-                if record_child is not None:
-                    record_child.run_id = active_run_id
-                    context = get_tool_runtime_context()
-                    if context is not None and context.active_model_name is not None:
-                        record_child.model_name = context.active_model_name
-                    update_subagent_turn_sync(record_child, self._runtime_paths)
-                if run_id_callback is not None:
-                    run_id_callback(active_run_id)
-
-            async with AsyncExitStack() as audit_stack:
-                if record_child is not None:
-                    await audit_stack.enter_async_context(
-                        child_audit_context(
-                            record_child,
-                            config=active_config,
-                            runtime_paths=self._runtime_paths,
-                        ),
-                    )
-                with tool_runtime_context(delegated_runtime_context):
-                    response = await ai_response(
-                        turn_ctx,
-                        prompt=task,
-                        runtime_paths=self._runtime_paths,
-                        config=active_config,
-                        knowledge=knowledge_resolution.knowledge,
-                        run_id_callback=note_child_run_id,
-                        include_interactive_questions=False,
-                        include_openai_compat_guidance=(
-                            execution_identity is not None and execution_identity.channel == "openai_compat"
-                        ),
-                        tool_function_filter=(
-                            runtime_context.tool_function_filter if runtime_context is not None else None
-                        ),
-                        execution_identity=execution_identity,
-                        delegation_depth=self._delegation_depth + 1,
-                        refresh_scheduler=self._refresh_scheduler,
-                        attempt_model_runtime=ToolRuntimeModelBinding(),
-                        supports_native_tool_approval=supports_native_tool_approval,
-                        collect_streamed_response=True,
-                        # The delegation owner needs the actual Agno outcome;
-                        # standalone replay normalization replaces failed runs.
-                        turn_recorder=TurnRecorder(user_message=task),
-                    )
         except asyncio.CancelledError:
-            if record_child is not None:
-                if record_child.status not in {"completed", "failed", "cancelled", "denied"}:
-                    record_child.status = "cancelled"
-                    record_child.result = "Delegation cancelled."
-                if record_child.record_locator:
-                    await finish_child_record(record_child, config=active_config, runtime_paths=self._runtime_paths)
-                else:
-                    await update_subagent_turn(record_child, self._runtime_paths)
+            await finish_child_turn(
+                child,
+                config=config,
+                runtime_paths=self._runtime_paths,
+                status="cancelled",
+                reason="Delegation cancelled.",
+            )
             raise
         except ResponsePausedForApproval:
             raise
-        except Exception as e:
-            logger.exception(
-                "Delegation failed",
-                from_agent=self._agent_name,
-                to_agent=agent_name,
-                error=str(e),
+        except Exception as error:
+            logger.exception("Delegation failed", from_agent=self._agent_name, to_agent=agent_name, error=str(error))
+            receipt = await finish_child_turn(
+                child,
+                config=config,
+                runtime_paths=self._runtime_paths,
+                status="failed",
+                reason=str(error),
             )
-            message = f"Delegation to '{agent_name}' failed: {e}"
-            if record_child is not None:
-                if record_child.status not in {"completed", "failed", "cancelled", "denied"}:
-                    record_child.status = "failed"
-                    record_child.result = str(e)
-                if record_child.record_locator:
-                    receipt = await finish_child_record(
-                        record_child,
-                        config=active_config,
-                        runtime_paths=self._runtime_paths,
-                    )
-                    return _result_with_receipt(message, receipt)
-                await update_subagent_turn(record_child, self._runtime_paths)
-            return message
+            return _result_with_receipt(f"Delegation to '{agent_name}' failed: {error}", receipt)
         else:
-            result = response or "Agent completed the task but returned no content."
-            if record_child is not None:
-                if record_child.status not in {"completed", "failed", "cancelled", "denied"}:
-                    record_child.status = "failed"
-                    record_child.result = "Delegated run ended without a retained terminal outcome."
-                receipt = await finish_child_record(
-                    record_child,
-                    config=active_config,
-                    runtime_paths=self._runtime_paths,
-                )
-                return _result_with_receipt(result, receipt)
-            return result
+            receipt = await finish_child_turn(
+                child,
+                config=config,
+                runtime_paths=self._runtime_paths,
+                status="failed",
+                reason="Delegated run ended without a retained terminal outcome.",
+            )
+            return _result_with_receipt(response or "Agent completed the task but returned no content.", receipt)
         finally:
             await liveness.aclose()
-
-    def _build_delegated_runtime_context(
-        self,
-        *,
-        agent_name: str,
-        session_id: str,
-        runtime_context: ToolRuntimeContext | None,
-        active_model_name: str,
-    ) -> ToolRuntimeContext | None:
-        """Return the child tool runtime context for one delegated run."""
-        if runtime_context is None:
-            return None
-        return replace(
-            runtime_context,
-            agent_name=agent_name,
-            active_model_name=active_model_name,
-            target=replace(runtime_context.target, session_id=session_id),
-        )
-
-
-def _resolve_delegated_room_id(
-    *,
-    runtime_context: ToolRuntimeContext | None,
-    execution_identity: ToolExecutionIdentity | None,
-) -> str | None:
-    """Resolve the room context that should apply to a delegated child run."""
-    if runtime_context is not None:
-        return runtime_context.room_id
-    if execution_identity is not None:
-        return execution_identity.room_id
-    return None
-
-
-def _resolve_delegated_thread_id(
-    *,
-    runtime_context: ToolRuntimeContext | None,
-    execution_identity: ToolExecutionIdentity | None,
-) -> str | None:
-    """Resolve the thread context that should apply to a delegated child run."""
-    if runtime_context is not None:
-        return runtime_context.resolved_thread_id
-    if execution_identity is not None:
-        return execution_identity.resolved_thread_id
-    return None
 
 
 def _record_execution_identity(
@@ -576,7 +311,7 @@ def _record_execution_identity(
     configured_identity: ToolExecutionIdentity | None,
     runtime_paths: RuntimePaths,
 ) -> ToolExecutionIdentity | None:
-    """Return the exact scoped identity used only for audit workspace resolution."""
+    """Resolve the caller identity shared by authorization, child execution, and audit."""
     if configured_identity is not None:
         return replace(configured_identity, agent_name=agent_name, session_id=session_id)
     if runtime_context is None:
@@ -604,4 +339,4 @@ def _require_record_identity(identity: ToolExecutionIdentity | None) -> ToolExec
 
 def _result_with_receipt(result: str, receipt: str) -> str:
     """Attach the stable child record reference to a direct tool result."""
-    return f"{result}\n\n{receipt}"
+    return f"{result}\n\n{receipt}" if receipt else result

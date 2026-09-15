@@ -11,6 +11,8 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.delegation_lifecycle import reserve_child_turn
+from mindroom.delegation_recovery import resolve_subagent
 from mindroom.delegation_sessions import (
     SubagentSessionError,
     load_subagent,
@@ -98,7 +100,14 @@ async def test_handle_reservations_are_scoped_and_reject_overlapping_followups(t
     winner = turns[results.index(None)]
     winner.status = "paused"
     await update_subagent_turn(winner, paths)
-    await reserve_subagent_turn(winner, owner=owner, runtime_paths=paths)
+    stale = replace(winner, run_id="older-attempt", model_name="older-model")
+    retained = await reserve_subagent_turn(stale, owner=owner, runtime_paths=paths)
+    assert retained == winner
+    assert stale.run_id == "older-attempt"
+    assert stale.model_name == "older-model"
+    await reserve_child_turn(stale, owner=owner, runtime_paths=paths)
+    assert stale.run_id == winner.run_id
+    assert stale.model_name == winner.model_name
     # Re-finishing an old audit cannot unlock or overwrite the pending approval.
     await update_subagent_turn(child, paths)
     retained = await load_subagent(subagent_id, owner=owner, **options)
@@ -138,8 +147,14 @@ async def test_liveness_distinguishes_active_from_abandoned_turn(tmp_path: Path)
     async with subagent_liveness(child, paths):
         await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
         assert (await load_subagent(subagent_id, **options)).status == "running"
-    recovered = await load_subagent(subagent_id, **options)
+    handle_path = paths.storage_root / "subagent_sessions" / f"{subagent_id}.json"
+    before = handle_path.read_bytes()
+    assert (await load_subagent(subagent_id, **options)).status == "running"
+    assert handle_path.read_bytes() == before
+    recovered = await resolve_subagent(subagent_id, **options)
     assert recovered.status == "failed"
+    assert not recovered.record_locator
+    assert (await load_subagent(subagent_id, **options)).status == "failed"
     assert "interrupted by a restart" in str(recovered.result)
     next_turn = replace(
         recovered,

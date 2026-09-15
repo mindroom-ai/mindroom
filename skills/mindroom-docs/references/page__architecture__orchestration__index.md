@@ -154,6 +154,32 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 - **`src/mindroom/agent_descriptions.py`** — Owns shared agent description rendering used by routing and delegation.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
 
+## Subagent Ownership
+
+`run_subagent` starts a separate child conversation; `continue_subagent` starts another turn in that same conversation.
+The child uses the normal agent response envelope, so its history, tools, and model behavior follow the existing runtime.
+Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
+
+| Module | Owns |
+| --- | --- |
+| `custom_tools/delegate.py` | Agent-facing tool schemas and direct invocation |
+| `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
+| `delegation_execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
+| `delegation_lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
+| `delegation_recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
+| `delegation_sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |
+| `delegation_audit.py` / `delegation_records.py` | Workspace audit projections, event logs, transcripts, and receipts |
+| `delegation_state.py` | Serializable runtime state and the child-runner protocol |
+
+Both direct and native invocation use the same child preparation and lifecycle owner.
+The native driver receives its response runner explicitly and does not construct the agent-facing toolkit.
+Handle reads do not recover or execute children; recovery runs above storage under a liveness lock.
+Audit recording does not change the child state or handle registry, and editable workspace receipts never grant continuation authority.
+A retained Agno run identifies the exact attempt; the lifecycle owner derives its outcome before publishing storage and audit projections.
+Tach dependency rules and isolated import tests enforce these directions.
+
+See [Agent Delegation](https://docs.mindroom.chat/configuration/agents/#agent-delegation) for configuration, tool arguments, audit paths, and user-visible behavior.
+
 ## Message Handling
 
 Correctness-critical timeline callbacks cross durable journal admission before ordinary callbacks run, and background dispatch workers then process committed work without blocking the sync loop.

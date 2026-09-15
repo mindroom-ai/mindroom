@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
 
 import pytest
 from agno.metrics import RunMetrics
@@ -20,10 +22,11 @@ from mindroom.delegation_audit import (
     finish_child_record,
     observe_child_event,
     record_child_response,
-    start_child_record,
 )
-from mindroom.delegation_execution import _settle_interrupted_child
+from mindroom.delegation_lifecycle import start_child_turn
 from mindroom.delegation_records import DelegationRecordLocator, DelegationRecordOwner
+from mindroom.delegation_recovery import interrupt_child
+from mindroom.delegation_sessions import reserve_subagent_turn
 from mindroom.delegation_state import DelegationChild
 from mindroom.delegation_storage import freeze_delegation_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -77,6 +80,35 @@ def _child() -> DelegationChild:
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [RunStatus.paused, RunStatus.completed, RunStatus.error, RunStatus.cancelled])
+async def test_audit_response_does_not_mutate_runtime_child_or_handle(tmp_path: Path, status: RunStatus) -> None:
+    """Audit projection cannot change execution state or release a follow-up reservation."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    child.subagent_id = uuid4().hex
+    await reserve_subagent_turn(child, owner=_identity("leader", "parent-session"), runtime_paths=paths)
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    before_child = asdict(child)
+    handle_path = paths.storage_root / "subagent_sessions" / f"{child.subagent_id}.json"
+    before_handle = handle_path.read_bytes()
+    await record_child_response(
+        child,
+        RunOutput(run_id=child.run_id, session_id=child.session_id, status=status, content="retained outcome"),
+        config=config,
+        runtime_paths=paths,
+    )
+    assert asdict(child) == before_child
+    assert handle_path.read_bytes() == before_handle
+
+
 def _events(record_dir: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in (record_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
 
@@ -93,7 +125,7 @@ async def test_start_child_record_persists_restart_locator_and_source_scope(tmp_
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
 
-    await start_child_record(
+    await start_child_turn(
         child,
         parent_run_id="parent-run",
         config=config,
@@ -135,7 +167,7 @@ async def test_interruption_recovery_preserves_workspace_knowledge_links(
         assert link.is_symlink()
         links.append(link)
     child.storage_bindings = freeze_delegation_storage(config, ("leader", "child"))
-    await start_child_record(
+    await start_child_turn(
         child,
         parent_run_id="parent-run",
         config=config,
@@ -146,7 +178,7 @@ async def test_interruption_recovery_preserves_workspace_knowledge_links(
     if removed_config:
         config = config.model_copy(update={"agents": {}})
 
-    await _settle_interrupted_child(child, config=config, runtime_paths=paths, reason="Interrupted", status=status)
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Interrupted", status=status)
 
     assert all(link.is_symlink() for link in links)
     run = json.loads((record_dir / "run.json").read_text())
@@ -160,7 +192,7 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_record(
+    await start_child_turn(
         child,
         parent_run_id="parent-run",
         config=config,
@@ -246,8 +278,8 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     run = json.loads((record_dir / "run.json").read_text(encoding="utf-8"))
     assert run["status"] == "completed"
     assert run["output"] == "final response"
-    assert child.status == "completed"
-    assert child.result == "final response"
+    assert child.status == "running"
+    assert child.result is None
 
 
 @pytest.mark.asyncio
@@ -256,7 +288,7 @@ async def test_live_observer_records_matching_child_events_once(tmp_path: Path) 
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_record(
+    await start_child_turn(
         child,
         parent_run_id="parent-run",
         config=config,
@@ -318,7 +350,7 @@ async def test_live_observer_flushes_buffered_partial_output_during_cancellation
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_record(
+    await start_child_turn(
         child,
         parent_run_id="parent-run",
         config=config,
@@ -352,7 +384,7 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_record(
+    await start_child_turn(
         child,
         parent_run_id="parent-run",
         config=config,
@@ -399,7 +431,7 @@ async def test_finish_child_record_settles_non_success_outcome_idempotently(
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_record(
+    await start_child_turn(
         child,
         parent_run_id="parent-run",
         config=config,

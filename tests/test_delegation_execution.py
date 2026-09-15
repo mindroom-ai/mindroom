@@ -19,6 +19,7 @@ from agno.tools.function import Function
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import apply_tool_approval_capability
+from mindroom.ai import run_delegated_child_response
 from mindroom.approval_execution import _collect_agent_continuation
 from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -26,12 +27,12 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation_execution import (
-    _cancel_delegations,
-    cancel_approval_delegations,
     drive_delegation_stream,
     drive_delegations,
 )
+from mindroom.delegation_lifecycle import note_child_run_id
 from mindroom.delegation_records import DelegationRecordLocator, DelegationRecordOwner
+from mindroom.delegation_recovery import _cancel_delegations, cancel_approval_delegations
 from mindroom.delegation_state import DelegationState
 from mindroom.event_journal import ApprovalContinuation
 from mindroom.response_turn import paused_attempt_from_response
@@ -49,11 +50,14 @@ from tests.history_helpers import RecordingModel
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from agno.db.base import BaseDb
     from agno.models.message import Message
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.delegation_state import DelegationChild
 
 
 @dataclass
@@ -228,15 +232,21 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
         )
 
     async def start_child(
-        self: DelegateTools,
-        agent_name: str,
-        task: str,
+        prepared: DelegationChild,
         *,
-        run_id_callback: Callable[[str], None],
-        **kwargs: object,
+        prompt: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        refresh_scheduler: object,
+        supports_native_tool_approval: bool,
     ) -> str:
-        session_id = cast("str", kwargs["session_id"])
-        run_id = cast("str", kwargs["run_id"])
+        assert runtime_paths == paths
+        assert supports_native_tool_approval
+        assert refresh_scheduler is None
+        agent_name = prepared.child_agent_name
+        task = prompt
+        session_id = prepared.session_id
+        run_id = prepared.run_id
         child_identity = replace(identity, agent_name=agent_name, session_id=session_id)
         child = build_child(agent_name, config, paths, child_identity)
         if retry:
@@ -247,7 +257,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
             )
             await empty_attempt.arun(task, session_id=session_id, run_id=run_id, user_id=identity.requester_id)
             run_id = uuid4().hex
-        run_id_callback(run_id)
+        note_child_run_id(prepared, run_id, paths)
         context = _delegate_runtime_context(config, paths, execution_identity=child_identity)
         with tool_runtime_context(replace(context, agent_name=agent_name)):
             response = await child.arun(
@@ -259,15 +269,15 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
             await drive_delegations(
                 child,
                 response,
+                run_child=start_child,
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=paths,
                 execution_identity=child_identity,
-                delegation_depth=self._delegation_depth + 1,
+                delegation_depth=prepared.depth,
             )
         return "ignored; persisted outcome owns success"
 
-    monkeypatch.setattr(DelegateTools, "run_delegated_task", start_child)
     monkeypatch.setattr("mindroom.agents.create_agent", build_child)
     team_presentation: _TeamStreamPresentation | None = None
     try:
@@ -276,6 +286,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
             paused = await drive_delegations(
                 parent,
                 response,
+                run_child=start_child,
                 agent_name="leader",
                 config=config,
                 runtime_paths=paths,
@@ -439,12 +450,12 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                 if team_parent:
                     assert team_presentation is not None
                     resumed = await _collect_team_continuation(
-                        drive_delegation_stream(rebuilt, stored_run(), **options),
+                        drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options),
                         team_presentation,
                     )
                 else:
                     resumed = await _collect_agent_continuation(
-                        drive_delegation_stream(rebuilt, stored_run(), **options),
+                        drive_delegation_stream(rebuilt, stored_run(), run_child=start_child, **options),
                         presentation,
                     )
                 visible_trace = team_presentation.tool_trace if team_parent else presentation.tool_trace
@@ -609,6 +620,7 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path) -> None
             response = await drive_delegations(
                 parent,
                 response,
+                run_child=run_delegated_child_response,
                 agent_name="leader",
                 config=config,
                 runtime_paths=paths,
@@ -620,6 +632,7 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path) -> None
             response = await drive_delegations(
                 parent,
                 response,
+                run_child=run_delegated_child_response,
                 agent_name="leader",
                 config=config,
                 runtime_paths=paths,
