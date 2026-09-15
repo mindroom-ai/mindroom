@@ -169,6 +169,30 @@ __all__ = [
 ]
 
 
+def _docker_seccomp_profile_matches(options: list[str]) -> bool:
+    seccomp_options = [option for option in options if option.lower().startswith("seccomp=")]
+    if len(options) != 2 or len(seccomp_options) != 1:
+        return False
+    actual_profile_json = seccomp_options[0].split("=", 1)[1]
+    expected_profile_json = docker_worker_security_options(computer_enabled=True)[1].split("=", 1)[1]
+    try:
+        return json.loads(actual_profile_json) == json.loads(expected_profile_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def _docker_security_options_match(value: object, *, computer_enabled: bool) -> bool:
+    if not isinstance(value, list) or not all(isinstance(option, str) for option in value):
+        return False
+    options = cast("list[str]", value)
+    no_new_privileges_options = [
+        option for option in options if option.lower() in {"no-new-privileges", "no-new-privileges:true"}
+    ]
+    if len(no_new_privileges_options) != 1:
+        return False
+    return _docker_seccomp_profile_matches(options) if computer_enabled else len(options) == 1
+
+
 def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
     resolved_workers_root = workers_root.expanduser().resolve()
     return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
@@ -910,19 +934,16 @@ class DockerWorkerBackend:
         if not isinstance(host_config, dict):
             return False
         host_config = cast("dict[str, object]", host_config)
+        cap_add = host_config.get("CapAdd")
         cap_drop = host_config.get("CapDrop")
-        if not isinstance(cap_drop, list) or "ALL" not in {str(cap).upper() for cap in cap_drop}:
-            return False
-        security_opt = host_config.get("SecurityOpt")
-        if not isinstance(security_opt, list):
-            return False
-        normalized_options = {str(option).lower() for option in security_opt}
-        has_no_new_privileges = any(
-            option in {"no-new-privileges", "no-new-privileges:true"} for option in normalized_options
-        )
-        has_seccomp_profile = any(option == "seccomp" or option.startswith("seccomp=") for option in normalized_options)
         computer_enabled = self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV)
-        return has_no_new_privileges and (not computer_enabled or has_seccomp_profile)
+        return (
+            host_config.get("Privileged") is False
+            and (cap_add is None or (isinstance(cap_add, list) and not cap_add))
+            and isinstance(cap_drop, list)
+            and [str(cap).upper() for cap in cap_drop] == ["ALL"]
+            and _docker_security_options_match(host_config.get("SecurityOpt"), computer_enabled=computer_enabled)
+        )
 
     def _ensure_container(
         self,
