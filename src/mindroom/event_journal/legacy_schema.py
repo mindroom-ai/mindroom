@@ -1,4 +1,4 @@
-"""One-time retirement of application work admitted before Nio owned ingestion."""
+"""Migrations for legacy journal layouts and approval records."""
 
 from __future__ import annotations
 

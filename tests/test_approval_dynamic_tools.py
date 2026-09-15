@@ -154,7 +154,7 @@ async def test_saved_approval_restores_deferred_local_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Static toolkit metadata also restores a deferred local function after restart."""
+    """Recorded toolkit identity restores a deferred local function after restart."""
     await _exercise_saved_approval(tmp_path, monkeypatch, tool_name="calculator")
 
 

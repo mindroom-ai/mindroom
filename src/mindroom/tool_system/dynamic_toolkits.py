@@ -583,21 +583,3 @@ def deferred_tool_catalog_entries(
             ),
         )
     return entries
-
-
-def resolve_dynamic_tool_selection(
-    *,
-    agent_name: str,
-    config: Config,
-    session_id: str | None,
-    delegation_depth: int = 0,
-    include_matrix_room_runtime_tools: bool = False,
-) -> VisibleToolSurface:
-    """Return the current loaded tools and final runtime tool selection for one session."""
-    return visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        session_id=session_id,
-        delegation_depth=delegation_depth,
-        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
-    )

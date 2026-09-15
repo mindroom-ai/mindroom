@@ -49,7 +49,6 @@ from mindroom.tool_system.dynamic_toolkits import (
     deferred_tool_catalog_entries,
     get_loaded_tools_for_session,
     has_deferred_tools,
-    resolve_dynamic_tool_selection,
     suppress_fully_deferred_toolkit_instructions,
     visible_tool_surface,
 )
@@ -1266,22 +1265,19 @@ def _resolve_agent_dynamic_tool_selection(
             enable_dynamic_tools_manager=False,
             include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
         )
-    if required_tool_names:
-        return visible_tool_surface(
-            agent_name=agent_name,
-            config=config,
-            session_id=session_id,
-            loaded_tools=[
-                *get_loaded_tools_for_session(agent_name=agent_name, config=config, session_id=session_id),
-                *required_tool_names,
-            ],
-            delegation_depth=delegation_depth,
-            include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
-        )
-    return resolve_dynamic_tool_selection(
+    loaded_tools = (
+        [
+            *get_loaded_tools_for_session(agent_name=agent_name, config=config, session_id=session_id),
+            *required_tool_names,
+        ]
+        if required_tool_names
+        else None
+    )
+    return visible_tool_surface(
         agent_name=agent_name,
         config=config,
         session_id=session_id,
+        loaded_tools=loaded_tools,
         delegation_depth=delegation_depth,
         include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
     )
