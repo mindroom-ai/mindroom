@@ -108,7 +108,10 @@ class ModelCatalog:
                 return self._uploads[digest]
             with io.BytesIO(data) as stream:
                 response, _ = await self._client.upload(
-                    stream, content_type=mime, filename="model-icon", filesize=len(data)
+                    stream,
+                    content_type=mime,
+                    filename="model-icon",
+                    filesize=len(data),
                 )
             if not isinstance(response, nio.UploadResponse) or not _matrix_uri(response.content_uri):
                 logger.warning("model_catalog_icon_upload_failed", model=key)
