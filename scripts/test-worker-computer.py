@@ -88,6 +88,11 @@ class Fixture:
         )
         self.viewer = self.matrix["users"]["computer_viewer"]["user_id"] if self.matrix else "@alice:computer.localhost"
         self.other = self.matrix["users"]["computer_other"]["user_id"] if self.matrix else "@bob:computer.localhost"
+        workspace = args.output / "data/agents/writer/workspace"
+        self.history = workspace / "thread_exports/thread.yaml"
+        self.history.parent.mkdir(parents=True)
+        self.history.write_text("messages: []\n")
+        (workspace / "AGENTS.md").write_text("Browser fixture context\n")
         self.config = Config.model_validate(
             {
                 "agents": {
@@ -98,9 +103,12 @@ class Fixture:
                         "tools": ["browser", "shell"],
                         "worker_tools": ["browser", "shell"],
                         "worker_scope": "user_agent",
+                        "knowledge_bases": ["threads"],
+                        "context_files": ["AGENTS.md"],
                     },
                 },
                 "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "knowledge_bases": {"threads": {"path": str(self.history.parent)}},
             },
         )
         (args.output / "config.yaml").write_text(yaml.safe_dump(self.config.model_dump(mode="json")))
@@ -409,6 +417,21 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
                 result["watch_input_rejected"] = True
                 path = "/api/computers/sessions/" + session["session_id"]
                 headers = {"Authorization": "Bearer " + session["session_token"]}
+                # A real reply rewrites thread exports before its browser call.
+                # The running worker and noVNC stream must survive that update.
+                fixture.history.write_text("messages: [navigate to another website]\n")
+                (fixture.history.parent.parent / "AGENTS.md").write_text("Updated browser fixture context\n")
+                navigated = await fixture.browser(
+                    action="navigate",
+                    targetId=opened["targetId"],
+                    targetUrl="http://127.0.0.1:8767/?after-chat=1",
+                )
+                assert navigated["targetId"] == opened["targetId"]
+                assert (await client.get(path, headers=headers)).status_code == 200
+                await page.wait_for_function(FRAMEBUFFER)
+                assert await page.evaluate("window.probe.connected && !window.probe.disconnected")
+                await fixture.evaluate("()=>document.querySelector('#shared-input').focus()")
+                result["chat_updates_preserve_connection"] = True
 
                 async def control(action: str) -> dict[str, Any]:
                     response = await client.post(path + "/control", headers=headers, json={"action": action})
@@ -535,7 +558,7 @@ async def main() -> None:  # noqa: C901, PLR0915 - CLI setup and owned service l
                 f"http://127.0.0.1:{listener.getsockname()[1]}",
                 owned_matrix_id=owned_matrix["container_id"] if owned_matrix else None,
             )
-            server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning"))
+            server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning", ws="websockets-sansio"))
             await server.serve(sockets=[listener])
         finally:
             listener.close()
@@ -545,7 +568,7 @@ async def main() -> None:  # noqa: C901, PLR0915 - CLI setup and owned service l
                 await command("docker", "rm", "-f", owned_matrix["container_id"])
         return
     fixture = Fixture(args, f"http://127.0.0.1:{listener.getsockname()[1]}")
-    server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(fixture.app(), log_level="warning", ws="websockets-sansio"))
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         async with asyncio.timeout(10):
