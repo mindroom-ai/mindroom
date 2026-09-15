@@ -65,6 +65,10 @@ final class DesktopBridgeProcess: ObservableObject {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        // A helper exit must turn a pending pipe write into an error, not terminate the app.
+        guard fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         child.executableURL = invocation.executableURL
         child.arguments = invocation.arguments
         child.environment = invocation.environment
