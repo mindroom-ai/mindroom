@@ -1947,7 +1947,7 @@ agents:
 | `worker_tools` | list | `null` | Tool names to run in the [sandbox proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) instead of the main process. Inherits from `defaults.worker_tools`. When omitted everywhere, MindRoom uses its built-in default. Set to `[]` to disable proxying for this agent |
 | `worker_scope` | string | `null` | How sandbox runtimes are shared for non-private agents. `shared`: one per agent. `user`: one per user (shared across agents). `user_agent`: one per user+agent pair. Inherits from `defaults.worker_scope`. Do not set this when the agent uses `private`, because `private.per` already defines the requester partition for that agent |
 | `allow_self_config` | bool | `null` | Give this agent a scoped tool to read and modify its own configuration at runtime. Inherits from `defaults.allow_self_config` (default: `false`). Lighter-weight alternative to the `config_manager` tool |
-| `delegate_to` | list | `[]` | Agent names this agent can delegate tasks to via tool calls (see [Agent Delegation](#agent-delegation)) |
+| `delegate_to` | list | `[]` | Allowed agent names for `run_subagent`, including itself if listed (see [Agent Delegation](#agent-delegation)) |
 | `thread_exports` | bool or object | `null` | Continuously export every thread from rooms this agent is joined to as YAML under `<workspace>/thread_exports/`. `true` enables the defaults; an object sets `invited_rooms` and `private_room_scope` (see [Thread Exports](#thread-exports)) |
 
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
@@ -2454,11 +2454,21 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 
 ## Agent Delegation
 
-Agents can delegate tasks to other agents using the `delegate_to` field.
+Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
+The model-facing tools are `run_subagent(task: str, agent_name: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent runs as a fresh, one-shot instance with no shared session or history.
-It executes the task and returns its response as the tool result.
+The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
+The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
+Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
+The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
+Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
+The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
+Listing the caller itself allows a fresh copy with the same configured capabilities.
+Omitting `agent_name` or passing `None` selects the caller itself; the same `delegate_to` allowlist still applies.
+For an ongoing Matrix conversation, use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations).
+Each child writes redacted execution records under `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in its resolved workspace, and the caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
+Approval-gated child calls use the native Matrix approval flow in the source room and thread while the parent-child continuation remains durable.
 
 ```yaml
 agents:
@@ -2466,7 +2476,7 @@ agents:
     display_name: Leader
     role: Orchestrate tasks by delegating to specialist agents
     model: sonnet
-    delegate_to: [code, research]
+    delegate_to: [leader, code, research]
     rooms: [lobby]
 
   code:
@@ -2488,8 +2498,9 @@ agents:
 **Constraints:**
 
 - Targets must reference existing agent names in the config
-- An agent cannot delegate to itself
+- An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
 
 ## Naming Rules
 
@@ -3552,7 +3563,7 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
 - [Memory & Storage](https://docs.mindroom.chat/tools/memory-and-storage/) - Explicit memory tools and external memory providers.
-- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - OAuth connection recovery, subagents, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
+- [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) - OAuth connection recovery, Matrix threads, delegation, Dynamic Workflows, config tools, OpenClaw compatibility, and Claude Agent sessions.
 - [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/) - Per-tool lazy loading for optional agent capabilities.
 - [Automation & Platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) - Infrastructure automation, generic APIs, and platform aggregators.
 - [Location, Commerce, & Home](https://docs.mindroom.chat/tools/location-commerce-and-home/) - Maps, weather, commerce, and Home Assistant.
@@ -7313,8 +7324,8 @@ Use these tools when you need to send or inspect Matrix messages, manage thread 
 
 ## Tools On This Page
 
-- [`matrix_message`] - Send, reply, react, read, list room threads, edit, or inspect Matrix conversation context.
-- [`matrix_room`] - Inspect Matrix room metadata, members, thread roots, and room state.
+- [`matrix_message`] - Send, read, edit, and react in Matrix conversations.
+- [`matrix_room`] - Inspect Matrix room metadata, available agents, members, thread roots, and room state.
 - [`matrix_voice_message`] - Generate speech from text and send it as a Matrix voice note.
 - [`thread_tags`] - Add, remove, and inspect shared tags on a Matrix thread.
 - [`thread_resolution`] - Explicitly resolve or reopen Matrix threads in the current room.
@@ -7332,33 +7343,17 @@ Current source in this worktree exposes `matrix_message`, `matrix_room`, `matrix
 
 ## [`matrix_message`]
 
-`matrix_message` is the main Matrix-native tool for sending, reading, reacting to, editing, and inspecting conversation context.
-
-### What It Does
-
-`matrix_message` supports `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`.
-`send` targets the room timeline by default, even when the current conversation is inside a thread.
-When a room-level `send` includes both text and attachments, the text is posted to the room timeline and the attachments are threaded under that new text event.
-When a room-level `send` includes multiple attachments and no text, the first attachment is posted to the room timeline and the remaining attachments are threaded under it.
-When `send` uses an explicit `thread_id`, both text and attachments stay in that existing thread instead of creating a new attachment thread.
-In `thread_mode: room`, room-level `send` stays plain room messaging and does not auto-thread attachments unless you pass an explicit `thread_id`.
-`reply` and `thread-reply` inherit the current thread when one can be resolved, and they return an error when no thread target is available.
-`read` and `context` also inherit the current thread when one can be resolved, while `thread_id="room"` forces room-level scope instead of thread inheritance.
-For `edit`, the required `target` alone selects the event; thread context does not select or validate that target.
-`thread-list` uses the current thread when one is active, and it requires an explicit `thread_id` when there is no active thread context.
-`room-threads` pages thread roots in the target room and returns `next_token` plus `has_more`; pass a returned `next_token` as `page_token` to fetch the next page.
-`react` requires `target` and uses `👍` when `message` is empty.
-`read`, `thread-list`, and `room-threads` default `limit` to 20 and clamp it from 1 through 50.
-`thread-list` returns recent thread messages plus `edit_options` for messages that the current Matrix account can edit.
-Only `send`, `reply`, and `thread-reply` accept attachments, with a combined cap of five `attachment_ids` plus `attachment_file_paths` per call.
-Relative `attachment_file_paths` resolve from the agent workspace when one is available, and they must stay inside that workspace.
-The tool rate-limits each `(agent_name, requester_id, room_id)` combination to 12 weighted actions per 30 seconds, where each attachment increases the weight of a send or reply.
+`matrix_message` supports four actions: `send`, `read`, `edit`, and `react`.
+Sending and reading use the current conversation by default.
+Set `recipient` to an available agent or team name to request a response; without a recipient, text mentions do not dispatch agents.
+Set `new_thread=True` to start a separate conversation, an explicit `thread_id` to continue another thread, or `thread_id="room"` for the room timeline.
+Cross-room calls never inherit the origin room's thread.
+`edit` and `react` require the target message's `event_id`.
+`read` returns recent messages and edit options, with `limit` clamped to 1–50 and defaulting to 20.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
-
-### Example
 
 ```yaml
 agents:
@@ -7367,25 +7362,24 @@ agents:
       - matrix_message
 ```
 
+### Example
+
 ```python
-matrix_message(action="context")
-matrix_message(action="send", message="Posting this to the room timeline.", thread_id="room")
-matrix_message(
-    action="reply",
-    message="I reviewed the thread and attached the export.",
-    attachment_file_paths=["exports/report.csv"],
-)
-matrix_message(action="react", target="$event123", message="✅")
+matrix_room(action="room-info")
+matrix_room(action="agents")
+matrix_message(recipient="code", message="Review this export.", new_thread=True)
+matrix_message(message="Here is the report.", attachments=["exports/report.csv", "att_chart"])
+matrix_message(action="react", event_id="$event123", message="✅")
 ```
 
 ### Notes
 
-- See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete `matrix_message` reference.
-- `ignore_mentions` defaults to `True`, which writes `com.mindroom.skip_mentions=True` so visible mentions do not wake other agents accidentally.
-- Set `ignore_mentions=False` only for deliberate self-handoffs or cross-agent dispatch, because the tool will preserve normal mention handling and record `com.mindroom.original_sender` for human requesters.
-- Use `action="context"` before a follow-up write when you want to inspect the resolved `room_id`, `thread_id`, and `reply_to_event_id`.
-- Successful attachment sends also return `attachment_thread_id`, which identifies the thread root used for the uploaded files.
-- If you need to send existing conversation files, pass `attachment_ids` from the current context or use the `attachments` tool to inspect them first.
+See [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/) for the complete argument schema, conversation selection, attachments, and collapsible sections.
+Use `matrix_room(action="threads")` for thread discovery and `matrix_room(action="room-info")` for current targeting metadata.
+`attachments` accepts up to five ordered context-scoped `att_*` IDs or file paths.
+Relative paths resolve from the agent workspace and must stay inside it.
+When sending to a recipient, all files arrive before the task text starts its response.
+Send results include the conversation `thread_id` and delivered event IDs, including partial delivery details on failure.
 
 ## [`matrix_room`]
 
@@ -7393,10 +7387,15 @@ matrix_message(action="react", target="$event123", message="✅")
 
 ### What It Does
 
-The supported actions are `room-info`, `members`, `threads`, and `state`.
+The supported actions are `room-info`, `members`, `agents`, `threads`, and `state`.
 `room-info` returns cached room metadata including name, topic, encryption status, membership count, join rule, canonical alias, version, guest access, creator, and a power-level summary.
+It also includes current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name`; inspecting another room does not expose the origin thread.
 `members` returns joined users with display names, avatar URLs, and power levels.
-`threads` returns paginated thread-root previews with sender, timestamp, and reply count; it defaults `limit` to 20, clamps it from 1 through 50, and returns `next_token` plus `has_more` for pagination.
+`agents` returns the agents currently eligible to answer this requester in the selected room as a sorted `agents` array with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`).
+It includes the caller when eligible and applies current authorization, configured room scope, and live responder availability.
+These are conversation targets; the separate `run_subagent` tool describes the caller's allowed subagents.
+Pass each returned `name` as `recipient` in [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to address that agent.
+`threads` returns paginated thread-root previews with sender, timestamp, reply count, and latest activity when available; it defaults `limit` to 20, clamps it from 1 through 50, and returns `next_token` plus `has_more` for pagination.
 `state` returns one exact state event when `event_type` is supplied, using an empty `state_key` by default.
 Without `event_type`, `state` returns a room-state summary with at most 100 non-member event previews and elides `m.room.member` events.
 `room_id` defaults to the active Matrix room.
@@ -7420,6 +7419,7 @@ agents:
 ```python
 matrix_room(action="room-info")
 matrix_room(action="members")
+matrix_room(action="agents")
 matrix_room(action="threads", limit=10)
 matrix_room(action="threads", page_token="next-page-token")
 matrix_room(action="state", event_type="m.room.topic")
@@ -7739,7 +7739,7 @@ The path must be relative to the workspace and must not be empty, absolute, poin
 `register_attachment()` turns a local file path into a new context-scoped `att_*` ID and appends that ID to the current runtime context so later tool calls in the same run can reuse it.
 Relative `register_attachment()` paths resolve from the agent workspace when one is available, and they must stay inside that workspace.
 Attachment records include kind, filename, MIME type, room ID, thread ID, sender, creation time, and an `available` flag that reports whether the local file still exists.
-This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`, `reply`, or `thread-reply`.
+This tool does not send files by itself, but its IDs can be passed to `matrix_message` for `send`.
 
 ### Configuration
 
@@ -7760,7 +7760,7 @@ list_attachments(target="att_abc123")
 get_attachment("att_abc123")
 get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
 register_attachment("incoming/plan.pdf")
-matrix_message(action="reply", message="Sharing the plan here.", attachment_ids=["att_abc123"])
+matrix_message(message="Sharing the plan here.", attachments=["att_abc123"])
 ```
 
 ### Notes
@@ -7797,104 +7797,137 @@ Initial enrichment uses the summary call that would already run and can add up t
 - [Attachments](https://docs.mindroom.chat/attachments/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
 
-# Matrix Message Full Semantics
+# Matrix messages
 
-This page is the complete reference for the `matrix_message` tool.
-The model-facing tool description is a condensed summary of these semantics.
+`matrix_message` sends, reads, edits, and reacts to messages.
+It uses the current conversation by default.
+Use `matrix_room` for room details, available agents, members, thread discovery, and room state.
+Both tools are available when `matrix_message` is enabled.
 
-Send, reply, react to, read, edit, or inspect Matrix messages using current room and thread context defaults.
+## Common calls
 
-## Actions
+```python
+# Post an update in the current conversation.
+matrix_message(message="The checks passed.")
 
-- send: Send text and optional attachments to a room.
-  It defaults to the current room.
-  When the effective target is room-level, text+attachment sends post the text to the room timeline and thread attachments under that text event.
-  When the effective target is room-level and you send multiple attachments without text, the first attachment is posted to the room timeline and the remaining attachments are threaded under it.
-  In `thread_mode: room`, room-level sends stay plain room messages and do not auto-thread attachments unless you pass an explicit `thread_id`.
-- reply: Send text and optional attachments into a thread.
-  It defaults to the current thread when one can be resolved and errors if no thread is available.
-- thread-reply: Same threading behavior as `reply`, kept as a separate action name for agent convenience.
-- react: React to `target` with `message` as the emoji, defaulting to thumbs-up when `message` is empty.
-- read: Read recent messages from the current thread when one is active, otherwise from the room timeline.
-  An edited message is reported once, at its newest revision, with `event_id` naming the original and `latest_event_id` naming the revision on screen.
-  A room-timeline read still asks the homeserver for `limit` raw events, so a heavily edited stretch of the room returns fewer than `limit` messages.
-  A room-timeline read whose window holds a revision but not the message it revises cannot tell where that message lives, and reports `thread_id_unknown` instead of a thread.
-- room-threads: List thread roots in a room with pagination support via `page_token`.
-- thread-list: List messages in a thread and include edit options keyed by event ID.
-  It uses the current thread when one is active, otherwise you must pass `thread_id`.
-- edit: Edit a previously sent message identified by `target`.
-  The required `target` selects the event; current thread context does not select or validate the edit target.
-- context: Return room, thread, reply target, requester, and agent metadata so you can plan a later tool call.
+# Ask another agent to respond in the current conversation.
+matrix_message(recipient="code", message="Review the failing check.")
 
-## Thread targeting
+# Start a separate conversation; keep the returned thread_id.
+matrix_message(recipient="code", message="Investigate the regression.", new_thread=True)
 
-- `send` is room-level by default even if the current conversation is inside a thread.
-- `send` only creates a new attachment thread when its effective thread target is room-level.
-  If you pass an explicit `thread_id`, both text and attachments stay in that existing thread.
-- `thread_mode: room` disables implicit attachment auto-threading for room-level sends.
-  Pass an explicit `thread_id` when you intentionally want threaded output from the tool.
-- `reply` and `thread-reply` inherit the current thread when possible.
-- `read` and `context` also inherit the current thread when possible.
-- `thread_id="room"` is a sentinel meaning "force room-level scope and do not inherit the current thread."
-  Use it when you want the room timeline instead of the active thread.
+# Read or continue that conversation later.
+matrix_message(action="read", thread_id="$returned-root")
+matrix_message(recipient="code", message="Also check the retry path.", thread_id="$returned-root")
 
-## Mention handling with `ignore_mentions`
+# Send files in their listed order.
+matrix_message(message="Results", attachments=["reports/results.txt", "att_screenshot"])
 
-- This flag only affects text sends for `send`, `reply`, and `thread-reply`.
-- Default `True`: the tool writes `com.mindroom.skip_mentions=True` into the outgoing event content.
-  The bot runtime checks that flag and suppresses mention-triggered agent dispatch, so visible mentions do not page agents.
-- `False`: the tool does not set the skip flag, so normal mention handling stays active.
-  When the requester is a human rather than the sending bot, the tool also writes `com.mindroom.original_sender=<human requester id>`, not the bot ID.
-  Downstream authorization and reply-permission checks then treat the event as coming from the original human requester.
-- self-trigger: an agent can mention itself with `ignore_mentions=False` to intentionally create a new turn.
-  Use the same pattern for deliberate cross-agent handoffs when another agent should actually wake up and respond.
+# Edit a message you sent, or react to a message.
+matrix_message(action="edit", event_id="$message", message="Corrected results")
+matrix_message(action="react", event_id="$message", message="✅")
+```
 
-## Safety
+## Agent conversations
 
-- The default `ignore_mentions=True` exists to prevent accidental infinite loops and noisy mutual paging between agents.
-- Set `ignore_mentions=False` only for intentional dispatch.
-  Prefer one deliberate handoff message over repeated self-mentions or agent-to-agent pings.
-- Direct `send`, `reply`, `thread-reply`, and `edit` calls reject interactive prompt blocks; use normal agent response delivery for interactive prompts.
-- Calls are limited to 12 weighted actions per 30 seconds for each agent, requester, and room combination.
-  Each call costs one action, and each attachment on `send`, `reply`, or `thread-reply` costs one additional action.
+Discover available recipients with `matrix_room(action="agents")`.
+Each result includes `name`, `matrix_user_id`, `description`, and `thread_mode`.
+Pass the `name` as `recipient`; no manual Matrix mention or dispatch flag is needed.
+You may address yourself for a human requester, or address an available team.
+Self-messaging without a human requester returns an error because own-agent ingress ignores it; use `run_subagent` for a fresh self-run when allowed.
+Only the chosen recipient is dispatched, even if the message mentions other agents.
+Without `recipient`, text mentions do not start agent turns.
+Recipient discovery checks the current requester, authorization, room membership, and agent availability.
 
-## Attachments
+Sending returns immediately with the delivered event IDs; read the conversation later for its response.
+For a bounded task whose answer should return within the same tool call, use [run_subagent](https://docs.mindroom.chat/configuration/agents/#agent-delegation).
+Matrix conversations and local subagent runs have separate lifecycles.
 
-- Attachments are only supported for `send`, `reply`, and `thread-reply`.
-- `attachment_ids` are context-scoped `att_*` IDs.
-- `attachment_file_paths` are local file paths that will be registered into the current attachment context before sending.
-  Relative paths resolve from the agent workspace, the same root used as `HOME` in worker-routed tools.
-- The combined limit of `attachment_ids` plus `attachment_file_paths` is 5 per call.
-- A send or reply call may include text, attachments, or both, but not neither.
+Thread-mode recipients support `new_thread=True` and explicit thread IDs.
+Room-mode recipients share the room conversation: omit thread options or use `thread_id="room"`.
+Requesting a separate thread from a room-mode recipient returns an error before sending.
 
-## Message extras
+## Conversation selection
 
-- `message_extras` adds collapsible MindRoom sections to send, reply, thread-reply, and edit events.
-- `message_extras` requires a non-empty `message`; attachment-only sends with extras are rejected.
-- Keep the visible `message` brief; put supporting evidence in extras.
-- Each section has `title`, `content`, optional `content_type`, and optional `collapsed`.
-- At most 8 sections are accepted; each title must be non-empty and at most 120 characters, and each content value may contain at most 16,384 characters.
-- `collapsed` must be a boolean and defaults to `true`.
-- Supported `content_type` values are `text/plain`, `text/markdown`, and `text/html`; default is `text/markdown`.
-- HTML content may use sanitized rich fragments: paragraphs, headings, lists, tables, blockquotes, code/pre blocks, basic inline formatting, and links.
-  Do not include scripts, styles, images, forms, media, SVG/math, or interactive elements; links should use `http`, `https`, or `mailto`.
-- Example: `message_extras=[{"title": "Evidence", "content_type": "text/html", "content": "<table><tr><td>42</td></tr></table>", "collapsed": true}]`.
+Omitted `room_id` selects the current room.
+Omitted `thread_id` selects the current conversation for both `send` and `read`.
+Selecting another room never inherits the current room's thread.
+Use `thread_id="room"` to explicitly select the room timeline, including for files.
+Use `new_thread=True` with `send` to create a separate conversation, even when already inside a thread.
+Do not combine `new_thread` with `thread_id`.
+
+A successful send returns `room_id`, `thread_id`, and `event_id`.
+Keep the returned `thread_id` to read or continue a new thread; it can differ from `event_id` when a file created the root.
+A null `thread_id` means the room timeline.
+For a thread-mode recipient, a task sent to the timeline starts its response thread at the task event, so the returned `thread_id` identifies that response conversation.
+Room thread discovery uses `matrix_room(action="threads", limit=20)` and its returned `next_token` as `page_token` for the next page.
+New roots may not appear in discovery until they have a reply.
+`matrix_room(action="room-info")` includes the current thread and reply event IDs, requester ID, and agent name alongside room metadata.
 
 ## Arguments
 
-- `action` (`str`): Supported actions are `send`, `reply`, `thread-reply`, `react`, `read`, `room-threads`, `thread-list`, `edit`, and `context`; they send text or attachments, react to an event, read messages, list room thread roots or thread messages, edit a prior event, or return targeting metadata.
-- `message` (`str | None`): Text body for `send`, `reply`, `thread-reply`, and `edit`; reaction emoji for `react` with a thumbs-up default when empty; use `None` for `read`, `room-threads`, `thread-list`, and `context`.
-- `attachment_ids` (`list[str] | None`): Context-scoped `att_*` attachment IDs; only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_file_paths` cannot exceed 5.
-- `attachment_file_paths` (`list[str] | None`): Local file paths to register and send in the current context; relative paths resolve from the agent workspace.
-  It is only valid for `send`, `reply`, and `thread-reply`, and the combined total with `attachment_ids` cannot exceed 5.
-- `room_id` (`str | None`): Optional target room ID or alias; defaults to the current room context when omitted.
-- `target` (`str | None`): Event ID to react to for `react` or to edit for `edit`.
-- `thread_id` (`str | None`): Optional explicit thread target; `thread_id="room"` forces room-level scope instead of inheriting the current thread.
-- `ignore_mentions` (`bool`): Text-send safety flag for `send`, `reply`, and `thread-reply`; default `True` writes `com.mindroom.skip_mentions=True` to suppress mention-triggered agent dispatch, while `False` keeps mentions active and also writes `com.mindroom.original_sender=<human requester id>` when the requester is not the sending bot.
-- `message_extras` (`list[dict[str, object]] | None`): Optional collapsible MindRoom sections for supporting evidence.
-  Each section supports title, content, content_type (`text/plain`, `text/markdown`, or sanitized `text/html`), and collapsed.
-- `limit` (`int | None`): Maximum messages returned for `read` or `thread-list`, or thread roots returned for `room-threads`; values are clamped to 1-50 and default to 20 when omitted.
-- `page_token` (`str | None`): Pagination token for `room-threads`, returned by a previous `room-threads` call to fetch the next page of thread roots.
+| Argument | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `action` | `"send" \| "read" \| "edit" \| "react"` | `"send"` | Message operation. |
+| `message` | `str \| None` | `None` | Text for send/edit; emoji for react, defaulting to 👍. |
+| `recipient` | `str \| None` | `None` | Available agent/team name to request a response from; send only. |
+| `room_id` | `str \| None` | `None` | Matrix room ID or configured room name; current room by default. |
+| `thread_id` | `str \| None` | `None` | Thread root ID, or `"room"` for the room timeline; current conversation by default. |
+| `new_thread` | `bool` | `False` | Start a separate thread; send only, mutually exclusive with `thread_id`. |
+| `event_id` | `str \| None` | `None` | Required target message ID for edit/react. |
+| `attachments` | `list[str] \| None` | `None` | Ordered attachment IDs or file paths; send only, maximum five. |
+| `message_extras` | `list[object] \| None` | `None` | Collapsible sections for send/edit; schema below. |
+| `limit` | `int \| None` | `None` | Read count, clamped to 1–50; default 20. |
+
+Workspace-backed agents may also see MindRoom's standard `mindroom_output_path` argument, which saves the tool result and returns a file receipt.
+It controls the returned tool output, not where the Matrix message is delivered.
+
+`send` requires text, attachments, or both.
+`edit` requires non-empty text and can only edit the sending account's messages.
+`read` returns message event IDs; thread reads also include edit options for editable messages.
+Room access checks apply before cross-room operations.
+Calls are rate limited to 12 actions per 30 seconds per agent, room, and requester; each file costs one additional action.
+
+## Attachments
+
+Each `attachments` entry is a context-scoped `att_*` ID or a local file path.
+Relative paths resolve from the agent workspace when configured.
+Use `./att_filename` for a local filename that starts with `att_`.
+All references are resolved before any message is sent.
+Files retain their input order.
+
+When `recipient` is set, files arrive before the text that requests the agent's response.
+The task message also carries trusted attachment references, allowing room-mode recipients to access registered files without thread history.
+Turn-scoped encrypted media, such as ephemeral screenshots, requires a threaded recipient conversation; room-timeline recipient sends reject it before delivery and suggest a registered local file instead.
+For a new thread, the first file can become its root.
+Without a recipient, text precedes its attachments.
+Files share the selected thread; a room-mode or explicit room-timeline send keeps files in the timeline.
+A thread-mode send outside an existing thread groups text and files under the text, or multiple files under the first file.
+
+Results include `attachment_event_ids`, `resolved_attachment_ids`, and `newly_registered_attachment_ids`.
+Delivery can fail after some files have arrived; error results retain those IDs.
+If any file fails before recipient dispatch, the tool does not send the task text.
+
+## Collapsible sections
+
+Each `message_extras` object has this schema:
+
+```json
+{
+  "title": "Details",
+  "content": "Additional information",
+  "content_type": "text/markdown",
+  "collapsed": true
+}
+```
+
+`title` and `content` are required strings.
+`content_type` defaults to `text/markdown` and also accepts `text/plain` or `text/html`.
+`collapsed` defaults to `true`.
+A call supports up to eight sections; titles are limited to 120 characters and content to 16,384 characters per section.
+Sections require a non-empty main message body.
+HTML supports basic fragments only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links permit `http`, `https`, and `mailto`.
+Direct send/edit calls reject interactive prompts; use normal agent response delivery for interactive prompts.
 
 # Matrix Desktop Bridge
 
@@ -9855,8 +9888,7 @@ Use these tools when you need OAuth recovery, multi-agent coordination, reusable
 ## Tools On This Page
 
 - [`oauth_connections`] - Issue a browser-confirmed reset for one authorized OAuth connection.
-- [`subagents`] - Spawn Matrix-backed sub-agent sessions and message them later by session key or label.
-- [`delegate`] - Run another configured agent as a one-shot specialist and return its answer inline.
+- [`delegate`] - Run a configured agent as a fresh subagent and wait for its answer.
 - [`dynamic_workflow`] - Create, update, run, and inspect saved Dynamic Workflows with persisted report artifacts.
 - [`report_publishing`] - Publish authorized report artifacts through revocable public links.
 - [`config_manager`] - Inspect and patch the full MindRoom configuration, and create, update, validate, or template agents and teams.
@@ -9867,14 +9899,13 @@ Use these tools when you need OAuth recovery, multi-agent coordination, reusable
 
 ## Common Setup Notes
 
-All ten entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
+All nine entries on this page are MindRoom-native orchestration features rather than third-party toolkits.
 [`oauth_connections`] manages connections used by other provider-backed tools and has no credentials of its own.
 Only [`claude_agent`] has tool-specific credential fields.
 [`delegate`] and [`self_config`] can be added automatically based on agent config, so they are not limited to explicit `tools:` entries.
 `agents.<name>.delegate_to` auto-enables [`delegate`] when the list is non-empty and the current delegation depth is below the hard limit of 3.
 `agents.<name>.allow_self_config` or `defaults.allow_self_config` auto-enables [`self_config`].
 [`config_manager`] and [`self_config`] both save changes by revalidating the full runtime config before rewriting `config.yaml`.
-[`subagents`] requires a live Matrix tool runtime context with `room_id`, `requester_id`, Matrix client access, and a writable storage path.
 [`dynamic_workflow`] requires a live tool runtime context, a writable storage path, and a configured agent model.
 [`report_publishing`] requires a live tool runtime context, a writable storage path, and an authorized report source.
 [`openclaw_compat`] is a config preset, not a runtime toolkit.
@@ -10009,89 +10040,63 @@ Compacted shared-agent self-service runs and deleted sessions are unavailable to
 Errors use the same envelope with a stable code.
 Common codes are `authorization_error` and `context_unavailable`.
 
-## [`subagents`]
+## Matrix Conversations
 
-`subagents` creates and tracks Matrix-backed sub-agent sessions that can continue across multiple tool calls.
-
-### What It Does
-
-`subagents` exposes `agents_list()`, `sessions_spawn()`, `sessions_send()`, and `list_sessions()`.
-All four calls return JSON strings with a `status` field, a `tool` field, and operation-specific payload data.
-`agents_list()` returns the current agent name plus `agents`, a sorted array of row objects with `name`, `can_delegate`, `can_spawn`, and `description`.
-`name` is the value to pass as `agent_id` when the relevant capability flag allows that operation.
-`can_spawn` means the agent is eligible in the current room, and `can_delegate` means the agent is listed in the caller's `delegate_to` allowlist.
-`sessions_spawn(task, summary, tag, label=None, agent_id=None)` requires a non-empty task plus a normalized summary and tag.
-`sessions_spawn()` posts a fresh room-level Matrix message that mentions the target agent, then treats the resulting event ID as the root of a new isolated session thread.
-After the spawn succeeds, it writes the requested thread summary and tag through the lower-level thread summary and thread tag APIs.
-If you pass a `label` and the current `(agent_name, room_id, requester_id)` scope already has a matching tracked session, `sessions_spawn()` reuses that session instead of creating a new one and still applies the requested summary and tag to the existing thread.
-If the post-spawn summary or tag write fails, the spawn still succeeds and the response includes a `warnings` list describing the follow-up failure.
-`sessions_send()` sends a follow-up message into an existing tracked session.
-If you omit `session_key`, `sessions_send()` defaults to the current room or thread session key from `create_session_id(room_id, thread_id)`.
-If you pass `label` without `session_key`, `sessions_send()` resolves the most recent in-scope session with that label.
-If you pass `agent_id`, `sessions_send()` prefixes the outgoing message with that agent's current full Matrix ID before sending it.
-Tracked sessions are persisted in `subagents/session_registry.json` under the current runtime storage root.
-`list_sessions()` paginates those tracked sessions with a default `limit` of 50 and a maximum of 200.
-Isolated spawned sessions require thread-capable agents.
-If the target agent uses `thread_mode=room`, `sessions_spawn()` fails and threaded `sessions_send()` calls to that session also fail.
-
-### Configuration
-
-This tool has no tool-specific inline configuration fields.
-
-### Example
-
-```yaml
-agents:
-  coordinator:
-    display_name: Coordinator
-    role: Break work into long-running threaded sub-sessions
-    model: sonnet
-    tools:
-      - subagents
-```
-
-```python
-agents_list()
-sessions_spawn(
-    task="Review the failing deployment and propose a rollback plan.",
-    summary="Investigate the failing deployment and propose a safe rollback plan.",
-    tag="incident-rollback",
-    label="incident-42",
-    agent_id="ops",
-)
-sessions_send(
-    message="Add a short list of commands we should run first.",
-    label="incident-42",
-)
-list_sessions(limit=20)
-```
-
-### Notes
-
-- Session tracking is scoped to the current `agent_name`, `room_id`, and `requester_id`, so labels are not global across unrelated conversations.
-- `sessions_spawn()` returns normalized `summary` and `tag` values in the success payload and may include `warnings` if the follow-up summary or tag write fails after the session is created.
-- Use [`subagents`] when you want a continuing Matrix thread that other agents or humans can revisit later.
-- Use [`delegate`] instead when you want a one-shot specialist answer returned directly as the tool result.
+Use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to start and continue conversations with agents in Matrix.
+Enable `matrix_message` on the caller; it also enables `matrix_room` for discovering available agents.
+`matrix_room(action="agents")` lists agents and teams eligible to answer this requester in the selected room, including the caller when eligible.
+Send `matrix_message(recipient="agent_name", message="...")` to request a response in the current conversation.
+For a separate conversation with a thread-mode agent, add `new_thread=True` and keep the returned `thread_id` for later reads and messages.
+Room-mode agents use the room timeline and reject requests for separate threads.
+Messages return immediately and the conversation remains visible in Matrix.
+Use `run_subagent` below when you need a fresh child's result before continuing.
 
 ## [`delegate`]
 
-`delegate` runs another configured agent as a fresh one-shot specialist and returns that agent's response inline.
+`delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
+Both return the child's response inline.
+When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
+Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
 
 ### What It Does
 
-`delegate` exposes one tool call, `delegate_task(agent_name, task)`.
+```python
+run_subagent(task: str, agent_name: str | None = None) -> str
+continue_subagent(subagent_id: str, message: str) -> str
+```
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
-The caller waits for the delegated agent to finish, and the delegated agent's `response.content` becomes the tool result.
+Fresh execution still uses the target agent's configured workspace, memory, requester scope, model, and tool policy.
+The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
+Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
+Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
+Omitting `agent_name` or passing `None` selects the caller itself, subject to the same allowlist.
 MindRoom gives the delegated agent any already-published last-good knowledge indexes and schedules missing or stale refresh work in the background.
 Interactive questions are disabled for delegated runs.
-Unlike [`subagents`], [`delegate`] does not create a Matrix thread, does not write to the room timeline, and does not keep a reusable session handle.
+`run_subagent` does not create a Matrix conversation thread.
+If a delegated Matrix run requests approval, MindRoom posts the native approval request to the source room and thread while durably retaining the paused parent-child continuation.
+Detached OpenAI-compatible runs retain their existing restriction on approval-gated and room-context tools.
 If `agent_name` is not in the caller's allowed `delegate_to` list, the tool returns an error string.
-Empty tasks are rejected.
+Empty tasks and follow-up messages are rejected.
+
+Use `continue_subagent` after the child returns to retain its own conversation history.
+The stable ID remains usable across parent turns and restarts, within the same caller, requester, and originating conversation.
+Follow-ups preserve the child session and nesting depth, recheck current permissions, and require the original storage scope.
+Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
+Calls wait for a result and do not queue messages into a running child or one awaiting approval.
+Finish that child's current turn before sending another message.
+After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
+Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
+
+Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
+The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
+Sensitive fields are redacted, and oversized output is retained through referenced artifacts.
+The caller receives `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its resolved workspace.
+Completed task results include a reference to the child's record.
 
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.
-Enable it by setting `delegate_to` on the agent config.
+Enable it by setting `delegate_to` on the agent config (the dashboard calls this **Allowed subagents**).
 MindRoom adds the tool automatically when `delegate_to` is non-empty, so listing `delegate` in `tools:` is usually unnecessary.
 
 ### Example
@@ -10103,6 +10108,7 @@ agents:
     role: Coordinate specialist agents
     model: sonnet
     delegate_to:
+      - lead
       - code
       - research
 
@@ -10123,17 +10129,26 @@ agents:
 ```
 
 ```python
-delegate_task(
+run_subagent(task="Independently review the proposed design and return its three main risks.")
+
+run_subagent(
     agent_name="research",
-    task="Summarize the three main risks in this proposal and cite supporting facts.",
+    task="Compare SQLite and PostgreSQL for a single-host task queue with 20 concurrent writers. Return three risks and cite sources.",
+)
+
+# Copy the Subagent ID from the result.
+continue_subagent(
+    subagent_id="<returned-subagent-id>",
+    message="Now assess how your recommendation changes with multiple hosts.",
 )
 ```
 
 ### Notes
 
-- `Config.validate_delegate_to()` rejects self-delegation and unknown target agents at config-load time.
+- `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
 - Recursive delegation is supported, but only up to a maximum depth of 3.
-- Use [`subagents`] when you need an ongoing threaded workflow.
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel.
+- Use `continue_subagent` for another answer from an existing child; use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) for a conversation visible in Matrix.
 - Use [`delegate`] when you need a synchronous specialist answer inside the current run.
 
 ## [`dynamic_workflow`]
@@ -10257,7 +10272,7 @@ agents:
 Use `allowed_tools: ["*"]` to make every granted non-system-mutating tool eligible.
 Tools outside `allowed_tools` are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
 Operator-authored approval rules retain precedence, so a matching `require_approval` rule still makes that function unavailable.
-System-mutating tools (`claude_agent`, `config_manager`, `scheduler`, and `subagents`) are always unavailable to embedded participants.
+System-mutating tools (`claude_agent`, `config_manager`, `scheduler`) are always unavailable to embedded participants.
 
 ### Notes
 
@@ -10391,7 +10406,7 @@ manage_agent(
     agent_name="triage",
     display_name="Triage",
     role="Sort incoming requests and hand them to the right specialist.",
-    tools=["duckduckgo", "subagents"],
+    tools=["duckduckgo", "matrix_message"],
     model="default",
     rooms=["lobby"],
 )
@@ -10455,7 +10470,7 @@ update_own_config(
         "Cite sources for factual claims.",
         "Prefer concise summaries with clear takeaways.",
     ],
-    tools=["duckduckgo", "wikipedia", "subagents"],
+    tools=["duckduckgo", "wikipedia", "matrix_message"],
     thread_mode="room",
     context_files=["SOUL.md", "USER.md"],
 )
@@ -10475,7 +10490,7 @@ update_own_config(
 
 `openclaw_compat` is not a runtime toolkit.
 The registered factory returns an empty `Toolkit`, and the real behavior comes from `Config.TOOL_PRESETS`.
-`Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `subagents`, and `matrix_message`.
+`Config.expand_tool_names()` expands `openclaw_compat` into `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, `matrix_message`.
 `matrix_message` then implies `attachments` and `matrix_room`, so the effective enabled set includes both companion toolkits even though the preset does not list them directly.
 Preset expansion dedupes while preserving order, so adding `openclaw_compat` alongside one of its member tools does not create duplicates.
 This preset is meant for OpenClaw-compatible workspace behavior inside MindRoom rather than for cloning the full OpenClaw gateway control plane.
@@ -10666,7 +10681,7 @@ A later `allowed_tools` expansion cannot widen a running script's unattended app
 The `browser`, `script`, `compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, and `self_config` toolkits are never available to background scripts, even when they are present on the agent.
 Operator-authored `tool_approval` rules are evaluated before the background allowlist, and a matching `require_approval` rule still pauses the call.
 Functions that declare their own confirmation requirement still require Matrix approval.
-The `claude_agent`, `config_manager`, `scheduler`, and `subagents` toolkits are never preapproved for background scripts.
+The `claude_agent`, `config_manager`, and `scheduler` toolkits are never preapproved for background scripts.
 
 The limits are captured with each run.
 `max_concurrent_runs` defaults to `3` for one requester and agent.
@@ -10741,7 +10756,9 @@ MindRoom stores only a hash of the capability in durable state and removes the r
 ## Complete Watcher Example
 
 This watcher polls a controlled text endpoint and wakes the same Matrix agent once per observed value change.
-Replace the URL and full Matrix user ID with values for your deployment.
+Replace the URL and configured agent name with values for your deployment.
+Start this watcher from a human-requester turn: background calls retain that requester, and Matrix self-messaging requires a human requester.
+For a fresh self-run from another requester context, use `run_subagent` in the agent runtime when self-delegation is allowed; the background-script gateway does not grant delegation tools.
 
 ```python
 from __future__ import annotations
@@ -10752,7 +10769,7 @@ from mindroom.script_sdk import MindRoomTools
 
 
 STATUS_URL = "https://example.org/controlled-status.txt"
-AGENT_MATRIX_ID = "@mindroom_watcher:example.org"
+AGENT_NAME = "watcher"
 POLL_SECONDS = 15
 
 
@@ -10771,8 +10788,8 @@ def main() -> None:
             "matrix_message",
             "matrix_message",
             action="send",
-            message=f"{AGENT_MATRIX_ID} the watched value changed; inspect {STATUS_URL} now.",
-            ignore_mentions=False,
+            message=f"The watched value changed; inspect {STATUS_URL} now.",
+            recipient=AGENT_NAME,
         )
 
 
@@ -10780,9 +10797,9 @@ if __name__ == "__main__":
     main()
 ```
 
-`matrix_message` defaults to `ignore_mentions=True` to prevent accidental agent loops.
-Set `ignore_mentions=False` only for an intentional handoff or self-trigger like the example above.
-The message must mention the actual agent Matrix ID if it is meant to start a new agent turn.
+`matrix_message` starts an agent turn only when `recipient` names an available agent or team.
+Set it to your own agent name for an intentional self-trigger like the example above.
+The message uses the current conversation by default.
 Make the watcher edge-triggered, persist or update its observed value before sending, and avoid reacting to its own unchanged output.
 
 The script inherits the original room, thread, requester, and agent execution identity, so omitting `room_id` sends through that authorized conversation context.
@@ -11531,7 +11548,7 @@ The tool names in this table are representative highlights rather than an exhaus
 | **Project Management** | github, jira, linear, clickup, notion, trello, todo, todoist | [→ project-management](https://docs.mindroom.chat/tools/project-management/) |
 | **Calendar & Scheduling** | google_calendar, cal_com, scheduler | [→ calendar-and-scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) |
 | **Memory & Storage** | memory, mem0, zep | [→ memory-and-storage](https://docs.mindroom.chat/tools/memory-and-storage/) |
-| **Agent Orchestration** | oauth_connections, subagents, delegate, dynamic_workflow, report_publishing, claude_agent, config_manager, self_config, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
+| **Agent Orchestration** | oauth_connections, delegate, dynamic_workflow, report_publishing, claude_agent, config_manager, self_config, openclaw_compat | [→ agent-orchestration](https://docs.mindroom.chat/tools/agent-orchestration/) |
 | **Automation & Platforms** | aws_lambda, aws_ses, airflow, e2b, daytona, composio, custom_api | [→ automation-and-platforms](https://docs.mindroom.chat/tools/automation-and-platforms/) |
 | **Location, Commerce & Home** | google_maps, openweather, shopify, homeassistant | [→ location-commerce-and-home](https://docs.mindroom.chat/tools/location-commerce-and-home/) |
 | **Runtime Awareness** | update_awareness | [→ tools overview](https://docs.mindroom.chat/tools/#mindroom-update-awareness) |
@@ -12049,7 +12066,7 @@ Works well:
 - OpenClaw-inspired behavior and instructions
 - Native MindRoom tool bundle via the `openclaw_compat` preset
 - Native Matrix messaging via the `matrix_message` tool in the preset bundle
-- Native sub-agent session orchestration via the `subagents` tool in the preset bundle
+- Matrix agent conversations through `matrix_message`, with agent discovery through `matrix_room`
 
 Not included:
 
@@ -12072,7 +12089,6 @@ Preset expansion:
 - `website`
 - `browser`
 - `scheduler`
-- `subagents`
 - `matrix_message`
 - `attachments` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
 - `matrix_room` (auto-implied by `matrix_message` via `IMPLIED_TOOLS`, not listed in the preset directly)
@@ -12132,7 +12148,7 @@ memory:
 
 When using `memory_backend: file`, the file backend automatically loads `MEMORY.md` from the canonical workspace root, so there is no need to add it to `context_files`.
 If you switch to `mem0`, add `MEMORY.md` back to `context_files` if you still want it preloaded.
-The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, sub-agent orchestration, and `matrix_message` tools (`attachments` and `matrix_room` are auto-implied by `matrix_message`), so listing those tools individually is not necessary.
+The `openclaw_compat` preset already expands to native shell, coding, duckduckgo, website, browser, scheduler, and `matrix_message` tools (`attachments` and `matrix_room` are auto-implied by `matrix_message`), so listing those tools individually is not necessary.
 Copy or sync your OpenClaw files into `agents/openclaw/workspace/` before using this config so `context_files`, file memory, and `search_memories` read the same canonical workspace.
 Native memory mutations schedule semantic-index refresh.
 Arbitrary external edits are not detected by a ready semantic index on access; use the supported memory tools or trigger/restart the index refresh before expecting those edits in semantic results.
@@ -15572,11 +15588,11 @@ It must not be empty, absolute, point at the workspace root, contain `..` or NUL
 When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.
 In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so `incoming/file.ext` and `~/incoming/file.ext` refer to the same saved file.
 
-`attachment_ids` accepts only context attachment IDs (`att_*`).
-`attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
+`matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
+Local files are registered in the current context before sending.
 Relative paths resolve from the agent workspace when one is available.
 Relative paths must stay inside the workspace.
-Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
+Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?
 
@@ -17289,7 +17305,7 @@ The request body's `user` field and requester headers cannot override this ident
 
 Mapped callers only see and invoke models allowed by the existing responder access policy, including every member of a selected team.
 Auto-routing uses the same permitted agents.
-`delegate_task` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
+`run_subagent` checks both the caller agent's `delegate_to` list and the requester's access to each target, and propagates the requester into nested runs and their metadata.
 Grant access with `agents.<name>.access.users`, administrator membership, or a ready managed `members_of_rooms` membership snapshot.
 There is no current Matrix room for `/v1`, so `current_room_members` cannot grant access, and missing or stale room membership fails closed.
 
@@ -17896,6 +17912,37 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 - **`src/mindroom/agent_storage.py`** — Owns agent session and learning SQLite storage construction helpers.
 - **`src/mindroom/agent_descriptions.py`** — Owns shared agent description rendering used by routing and delegation.
 - **`src/mindroom/runtime_state.py`** — Shared runtime readiness state with `set_runtime_starting()`, `set_runtime_ready()`, and `set_runtime_failed()` used by health endpoints.
+
+## Subagent Ownership
+
+`run_subagent` starts a separate child conversation; `continue_subagent` starts another turn in that same conversation.
+The child uses the normal agent response envelope, so its history, tools, and model behavior follow the existing runtime.
+Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
+
+The runtime lives in the `src/mindroom/delegation/` package, with explicit imports between its modules.
+
+| Module | Owns |
+| --- | --- |
+| `custom_tools/delegate.py` | Agent-facing tool schemas and direct invocation |
+| `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
+| `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
+| `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
+| `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
+| `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |
+| `delegation/audit.py` / `delegation/records.py` | Workspace audit projections, event logs, transcripts, and receipts |
+| `delegation/state.py` | Serializable runtime state and the child-runner protocol |
+| `delegation/hooks.py` | Persisted plugin hook phases across approval continuations |
+| `delegation/storage.py` | Frozen storage bindings for retained runs |
+
+Both direct and native invocation use the same child preparation and lifecycle owner.
+The native driver receives its response runner explicitly and does not construct the agent-facing toolkit.
+Handle reads do not recover or execute children; recovery runs above storage under a liveness lock.
+Audit snapshots do not settle child state or finish audit records; the lifecycle owner publishes terminal outcomes.
+Editable workspace receipts never grant continuation authority.
+A retained Agno run identifies the exact attempt; the lifecycle owner derives its outcome before publishing storage and audit projections.
+Tach dependency rules and isolated import tests enforce these directions.
+
+See [Agent Delegation](https://docs.mindroom.chat/configuration/agents/#agent-delegation) for configuration, tool arguments, audit paths, and user-visible behavior.
 
 ## Message Handling
 
@@ -19702,7 +19749,7 @@ Provisioned directory records are administrator-managed and outside the OAuth lo
 
 - Tools requiring native confirmation or configured approval cannot run through the gateway; they return `approval_required`.
 - Toolkits marked `requires_room_context` in their metadata are omitted from discovery and rejected on direct schema and invocation requests before construction.
-  This includes Matrix messaging, subagent sessions, scheduling, conversation attachments, and other tools that require the live Matrix room runtime.
+  This includes Matrix messaging, scheduling, conversation attachments, and other tools that require the live Matrix room runtime.
 - MCP generic bridge dispatchers are excluded; only selected, filtered typed functions are exposed.
 - Search returns at most 10 items and 16 KiB. A selected schema is limited to 32 KiB; tool arguments and result payloads to 64 KiB each.
 - HTTP request bodies and MCP tool responses are limited to 128 KiB. JSON-encoded request IDs are limited to 128 bytes; the `MCP-Protocol-Version` header to 64 UTF-8 bytes. Calls have a 60-second gateway deadline, with configurable active-call limits (defaults: 16 per grant, 32 per authoritative requester across grants, and 128 per process). A cancelled or timed-out call retains its capacity until its local background work and toolkit cleanup finish, including its grant and requester allowances.

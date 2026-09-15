@@ -80,6 +80,15 @@ class _ValidatedOutputPath:
 
 
 @dataclass(frozen=True)
+class ToolOutputFileRequest:
+    """Validated output destination for a direct or externally executed tool call."""
+
+    policy: ToolOutputFilePolicy
+    tool_name: str
+    path: _ValidatedOutputPath | None
+
+
+@dataclass(frozen=True)
 class _SerializedToolOutput:
     payload: bytes
     format: Literal["text", "json", "binary"]
@@ -701,6 +710,27 @@ def _docstring_with_output_path(original_doc: str | None) -> str:
     return f"{base}\n\n{output_arg_doc}"
 
 
+def prepare_tool_output_file(
+    policy: ToolOutputFilePolicy,
+    *,
+    tool_name: str,
+    output_path: object = None,
+) -> ToolOutputFileRequest | dict[str, object]:
+    """Validate before tool execution, without creating files or directories."""
+    normalized = _normalize_output_path_argument(output_path)
+    validated = _validate_output_path(policy, normalized) if normalized is not None else None
+    if isinstance(validated, str):
+        return _error_receipt(validated)
+    return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
+
+
+def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
+    """Apply the shared explicit redirect or large-result policy after execution."""
+    if request.path is None:
+        return _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
+    return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+
+
 def _wrap_entrypoint(
     entrypoint: Callable[..., object],
     policy: ToolOutputFilePolicy,
@@ -711,29 +741,21 @@ def _wrap_entrypoint(
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
         async def async_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
-            if normalized_output_path is None:
-                result = await async_entrypoint(*args, **kwargs)
-                return _auto_save_large_result(result, policy=policy, tool_name=tool_name)
-            validated_path = _validate_output_path(policy, normalized_output_path)
-            if isinstance(validated_path, str):
-                return _error_receipt(validated_path)
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            if isinstance(request, dict):
+                return request
             result = await async_entrypoint(*args, **kwargs)
-            return _redirect_result_to_file(result, policy=policy, validated_path=validated_path)
+            return finalize_tool_output_file(request, result)
 
         wrapper = async_wrapper
     else:
 
         def sync_wrapper(*args: object, mindroom_output_path: str | None = None, **kwargs: object) -> object:
-            normalized_output_path = _normalize_output_path_argument(mindroom_output_path)
-            if normalized_output_path is None:
-                result = entrypoint(*args, **kwargs)
-                return _auto_save_large_result(result, policy=policy, tool_name=tool_name)
-            validated_path = _validate_output_path(policy, normalized_output_path)
-            if isinstance(validated_path, str):
-                return _error_receipt(validated_path)
+            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
+            if isinstance(request, dict):
+                return request
             result = entrypoint(*args, **kwargs)
-            return _redirect_result_to_file(result, policy=policy, validated_path=validated_path)
+            return finalize_tool_output_file(request, result)
 
         wrapper = sync_wrapper
 

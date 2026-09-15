@@ -26,7 +26,9 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
+from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
+from agno.run.requirement import RunRequirement
 
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
@@ -39,6 +41,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
+from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
@@ -47,9 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
-    from agno.models.response import ToolExecution
     from agno.run.agent import RunOutput, RunPausedEvent
-    from agno.run.requirement import RunRequirement
     from agno.run.team import RunPausedEvent as TeamRunPausedEvent
     from agno.run.team import TeamRunOutput
 
@@ -81,6 +82,7 @@ __all__ = [
     "TurnRunState",
     "TurnSinks",
     "apply_exact_approval_decisions",
+    "apply_local_approval_decisions",
     "build_matrix_run_metadata",
     "paused_attempt_from_event",
     "paused_attempt_from_response",
@@ -385,6 +387,8 @@ class PausedAttempt:
     acknowledged_response_text: str | None = None
     tool_trace: tuple[ToolTraceEntry, ...] = ()
     response_presentation_state: dict[str, object] = field(default_factory=dict)
+    approval_agent_name: str | None = None
+    delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
@@ -409,6 +413,25 @@ class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N81
         )
 
 
+def apply_local_approval_decisions(
+    response: RunOutput | TeamRunOutput,
+    *,
+    decisions: dict[str, bool],
+    denial_reasons: dict[str, str | None],
+) -> list[RunRequirement]:
+    """Apply this actor's approvals; projected child calls belong to the child executor."""
+    delegation = DelegationState.from_metadata(response.metadata)
+    if delegation.pending_child_id is not None:
+        return []
+    return apply_exact_approval_decisions(
+        [RunRequirement.from_dict(item) for item in delegation.pending_requirements]
+        if delegation.pending_requirements
+        else deepcopy(response.requirements or []),
+        decisions=decisions,
+        denial_reasons=denial_reasons,
+    )
+
+
 def paused_attempt_from_response(
     response: RunOutput | TeamRunOutput,
     *,
@@ -419,6 +442,30 @@ def paused_attempt_from_response(
     """Extract confirmation requirements from one persisted paused Agno run."""
     if response.status != RunStatus.paused:
         return None
+    delegation = DelegationState.from_metadata(response.metadata)
+    if delegation.pending_tools:
+        if delegation.pending_child_id is not None:
+            toolkit_owners = {
+                (source.child.child_agent_name, str(tool["tool_name"])): source.toolkit_name
+                for tool in delegation.pending_tools
+                if (source := delegation.pending_tool_sources.get(str(tool["tool_call_id"]))) is not None
+            }
+        paused = _paused_attempt(
+            toolkit_owners=toolkit_owners,
+            tools=[ToolExecution.from_dict(tool) for tool in delegation.pending_tools],
+            requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
+            session_id=response.session_id or fallback_session_id,
+            run_id=response.run_id or fallback_run_id,
+        )
+        return (
+            replace(
+                paused,
+                approval_agent_name=delegation.pending_agent_name,
+                delegation_storage_bindings=delegation.storage_bindings,
+            )
+            if paused is not None
+            else None
+        )
     return _paused_attempt(
         toolkit_owners=toolkit_owners,
         tools=response.tools or (),
@@ -497,6 +544,14 @@ def _paused_attempt(
         run_id=run_id,
         tools=tuple(pending_tools),
         requirements=pending_requirements,
+        approval_agent_name=next(
+            (
+                requirement.member_agent_name
+                for requirement in pending_requirements
+                if requirement.member_agent_name and requirement.member_agent_id is None
+            ),
+            None,
+        ),
         toolkit_owners=toolkit_owners,
     )
 

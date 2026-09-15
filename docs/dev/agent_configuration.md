@@ -476,7 +476,6 @@ Below is a representative selection:
 - **openai** - Generate images with GPT Image 2.5 Sunburst
 - **gemini** - Google Gemini multimodal capabilities
 - **claude_agent** - Spawn Claude sub-agents
-- **subagents** - Delegate tasks to other MindRoom agents
 
 ### Productivity Tools
 - **scheduler** - Schedule recurring tasks (included by default)
@@ -492,7 +491,7 @@ Below is a representative selection:
 - **notion** - Notion workspace integration (requires API key)
 
 ### Special Tool Bundles
-- **openclaw_compat** - Convenience bundle that expands to shell, coding, duckduckgo, website, browser, scheduler, subagents, and matrix_message, which also implies attachments and matrix_room through `IMPLIED_TOOLS`.
+- **openclaw_compat** - Convenience bundle that expands to shell, coding, duckduckgo, website, browser, scheduler, and matrix_message, which also implies attachments and matrix_room through `IMPLIED_TOOLS`.
 
 ## Example Agent Configurations
 

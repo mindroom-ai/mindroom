@@ -105,11 +105,11 @@ It must not be empty, absolute, point at the workspace root, contain `..` or NUL
 When the save succeeds, the response includes `mindroom_tool_output` with `status: "saved_to_file"`, `path`, byte count, `format: "binary"`, and `sha256`.
 In shell tools, that workspace is exposed as `$MINDROOM_AGENT_WORKSPACE`; in worker-routed shell and python tools it is also `~` and `$HOME`, so `incoming/file.ext` and `~/incoming/file.ext` refer to the same saved file.
 
-`attachment_ids` accepts only context attachment IDs (`att_*`).
-`attachment_file_paths` accepts local file paths and auto-registers them in the current context before sending.
+`matrix_message` accepts one ordered `attachments` list containing context attachment IDs (`att_*`) and local file paths.
+Local files are registered in the current context before sending.
 Relative paths resolve from the agent workspace when one is available.
 Relative paths must stay inside the workspace.
-Use `matrix_message(action="send"|"reply"|"thread-reply", attachment_ids=..., attachment_file_paths=...)` to send attachments.
+Use `matrix_message(attachments=["att_example", "exports/report.csv"])` to send attachment IDs and file paths in order to the current conversation.
 
 ### Why use this tool?
 

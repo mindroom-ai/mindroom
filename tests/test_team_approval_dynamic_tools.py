@@ -28,7 +28,11 @@ from mindroom.approval_tools import approval_denial_context, toolkit_owners_for_
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.event_journal.approval_continuations import ApprovalDecision
-from mindroom.history.session_context import close_team_runtime_state_dbs, open_bound_scope_session_context
+from mindroom.history.session_context import (
+    close_team_runtime_state_dbs,
+    open_bound_scope_session_context,
+    open_resolved_scope_session_context,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.response_sources import ResponseSources
@@ -256,7 +260,35 @@ async def _exercise_team_member_assembly(
         raise _MemberAssemblyObservedError
 
     dynamic_toolkits._loaded_tools.clear()
-    monkeypatch.setattr("mindroom.teams.open_bound_scope_session_context", inspect_members)
+    with open_resolved_scope_session_context(
+        agent_name="alpha",
+        scope=HistoryScope(kind="team", scope_id="research"),
+        session_id=identity.session_id,
+        config=config,
+        runtime_paths=paths,
+        execution_identity=identity,
+        create_session_if_missing=True,
+    ) as scope:
+        assert scope is not None
+        scope.storage.upsert_session(
+            TeamSession(
+                session_id=identity.session_id,
+                team_id="research",
+                user_id=identity.requester_id,
+            ),
+        )
+        scope.storage.upsert_run(
+            run=TeamRunOutput(
+                run_id="paused-team-run",
+                session_id=identity.session_id,
+                user_id=identity.requester_id,
+                team_id="research",
+                status=RunStatus.paused,
+            ),
+            session_id=identity.session_id,
+            user_id=identity.requester_id,
+        )
+    monkeypatch.setattr("mindroom.teams.build_materialized_team_instance", inspect_members)
     try:
         with pytest.raises(_MemberAssemblyObservedError):
             await continue_paused_team_run(
