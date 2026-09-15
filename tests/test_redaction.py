@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from mindroom import redaction
 from mindroom.redaction import (
@@ -291,6 +293,261 @@ def test_redact_sensitive_data_bounds_cyclic_containers() -> None:
     redacted = redact_sensitive_data(value)
 
     assert len(json.dumps(redacted)) < 10_000
+
+
+def test_redact_sensitive_data_bounds_cyclic_dataclasses_and_redacts_secret_fields() -> None:
+    """Dataclass traversal must keep diagnostic fields without copying an unbounded cycle."""
+
+    @dataclass
+    class Diagnostic:
+        label: str
+        api_key: str
+        nested: Diagnostic | None = None
+
+    diagnostic = Diagnostic("request_failed", "synthetic-field-secret")
+    diagnostic.nested = Diagnostic("nested_diagnostic", "synthetic-field-secret", diagnostic)
+
+    result = redact_sensitive_data(diagnostic, max_depth=3)
+
+    assert isinstance(result, dict)
+    assert result["label"] == "request_failed"
+    assert result["api_key"] == REDACTED
+    assert result["nested"]["label"] == "nested_diagnostic"
+    serialized = json.dumps(result)
+    assert "synthetic-field-secret" not in serialized
+    assert "[truncated]" in serialized
+    assert len(serialized) < 1_000
+    assert diagnostic.nested.nested is diagnostic
+
+
+def test_redact_log_event_bounds_branching_dataclass_cycles() -> None:
+    """One cyclic diagnostic must not expand exponentially at the default depth."""
+    field_reads = 0
+
+    @dataclass
+    class Diagnostic:
+        api_key: str
+        left: Diagnostic | None = None
+        right: Diagnostic | None = None
+
+        def __getattribute__(self, name: str) -> object:
+            nonlocal field_reads
+            if name in {"api_key", "left", "right"}:
+                field_reads += 1
+                # Keep this regression safe even when cycle detection breaks.
+                if field_reads > 100:
+                    msg = "Test guard stopped unbounded dataclass traversal"
+                    raise RuntimeError(msg)
+            return object.__getattribute__(self, name)
+
+    diagnostic = Diagnostic("synthetic-cycle-secret")
+    diagnostic.left = diagnostic
+    diagnostic.right = diagnostic
+
+    result = redact_log_event(None, "warning", {"event": "request_failed", "response": diagnostic})
+
+    assert result["event"] == "request_failed"
+    assert field_reads < 100
+    serialized = json.dumps(result)
+    assert "synthetic-cycle-secret" not in serialized
+    assert REDACTED in serialized
+    assert REDACTION_FAILED not in serialized
+    assert len(serialized) < 1_000
+
+
+@pytest.mark.parametrize("structured_object", [False, True])
+def test_redact_sensitive_data_preserves_shared_sibling_references(structured_object: bool) -> None:
+    """An alias on a sibling path is not a cycle and keeps its own secret context."""
+
+    @dataclass
+    class Diagnostic:
+        label: str
+        api_key: str
+
+    shared = (
+        Diagnostic("request_failed", "synthetic-alias-secret")
+        if structured_object
+        else {"label": "request_failed", "api_key": "synthetic-alias-secret"}
+    )
+
+    result = redact_sensitive_data({"credentials": shared, "response": [shared]})
+
+    assert result == {
+        "credentials": {"label": REDACTED, "api_key": REDACTED},
+        "response": [{"label": "request_failed", "api_key": REDACTED}],
+    }
+
+
+def test_redact_sensitive_data_preserves_dataclass_secret_label_context() -> None:
+    """Declared sibling labels must still hide bare values after dataclass normalization."""
+
+    @dataclass
+    class Header:
+        name: str
+        value: str
+
+    result = redact_sensitive_data({"headers": [Header("Authorization", "synthetic-bare-secret")]})
+
+    assert result == {"headers": [{"name": "Authorization", "value": REDACTED}]}
+
+
+def test_redact_log_event_redacts_dataclass_mapping_keys() -> None:
+    """Dataclass keys made reachable by shallow traversal must not expose secrets."""
+
+    @dataclass(frozen=True)
+    class DiagnosticKey:
+        api_key: str
+
+    @dataclass
+    class Diagnostic:
+        values: dict[DiagnosticKey, str]
+
+    result = redact_log_event(
+        None,
+        "warning",
+        {
+            "event": "request_failed",
+            "response": Diagnostic({DiagnosticKey("synthetic-key-secret"): "diagnostic"}),
+        },
+    )
+
+    assert result["event"] == "request_failed"
+    serialized = json.dumps(result)
+    assert "synthetic-key-secret" not in serialized
+    assert REDACTED in serialized
+    assert REDACTION_FAILED not in serialized
+
+
+@pytest.mark.parametrize("custom_string", [False, True])
+def test_redact_log_event_hides_dataclass_mapping_key_secret_context(custom_string: bool) -> None:
+    """Structured key contents stay opaque, including bare values and custom displays."""
+
+    @dataclass(frozen=True)
+    class Header:
+        name: str
+        value: str
+
+        def __str__(self) -> str:
+            return self.value if custom_string else repr(self)
+
+    @dataclass
+    class Diagnostic:
+        values: dict[Header, str]
+
+    result = redact_log_event(
+        None,
+        "warning",
+        {
+            "event": "request_failed",
+            "response": Diagnostic({Header("Authorization", "synthetic-bare-key-secret"): "diagnostic"}),
+        },
+    )
+
+    assert result["event"] == "request_failed"
+    serialized = json.dumps(result)
+    assert "synthetic-bare-key-secret" not in serialized
+    assert "Authorization" not in serialized
+    assert list(result["response"]["values"].values()) == [REDACTED]
+    assert REDACTION_FAILED not in serialized
+
+
+@pytest.mark.parametrize("key_type", ["tuple", "model"])
+@pytest.mark.parametrize("literal_first", [False, True])
+@pytest.mark.parametrize("opaque_label", [False, True])
+def test_redact_log_event_keeps_structured_keys_opaque_and_distinct(
+    key_type: str,
+    literal_first: bool,
+    opaque_label: bool,
+) -> None:
+    """Opaque labels preserve entries without revealing safe-display key internals."""
+
+    class SafeDisplayTuple(tuple[str, ...]):
+        __slots__ = ()
+
+        def __str__(self) -> str:
+            return "diagnostic-key"
+
+    class SafeDisplayModel(BaseModel):
+        model_config = ConfigDict(frozen=True)
+        value: str
+
+        def __str__(self) -> str:
+            return "diagnostic-key"
+
+    secrets = ["synthetic-first-key-secret", "synthetic-second-key-secret"]
+    keys = (
+        [SafeDisplayTuple((secret,)) for secret in secrets]
+        if key_type == "tuple"
+        else [SafeDisplayModel(value=secret) for secret in secrets]
+    )
+    literal_key = f"<redacted structured key {1 if literal_first else 0}>"
+
+    class LiteralDisplayKey:
+        def __str__(self) -> str:
+            return literal_key
+
+    literal_input_key = LiteralDisplayKey() if opaque_label else literal_key
+    entries: list[tuple[object, str]] = [(keys[0], "first"), (keys[1], "second")]
+    if literal_first:
+        entries.insert(0, (literal_input_key, "literal"))
+    else:
+        entries.append((literal_input_key, "literal"))
+
+    result = redact_log_event(None, "warning", {"event": "request_failed", "response": dict(entries)})
+
+    assert result["event"] == "request_failed"
+    assert len(result["response"]) == 3
+    assert set(result["response"].values()) == {"first", "second", "literal"}
+    assert result["response"][literal_key] == "literal"
+    serialized = json.dumps(result)
+    assert all(secret not in serialized for secret in secrets)
+    assert REDACTION_FAILED not in serialized
+
+
+def test_redact_log_event_bounds_structured_key_label_collisions() -> None:
+    """Invisible mapping entries must not cause unbounded label collision checks."""
+    membership_checks = 0
+
+    class GuardedMapping(dict[object, object]):
+        def __contains__(self, key: object) -> bool:
+            nonlocal membership_checks
+            membership_checks += 1
+            if membership_checks > 200:
+                msg = "Test guard stopped unbounded label collision checks"
+                raise RuntimeError(msg)
+            return super().__contains__(key)
+
+    @dataclass(frozen=True)
+    class DiagnosticKey:
+        label: str
+
+    payload = GuardedMapping({DiagnosticKey("synthetic-key-canary"): "diagnostic"})
+    payload.update({f"<redacted structured key {index}>": index for index in range(1_000)})
+
+    result = redact_log_event(None, "warning", {"event": "request_failed", "response": payload})
+
+    assert result["event"] == "request_failed"
+    assert membership_checks < 200
+    assert len(result["response"]) == 101
+    assert result["response"]["__truncated__"] == "901 more items"
+    assert "diagnostic" in result["response"].values()
+    assert "synthetic-key-canary" not in json.dumps(result)
+
+
+def test_redact_log_event_preserves_opaque_mapping_key_string_fallback() -> None:
+    """Opaque keys must keep their existing string representation, not switch to repr."""
+
+    class DiagnosticKey:
+        def __str__(self) -> str:
+            return "diagnostic-key"
+
+        def __repr__(self) -> str:
+            return "synthetic-opaque-key-secret"
+
+    result = redact_log_event(None, "warning", {"event": "request_failed", "response": {DiagnosticKey(): "diagnostic"}})
+
+    assert result == {"event": "request_failed", "response": {"diagnostic-key": "diagnostic"}}
+    assert "synthetic-opaque-key-secret" not in json.dumps(result)
 
 
 def test_redact_log_event_bounds_large_collections(monkeypatch: pytest.MonkeyPatch) -> None:
