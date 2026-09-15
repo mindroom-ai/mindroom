@@ -410,3 +410,48 @@ async def test_alias_revocation_while_waiting_for_lock_fails_closed(
         receipt = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="queued"))
     assert receipt["status"] == "error"
     assert not transport.events
+
+
+async def test_pending_write_uncertainty_prevents_retry_transport(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A visible pending row must be durably reaffirmed before any retry can send it."""
+    original_write = durable.write_json_file_durable
+    pending_rows: list[dict[str, Any]] = []
+
+    def fail_durability(path: Path, payload: object, **kwargs: Any) -> None:  # noqa: ANN401
+        row = next(iter(cast("dict", payload)["sends"].values()))
+        if row["event_id"] is None:
+            pending_rows.append(json.loads(json.dumps(row)))
+            original_write(path, payload, **kwargs)
+        msg = "durable storage unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr(durable, "write_json_file_durable", fail_durability)
+    with tool_runtime_context(context):
+        for message in ("first", "changed", "changed again"):
+            result = json.loads(
+                await MatrixMessageTools().matrix_message(
+                    message=message,
+                    idempotency_key="pending-fsync",
+                ),
+            )
+            assert result["status"] == "error"
+            assert not transport.events
+        assert len(pending_rows) == 3
+        assert all(row == pending_rows[0] for row in pending_rows)
+        monkeypatch.setattr(durable, "write_json_file_durable", original_write)
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(
+                message="recovered",
+                idempotency_key="pending-fsync",
+            ),
+        )
+    assert result["status"] == "ok"
+    assert len(transport.events) == len(transport.attempts) == 1
+    transaction_id = pending_rows[0]["transaction_id"]
+    assert transport.attempts[0]["tx_id"] == transaction_id
+    assert transport.attempts[0]["content"] == pending_rows[0]["payload"]
+    assert result["event_id"] == f"${transaction_id}"

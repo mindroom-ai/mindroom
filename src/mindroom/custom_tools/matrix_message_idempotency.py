@@ -140,6 +140,9 @@ class MatrixMessageSendClaim:
             msg = "Idempotent Matrix send belongs to another sender or device; refusing unsafe replay."
             raise MatrixMessageIdempotencyError(msg)
         if intent.event_id is None:
+            # Seeing a pending row does not prove its original directory fsync
+            # succeeded. Reaffirm its transaction before any transport attempt.
+            await run_blocking_until_complete(_write, self.path, self.state)
             assert intent.payload is not None
             outcome = await send_message_outcome(
                 self.context.client,
