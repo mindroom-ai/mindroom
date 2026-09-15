@@ -268,6 +268,26 @@ def test_snapshot_locator_is_durable_and_rejects_parent_traversal(runtime_paths:
         store.record_snapshot_locator(run.run_id, "../outside/run-1")
 
 
+def test_replace_recovery_signature_is_compare_and_swap(runtime_paths: RuntimePaths) -> None:
+    """Recovery migration cannot overwrite an unexpected durable authority contract."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(replace(_new_run(), recovery_signature="legacy-signature"))
+
+    updated = store.replace_recovery_signature(
+        run.run_id,
+        expected_signature="legacy-signature",
+        recovery_signature="v2:new-signature",
+    )
+
+    assert updated.recovery_signature == "v2:new-signature"
+    with pytest.raises(ScriptRunStoreError, match="recovery signature changed"):
+        store.replace_recovery_signature(
+            run.run_id,
+            expected_signature="legacy-signature",
+            recovery_signature="v2:other-signature",
+        )
+
+
 def test_observed_exit_revokes_and_retains_output_before_terminal_transition(runtime_paths: RuntimePaths) -> None:
     """One atomic durable mutation preserves process truth while cleanup remains pending."""
     store = ScriptRunStore(runtime_paths)

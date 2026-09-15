@@ -52,6 +52,7 @@ The remaining rows were already focused boundaries and complete the current map.
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
+| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] | Script-runtime startup encounters an unversioned recovery signature. | Only an exact recomputation of the original digest permits migration to v2; the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 
 ## Python provenance and regression coverage
 
@@ -72,6 +73,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | [Journal store][journal-store-tests] tests preserve incomplete deletion proof and FINAL debt; [response runner][response-runner-tests] tests recover every approval state only after card expiration, without editing deleted responses or resuming tools. |
 | [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
 | [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
+| [`script_runs/legacy_recovery.py`][script-legacy-recovery] | [Script lifecycle tests][script-lifecycle-tests] cover exact legacy adoption and rejection after authority changes; [script-run tests][script-run-tests] verify atomic signature replacement. |
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
@@ -287,6 +289,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [scheduled-records]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduled_run_records.py
 [scheduling]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/scheduling.py
 [script-legacy-schema]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_schema.py
+[script-legacy-recovery]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/script_runs/legacy_recovery.py
+[script-lifecycle-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_script_runtime_lifecycle.py
 [session-preflight]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/session_storage_preflight.py
 [skills]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/tool_system/skills.py
 [sso]: https://github.com/mindroom-ai/mindroom/blob/main/saas-platform/platform-backend/src/backend/routes/sso.py

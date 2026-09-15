@@ -37,7 +37,6 @@ from mindroom.ai import (
     _collect_streamed_response_content,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
-    _run_error_event_text,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
     ai_response,
@@ -59,7 +58,7 @@ from mindroom.constants import (
     RuntimePaths,
 )
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, run_error_event_text
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import PreparedHistoryState
@@ -1841,7 +1840,7 @@ class TestUserIdPassthrough:
         expected: str,
     ) -> None:
         """Run errors should surface nested provider payloads before static fallback."""
-        assert _run_error_event_text(event) == expected
+        assert run_error_event_text(event) == expected
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_uses_run_error_event_metadata_when_content_empty(

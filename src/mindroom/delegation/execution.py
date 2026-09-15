@@ -14,9 +14,10 @@ from uuid import uuid4
 
 from agno.db.base import BaseDb
 from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput, RunPausedEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunErrorEvent, RunOutput, RunPausedEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
+from agno.run.team import RunErrorEvent as TeamRunErrorEvent
 from agno.run.team import RunPausedEvent as TeamRunPausedEvent
 from agno.run.team import TeamRunOutput
 from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
@@ -51,6 +52,7 @@ from mindroom.delegation.sessions import (
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
+from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_resolution import resolve_agent_storage
@@ -402,10 +404,15 @@ async def _continue_child(
             yield_run_output=True,
         )
         continued = None
+        error_event: RunErrorEvent | None = None
         async for event in events:
             await observe_child_event(event)
             if isinstance(event, RunOutput):
                 continued = event
+            elif isinstance(event, RunErrorEvent):
+                error_event = event
+        if error_event is not None and (continued is None or continued.status == RunStatus.error):
+            raise RuntimeError(run_error_event_text(error_event))
         if continued is None:
             msg = "Delegated continuation did not yield its retained outcome"
             raise RuntimeError(msg)
@@ -923,18 +930,26 @@ async def drive_delegations(  # noqa: C901, PLR0912, PLR0915
                 yield_run_output=True,
             )
         continued = None
+        error_event: RunErrorEvent | TeamRunErrorEvent | None = None
         async with closing_async_stream(continuation_stream):
             async for event in continuation_stream:
+                if isinstance(event, (RunErrorEvent, TeamRunErrorEvent)):
+                    error_event = event
                 if isinstance(event, (RunOutput, TeamRunOutput)):
                     continued = event
                 elif not isinstance(event, (RunPausedEvent, TeamRunPausedEvent)) and on_event is not None:
                     on_event(event)
+        entity_label = "Team" if isinstance(response, TeamRunOutput) else "Agent"
         if continued is None:
+            if error_event is not None:
+                raise RuntimeError(run_error_event_text(error_event, entity_label=entity_label))
             msg = "Delegation continuation did not yield its terminal run"
             raise RuntimeError(msg)
         response = continued
         state.clear_pending()
         await _persist(entity, response, state)
+        if error_event is not None and response.status == RunStatus.error:
+            raise RuntimeError(run_error_event_text(error_event, entity_label=entity_label))
     return response
 
 

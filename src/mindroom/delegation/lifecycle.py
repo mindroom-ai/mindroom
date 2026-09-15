@@ -23,6 +23,7 @@ from mindroom.delegation.audit import observe_child_event as record_child_event
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
 from mindroom.delegation.state import DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.error_handling import run_error_event_text
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
@@ -123,6 +124,7 @@ async def settle_child_response(
     runtime_paths: RuntimePaths,
     decisions: Mapping[str, bool] | None = None,
     denial_reasons: Mapping[str, str | None] | None = None,
+    error_message: str | None = None,
 ) -> None:
     """Derive operational state from one exact run, then publish its audit view."""
     if response.run_id != child.run_id or response.session_id != child.session_id:
@@ -136,7 +138,7 @@ async def settle_child_response(
         child.result = str(response.content or "Delegation cancelled.")
     elif response.status in {RunStatus.error, RunStatus.regenerated}:
         child.status = "failed"
-        child.result = str(response.content or response.status)
+        child.result = error_message or str(response.content or response.status)
     else:
         child.status = "paused" if response.status == RunStatus.paused else "running"
         child.result = None
@@ -191,7 +193,18 @@ async def child_run_context(
         try:
             response = observation.response
             if response is not None and response.run_id == child.run_id:
-                await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
+                terminal = observation.terminal
+                await settle_child_response(
+                    child,
+                    response,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    error_message=(
+                        terminal[2]
+                        if terminal is not None and terminal[0] == response.run_id and terminal[1] == "failed"
+                        else None
+                    ),
+                )
             elif observation.terminal is not None and observation.terminal[0] == child.run_id:
                 _, status, reason = observation.terminal
                 await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
@@ -206,8 +219,10 @@ async def observe_child_event(event: object) -> None:
         child = observation.child
         if event.run_id == child.run_id and event.session_id == child.session_id:
             if isinstance(event, RunOutput):
+                # Failed outputs can retain stale text; keep the matching error event's details.
                 observation.response = event
-                observation.terminal = None
+                if event.status != RunStatus.error:
+                    observation.terminal = None
             else:
                 observation.response = None
                 if isinstance(event, RunCancelledEvent):
@@ -216,7 +231,7 @@ async def observe_child_event(event: object) -> None:
                     observation.terminal = (
                         child.run_id,
                         "failed",
-                        event.content or event.error_type or "Delegated run failed.",
+                        run_error_event_text(event),
                     )
     await record_child_event(event)
 
