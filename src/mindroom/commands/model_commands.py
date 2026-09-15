@@ -50,14 +50,23 @@ def _apply_model_selection(
     if request.model not in config.models:
         error = f"Unknown model `{request.model}`. Refresh the model picker."
         return f"❌ {error}", error
-    return handle_model_command(
-        request.model,
-        config=config,
-        runtime_paths=runtime_paths,
-        room_id=room_id,
+    set_thread_model_override(
+        runtime_paths,
         thread_id=thread_id,
-        requester_user_id=requester_user_id,
-    ), None
+        model_name=request.model,
+        room_id=room_id,
+        set_by=requester_user_id,
+    )
+    return _model_selected_text(request.model, config), None
+
+
+def _model_selected_text(model_name: str, config: Config) -> str:
+    """Describe the exact model key that was persisted by either command path."""
+    model = config.models[model_name]
+    return (
+        f"✅ This thread now uses `{model_name}` ({model.provider} {model.id}) for all agents and teams.\n"
+        "Use `!model reset` to restore room-level model selection."
+    )
 
 
 async def handle_structured_model_command(
@@ -163,8 +172,4 @@ def handle_model_command(  # noqa: PLR0911
         room_id=room_id,
         set_by=requester_user_id,
     )
-    model = config.models[requested]
-    return (
-        f"✅ This thread now uses `{requested}` ({model.provider} {model.id}) for all agents and teams.\n"
-        "Use `!model reset` to restore room-level model selection."
-    )
+    return _model_selected_text(requested, config)

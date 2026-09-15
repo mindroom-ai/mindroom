@@ -82,6 +82,57 @@ async def test_explicit_model_operation(
     assert result["override"] == expected
 
 
+@pytest.mark.parametrize("model_key", [" reset ", " clear ", " list ", " show ", " default ", "fast", " fast "])
+@pytest.mark.asyncio
+async def test_structured_set_keeps_exact_key_in_storage_reply_and_ack(tmp_path: Path, model_key: str) -> None:
+    """Text trimming must never turn an explicit key into an alias or another model."""
+    client, config, paths, _, router, _ = picker_setup(tmp_path)
+    config.models.update(
+        {
+            " reset ": ModelConfig(provider="openai", id="padded-reset"),
+            " clear ": ModelConfig(provider="openai", id="padded-clear"),
+            " list ": ModelConfig(provider="openai", id="padded-list"),
+            " show ": ModelConfig(provider="openai", id="padded-show"),
+            " default ": ModelConfig(provider="openai", id="padded-default"),
+            "fast": ModelConfig(provider="openai", id="plain-fast"),
+            " fast ": ModelConfig(provider="openai", id="padded-fast"),
+        },
+    )
+    set_thread_model_override(paths, thread_id="$root", model_name="default", room_id=ROOM, set_by=USER)
+    harness = _build_harness(config, tmp_path / "turns", agent_name="router")
+    executor = harness.controller.deps.command_executor
+    executor.deps.runtime.client = client
+    event = root_event(
+        event_id="$command",
+        content={
+            "body": f"!model {model_key}",
+            "msgtype": "m.text",
+            "io.mindroom.model_selection": {
+                "version": 1,
+                "runtime_user_id": router,
+                "runtime_device_id": "DEVICE",
+                "operation": "set",
+                "model": model_key,
+            },
+        },
+    )
+    command = command_parser.parse(event.body)
+    await executor.execute(
+        client.rooms[ROOM],
+        event,
+        USER,
+        command,
+        target=MessageTarget.resolve(ROOM, "$root", "$command"),
+        handled_turn=TurnRecord.create(["$command"]),
+    )
+    assert resolve_thread_model_override(paths, "$root", configured_models=config.models).active == model_key
+    reply = harness.gateway.sent[0]
+    assert f"now uses `{model_key}`" in reply.response_text
+    result = reply.extra_content["io.mindroom.model_selection_result"]
+    assert result["status"] == "applied"
+    assert result["model"] == result["override"] == model_key
+
+
 @pytest.mark.parametrize(
     "failure",
     ["malformed", "missing_root", "foreign_root", "child", "requester_left", "unknown_model", "encrypted"],
