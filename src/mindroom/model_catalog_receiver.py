@@ -195,6 +195,7 @@ class _Receiver:
             return (
                 self.config_getter() is config
                 and await self._scope(event, request, config) == scope
+                and self.config_getter() is config
                 and authenticated_sender_matches(self.client, event, target)
             )
 

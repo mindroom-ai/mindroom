@@ -301,7 +301,9 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
     )
     await client.add_to_device_callback.call_args.args[0](request())
     client.olm.device_store[USER]["REQUESTER"] = OlmDevice(
-        USER, "REQUESTER", {"ed25519": "replacement", "curve25519": "new-curve"}
+        USER,
+        "REQUESTER",
+        {"ed25519": "replacement", "curve25519": "new-curve"},
     )
     callback, event = pending[0]
     await callback(event)
@@ -331,3 +333,35 @@ async def test_final_transport_guard_rechecks_after_session_work(
     sent.side_effect = session_work
     await callback(request())
     assert guards == [False]
+
+
+@pytest.mark.asyncio
+async def test_config_reload_during_final_scope_await_prevents_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last transport guard must reject config replaced inside its awaited scope."""
+    callback, client, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    original_config = current[0]
+    membership = client.joined_members.return_value
+    in_transport = False
+    delivered = []
+
+    async def joined_members(*_args: object) -> nio.JoinedMembersResponse:
+        if in_transport and current[0] is original_config:
+            await asyncio.sleep(0)
+            current[0] = original_config.model_copy(deep=True)
+        return membership
+
+    async def transport(*_args: object, **kwargs: object) -> None:
+        nonlocal in_transport
+        in_transport = True
+        if await kwargs["before_send"]():
+            delivered.append(kwargs["content"])
+
+    client.joined_members.side_effect = joined_members
+    sent.side_effect = transport
+    await callback(request())
+    assert in_transport
+    assert current[0] is not original_config
+    assert delivered == []
