@@ -6428,7 +6428,7 @@ agents:
     worker_scope: user_agent
 ```
 
-Interactive sessions require effective `worker_scope: user_agent` and worker-routed `browser`.
+Interactive sessions require effective `worker_scope: user_agent` and exactly one worker-routed browser provider: `browser` or `browser_mcp`.
 The normal requester/agent worker resolver supplies the same worker to Chat and tool calls.
 Keep the browser's default `target: host` for this managed worker browser.
 The connected-user `target: desktop` is a separate feature and is not supported inside the worker computer.
@@ -6449,6 +6449,59 @@ env:
 Use the chart's existing worker image, authentication secret, storage, and RBAC settings.
 The instance chart names its opt-in values `workerBackend: kubernetes` and `workerComputerEnabled: true`; supply the allowed-origin environment value to its primary runtime through your deployment's environment configuration.
 Changing the feature flag changes the worker configuration signature, so workers are replaced as needed.
+
+## Native Playwright MCP provider
+
+Select `browser_mcp` for native Playwright tools such as `browser_navigate`, `browser_snapshot`,
+`browser_click`, `browser_evaluate`, `browser_tabs`, and `browser_take_screenshot`:
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Research with a browser and save results.
+    model: default
+    tools: [browser_mcp, shell, file]
+    worker_scope: user_agent
+```
+
+`browser_mcp` routes to workers by default and requires an enabled dedicated Computer worker.
+Assign exactly one browser provider to this scope. The existing `browser` action-based provider and connected
+user desktop extension remain available separately.
+
+The full image installs `@playwright/mcp@0.0.78` with fixed `vision,pdf` capabilities at build time.
+The native schemas are pinned and checked against the installed server on connection. Runtime calls cannot
+install packages, choose another server, add capabilities, or change launch/init settings.
+`browser_run_code_unsafe`, browser installation, and route mutation tools are excluded. Page-context
+`browser_evaluate` remains available; it does not expose server-side Node APIs.
+
+The browser runs visibly on its worker display with sandboxing enabled. Its profile persists under the worker
+storage root at `browser-profiles/native-mcp`; native screenshots, PDFs, and downloads use `browser/` inside
+the shared workspace. Upstream workspace file restrictions remain enabled. Screenshots without a native
+`filename` return inline model-visible images; a native filename produces the upstream file result instead.
+MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media
+receipt. The primary never fetches worker paths to reconstruct images.
+
+All native calls, including snapshots and browser close, use the same takeover gate as the existing provider.
+Timeout, cancellation, and server failure close owned resources before replacement. On Linux, a dedicated
+child supervisor reaps detached Chromium descendants as well as the MCP server.
+
+The packaged init-page hook checks intercepted requests through an authenticated worker-loopback verifier.
+Private networks are denied by default. To allow trusted private destinations, configure:
+
+```yaml
+agents:
+  researcher:
+    tools:
+      - browser_mcp:
+          allow_private_networks: true
+    worker_scope: user_agent
+```
+
+Metadata and link-local addresses stay blocked even with this option. Callback errors and timeouts deny requests;
+service workers are blocked. This request guard does not promise DNS-rebinding protection, coverage of every
+network protocol, or confinement of malicious shell code. Persistent workspace files remain intentionally shared
+with the agent's other worker tools.
 
 ## Browser and container sandboxing
 

@@ -179,3 +179,33 @@ async def test_actual_membership_refresh_does_not_log_transport_urls(tmp_path: P
     assert error.value.status_code == 503
     assert "refresh-secret" not in str(logs)
     assert any(log.get("error") == "ClientConnectionError" for log in logs)
+
+
+@pytest.mark.parametrize("tools", [["browser_mcp"], ["browser", "browser_mcp"]])
+def test_computer_selects_exactly_one_browser_provider(tmp_path: Path, tools: list[str]) -> None:
+    """Native worker tools are eligible; ambiguous browser providers are refused."""
+    from mindroom.orchestration.computer_runtime import _resolve_target  # noqa: PLC0415
+
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    config = Config(
+        agents={
+            "writer": AgentConfig(display_name="Writer", tools=tools, worker_tools=tools, worker_scope="user_agent"),
+        },
+    )
+    if len(tools) == 2:
+        with pytest.raises(ComputerError, match="exactly one"):
+            _resolve_target("@alice:example.org", "!room:example.org", "@writer:example.org", "writer", config, paths)
+    else:
+        target = _resolve_target(
+            "@alice:example.org",
+            "!room:example.org",
+            "@writer:example.org",
+            "writer",
+            config,
+            paths,
+        )
+        assert "user_agent" in target.spec.worker_key

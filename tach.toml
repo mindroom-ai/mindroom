@@ -1376,6 +1376,11 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.custom_tools.browser_mcp",
+    "mindroom.tools.browser_mcp",
+    "mindroom.worker_computer.mcp_catalog",
+    "mindroom.worker_computer.mcp_results",
+
     "mindroom.worker_computer.runtime",
     "mindroom.worker_computer.protocol",
     "mindroom.api.sandbox_env_assembly",
@@ -2896,7 +2901,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.desktop.playwright_mcp"
-depends_on = []
+depends_on = ["mindroom.playwright_mcp_session"]
 
 [[modules]]
 path = "mindroom.desktop.command_journal"
@@ -3940,6 +3945,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.worker_proxy_client"
 depends_on = [
+    "mindroom.worker_computer.mcp_results",
+
     "mindroom.credentials",
     "mindroom.runtime_env_policy",
     "mindroom.tool_system.runtime_context",
@@ -6200,6 +6207,38 @@ depends_on = [
     "mindroom.requester_identity",
 ]
 visibility = ["mindroom.custom_tools.matrix_message"]
+
+[[modules]]
+path = "mindroom.playwright_mcp_session"
+depends_on = []
+
+[[modules]]
+path = "mindroom.playwright_mcp_process"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.mcp_catalog"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.mcp_results"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.browser_guard"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.mcp_provider"
+depends_on = ["mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard"]
+
+[[modules]]
+path = "mindroom.custom_tools.browser_mcp"
+depends_on = ["mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.mcp_provider"]
+
+[[modules]]
+path = "mindroom.tools.browser_mcp"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.mcp_catalog", "mindroom.custom_tools.browser_mcp"]
 
 
 [[modules]]
