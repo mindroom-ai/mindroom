@@ -187,6 +187,73 @@ async def test_openai_decision_disables_function_selection_before_answering() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["respond", "stay_silent"])
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        ("", ""),
+        ("My decision: ", ""),
+        ("", " That is my decision."),
+        ("Before.\n", "\nAfter."),
+        ("```json\n", "\n```"),
+        ("Before.\n```json\n", "\n```\nAfter."),
+        ("[Decision]\n", ""),
+        ("", " See [context](https://example.com)."),
+        ("Some {informal notation}. ", ""),
+    ],
+)
+async def test_single_decision_allows_surrounding_text(action: str, prefix: str, suffix: str) -> None:
+    """Prose and fences must not hide a single valid verdict or leak into the answer."""
+    reason = 'An unanswered question about {"key": "value"} needs help.'
+    content = prefix + json.dumps({"action": action, "reason": reason}) + suffix
+    model = ParticipationModel(ModelResponse(content=content))
+    gate = ParticipationGate()
+    with participation_model(model, gate, run_id="primary"):
+        result = await model.aresponse(
+            [Message(role="user", content="Can anyone explain this?")],
+            run_response=RunOutput(run_id="primary"),
+        )
+    assert gate.decision is not None
+    assert gate.decision.action == action
+    assert gate.decision.reason == reason
+    assert (result.content or "") == ("Useful answer" if action == "respond" else "")
+    assert len(model.requests) == (2 if action == "respond" else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"action":"respond","reason":"Help."}{"action":"stay_silent","reason":"Wait."}',
+        '{"action":"respond","reason":"Help."} More text. {"action":"respond","reason":"Help."}',
+        'An example: {}. Decision: {"action":"respond","reason":"Help."}',
+        'Before. [{"action":"respond","reason":"Help."}] After.',
+        'Before. {"decision":{"action":"respond","reason":"Help."}} After.',
+        '[{"action":"respond","reason":"Help."}',
+        '{"decision":{"action":"respond","reason":"Help."}',
+        '[1, {"action":"respond","reason":"Help."}',
+        '[null, {"action":"respond","reason":"Help."}',
+        'Before. {"action":"respond","reason":"Help.","extra":true} After.',
+        'Before. {"action":"respond"} After.',
+        'Before. {"action":"maybe","reason":"Help."} After.',
+        'Before. {"action":"respond","reason":"Help." After.',
+    ],
+)
+async def test_ambiguous_or_invalid_embedded_decisions_stay_quiet(content: str) -> None:
+    """Extraction must not pick a verdict from multiple objects or bypass schema validation."""
+    model = ParticipationModel(ModelResponse(content=content))
+    gate = ParticipationGate()
+    with participation_model(model, gate, run_id="primary"):
+        result = await model.aresponse(
+            [Message(role="user", content="Can anyone explain this?")],
+            run_response=RunOutput(run_id="primary"),
+        )
+    assert not result.content
+    assert gate.is_silent
+    assert len(model.requests) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "decision",
     [

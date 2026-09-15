@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, cast
@@ -35,6 +37,25 @@ Return only a JSON object with action (respond or stay_silent) and a brief reaso
 """
 
 
+def _parse_decision(content: str) -> ParticipationDecision:
+    """Accept one decision object with prose or fences, rejecting ambiguous output."""
+    decoder = json.JSONDecoder()
+    values = []
+    end = 0
+    # Skip prose brackets, but let malformed JSON fail instead of extracting its children.
+    for start in re.finditer(r'[\[{](?=\s*(?:["{}\[\]0-9-]|true\b|false\b|null\b))', content):
+        if start.start() < end:
+            continue
+        value, end = decoder.raw_decode(content, start.start())
+        values.append(value)
+        if len(values) > 1:
+            break
+    if len(values) != 1:
+        msg = "Participation decision must contain exactly one JSON object"
+        raise ValueError(msg)
+    return ParticipationDecision.model_validate(values[0])
+
+
 async def _request_decision(
     model: Model,
     gate: ParticipationGate,
@@ -62,7 +83,7 @@ async def _request_decision(
             accumulate_model_metrics(response, model, model.model_type, run_response.metrics)
         if response.tool_calls or not isinstance(response.content, str):
             return ParticipationDecision(action="stay_silent", reason="invalid_decision")
-        return ParticipationDecision.model_validate_json(response.content)
+        return _parse_decision(response.content)
     except Exception as error:
         logger.exception("Participation decision failed", error_type=type(error).__name__)
         return ParticipationDecision(action="stay_silent", reason="decision_failed")
