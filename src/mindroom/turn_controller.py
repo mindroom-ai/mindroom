@@ -101,6 +101,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
 from mindroom.text_ingress_dispatch import dispatch_text_message
@@ -1758,6 +1759,13 @@ class TurnController:
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
                 thread_history=thread_history,
+                sources=ResponseSources(
+                    pending_event_ids=tuple(
+                        dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)),
+                    ),
+                    logical_source_event_ids=selection_handled_turn.source_event_ids,
+                    discovery_event_ids=selection_handled_turn.discovery_event_ids,
+                ),
                 history_boundary_event_id=source_event_id,
                 member_display_names=room_member_display_names(room),
                 existing_event_id=ack_event_id,
@@ -2098,6 +2106,13 @@ class TurnController:
                     thread_history=dispatch.context.thread_history,
                     member_display_names=room_member_display_names(room),
                     prompt=event.body,
+                    sources=ResponseSources(
+                        pending_event_ids=tuple(
+                            dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
+                        ),
+                        logical_source_event_ids=handled_turn.source_event_ids,
+                        discovery_event_ids=handled_turn.discovery_event_ids,
+                    ),
                     user_id=dispatch.requester_user_id,
                     existing_event_id=recovered_response_event_id,
                     existing_event_is_placeholder=recovered_response_event_id is not None,

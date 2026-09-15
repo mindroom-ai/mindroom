@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 
+from .legacy_response_attempts import migrate_response_attempts
 from .legacy_schema import upgrade_legacy_journal
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, render, schema_statements
@@ -201,6 +202,7 @@ class SqliteBackend:
             upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
             for statement in schema_statements(SQLITE_DIALECT):
                 connection.execute(statement)
+            migrate_response_attempts(_SqliteTransaction(connection), existing_tables)
             connection.execute("COMMIT")
         except BaseException:
             connection.close()

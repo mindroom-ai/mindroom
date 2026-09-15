@@ -19,6 +19,13 @@ It should resolve explicit thread identity, history, mentions, and normalized in
 `DeliveryGateway` owns Matrix transport.
 It should send, edit, redact, and finalize already-generated responses.
 
+`ResponseSources` captures immutable pending events, logical sources, discovery aliases, and the selected edit receipt for one request.
+The journal registers `ResponseAttempt` identity atomically with approval creation or response delivery enqueue, and binds the visible response on acknowledgement.
+Normalized attempt rows survive approval deletion; `approval_continuation_sources` alone owns pending approval settlement.
+Current `TurnRecord` selection and STOP watermarks govern edits selected before execution, while the outbox alone owns frozen payloads, results, acknowledgement, and retirement.
+STOP and stale approval failure decisions query exact durable identity; prepared turn snapshots remain solely for terminal commit and recovery.
+`response_sources.py` owns the immutable runtime values, `event_journal/response_attempts.py` owns normalized durable registration and lookup, and `event_journal/legacy_response_attempts.py` owns one-time transactional adoption from released snapshots.
+
 `EditRegenerator` owns the edited-message replay workflow.
 It is still coupled to the current persistence split, but its workflow boundary is real.
 

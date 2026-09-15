@@ -138,6 +138,8 @@ visibility = [
 [[modules]]
 path = "mindroom.event_journal"
 depends_on = [
+    "mindroom.event_journal.legacy_response_attempts",
+    "mindroom.response_sources",
     "mindroom.event_journal.legacy_approval_recovery",
     "mindroom.history.types",
     "mindroom.interactive_models",
@@ -148,6 +150,7 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
+    "mindroom.event_journal.legacy_response_attempts",
     "mindroom.approval_recovery",
     "mindroom.agent_reply_membership_sync",
     "mindroom.approval_execution",
@@ -572,6 +575,7 @@ visibility = [
 path = "mindroom.legacy_delivery_payloads"
 depends_on = ["mindroom.constants"]
 visibility = [
+    "mindroom.event_journal.legacy_response_attempts",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
     "mindroom.event_journal.outbox",
@@ -765,6 +769,7 @@ visibility = [
 [[modules]]
 path = "mindroom.approval_response"
 depends_on = [
+    "mindroom.response_sources",
     "mindroom.approval_failure",
     "mindroom.approval_manager",
     "mindroom.constants",
@@ -1558,6 +1563,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delivery_gateway"
 depends_on = [
+    "mindroom.response_sources",
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.hooks",
@@ -1582,6 +1588,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.identity",
     "mindroom.response_runner",
+    "mindroom.response_sources",
     "mindroom.runtime_protocols",
     "mindroom.timestamp_formatting",
     "mindroom.turn_record",
@@ -2033,6 +2040,7 @@ depends_on = [
     "mindroom.response_admission",
     "mindroom.response_attempt",
     "mindroom.response_lifecycle",
+    "mindroom.response_sources",
     "mindroom.response_terminal",
     "mindroom.response_turn",
     "mindroom.streaming",
@@ -2045,6 +2053,19 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_record",
     "mindroom.user_turn_time",
+]
+
+[[modules]]
+path = "mindroom.response_sources"
+depends_on = []
+visibility = [
+    "mindroom.event_journal",
+    "mindroom.event_journal.legacy_response_attempts",
+    "mindroom.approval_response",
+    "mindroom.delivery_gateway",
+    "mindroom.edit_regenerator",
+    "mindroom.response_runner",
+    "mindroom.turn_controller",
 ]
 
 [[modules]]
@@ -4110,6 +4131,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.response_payload_preparation",
     "mindroom.response_runner",
+    "mindroom.response_sources",
     "mindroom.routing",
     "mindroom.teams",
     "mindroom.text_ingress_dispatch",
@@ -5658,7 +5680,7 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 [[modules]]
 path = "mindroom.history.message_content"
 depends_on = ["mindroom.token_budget"]
-visibility = ["mindroom.history.replay", "mindroom.history.summary_input"]
+visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
 
 [[modules]]
 path = "mindroom.history.provider_error_compat"
@@ -5745,3 +5767,8 @@ visibility = ["mindroom.model_loading"]
 path = "mindroom.config.participation"
 depends_on = []
 visibility = ["mindroom.config.main", "mindroom.turn_policy", "mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.event_journal.legacy_response_attempts"
+depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
+visibility = ["mindroom.event_journal"]

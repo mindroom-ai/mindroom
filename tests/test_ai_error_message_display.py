@@ -28,6 +28,7 @@ from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -41,6 +42,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -73,6 +75,7 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
         runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
+    install_direct_response_admission(bot)
     bot.logger = MagicMock()
     bot.stop_manager.remove_stop_button = AsyncMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -139,6 +142,10 @@ def _response_request(
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=(reply_to_event_id,),
+            logical_source_event_ids=(reply_to_event_id,),
+        ),
         thread_history=(),
         prompt=prompt,
         response_envelope=request_envelope(

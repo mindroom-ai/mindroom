@@ -144,7 +144,7 @@ async def _regeneration_prompt(record: TurnRecord) -> str:
     )
     envelope = request_envelope(
         room_id=_ROOM_ID,
-        reply_to_event_id=source_event_id,
+        reply_to_event_id="$same-body-edit",
         thread_id=_THREAD_ID,
         prompt=body,
         user_id=_REQUESTER,

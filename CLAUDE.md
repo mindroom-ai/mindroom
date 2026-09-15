@@ -112,6 +112,9 @@ Matrix sync callback
 | `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
+| `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
+| `event_journal/response_attempts.py` | Normalized durable response ownership registration, binding, and exact lookup queries |
+| `event_journal/legacy_response_attempts.py` | One-time transactional adoption of released response ownership snapshots |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |

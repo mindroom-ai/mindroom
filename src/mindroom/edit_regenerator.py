@@ -14,6 +14,7 @@ from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError, canonicalize_turn_record
@@ -398,6 +399,16 @@ class EditRegenerator:
                 member_display_names=room_member_display_names(room),
                 prompt=prompt,
                 response_envelope=driving_edit.envelope,
+                sources=ResponseSources(
+                    pending_event_ids=tuple(
+                        dict.fromkeys(
+                            (driving_edit.revision[1], *(edit.revision[1] for edit in active.values())),
+                        ),
+                    ),
+                    logical_source_event_ids=record.source_event_ids,
+                    discovery_event_ids=record.discovery_event_ids,
+                    edit_receipt_order=active_receipt_order,
+                ),
                 existing_event_id=record.response_event_id,
                 user_id=requester_id,
                 correlation_id=driving_edit.revision[1],
@@ -407,9 +418,6 @@ class EditRegenerator:
                 prepare_source_turn=prepare_snapshot,
                 prepared_edit_record=record,
                 source_handoff=asyncio.Event(),
-                journal_source_event_ids=tuple(
-                    dict.fromkeys((driving_edit.revision[1], *(edit.revision[1] for edit in active.values()))),
-                ),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=record_deferred_outcome,
@@ -534,7 +542,7 @@ class EditRegenerator:
                 continue
             regenerated_event_id = await self.deps.generate_response(request)
             if request.source_handoff is not None and request.source_handoff.is_set():
-                mailbox.handed_off_revisions.update(request.journal_source_event_ids)
+                mailbox.handed_off_revisions.update(request.sources.pending_event_ids)
             if mailbox.rebuild_requested:
                 mailbox.rebuild_requested = False
                 continue
