@@ -1001,7 +1001,7 @@ depends_on = [
     "mindroom.matrix.olm_to_device",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
-]
+ "mindroom.desktop.input"]
 
 # Keep split Matrix client consumers on explicit per-module rules so Tach can
 # enforce both dependency edges and module visibility for each importer.
@@ -2705,7 +2705,7 @@ visibility = ["mindroom.response_runner", "mindroom.approval_execution"]
 
 [[modules]]
 path = "mindroom.matrix.client_session"
-depends_on = ["mindroom.constants", "mindroom.matrix.to_device"]
+depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.bot",
     "mindroom.cli.doctor",
@@ -2747,25 +2747,9 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.matrix.to_device"
-depends_on = []
-visibility = [
-    "mindroom.bot",
-    "mindroom.cli.desktop",
-    "mindroom.desktop.bridge",
-    "mindroom.desktop.client",
-    "mindroom.desktop.pairing_client",
-    "mindroom.desktop.pairing_receiver",
-    "mindroom.matrix.client_session",
-    "mindroom.matrix.olm_to_device",
-    "mindroom.matrix_rtc.call_manager",
-]
-
-[[modules]]
 path = "mindroom.matrix.olm_to_device"
 depends_on = [
     "mindroom.matrix.device_identity",
-    "mindroom.matrix.to_device",
 ]
 
 [[modules]]
@@ -2774,7 +2758,7 @@ depends_on = []
 visibility = [
     "mindroom.desktop.configuration",
     "mindroom.matrix.olm_to_device",
-]
+ "mindroom.desktop.native_config"]
 
 [[modules]]
 path = "mindroom.desktop"
@@ -2806,19 +2790,18 @@ depends_on = [
     "mindroom.desktop.protocol",
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
-    "mindroom.matrix.to_device",
 ]
 visibility = ["mindroom.bot"]
 
 [[modules]]
 path = "mindroom.desktop.pairing_client"
 depends_on = [
+    "mindroom.desktop.transport",
     "mindroom.desktop.protocol",
     "mindroom.desktop.session",
     "mindroom.matrix.olm_to_device",
-    "mindroom.matrix.to_device",
 ]
-visibility = ["mindroom.cli.desktop"]
+visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.login_method"
@@ -2826,21 +2809,21 @@ depends_on = []
 visibility = [
     "mindroom.cli.desktop",
     "mindroom.desktop.session",
-]
+ "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.cloudflare_access"
 depends_on = []
-visibility = ["mindroom.cli.desktop"]
+visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.sso"
 depends_on = []
-visibility = ["mindroom.cli.desktop"]
+visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.protocol"
-depends_on = []
+depends_on = [ "mindroom.desktop.input"]
 
 [[modules]]
 path = "mindroom.desktop.accessibility"
@@ -2851,7 +2834,7 @@ path = "mindroom.desktop.provider"
 depends_on = [
     "mindroom.desktop.accessibility",
     "mindroom.desktop.protocol",
-]
+ "mindroom.desktop.displays", "mindroom.desktop.input", "mindroom.desktop.macos_input", "mindroom.desktop.macos_capture"]
 
 [[modules]]
 path = "mindroom.desktop.playwright_mcp"
@@ -2876,12 +2859,12 @@ path = "mindroom.desktop.client"
 depends_on = [
     "mindroom.desktop.protocol",
     "mindroom.matrix.olm_to_device",
-    "mindroom.matrix.to_device",
 ]
 
 [[modules]]
 path = "mindroom.desktop.bridge"
 depends_on = [
+    "mindroom.desktop.observations",
     "mindroom.desktop.accessibility",
     "mindroom.desktop.command_journal",
     "mindroom.desktop.media",
@@ -2890,11 +2873,12 @@ depends_on = [
     "mindroom.desktop.provider",
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
-]
+ "mindroom.desktop.input"]
 
 [[modules]]
 path = "mindroom.desktop.session"
 depends_on = [
+    "mindroom.file_locks",
     "mindroom.desktop.login_method",
     "mindroom.durable_write",
     "mindroom.matrix.client_session",
@@ -3185,13 +3169,13 @@ depends_on = ["mindroom.matrix_rtc.call_manager"]
 [[modules]]
 path = "mindroom.matrix_rtc.call_manager"
 depends_on = [
+    "mindroom.matrix.olm_to_device",
     "mindroom.authorization",
     "mindroom.config.voice",
     "mindroom.credentials_sync",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.to_device",
     "mindroom.matrix_rtc.call_session",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.matrix_rtc.events",
@@ -3267,6 +3251,7 @@ depends_on = ["mindroom.matrix_rtc.events"]
 [[modules]]
 path = "mindroom.matrix_rtc.key_transport"
 depends_on = [
+    "mindroom.matrix.olm_to_device",
     "mindroom.logging_config",
     "mindroom.matrix_rtc.events",
 ]
@@ -3345,7 +3330,6 @@ depends_on = [
     "mindroom.matrix.state",
     "mindroom.matrix.sync_continuity",
     "mindroom.matrix.sync_loop",
-    "mindroom.matrix.to_device",
     "mindroom.matrix.users",
     "mindroom.matrix.visible_body",
     "mindroom.matrix_rtc.call_manager",
@@ -3453,6 +3437,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.cli.desktop"
 depends_on = [
+    "mindroom.desktop.transport",
     "mindroom.cli.config",
     "mindroom.constants",
     "mindroom.desktop.bridge",
@@ -3468,9 +3453,8 @@ depends_on = [
     "mindroom.desktop.sso",
     "mindroom.logging_config",
     "mindroom.matrix.olm_to_device",
-    "mindroom.matrix.to_device",
     "mindroom.tool_system.dependencies",
-]
+ "mindroom.desktop.native_host"]
 visibility = ["mindroom.cli.main"]
 
 [[modules]]
@@ -3589,7 +3573,7 @@ depends_on = [
     "mindroom.desktop.credentials",
     "mindroom.desktop.identity",
     "mindroom.desktop.pairing",
-]
+ "mindroom.desktop.protocol"]
 visibility = [
     "mindroom.commands.handler",
 ]
@@ -4791,7 +4775,7 @@ expose = [
     "require_runtime_paths_arg",
 ]
 from = ["mindroom.matrix.client_session"]
-visibility = ["mindroom.matrix._owned_session", "mindroom.matrix.typing"]
+visibility = ["mindroom.matrix._owned_session", "mindroom.matrix.typing", "mindroom.desktop.session"]
 
 [[interfaces]]
 expose = [
@@ -4812,10 +4796,6 @@ expose = [
     "tagged_coalesced_prompt",
 ]
 from = ["mindroom.coalescing_batch"]
-
-[[interfaces]]
-expose = ["AuthenticatedToDeviceEvent"]
-from = ["mindroom.matrix.to_device"]
 
 [[interfaces]]
 expose = [
@@ -5902,3 +5882,43 @@ visibility = [
 path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
 visibility = ["mindroom.event_journal"]
+
+[[modules]]
+path = "mindroom.desktop.observations"
+depends_on = ["mindroom.desktop.accessibility", "mindroom.desktop.protocol"]
+
+[[modules]]
+path = "mindroom.desktop.transport"
+depends_on = ["mindroom.desktop.bridge", "mindroom.desktop.command_journal", "mindroom.desktop.protocol", "mindroom.desktop.session"]
+
+[[modules]]
+path = "mindroom.desktop.input"
+depends_on = []
+
+[[modules]]
+path = "mindroom.desktop.displays"
+depends_on = ["mindroom.desktop.accessibility"]
+
+[[modules]]
+path = "mindroom.desktop.macos_input"
+depends_on = []
+
+[[modules]]
+path = "mindroom.desktop.macos_capture"
+depends_on = ["mindroom.desktop.accessibility"]
+
+[[modules]]
+path = "mindroom.desktop.native_config"
+depends_on = ["mindroom.durable_write", "mindroom.matrix.device_identity"]
+
+[[modules]]
+path = "mindroom.desktop.native_entry"
+depends_on = ["mindroom.constants", "mindroom.desktop.native_host"]
+
+[[modules]]
+path = "mindroom.desktop.native_host"
+depends_on = ["mindroom.constants", "mindroom.desktop.bridge", "mindroom.desktop.cloudflare_access", "mindroom.desktop.login_method", "mindroom.desktop.native_config", "mindroom.desktop.native_protocol", "mindroom.desktop.pairing_client", "mindroom.desktop.playwright_mcp", "mindroom.desktop.protocol", "mindroom.desktop.provider", "mindroom.desktop.session", "mindroom.desktop.sso", "mindroom.desktop.transport", "mindroom.matrix.olm_to_device"]
+
+[[modules]]
+path = "mindroom.desktop.native_protocol"
+depends_on = []

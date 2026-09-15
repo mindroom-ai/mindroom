@@ -18,7 +18,6 @@ from mindroom.desktop.playwright_mcp import (
     PlaywrightActionOutcomeUnknownError,
     PlaywrightBrowserError,
     PlaywrightMCPBrowserProvider,
-    _act_call,
     _mcp_calls,
     _provider_result,
     _QueuedCall,
@@ -73,7 +72,7 @@ def test_provider_launches_pinned_extension_server_for_existing_profile(
         PLAYWRIGHT_MCP_PACKAGE,
         "--extension",
         "--caps",
-        "vision,pdf",
+        "vision",
         "--output-dir",
         str((tmp_path / "output").resolve()),
         "--output-mode",
@@ -94,10 +93,6 @@ def test_browser_actions_map_to_high_level_playwright_mcp_tools() -> None:
         "action": "new",
         "url": "https://example.com",
     }
-    navigate = _mcp_calls("navigate", {"targetUrl": "https://example.com/form"})
-    assert [(call.tool_name, call.arguments) for call in navigate] == [
-        ("browser_navigate", {"url": "https://example.com/form"}),
-    ]
     snapshot = _mcp_calls("snapshot", {"selector": "main", "depth": 8, "maxChars": 4000})
     assert snapshot[-1].tool_name == "browser_snapshot"
     assert snapshot[-1].arguments == {"target": "main", "depth": 8}
@@ -109,36 +104,6 @@ def test_browser_actions_map_to_high_level_playwright_mcp_tools() -> None:
         "type": "jpeg",
         "scale": "css",
         "fullPage": False,
-    }
-
-
-def test_act_mapping_covers_semantic_interaction_parity() -> None:
-    """The stable browser act vocabulary maps to Playwright's semantic primitives."""
-    click = _act_call({"kind": "click", "ref": "e3", "doubleClick": True})
-    assert click.tool_name == "browser_click"
-    assert click.arguments == {"element": "e3", "target": "e3", "doubleClick": True}
-
-    fill = _act_call(
-        {
-            "kind": "fill",
-            "fields": [
-                {"ref": "e4", "name": "Full name", "type": "textbox", "value": "Ada Lovelace"},
-                {"ref": "e5", "name": "Updates", "type": "checkbox", "value": "true"},
-            ],
-        },
-    )
-    assert fill.tool_name == "browser_fill_form"
-    assert fill.arguments["fields"] == [
-        {"element": "Full name", "name": "Full name", "target": "e4", "type": "textbox", "value": "Ada Lovelace"},
-        {"element": "Updates", "name": "Updates", "target": "e5", "type": "checkbox", "value": "true"},
-    ]
-
-    evaluate = _act_call({"kind": "evaluate", "fn": "element => element.textContent", "ref": "e6"})
-    assert evaluate.tool_name == "browser_evaluate"
-    assert evaluate.arguments == {
-        "function": "element => element.textContent",
-        "element": "e6",
-        "target": "e6",
     }
 
 
@@ -178,22 +143,23 @@ def test_provider_result_rejects_mcp_tool_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_navigates_only_the_current_extension_tab(
+async def test_provider_opens_and_navigates_a_new_tab_in_one_upstream_call(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """One Matrix command navigates without trusting a mutable tab-list index."""
+    """The upstream call creates a new Tab and navigates that retained object."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    call_tool = AsyncMock(return_value=_text_result("navigated"))
+    call_tool = AsyncMock(return_value=_text_result("opened"))
     monkeypatch.setattr(provider, "_call_tool", call_tool)
 
     result = await provider.execute(
-        "navigate",
+        "open",
         {"targetUrl": "https://example.com/checkout"},
     )
 
-    assert result.payload["result"] == "navigated"
-    call_tool.assert_awaited_once_with("browser_navigate", {"url": "https://example.com/checkout"})
+    assert result.payload["result"] == "opened"
+    assert result.payload["stable_targeting"] is False
+    call_tool.assert_awaited_once_with("browser_tabs", {"action": "new", "url": "https://example.com/checkout"})
 
 
 @pytest.mark.asyncio
@@ -383,9 +349,9 @@ async def test_failed_control_action_reports_unknown_outcome(
     monkeypatch.setattr(provider, "_call_tool", call_tool)
 
     with pytest.raises(PlaywrightActionOutcomeUnknownError, match="extension disconnected"):
-        await provider.execute("navigate", {"targetUrl": "https://example.com/checkout"})
+        await provider.execute("open", {"targetUrl": "https://example.com/checkout"})
 
-    call_tool.assert_awaited_once_with("browser_navigate", {"url": "https://example.com/checkout"})
+    call_tool.assert_awaited_once_with("browser_tabs", {"action": "new", "url": "https://example.com/checkout"})
 
 
 @pytest.mark.parametrize("action", ["focus", "snapshot", "navigate", "close"])
@@ -405,31 +371,8 @@ def test_mutable_playwright_tab_index_inside_act_request_is_rejected() -> None:
         "request": {"kind": "click", "ref": "e1", "targetId": "1"},
     }
 
-    with pytest.raises(PlaywrightBrowserError, match="tab indices can change"):
+    with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
         _mcp_calls("act", parameters)
-
-
-@pytest.mark.asyncio
-async def test_uploads_are_confined_to_the_browser_workspace(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The extension child never receives an upload path outside its documented workspace."""
-    output_dir = tmp_path / "browser"
-    output_dir.mkdir()
-    allowed_file = output_dir / "invoice.txt"
-    allowed_file.write_text("invoice")
-    outside_file = tmp_path / "secret.txt"
-    outside_file.write_text("secret")
-    provider = PlaywrightMCPBrowserProvider(output_dir=output_dir)
-    call_tool = AsyncMock(return_value=_text_result("uploaded"))
-    monkeypatch.setattr(provider, "_call_tool", call_tool)
-
-    await provider.execute("upload", {"paths": ["invoice.txt"]})
-
-    call_tool.assert_awaited_once_with("browser_file_upload", {"paths": [str(allowed_file.resolve())]})
-    with pytest.raises(PlaywrightBrowserError, match="must exist under"):
-        await provider.execute("upload", {"paths": [str(outside_file)]})
 
 
 @pytest.mark.asyncio
@@ -485,6 +428,8 @@ async def test_status_is_lazy_until_extension_use(tmp_path: Path) -> None:
     result = await provider.execute("status", {})
 
     assert result.payload == {
+        "stable_targeting": False,
+        "supported_control_actions": ["start", "stop", "open"],
         "action": "status",
         "provider": "playwright_mcp_extension",
         "running": False,
@@ -552,3 +497,63 @@ async def test_browser_stop_remains_restartable(monkeypatch: pytest.MonkeyPatch,
 
     assert stopped.payload["running"] is False
     assert started.payload["result"] == "started"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "parameters"),
+    [
+        ("navigate", {"targetUrl": "https://example.com/checkout"}),
+        ("close", {}),
+        ("focus", {}),
+        ("pdf", {}),
+        ("upload", {"paths": ["invoice.txt"]}),
+        ("dialog", {"accept": True}),
+        ("act", {"request": {"kind": "click", "ref": "e3"}}),
+        ("act", {"request": {"kind": "evaluate", "fn": "() => document.title"}}),
+    ],
+)
+async def test_existing_page_control_is_rejected_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    action: str,
+    parameters: dict[str, object],
+) -> None:
+    """No unbound operation may reach whichever tab replaced the observed page."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    call_tool = AsyncMock(return_value=_text_result("would affect replacement"))
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+    with pytest.raises(PlaywrightBrowserError, match="stable page identity") as error:
+        await provider.execute(action, parameters)
+    assert not isinstance(error.value, PlaywrightActionOutcomeUnknownError)
+    assert "reconnect" in str(error.value)
+    call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_url_and_title_after_replacement_cannot_authorize_a_click(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An indistinguishable tab-list result cannot turn old element refs into authority."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    monkeypatch.setattr(PlaywrightMCPBrowserProvider, "running", property(lambda _self: True))
+    observed_tabs = "- 0: (current) [Checkout](https://example.com/checkout)"
+    call_tool = AsyncMock(return_value=_text_result(observed_tabs))
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+    first = await provider.execute("tabs", {})
+    # The old Page closes; a different Page now has the same index, URL and title.
+    replacement = await provider.execute("tabs", {})
+    assert first.payload["result"] == replacement.payload["result"]
+    with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
+        await provider.execute("act", {"request": {"kind": "click", "ref": "e3"}})
+    assert [call.args[0] for call in call_tool.await_args_list] == ["browser_tabs", "browser_tabs"]
+
+
+@pytest.mark.asyncio
+async def test_provider_reports_stable_targeting_limit_before_start(tmp_path: Path) -> None:
+    """Capability discovery truthfully bounds control before launching the extension."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    status = await provider.execute("status", {})
+    assert status.payload["stable_targeting"] is False
+    assert status.payload["supported_control_actions"] == ["start", "stop", "open"]

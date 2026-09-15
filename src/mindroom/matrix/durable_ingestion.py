@@ -7,7 +7,6 @@ from typing import Protocol
 
 import nio
 from nio.durable import RecordKind, SyncBatch, SyncRecord
-from nio.durable.codec import restore_event
 
 import mindroom.event_journal as ej
 from mindroom.event_journal.views import IngestionBatchAdmissionView
@@ -31,7 +30,6 @@ type _AfterAdmission = Callable[
     [ej.IngestionRecordAdmission, ej.AdmissionFacts, nio.TimelineEventProvenance | None],
     Awaitable[None],
 ]
-type _AuthenticateToDevice = Callable[[dict[str, object], object], object]
 
 
 def _record_admission(
@@ -126,7 +124,6 @@ async def consume_one_ingestion_batch(
     before_admission: _BeforeAdmission | None = None,
     after_admission: _AfterAdmission | None = None,
     after_sync: Callable[[], Awaitable[None]] | None = None,
-    authenticate_to_device: _AuthenticateToDevice | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> ej.AdmissionFacts | None:
@@ -156,7 +153,7 @@ async def consume_one_ingestion_batch(
                 on_decryption_failure(record)
             continue
         if converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
-            await _dispatch_auxiliary_record(session, record, account_id, authenticate_to_device)
+            await _dispatch_auxiliary_record(session, record, account_id)
     if batch.completes_sync and after_sync is not None:
         await after_sync()
     await session.ack(batch)
@@ -167,7 +164,6 @@ async def _dispatch_auxiliary_record(
     session: _OwnedIngestionSession,
     record: SyncRecord,
     account_id: str,
-    authenticate_to_device: _AuthenticateToDevice | None,
 ) -> None:
     """Dispatch auxiliary callbacks at least once, filtering transport-only edits."""
     if record.kind is RecordKind.TIMELINE and is_transport_progress_source(
@@ -175,10 +171,7 @@ async def _dispatch_auxiliary_record(
         self_sender=account_id,
     ):
         return
-    event = None
-    if record.kind is RecordKind.TO_DEVICE and authenticate_to_device is not None:
-        event = authenticate_to_device(record.source, restore_event(record))
-    await session.dispatch(record, event=event)
+    await session.dispatch(record)
 
 
 async def run_ingestion_pump(
@@ -193,7 +186,6 @@ async def run_ingestion_pump(
     after_admission: _AfterAdmission | None = None,
     after_sync: Callable[[], Awaitable[None]] | None = None,
     after_ack: Callable[[], None] | None = None,
-    authenticate_to_device: _AuthenticateToDevice | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
     schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
@@ -208,7 +200,6 @@ async def run_ingestion_pump(
                 before_admission=before_admission,
                 after_admission=after_admission,
                 after_sync=after_sync,
-                authenticate_to_device=authenticate_to_device,
                 on_decryption_failure=on_decryption_failure,
                 schedule_trigger_sender_is_managed=schedule_trigger_sender_is_managed,
             )

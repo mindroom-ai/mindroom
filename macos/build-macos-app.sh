@@ -68,6 +68,9 @@ done
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PACKAGE_DIR="$ROOT_DIR/macos/$APP_NAME"
+HELPER_BUILD_DIR="$ROOT_DIR/dist/macos/desktop-helper"
+HELPER_BUILD_SCRIPT="$ROOT_DIR/macos/build-desktop-helper.sh"
+HELPER_VERIFY_SCRIPT="$ROOT_DIR/macos/verify-desktop-helper.sh"
 DIST_DIR="$ROOT_DIR/dist/macos"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
@@ -338,11 +341,19 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
+echo "Building fixed-identity desktop helper..."
+HELPER_BUILD_ARGS=(--output "$HELPER_BUILD_DIR")
+if [[ "$UNIVERSAL" == true ]]; then
+    HELPER_BUILD_ARGS+=(--universal)
+fi
+UV_BINARY="$UV_BINARY" "$HELPER_BUILD_SCRIPT" "${HELPER_BUILD_ARGS[@]}"
+HELPER_APP="$HELPER_BUILD_DIR/dist/MindRoom Desktop Helper.app"
+
 echo "Building app icon..."
 build_app_icon
 
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources/bin"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Frameworks" "$APP_DIR/Contents/Resources/bin" "$APP_DIR/Contents/Helpers"
 
 EXPECTED_SPARKLE_FRAMEWORK="$BIN_DIR/Sparkle.framework"
 SPARKLE_FRAMEWORK="$EXPECTED_SPARKLE_FRAMEWORK"
@@ -363,11 +374,13 @@ cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
 cp "$APP_ICON_ICNS" "$APP_DIR/Contents/Resources/MindRoom.icns"
+ditto "$HELPER_APP" "$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app"
 chmod 755 "$APP_DIR/Contents/MacOS/$APP_NAME" "$APP_DIR/Contents/Resources/bin/uv"
 
 if [[ "$UNIVERSAL" == true ]]; then
     UNIVERSAL_BINARIES=(
         "$APP_DIR/Contents/MacOS/$APP_NAME"
+        "$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app/Contents/MacOS/MindRoom Desktop Helper"
         "$APP_DIR/Contents/Resources/bin/uv"
         "$APP_DIR/Contents/Frameworks/Sparkle.framework/Sparkle"
         "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate"
@@ -386,7 +399,18 @@ if ! otool -l "$APP_DIR/Contents/MacOS/$APP_NAME" | grep -q '@executable_path/..
 fi
 
 stamp_info_plist
+HELPER_INFO="$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app/Contents/Info.plist"
+HELPER_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist")
+HELPER_BUILD_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_DIR/Contents/Info.plist")
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $HELPER_VERSION" "$HELPER_INFO"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $HELPER_BUILD_VERSION" "$HELPER_INFO"
 sign_executable "$APP_DIR/Contents/Resources/bin/uv"
+sign_app "$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app"
+VERIFY_ARGS=("$APP_DIR/Contents/Helpers/MindRoom Desktop Helper.app")
+if [[ "$UNIVERSAL" == true ]]; then
+    VERIFY_ARGS+=(--universal)
+fi
+"$HELPER_VERIFY_SCRIPT" "${VERIFY_ARGS[@]}"
 sign_app "$APP_DIR"
 
 echo "Built $APP_DIR"

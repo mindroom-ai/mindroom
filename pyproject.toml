@@ -42,8 +42,8 @@ dependencies = [
   "mcp[cli]>=1.28.1,<2",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
-  # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==1.0.8",
+  # Pin the reviewed transport commit until NIO 1.1.0 is released.
+  "mindroom-nio[e2e] @ git+https://github.com/mindroom-ai/mindroom-nio.git@6542ccaad43848fa6f894f4b6a612b3c4cbff81a",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -442,6 +442,7 @@ desktop = [
   "pyautogui>=0.9.54",
   "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
 ]
 [project.scripts]
 mindroom = "mindroom.cli.main:main"
@@ -479,6 +480,8 @@ packages = [ "src/mindroom" ]
 [tool.hatch.build.targets.wheel.force-include]
 skills = "mindroom/_bundled_skills"
 [tool.hatch.build.targets.wheel.hooks.custom]
+[tool.hatch.metadata]
+allow-direct-references = true
 [tool.hatch.version]
 source = "vcs"
 [tool.hatch.version.raw-options]

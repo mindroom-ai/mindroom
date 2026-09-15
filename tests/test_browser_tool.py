@@ -323,9 +323,9 @@ async def test_browser_discovery_distinguishes_host_and_desktop_semantics() -> N
     descriptions = {entry["action"]: entry["description"] for entry in payload["actionTable"]}
 
     assert "Host target only" in descriptions["focus"]
-    assert "desktop closes its current extension tab" in descriptions["close"]
-    assert "current desktop extension tab" in descriptions["navigate"]
-    assert "active desktop file chooser" in descriptions["upload"]
+    for action in ("close", "navigate", "upload", "dialog", "act", "pdf"):
+        assert "Host target only" in descriptions[action]
+    assert "stable targeting" in descriptions["act"]
     assert "desktop removes its transient scratch file" in descriptions["screenshot"]
 
 
@@ -344,6 +344,8 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "request.kind" in request_description
     assert "click" in request_description
     assert "evaluate" in request_description
+    assert "start, stop, open" in properties["target"]["description"]
+    assert "stable targeting" in properties["target"]["description"]
     for field_name in ("compact", "frame", "interactive", "labels", "limit", "mode", "refs", "snapshotFormat"):
         assert "Host-target" in properties[field_name]["description"]
 

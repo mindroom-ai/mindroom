@@ -6,7 +6,7 @@ struct MindRoomApp: App {
 
     var body: some Scene {
         Settings {
-            EmptyView()
+            DesktopControlView()
         }
     }
 }
