@@ -214,6 +214,8 @@ class _FakeContainersApi:
             user=str(kwargs["user"]) if kwargs.get("user") is not None else None,
         )
         container.attrs["HostConfig"] = {
+            "Privileged": bool(kwargs.get("privileged", False)),
+            "CapAdd": None,
             "CapDrop": list(kwargs.get("cap_drop", [])),
             "SecurityOpt": list(kwargs.get("security_opt", [])),
         }
@@ -3316,6 +3318,81 @@ def test_docker_backend_recreates_container_missing_runtime_security_options(
 
     assert first_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("computer_enabled", "weakened_setting"),
+    [
+        (True, "privileged"),
+        (True, "cap_add"),
+        (True, "unconfined"),
+        (True, "normalized_seccomp_marker"),
+        (True, "wrong_profile"),
+        (False, "unconfined"),
+        (False, "wrong_profile"),
+    ],
+)
+def test_docker_backend_recreates_container_with_weakened_runtime_security(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    computer_enabled: bool,
+    weakened_setting: str,
+) -> None:
+    """A matching worker must not be reused when its effective Docker policy is weaker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"} if computer_enabled else {},
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    host_config = first_container.attrs["HostConfig"]
+    assert isinstance(host_config, dict)
+
+    if weakened_setting == "privileged":
+        host_config["Privileged"] = True
+    elif weakened_setting == "cap_add":
+        host_config["CapAdd"] = ["SYS_ADMIN"]
+    elif weakened_setting == "normalized_seccomp_marker":
+        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp"]
+    else:
+        replacement = (
+            "unconfined"
+            if weakened_setting == "unconfined"
+            else json.dumps({"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []})
+        )
+        host_config["SecurityOpt"] = ["no-new-privileges:true", f"seccomp={replacement}"]
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize("computer_enabled", [False, True])
+def test_docker_backend_reuses_container_with_expected_runtime_security(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    computer_enabled: bool,
+) -> None:
+    """An unchanged default or computer security policy permits worker reuse."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"} if computer_enabled else {},
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    second_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert second_handle.worker_id == first_handle.worker_id
+    assert first_container.removed == 0
+    assert len(fake_client.containers.run_calls) == 1
 
 
 def test_docker_backend_recreates_container_when_validation_snapshot_changes(
