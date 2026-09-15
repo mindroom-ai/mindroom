@@ -26,6 +26,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import Message as AnthropicMessage
 
 import mindroom.bedrock_claude as bedrock_claude_module
+from mindroom.agno_compat_vertex_claude_tools import strip_vertex_claude_tool_strict
 from mindroom.bedrock_claude import MindRoomBedrockClaude
 from mindroom.claude_prompt_cache import (
     _DEFERRED_TOOL_NAMES_ATTR,
@@ -47,7 +48,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.hooks import render_transient_context
 from mindroom.model_loading import get_model_instance
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.vertex_claude_compat import MindroomVertexAIClaude, _strip_vertex_claude_tool_strict
+from mindroom.vertex_claude_compat import MindroomVertexAIClaude
 
 
 def _config_with_runtime_paths(
@@ -810,7 +811,7 @@ def test_strip_vertex_claude_tool_strict_preserves_schema_and_input() -> None:
     """Vertex Claude rejects provider-level strict, but schema fields named strict are valid."""
     tool = _strict_tool_definition()
 
-    sanitized = _strip_vertex_claude_tool_strict([tool])
+    sanitized = strip_vertex_claude_tool_strict([tool])
 
     assert sanitized is not None
     assert "strict" not in sanitized[0]["function"]

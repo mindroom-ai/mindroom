@@ -268,7 +268,8 @@ async def test_managed_mode_refuses_legacy_unbound_grant(
     assert await managed.load_refresh_token(client, tokens.refresh_token) is None
 
 
-@pytest.mark.timeout(300)
+# This capacity regression performs 17,280 real SQLite token rotations; allow CI disk contention.
+@pytest.mark.timeout(600)
 async def test_180_day_quarter_hour_refresh_fits_default_quota_and_retains_replay(
     runtime_paths: RuntimePaths,
     client: OAuthClientInformationFull,

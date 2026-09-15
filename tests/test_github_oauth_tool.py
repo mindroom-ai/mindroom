@@ -32,6 +32,7 @@ from mindroom.credentials import (
     scoped_credentials_path,
 )
 from mindroom.custom_tools import github as mindroom_github_module
+from mindroom.custom_tools.agno_compat_github_errors import _PROVIDER_DETAIL_LOG_PREFIXES
 from mindroom.custom_tools.github import GithubTools
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
 from mindroom.oauth.credential_store import _oauth_credential_database_path
@@ -59,7 +60,7 @@ def test_agno_github_log_redaction_prefixes_match_pinned_upstream() -> None:
     """An Agno wording change must fail tests before it can reopen provider-detail logs."""
     upstream_source = inspect.getsource(agno_github_module.GithubTools)
 
-    assert all(prefix in upstream_source for prefix in mindroom_github_module._AGNO_GITHUB_PROVIDER_DETAIL_LOG_PREFIXES)
+    assert all(prefix in upstream_source for prefix in _PROVIDER_DETAIL_LOG_PREFIXES)
 
 
 def _publish_oauth_credentials(

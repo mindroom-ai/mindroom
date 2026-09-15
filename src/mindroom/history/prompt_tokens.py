@@ -30,7 +30,7 @@ from agno.session.team import TeamSession
 from agno.tools import Toolkit
 from agno.tools.function import Function
 
-from mindroom.history.agno_prompt_compat import prepare_team_prompt_tools, temporary_tool_instructions
+from mindroom.agno_compat_prepared_tools import prepare_team_prompt_tools, temporary_tool_instructions
 from mindroom.timing import timed_block
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_schema_cache import cached_processed_schema

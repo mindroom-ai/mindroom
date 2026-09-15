@@ -20,6 +20,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
 from mindroom.agent_storage import runs_without, save_runs
+from mindroom.agno_compat_model_hooks import install_tool_result_callback
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 from mindroom.media_inputs import MediaInputs
@@ -727,62 +728,17 @@ def discard_empty_completed_run(
         )
 
 
-def install_queued_message_notice_hook(
-    model: Model,
-    *,
-    notice_text: str,
-) -> None:
+def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> None:
     """Append a hidden notice after tool results when a newer message is queued."""
-    try:
-        original_format_function_call_results = model.format_function_call_results
-        model_dict = vars(model)
-    except (AttributeError, TypeError):
-        return
-    if model_dict.get(_QUEUED_MESSAGE_NOTICE_HOOK_ATTR) is True:
-        return
-    setattr(model, _QUEUED_MESSAGE_NOTICE_HOOK_ATTR, True)
-
-    def _format_function_call_results_with_notice(
-        messages: list[Message],
-        function_call_results: list[Message],
-        compress_tool_results: bool = False,
-        **kwargs: object,
-    ) -> None:
-        original_format_function_call_results(
+    install_tool_result_callback(
+        model,
+        marker=_QUEUED_MESSAGE_NOTICE_HOOK_ATTR,
+        callback=lambda messages, results: _append_queued_notice_if_needed(
             messages=messages,
-            function_call_results=function_call_results,
-            compress_tool_results=compress_tool_results,
-            **kwargs,
-        )
-        _append_queued_notice_if_needed(
-            messages=messages,
-            function_call_results=function_call_results,
+            function_call_results=results,
             notice_text=notice_text,
-        )
-
-    def _handle_function_call_media_with_notice(
-        messages: list[Message],
-        function_call_results: list[Message],
-        send_media_to_model: bool = True,
-    ) -> None:
-        original_handle_function_call_media(
-            messages=messages,
-            function_call_results=function_call_results,
-            send_media_to_model=send_media_to_model,
-        )
-        _append_queued_notice_if_needed(
-            messages=messages,
-            function_call_results=function_call_results,
-            notice_text=notice_text,
-        )
-
-    model_dict["format_function_call_results"] = _format_function_call_results_with_notice
-    try:
-        original_handle_function_call_media = model._handle_function_call_media
-    except AttributeError:
-        return
-
-    model_dict["_handle_function_call_media"] = _handle_function_call_media_with_notice
+        ),
+    )
 
 
 def next_retry_run_id(run_id: str | None) -> str | None:

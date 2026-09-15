@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
-from agno.agent._tools import reject_tool_call
-from agno.run.agent import RunOutput
-from agno.run.messages import RunMessages
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
+from mindroom.agno_compat_approval import append_denied_tool_result, before_tool_lookup
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.mcp.toolkit import require_mcp_server_manager
@@ -21,9 +19,10 @@ from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from agno.agent import Agent
+    from agno.run.agent import RunOutput
     from agno.run.requirement import RunRequirement
     from agno.run.team import TeamRunOutput
     from agno.team import Team
@@ -68,14 +67,7 @@ def record_approval_denials(
             msg = "Denied approval no longer matches the pending function; retry the request"
             raise RuntimeError(msg)
         if not any(message.tool_call_id == tool.tool_call_id for message in run.messages):
-            reject_tool_call(
-                cast("Agent", actor),
-                RunMessages(messages=run.messages),
-                tool,
-                functions={
-                    call.tool_name: Function(name=call.tool_name, stop_after_tool_call=tool.stop_after_tool_call),
-                },
-            )
+            append_denied_tool_result(actor, run.messages, tool, tool_name=call.tool_name)
         tool.requires_confirmation = False
         tool.tool_call_error = True
 
@@ -93,19 +85,13 @@ def approval_denial_context(actor: Agent, calls_by_run: Mapping[str, Sequence[Ap
     if not any(calls_by_run.values()):
         yield
         return
-    original = cast("Callable[..., Awaitable[list[object]]]", actor.aget_tools)
 
-    async def tools_after_denials(*args: object, **kwargs: object) -> list[object]:
-        run = kwargs.get("run_response")
-        if isinstance(run, RunOutput) and run.run_id is not None and (calls := calls_by_run.get(run.run_id)):
+    def apply_denials(run: RunOutput) -> None:
+        if run.run_id is not None and (calls := calls_by_run.get(run.run_id)):
             record_approval_denials(actor, run, calls)
-        return await original(*args, **kwargs)
 
-    actor.__dict__["aget_tools"] = tools_after_denials
-    try:
+    with before_tool_lookup(actor, apply_denials):
         yield
-    finally:
-        actor.__dict__["aget_tools"] = original
 
 
 def validate_approval_tool_owners(

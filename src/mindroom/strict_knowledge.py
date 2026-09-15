@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.content import Content, ContentStatus
 from agno.knowledge.knowledge import Knowledge
-from agno.knowledge.utils import set_agno_metadata
+
+from mindroom import agno_compat_knowledge
 
 if TYPE_CHECKING:
     from agno.knowledge.document import Document
@@ -41,9 +42,7 @@ class StrictSearchKnowledge(Knowledge):
     ) -> list[Document]:
         """Return matching documents; raise on vector-db or embedder failure."""
         del search_type, user_id  # MindRoom read handles are shared and never override per-call search types.
-        if self.vector_db is None:
-            return []
-        return self.vector_db.search(query=query, limit=max_results or self.max_results, filters=filters)
+        return agno_compat_knowledge.search(self, query, limit=max_results or self.max_results, filters=filters)
 
     async def asearch(
         self,
@@ -55,13 +54,7 @@ class StrictSearchKnowledge(Knowledge):
     ) -> list[Document]:
         """Async variant of ``search`` with agno's sync fallback preserved."""
         del search_type, user_id
-        if self.vector_db is None:
-            return []
-        limit = max_results or self.max_results
-        try:
-            return await self.vector_db.async_search(query=query, limit=limit, filters=filters)
-        except NotImplementedError:
-            return self.vector_db.search(query=query, limit=limit, filters=filters)
+        return await agno_compat_knowledge.asearch(self, query, limit=max_results or self.max_results, filters=filters)
 
 
 @dataclass
@@ -81,17 +74,17 @@ class StrictInsertKnowledge(Knowledge):
         branch Agno keys off ``prior_status`` never applies here.
         """
         del prior_status
-        if self.vector_db is None:
-            msg = "No vector database configured"
-            raise RuntimeError(msg)
-        if self.vector_db.upsert_available() and upsert:
-            self.vector_db.upsert(content.content_hash, read_documents, content.metadata)
-        else:
-            self.vector_db.insert(content.content_hash, documents=read_documents, filters=content.metadata)
-        content.metadata = set_agno_metadata(content.metadata, "vectors_indexed", True)
-        self._set_embedding_success_status(content, read_documents)
-        if content.status is not ContentStatus.COMPLETED:
-            # Agno downgrades to PARTIAL/FAILED when chunks silently lack an embedding.
-            msg = content.status_message or f"Knowledge content {content.id or content.name!r} was not fully embedded"
-            raise RuntimeError(msg)
-        self._update_content(content)
+        agno_compat_knowledge.insert_documents(
+            self,
+            content,
+            read_documents,
+            upsert=upsert,
+            validate=_require_complete_embedding,
+        )
+
+
+def _require_complete_embedding(content: Content) -> None:
+    """Do not publish a candidate collection with missing embeddings."""
+    if content.status is not ContentStatus.COMPLETED:
+        msg = content.status_message or f"Knowledge content {content.id or content.name!r} was not fully embedded"
+        raise RuntimeError(msg)

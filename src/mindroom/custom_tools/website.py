@@ -15,6 +15,7 @@ from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
+from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
 from mindroom.server_fetch_url import (
     ServerFetchHTTPTransport,
     ServerFetchUrlError,
@@ -190,9 +191,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
             ):
                 continue
 
-            full_url_str = str(full_url)
-            if full_url_str not in self._visited and (full_url_str, current_depth + 1) not in self._urls_to_crawl:
-                self._urls_to_crawl.append((full_url_str, current_depth + 1))
+            queue_crawl_url(self, str(full_url), current_depth + 1)
 
     def _should_skip_crawl_url(
         self,
@@ -205,8 +204,7 @@ class _MindRoomWebsiteReader(WebsiteReader):
     ) -> bool:
         """Return whether a queued crawl URL is outside the current crawl budget."""
         return (
-            current_url in self._visited
-            or not _url_matches_crawl_host(current_url, crawl_host)
+            not _url_matches_crawl_host(current_url, crawl_host)
             or (current_depth > self.max_depth and current_url != starting_url)
             or num_links >= self.max_links
         )
@@ -324,32 +322,26 @@ class _MindRoomWebsiteReader(WebsiteReader):
     def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
         starting_url = validate_server_fetch_url(url)
-        num_links = 0
-        crawler_result: dict[str, str] = {}
         crawl_host = _normalized_hostname(starting_url)
-
-        self._visited = set()
-        self._urls_to_crawl = [(starting_url, starting_depth)]
-        while self._urls_to_crawl:
-            current_url, current_depth = self._urls_to_crawl.pop(0)
-            if self._should_skip_crawl_url(
+        crawler_result = crawl_with_callbacks(
+            self,
+            starting_url,
+            starting_depth,
+            should_skip=lambda current_url, current_depth, num_links: self._should_skip_crawl_url(
                 current_url=current_url,
                 starting_url=starting_url,
                 current_depth=current_depth,
                 num_links=num_links,
                 crawl_host=crawl_host,
-            ):
-                continue
-
-            self._visited.add(current_url)
-            self.delay()
-            num_links += self._record_current_url(
+            ),
+            record=lambda current_url, current_depth, crawler_result: self._record_current_url(
                 current_url=current_url,
                 current_depth=current_depth,
                 starting_url=starting_url,
                 crawler_result=crawler_result,
                 crawl_host=crawl_host,
-            )
+            ),
+        )
 
         if not crawler_result:
             raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)

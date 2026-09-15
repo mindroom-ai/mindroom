@@ -4,49 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.agno_compat_openai_responses_items import RESPONSE_OUTPUT_KEY, TOOL_SEARCH_ITEMS_KEY
 from mindroom.legacy_openai_tool_replay import repair_legacy_responses_span
 from mindroom.native_compaction import checkpoint_items
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Sequence
 
     from agno.models.message import Message
-    from agno.models.response import ModelResponse
-
-_TOOL_SEARCH_ITEMS_KEY = "tool_search_items"
-_TOOL_SEARCH_ITEM_TYPES = frozenset({"tool_search_call", "tool_search_output"})
-_RESPONSE_OUTPUT_KEY = "mindroom_response_output"
-
-
-def record_tool_search_items(model_response: ModelResponse, output_items: Iterable[Any]) -> None:
-    """Store tool_search output items on one response's provider data.
-
-    Agno's Responses parser only handles message/function_call/reasoning
-    items, so the search items would otherwise be dropped and could never be
-    replayed. Both the non-streaming output list and streamed
-    ``response.output_item.done`` items land here; Agno's provider-data merge
-    extends lists, so streamed items accumulate in arrival order.
-    """
-    items = [item.model_dump(exclude_none=True) for item in output_items if item.type in _TOOL_SEARCH_ITEM_TYPES]
-    if not items:
-        return
-    if model_response.provider_data is None:
-        model_response.provider_data = {}
-    model_response.provider_data.setdefault(_TOOL_SEARCH_ITEMS_KEY, []).extend(items)
-
-
-def record_response_output(model_response: ModelResponse, items: list[dict[str, Any]]) -> None:
-    """Retain reasoning in its original position beside text, search, and function calls.
-
-    Agno stores only the last reasoning item and omits it when replaying tool
-    calls. Capture complete output only when that lossy conversion matters.
-    Checkpoints have a separate route-bound owner; this is canonical replay.
-    """
-    if any(item.get("type") == "reasoning" for item in items):
-        model_response.provider_data = {
-            **(model_response.provider_data or {}),
-            _RESPONSE_OUTPUT_KEY: [item for item in items if item.get("type") != "compaction"],
-        }
 
 
 def formatted_input_with_provider_items(
@@ -83,7 +48,7 @@ def formatted_input_with_provider_items(
             prepared_input[anchor : anchor + size] = replacement
             cursor = anchor + len(replacement)
         else:
-            items = data.get(_TOOL_SEARCH_ITEMS_KEY) or []
+            items = data.get(TOOL_SEARCH_ITEMS_KEY) or []
             span = prepared_input[anchor : anchor + size]
             if replay_reasoning:
                 span = _reconstructed_response_input(message, span)
@@ -114,7 +79,7 @@ def _reconstructed_response_input(message: Message, formatted_span: list[Any]) -
 
 def _canonical_response_output(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]] | None:
     """Replay original ordering using only the text and calls still in canonical history."""
-    items = (message.provider_data or {}).get(_RESPONSE_OUTPUT_KEY)
+    items = (message.provider_data or {}).get(RESPONSE_OUTPUT_KEY)
     if not isinstance(items, list):
         return None
     text = "".join(

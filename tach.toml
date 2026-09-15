@@ -66,6 +66,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.openai_embedder"
 depends_on = [
+    "mindroom.agno_compat_openai_embedder",
     "mindroom.embedder_health",
     "mindroom.embedding_errors",
     "mindroom.model_defaults",
@@ -354,7 +355,7 @@ depends_on = ["mindroom.durable_write"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
-    "mindroom.agno_session_persistence_patch",
+    "mindroom.agno_compat_session_persistence",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.agno_participation",
     "mindroom.agents",
@@ -472,7 +473,7 @@ depends_on = [
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.memory",
     "mindroom.entity_resolution",
-    "mindroom.history.agno_message_builder_patch",
+    "mindroom.history.agno_compat_message_builder",
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
@@ -524,7 +525,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.strict_knowledge"
-depends_on = []
+depends_on = ["mindroom.agno_compat_knowledge", ]
 visibility = [
     "mindroom.knowledge.collections",
     "mindroom.knowledge.manager",
@@ -535,7 +536,8 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_storage"
 depends_on = [
-    "mindroom.agno_session_persistence_patch",
+    "mindroom.agno_compat_sqlite",
+    "mindroom.agno_compat_session_persistence",
     "mindroom.constants",
     "mindroom.legacy_session_storage",
     "mindroom.runtime_resolution",
@@ -614,7 +616,7 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.agno_session_persistence_patch"
+path = "mindroom.agno_compat_session_persistence"
 depends_on = ["mindroom.background_tasks"]
 visibility = ["mindroom.agent_storage", "mindroom.ai"]
 
@@ -635,6 +637,7 @@ visibility = [
 [[modules]]
 path = "mindroom.ai_runtime"
 depends_on = [
+    "mindroom.agno_compat_model_hooks",
     "mindroom.agent_storage",
     "mindroom.history_run_visibility",
     "mindroom.logging_config",
@@ -785,6 +788,7 @@ visibility = ["mindroom.response_runner"]
 [[modules]]
 path = "mindroom.approval_tools"
 depends_on = [
+    "mindroom.agno_compat_approval",
     "mindroom.credentials",
     "mindroom.mcp.registry",
     "mindroom.mcp.toolkit",
@@ -797,7 +801,7 @@ visibility = ["mindroom.delegation.execution", "mindroom.ai", "mindroom.approval
 
 [[modules]]
 path = "mindroom.approval_receipt"
-depends_on = ["mindroom.event_journal"]
+depends_on = ["mindroom.agno_compat_model_hooks", "mindroom.event_journal"]
 visibility = [
     "mindroom.approval_execution",
     "mindroom.response_runner",
@@ -1686,7 +1690,7 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.history.agno_message_builder_patch"
+path = "mindroom.history.agno_compat_message_builder"
 depends_on = []
 visibility = ["mindroom.agents", "mindroom.teams"]
 
@@ -1712,7 +1716,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.prompt_tokens"
 depends_on = [
-    "mindroom.history.agno_prompt_compat",
+    "mindroom.agno_compat_prepared_tools",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_schema_cache",
@@ -1755,7 +1759,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.openai_response_replay"
-depends_on = ["mindroom.legacy_openai_tool_replay", "mindroom.native_compaction"]
+depends_on = ["mindroom.agno_compat_openai_responses_items", "mindroom.legacy_openai_tool_replay", "mindroom.native_compaction"]
 visibility = ["mindroom.openai_models"]
 
 [[modules]]
@@ -2212,7 +2216,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
-    "mindroom.history.agno_message_builder_patch",
+    "mindroom.history.agno_compat_message_builder",
     "mindroom.history.interrupted_replay",
     "mindroom.history.native",
     "mindroom.history.prompt_tokens",
@@ -3231,6 +3235,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
+    "mindroom.agno_compat_prepared_tools",
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
@@ -3765,6 +3770,7 @@ visibility = [
 [[modules]]
 path = "mindroom.provider_media_fallback"
 depends_on = [
+    "mindroom.agno_compat_model_hooks",
     "mindroom.error_handling",
     "mindroom.logging_config",
     "mindroom.redaction",
@@ -3837,6 +3843,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.tool_system.output_files"
 depends_on = [
+    "mindroom.tool_system.agno_compat_function_schema",
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.tool_system.declarations",
@@ -3887,6 +3894,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.tool_system.agno_compat_tool_hooks",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",
@@ -5814,9 +5822,9 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.agno_prompt_compat"
+path = "mindroom.agno_compat_prepared_tools"
 depends_on = []
-visibility = ["mindroom.history.prompt_tokens"]
+visibility = ["mindroom.matrix_rtc.call_tools", "mindroom.history.prompt_tokens"]
 
 [[modules]]
 path = "mindroom.history.claude_replay_compat"
@@ -5903,7 +5911,7 @@ visibility = ["mindroom.agno_participation", "mindroom.response_runner", "mindro
 
 [[modules]]
 path = "mindroom.agno_participation"
-depends_on = ["mindroom.participation", "mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy", "mindroom.json_utils"]
+depends_on = ["mindroom.agno_compat_model_hooks", "mindroom.participation", "mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy", "mindroom.json_utils"]
 visibility = ["mindroom.ai"]
 
 [[modules]]
@@ -6138,6 +6146,15 @@ depends_on = ["mindroom.provider_tool_policy"]
 visibility = ["mindroom.model_loading"]
 
 [[modules]]
+path = "mindroom.tool_system.agno_compat_tool_hooks"
+depends_on = []
+visibility = ["mindroom.tool_system.tool_hooks"]
+
+[[interfaces]]
+from = ["mindroom.tool_system.agno_compat_tool_hooks"]
+expose = ["install_patch"]
+
+[[modules]]
 path = "mindroom.custom_tools.matrix_message_idempotency"
 depends_on = [
     "mindroom.authorization",
@@ -6148,3 +6165,157 @@ depends_on = [
     "mindroom.requester_identity",
 ]
 visibility = ["mindroom.custom_tools.matrix_message"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_approval"
+depends_on = []
+visibility = ["mindroom.approval_tools"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_approval"]
+expose = ["append_denied_tool_result", "before_tool_lookup"]
+
+[[modules]]
+path = "mindroom.agno_compat_model_hooks"
+depends_on = []
+visibility = [
+    "mindroom.agno_participation",
+    "mindroom.ai_runtime",
+    "mindroom.approval_receipt",
+    "mindroom.llm_request_logging",
+    "mindroom.provider_media_fallback",
+    "mindroom.claude_stream_retry",
+    "mindroom.claude_prompt_cache",
+]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_model_hooks"]
+expose = [
+    "install_message_projection",
+    "install_tool_result_callback",
+    "install_async_invocation_hooks",
+    "install_stream_invocation_hooks",
+    "temporary_async_invocation_hooks",
+    "install_retry_cycle_hooks",
+    "install_client_factories",
+]
+
+
+[[modules]]
+path = "mindroom.agno_compat_sqlite"
+depends_on = []
+visibility = ["mindroom.agent_storage"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_sqlite"]
+expose = ["remove_default_pragmas", "upsert_run_at_end", "run_deletion_transaction", "cached_run_counts"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_knowledge"
+depends_on = []
+visibility = ["mindroom.strict_knowledge"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_knowledge"]
+expose = ["search", "asearch", "insert_documents"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_openai_embedder"
+depends_on = []
+visibility = ["mindroom.openai_embedder"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_openai_embedder"]
+expose = ["OpenAIEmbedderWithHooks"]
+
+
+[[modules]]
+path = "mindroom.tool_system.agno_compat_function_schema"
+depends_on = []
+visibility = ["mindroom.tool_system.output_files"]
+
+[[interfaces]]
+from = ["mindroom.tool_system.agno_compat_function_schema"]
+expose = ["install_schema_postprocessor", "uses_schema_postprocessor"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_openai_chat"
+depends_on = []
+visibility = ["mindroom.openai_models"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_openai_chat"]
+expose = ["OpenAIChatProviderCompat"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_openai_responses"
+depends_on = ["mindroom.error_handling"]
+visibility = ["mindroom.openai_models"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_openai_responses"]
+expose = ["OpenAIResponsesProviderCompat"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_openai_responses_items"
+depends_on = []
+visibility = ["mindroom.openai_models", "mindroom.openai_response_replay"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_openai_responses_items"]
+expose = ["TOOL_SEARCH_ITEMS_KEY", "RESPONSE_OUTPUT_KEY", "record_tool_search_items", "record_response_output"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_claude"
+depends_on = ["mindroom.model_defaults"]
+visibility = ["mindroom.claude_compat"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_claude"]
+expose = ["ClaudeProviderSDKCompat"]
+
+
+[[modules]]
+path = "mindroom.agno_compat_vertex_claude_tools"
+depends_on = []
+visibility = ["mindroom.vertex_claude_compat"]
+
+[[interfaces]]
+from = ["mindroom.agno_compat_vertex_claude_tools"]
+expose = ["strip_vertex_claude_tool_strict", "format_tools_for_vertex_claude"]
+
+
+[[modules]]
+path = "mindroom.custom_tools.agno_compat_website_reader"
+depends_on = []
+visibility = ["mindroom.custom_tools.website"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_website_reader"]
+expose = ["queue_crawl_url", "crawl_with_callbacks"]
+
+[[modules]]
+path = "mindroom.custom_tools.agno_compat_github_errors"
+depends_on = []
+visibility = ["mindroom.custom_tools.github"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_github_errors"]
+expose = ["record_provider_failure", "call_with_provider_failure_capture", "is_provider_detail_log", "install_provider_log_filter"]
+
+
+[[modules]]
+path = "mindroom.oauth.agno_compat_google_auth"
+depends_on = []
+visibility = ["mindroom.oauth.client"]
+
+[[interfaces]]
+from = ["mindroom.oauth.agno_compat_google_auth"]
+expose = ["AgnoGoogleAuthBindingMixin"]

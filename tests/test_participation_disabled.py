@@ -15,7 +15,7 @@ from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from openai import AsyncOpenAI
 
-from mindroom import agno_session_persistence_patch as persistence
+from mindroom import agno_compat_session_persistence as persistence
 from mindroom.agent_storage import get_agent_session
 from mindroom.cancellation import request_task_cancel
 from mindroom.openai_models import MindRoomOpenAIChat
