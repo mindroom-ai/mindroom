@@ -189,7 +189,8 @@ def test_active_stream_authorization_transport_failure_revokes_control(
     assert client.get(path, headers=headers).status_code == 401
 
 
-def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway) -> None:
+@pytest.mark.parametrize("combined_protocols", [False, True])
+def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway, *, combined_protocols: bool) -> None:
     """Stream watch take release reconnect and stop."""
     client, _peer, _app = gateway
     session = create(client).json()
@@ -198,7 +199,8 @@ def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway) -> None:
 
     def protocols() -> list[str]:
         ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
-        return ["binary", "mindroom-ticket." + ticket]
+        values = ["binary", "mindroom-ticket." + ticket]
+        return [", ".join(values)] if combined_protocols else values
 
     initial = protocols()
     with client.websocket_connect(
@@ -902,3 +904,39 @@ def test_requester_quota_rejects_before_allocating_worker(gateway: Gateway) -> N
     assert client.delete(path, headers=headers).status_code == 204
     peer.openid_subject = "@alice:example.org"
     assert create(client).status_code == 200
+
+
+@pytest.mark.parametrize("combined", [False, True])
+@pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_binary", "missing_ticket"])
+def test_stream_ticket_scope_representations(gateway: Gateway, offer: str, *, combined: bool) -> None:
+    """Raw header lines and normalized ASGI tokens enforce the same ticket contract."""
+    client, _, app = gateway
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    protocols = ["binary", "mindroom-ticket." + ticket]
+    if offer == "duplicate":
+        protocols.append(protocols[-1])
+    elif offer == "missing_binary":
+        protocols.pop(0)
+    elif offer == "missing_ticket":
+        protocols.pop()
+    websocket = WebSocket(
+        {
+            "type": "websocket",
+            "app": app,
+            "headers": [(b"origin", b"https://chat.example.org")],
+            "subprotocols": [", \t".join(protocols)] if combined else protocols,
+        },
+        receive=AsyncMock(),
+        send=AsyncMock(),
+    )
+    if offer == "valid":
+        assert computers._stream_session(websocket, session["session_id"]).session_id == session["session_id"]
+        with pytest.raises(ComputerError):
+            computers._stream_session(websocket, session["session_id"])
+    else:
+        with pytest.raises(ComputerError) as error:
+            computers._stream_session(websocket, session["session_id"])
+        assert error.value.status_code == 401
