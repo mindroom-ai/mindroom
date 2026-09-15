@@ -102,7 +102,8 @@ final class DesktopBridgeProcess: ObservableObject {
         stderrHandle = stderr
         stdout.readabilityHandler = { [weak self] handle in
             do {
-                guard let data = try handle.read(upToCount: 65_536), !data.isEmpty else {
+                let data = try Self.readAvailableChunk(handle)
+                guard !data.isEmpty else {
                     handle.readabilityHandler = nil
                     return
                 }
@@ -122,7 +123,8 @@ final class DesktopBridgeProcess: ObservableObject {
         }
         stderr.readabilityHandler = { handle in
             do {
-                guard let data = try handle.read(upToCount: 65_536), !data.isEmpty else {
+                let data = try Self.readAvailableChunk(handle)
+                guard !data.isEmpty else {
                     handle.readabilityHandler = nil
                     return
                 }
@@ -130,6 +132,22 @@ final class DesktopBridgeProcess: ObservableObject {
                 handle.readabilityHandler = nil
             }
         }
+    }
+
+    private nonisolated static func readAvailableChunk(_ handle: FileHandle) throws -> Data {
+        // FileHandle.read(upToCount:) can wait to fill its buffer before delivering a short record.
+        var data = Data(count: 65_536)
+        var count: Int
+        repeat {
+            count = data.withUnsafeMutableBytes { buffer in
+                Darwin.read(handle.fileDescriptor, buffer.baseAddress, buffer.count)
+            }
+        } while count == -1 && errno == EINTR
+        guard count >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        data.count = count
+        return data
     }
 
     func request(
