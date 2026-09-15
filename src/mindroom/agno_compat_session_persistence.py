@@ -36,6 +36,17 @@ if TYPE_CHECKING:
 
 type _PersistenceTarget = tuple[str, str]
 
+# Reason: Async Agent/Team session paths call owned synchronous storage on the event loop.
+# Upstream issue: https://github.com/agno-agi/agno/issues/10149
+# Upstream PR: No complete implementation yet; https://github.com/agno-agi/agno/pull/10148
+# only routes Agent startup through the existing awaitable read path.
+# Remove when: Supported async persistence preserves nonmutating preparation and
+# owner-controlled dispatch across the required Agent/Team reads and writes.
+# Keep MindRoom's FIFO, snapshot, cancellation, and resource-lifetime guarantees.
+# Coverage: tests/test_agno_compat_session_persistence.py::test_registered_writes_run_on_a_dedicated_thread;
+# tests/test_agno_compat_session_persistence.py::test_cross_loop_reservation_precedes_snapshot_work;
+# tests/test_agno_compat_session_persistence.py::test_async_session_read_shares_save_lane_and_drains_cancellation.
+
 # Agno 3.0 splits one session save into a session-row write (``asave_session``) and
 # per-run writes (``asave_run``); both call the synchronous SQLite adapter directly,
 # so both are offloaded through the same FIFO lane to keep their order.

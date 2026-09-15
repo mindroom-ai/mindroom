@@ -21,7 +21,7 @@ from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.history.agno_message_builder_patch import apply_patch as install_message_builder_patch
+from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.hooks import HookRegistry
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import hide_mcp_function_collisions

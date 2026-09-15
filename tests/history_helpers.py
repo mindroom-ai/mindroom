@@ -32,7 +32,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.history.agno_message_builder_patch import apply_patch
+from mindroom.history.agno_compat_message_builder import apply_patch
 from mindroom.history.storage import (
     write_scope_state,
 )

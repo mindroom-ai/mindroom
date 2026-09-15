@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
 
-from mindroom import agno_session_persistence_patch
+from mindroom import agno_compat_session_persistence
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.logging_config import get_logger
@@ -66,7 +66,7 @@ async def run_session_storage_operation[Result](
     operation: Callable[[BaseDb], Result],
 ) -> Result:
     """Run one application-owned synchronous storage operation off-loop and in order."""
-    return await agno_session_persistence_patch.run_registered_storage_operation(
+    return await agno_compat_session_persistence.run_registered_storage_operation(
         create_storage,
         operation,
     )
@@ -115,7 +115,7 @@ def _create_sqlite_state_storage(
     prompt_roles: frozenset[str] | None = None,
 ) -> SqliteDb:
     """Create a persistent SQLite database from an already-resolved state root."""
-    agno_session_persistence_patch.install_patch()
+    agno_compat_session_persistence.install_patch()
     preflight = (
         session_storage_preflight(
             state_root,
@@ -139,7 +139,7 @@ def _create_sqlite_state_storage(
             db_file=db_file,
             db_engine=create_state_engine(db_file),
         )
-        agno_session_persistence_patch._register_sync_session_storage(
+        agno_compat_session_persistence._register_sync_session_storage(
             database,
             db_file=db_file,
             session_table=session_table,

@@ -465,7 +465,7 @@ depends_on = [
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.memory",
     "mindroom.entity_resolution",
-    "mindroom.history.agno_message_builder_patch",
+    "mindroom.history.agno_compat_message_builder",
     "mindroom.hooks",
     "mindroom.logging_config",
     "mindroom.matrix.identity",
@@ -528,7 +528,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_storage"
 depends_on = [
-    "mindroom.agno_session_persistence_patch",
+    "mindroom.agno_compat_session_persistence",
     "mindroom.constants",
     "mindroom.legacy_session_storage",
     "mindroom.runtime_resolution",
@@ -607,7 +607,7 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.agno_session_persistence_patch"
+path = "mindroom.agno_compat_session_persistence"
 depends_on = ["mindroom.background_tasks"]
 visibility = ["mindroom.agent_storage"]
 
@@ -1666,7 +1666,7 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.history.agno_message_builder_patch"
+path = "mindroom.history.agno_compat_message_builder"
 depends_on = []
 visibility = ["mindroom.agents", "mindroom.teams"]
 
@@ -1692,7 +1692,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.history.prompt_tokens"
 depends_on = [
-    "mindroom.history.agno_prompt_compat",
+    "mindroom.history.agno_compat_prompt",
     "mindroom.timing",
     "mindroom.token_budget",
     "mindroom.tool_schema_cache",
@@ -2189,7 +2189,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.error_handling",
     "mindroom.execution_preparation",
-    "mindroom.history.agno_message_builder_patch",
+    "mindroom.history.agno_compat_message_builder",
     "mindroom.history.interrupted_replay",
     "mindroom.history.native",
     "mindroom.history.prompt_tokens",
@@ -3847,6 +3847,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
+    "mindroom.tool_system.agno_compat_tool_hooks",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
     "mindroom.tool_system.runtime_context",
@@ -5768,7 +5769,7 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.history.agno_prompt_compat"
+path = "mindroom.history.agno_compat_prompt"
 depends_on = []
 visibility = ["mindroom.history.prompt_tokens"]
 
@@ -5902,3 +5903,12 @@ visibility = [
 path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
 visibility = ["mindroom.event_journal"]
+
+[[modules]]
+path = "mindroom.tool_system.agno_compat_tool_hooks"
+depends_on = []
+visibility = ["mindroom.tool_system.tool_hooks"]
+
+[[interfaces]]
+from = ["mindroom.tool_system.agno_compat_tool_hooks"]
+expose = ["install_patch"]

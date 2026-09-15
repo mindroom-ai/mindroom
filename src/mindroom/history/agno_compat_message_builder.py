@@ -20,6 +20,23 @@ from agno.run.messages import RunMessages
 from agno.team import _messages as team_messages
 from agno.utils.log import log_warning
 
+# Reason: Team flattens roleful Message input into a single user message.
+# Upstream issue: https://github.com/agno-agi/agno/issues/9942
+# Upstream PR: https://github.com/agno-agi/agno/pull/9943
+# Remove when: The pinned Agno release preserves roles, user_message, and extra_messages
+# for sync and async Team input. That fix alone does not replace historical-media filtering.
+# Coverage: tests/test_agno_compat_message_builder.py::test_team_list_message_patch_preserves_roleful_input_through_formatter;
+# tests/test_agno_compat_message_builder.py::test_team_list_message_patch_preserves_additional_input_separately.
+
+# Reason: MindRoom omits persisted inline media while retaining current-turn media.
+# Upstream issue: No matching issue identified; this is an application replay policy
+# that currently requires wrapping Agno's private Agent/Team message builders.
+# Upstream PR: None identified; the roleful-input PR above does not cover this behavior.
+# Remove when: A supported message-preparation hook can apply the same history filter;
+# retain the filtering policy when removing private builder interception.
+# Coverage: tests/test_agno_compat_message_builder.py::test_persisted_history_media_is_not_replayed;
+# tests/test_agno_compat_message_builder.py::test_inline_media_cleanup_strips_every_kind_only_from_history.
+
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()
 type _RolefulInput = list[Message]
