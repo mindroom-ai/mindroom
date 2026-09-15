@@ -18,6 +18,8 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import ApiAuthState, public_origin, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
+from mindroom.api.computers import rebind_computer_runtime, touch_computer_workers
+from mindroom.api.computers import router as computers_router
 from mindroom.api.config_lifecycle import ApiSnapshot, ApiState, ConfigLoadResult  # noqa: F401
 from mindroom.api.config_reload import router as config_reload_router
 from mindroom.api.connections import router as connections_router
@@ -56,6 +58,7 @@ from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
 from mindroom.runtime_state import get_runtime_state
+from mindroom.worker_computer.auth import computer_origins
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
@@ -63,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
-    from starlette.types import ASGIApp, Receive, Scope, Send
+    from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
@@ -114,11 +117,23 @@ class _RuntimeDashboardCorsMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         middleware = self._middleware_for_current_runtime(scope.get("path", ""))
-        await middleware(scope, receive, send)
+        if scope.get("path", "").startswith("/api/computers"):
+
+            async def no_store_send(message: Message) -> None:
+                if message["type"] == "http.response.start":
+                    message["headers"] = [
+                        (key, value) for key, value in message.get("headers", []) if key.lower() != b"cache-control"
+                    ]
+                    message["headers"].append((b"cache-control", b"no-store"))
+                await send(message)
+
+            await middleware(scope, receive, no_store_send)
+        else:
+            await middleware(scope, receive, send)
 
     def _middleware_for_current_runtime(self, path: str) -> CORSMiddleware:
         paths = self._current_runtime_paths()
-        origins = gateway_cors_origins(paths, path)
+        origins = computer_origins(paths) if path.startswith("/api/computers") else gateway_cors_origins(paths, path)
         settings = (
             _DashboardCorsSettings(origins, allow_credentials=False, expose_headers=("WWW-Authenticate",))
             if origins is not None
@@ -210,6 +225,7 @@ def _cleanup_workers_once(
     *,
     runtime_config: Config | None = None,
     touch_live_workers: Callable[[WorkerBackend], None] | None = None,
+    api_app: FastAPI | None = None,
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
     worker_lease = lease_configured_primary_worker_manager(
@@ -221,6 +237,8 @@ def _cleanup_workers_once(
     with worker_lease as worker_manager:
         if touch_live_workers is not None:
             touch_live_workers(worker_manager)
+        if api_app is not None:
+            touch_computer_workers(api_app, worker_manager)
         maintenance = maintain_workers(worker_manager)
     if maintenance.cleaned:
         logger.info(
@@ -268,6 +286,7 @@ async def _worker_cleanup_loop(
                     runtime_paths,
                     runtime_config=runtime_config,
                     touch_live_workers=config_lifecycle.app_state(api_app).script_worker_keepalive,
+                    api_app=api_app,
                 )
             except Exception:
                 logger.exception("Background worker cleanup failed")
@@ -331,6 +350,9 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             app_state.leave_matrix_room = None
             app_state.external_trigger_runtime = None
             app_state.agent_reply_memberships = AgentReplyMembershipIndex()
+            app_state.computer_runtime = None
+            if app_state.computer_sessions is not None:
+                app_state.computer_sessions.close_all()
             app_state.script_worker_keepalive = None
             bind_script_tool_broker(api_app, None)
         previous_state.snapshot = config_lifecycle._published_snapshot(
@@ -501,6 +523,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             )
         else:
             app_state.external_trigger_runtime = None
+    rebind_computer_runtime(_app, preload_snapshot, loaded=loaded)
     logger.info(
         "Initialized API runtime config",
         config_path=str(runtime_paths.config_path),
@@ -532,6 +555,9 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     async with gateway_lifespan(_app):
         yield
 
+    if app_state.computer_sessions is not None:
+        app_state.computer_sessions.close_all()
+    app_state.computer_runtime = None
     stop_event.set()
     watch_task.cancel()
     worker_cleanup_task.cancel()
@@ -733,6 +759,7 @@ app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
+app.include_router(computers_router)
 app.include_router(script_gateway_router)
 app.include_router(dynamic_workflows_router, dependencies=[Depends(verify_user)])
 

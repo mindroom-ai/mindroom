@@ -1218,6 +1218,8 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.api.computers",
+    "mindroom.worker_computer.auth",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
     "mindroom.api.thread_exports",
@@ -1469,6 +1471,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.workers"
 depends_on = [
+    "mindroom.api.computers",
     "mindroom.api.config_lifecycle",
     "mindroom.api.worker_responses",
     "mindroom.tool_system.sandbox_proxy",
@@ -2003,6 +2006,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.orchestration.computer_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.event_journal_open",
@@ -5933,4 +5937,56 @@ depends_on = [
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.rfb",
     "mindroom.worker_computer.runtime",
+]
+
+[[modules]]
+path = "mindroom.worker_computer.sessions"
+depends_on = [
+    "mindroom.workers.models",
+]
+
+[[modules]]
+path = "mindroom.worker_computer.auth"
+depends_on = [
+    "mindroom.runtime_env_policy",
+    "mindroom.constants",
+    "mindroom.requester_identity",
+    "mindroom.worker_computer.sessions",
+]
+
+[[modules]]
+path = "mindroom.worker_computer.client"
+depends_on = [
+    "mindroom.worker_computer.protocol",
+    "mindroom.worker_computer.sessions",
+]
+
+[[modules]]
+path = "mindroom.api.computers"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.constants",
+    "mindroom.worker_computer.auth",
+    "mindroom.worker_computer.client",
+    "mindroom.worker_computer.sessions",
+    "mindroom.workers.backend",
+    "mindroom.workers.runtime",
+]
+
+[[modules]]
+path = "mindroom.orchestration.computer_runtime"
+depends_on = [
+    "mindroom.authorization",
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.worker_computer.sessions",
+    "mindroom.workers.models",
+    "mindroom.workers.runtime",
+    "mindroom.agents",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.api",
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.main",
+    "mindroom.api.computers",
 ]

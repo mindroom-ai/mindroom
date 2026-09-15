@@ -105,8 +105,9 @@ class WorkerComputerRuntime:
 
         return await self._run_browser_action(action)
 
-    async def take_control(self, session_id: str) -> ComputerStatus:
+    async def take_control(self, session_id: str, *, generation: str | None = None) -> ComputerStatus:
         """Wait for an active action, then grant exclusive control to a live viewer."""
+        self._check_generation(generation)
         if self._controller not in (None, session_id) or self._pending_controller not in (None, session_id):
             msg = "Computer is controlled by another user session."
             raise ComputerControlError(msg)
@@ -118,6 +119,7 @@ class WorkerComputerRuntime:
         self._epoch += 1
         try:
             async with self._lock:
+                self._check_generation(generation)
                 if self._streams.get(session_id) is not stream or stream.is_set() or self.status()["state"] != "ready":
                     msg = "Computer stream is no longer connected."
                     raise ComputerControlError(msg)
@@ -127,9 +129,10 @@ class WorkerComputerRuntime:
             if self._pending_controller == session_id:
                 self._pending_controller = None
 
-    async def release_control(self, session_id: str) -> ComputerStatus:
+    async def release_control(self, session_id: str, *, generation: str | None = None) -> ComputerStatus:
         """Release only this viewer's control lease."""
         async with self._lock:
+            self._check_generation(generation)
             if self._controller == session_id:
                 self._controller = None
                 self._epoch += 1
@@ -195,10 +198,17 @@ class WorkerComputerRuntime:
             self._state = "stopped"
             await self.display.close()
 
-    async def stop(self) -> ComputerStatus:
+    def _check_generation(self, generation: str | None) -> None:
+        if generation is not None and generation != self._generation:
+            msg = "Computer generation changed; create a new session."
+            raise ComputerControlError(msg)
+
+    async def stop(self, *, generation: str | None = None) -> ComputerStatus:
         """Stop owned processes and invalidate queued calls, retaining disk state."""
+        self._check_generation(generation)
         self._epoch += 1
         async with self._lock:
+            self._check_generation(generation)
             await self._stop_locked()
             return self.status()
 

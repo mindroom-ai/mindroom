@@ -209,3 +209,16 @@ async def test_timed_out_action_invalidates_uncertain_browser_state() -> None:
         await runtime._run_browser_action(stalled_action)
     assert runtime.status()["state"] == "stopped"
     assert runtime.status()["generation"] != generation
+
+
+@pytest.mark.asyncio
+async def test_stale_control_generation_cannot_stop_replacement_runtime() -> None:
+    """A delayed control request must not mutate a newer computer generation."""
+    runtime = WorkerComputerRuntime(FakeDisplay())
+    original = await runtime.ensure_started()
+    await runtime.stop()
+    replacement = await runtime.ensure_started()
+    with pytest.raises(ComputerControlError):
+        await runtime.stop(generation=original["generation"])
+    assert runtime.status() == replacement
+    await runtime.close()

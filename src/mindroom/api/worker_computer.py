@@ -39,6 +39,7 @@ class ComputerControlRequest(BaseModel):
 
     session_id: str = Field(min_length=1, max_length=256)
     action: Literal["take", "release", "stop"]
+    generation: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 @router.get("", dependencies=[Depends(validate_runner_token)])
@@ -61,10 +62,10 @@ async def control(payload: ComputerControlRequest, computer: Computer) -> Comput
     """Apply exclusive takeover, release, or stop."""
     try:
         if payload.action == "take":
-            return await computer.take_control(payload.session_id)
+            return await computer.take_control(payload.session_id, generation=payload.generation)
         if payload.action == "release":
-            return await computer.release_control(payload.session_id)
-        return await computer.stop()
+            return await computer.release_control(payload.session_id, generation=payload.generation)
+        return await computer.stop(generation=payload.generation)
     except ComputerControlError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

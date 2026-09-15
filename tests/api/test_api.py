@@ -874,9 +874,11 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         *,
         runtime_config: object | None = None,
         touch_live_workers: Callable[[WorkerBackend], None] | None = None,
+        api_app: FastAPI | None = None,
     ) -> int:
         del runtime_config
         assert touch_live_workers is None
+        assert api_app is main.app
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
