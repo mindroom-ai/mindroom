@@ -511,6 +511,41 @@ def test_script_recovery_contract_survives_unrelated_tool_catalog_upgrade() -> N
     assert upgraded.script_recovery_signature() == original.script_recovery_signature()
 
 
+def test_script_recovery_contract_survives_unrelated_agent_delegation_change() -> None:
+    """Another agent's delegation graph does not change a script worker's physical authority."""
+    original, _apps, _core = _backend(
+        config_snapshot={
+            "defaults": {"worker_scope": "user_agent"},
+            "agents": {
+                "analyst": {
+                    "delegate_to": [],
+                    "private": None,
+                    "worker_scope": None,
+                    "knowledge_bases": [],
+                },
+            },
+            "knowledge_bases": {},
+        },
+    )
+    updated, _apps, _core = _backend(
+        config_snapshot={
+            "defaults": {"worker_scope": "user_agent"},
+            "agents": {
+                "analyst": {
+                    "delegate_to": ["analyst"],
+                    "private": None,
+                    "worker_scope": None,
+                    "knowledge_bases": [],
+                },
+            },
+            "knowledge_bases": {},
+        },
+    )
+
+    assert updated.script_recovery_signature() == original.script_recovery_signature()
+    assert updated.legacy_script_recovery_signature() != original.legacy_script_recovery_signature()
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -570,6 +605,46 @@ def test_script_recovery_contract_rejects_changed_grantable_credentials() -> Non
     backend.worker_grantable_credentials = frozenset({"github"})
 
     assert backend.script_recovery_signature() != initial
+
+
+def test_script_recovery_resources_track_only_the_selected_profile() -> None:
+    """Recovery compares the run's pod resources without binding unrelated profiles."""
+    profiles = {
+        "small": {
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "500m", "memory": "512Mi"},
+        },
+        "standard": {
+            "requests": {"cpu": "200m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"},
+        },
+        "large": {
+            "requests": {"cpu": "500m", "memory": "2Gi"},
+            "limits": {"cpu": "2", "memory": "8Gi"},
+        },
+    }
+    backend, _apps, _core = _backend(config_snapshot={}, script_resource_profiles=profiles)
+    backend_signature = backend.script_recovery_signature()
+    initial = backend.script_resource_recovery_authority("standard")
+    legacy_resources = backend.script_resource_recovery_authority(None)
+    backend.config = replace(
+        backend.config,
+        resource_requests={"cpu": "300m", "memory": "768Mi"},
+        resource_limits={"cpu": "1500m", "memory": "3Gi"},
+    )
+    assert backend.script_recovery_signature() == backend_signature
+    assert backend.script_resource_recovery_authority("standard") == initial
+    assert backend.script_resource_recovery_authority(None) != legacy_resources
+
+    unrelated = deepcopy(profiles)
+    unrelated["large"]["limits"]["cpu"] = "4"
+    backend.config = replace(backend.config, script_resource_profiles=unrelated)
+    assert backend.script_resource_recovery_authority("standard") == initial
+
+    selected = deepcopy(unrelated)
+    selected["standard"]["limits"]["cpu"] = "1500m"
+    backend.config = replace(backend.config, script_resource_profiles=selected)
+    assert backend.script_resource_recovery_authority("standard") != initial
 
 
 def _backend(
