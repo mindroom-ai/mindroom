@@ -34,6 +34,8 @@
 - name: MINDROOM_SANDBOX_PROXY_URL
   value: "http://localhost:8766"
 {{- else if eq $workerBackend "kubernetes" }}
+- name: MINDROOM_WORKER_COMPUTER_ENABLED
+  value: {{ $values.workerComputerEnabled | default false | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_NAMESPACE
   value: {{ $instanceNamespace | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_IMAGE

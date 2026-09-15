@@ -292,6 +292,10 @@ probes:
     failureThreshold: 6
 
 workers:
+  # Opt-in visible browser; requires backend=kubernetes, user_agent scope and
+  # browser worker_tools. Set MINDROOM_COMPUTER_ALLOWED_ORIGINS via env.extra.
+  # See docs/tools/worker-computer.md for trusted Chat origin and WSS routing.
+  computerEnabled: false
   # static_runner keeps a sandbox-runner sidecar in this pod.
   # kubernetes lets the MindRoom runtime create worker Deployments on demand.
   backend: static_runner

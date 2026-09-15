@@ -24,6 +24,7 @@ from agno.tools.function import ToolResult
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
@@ -40,6 +41,8 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
+    from playwright.async_api import Download
+
     from mindroom.constants import RuntimePaths
 
 _DEFAULT_PROFILE = "mindroom"
@@ -258,6 +261,7 @@ class _BrowserProfileState:
     context: BrowserContext
     tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
+    cleanup_required: bool = False
 
 
 def _clean_str(value: object) -> str | None:
@@ -555,12 +559,69 @@ class BrowserTools(Toolkit):
         self._command_session_id = uuid4().hex
         self._command_sequences = count()
         self._profiles: dict[str, _BrowserProfileState] = {}
+        self._worker_display: str | None = None
+        self._worker_workspace: Path | None = None
         self._lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
+        self._startup_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._describe_browser_schema()
+
+    def bind_worker_display(self, display: str, workspace: Path) -> str:
+        """Bind a fresh controller to its prepared workspace and return its config key."""
+        if self._profiles:
+            msg = "Bind the worker display before starting browser profiles."
+            raise ValueError(msg)
+        if self._default_target != "host":
+            msg = "Worker computer does not support default_target=desktop."
+            raise ValueError(msg)
+        workspace = workspace.resolve()
+        output_dir = self._configured_output_dir or workspace / "browser"
+        if not output_dir.is_relative_to(workspace):
+            msg = "Worker browser output_dir must stay inside the prepared workspace."
+            raise ValueError(msg)
+        self._worker_display = display
+        self._worker_workspace = workspace
+        self._configured_output_dir = output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return json.dumps(
+            {
+                "output_dir": str(output_dir),
+                "allow_private_networks": self._allow_private_networks,
+                "default_target": self._default_target,
+                "timeout_seconds": self._timeout_seconds,
+            },
+            sort_keys=True,
+        )
+
+    async def aclose(self) -> None:
+        """Close persistent browser resources on their owning event loop."""
+        await run_coroutine_until_complete(self._aclose())
+
+    async def _aclose(self) -> None:
+        """Drain all profiles and retained startup cleanup before releasing ownership."""
+        try:
+            await self._close_profiles()
+        finally:
+            # Startup owns the driver until its handshake settles. A second
+            # cancellation must not orphan cleanup or cancel that handshake.
+            tasks = tuple(self._startup_cleanup_tasks)
+            cleanup = asyncio.gather(*tasks, return_exceptions=True)
+            cancelled: asyncio.CancelledError | None = None
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            results = cleanup.result()
+            self._startup_cleanup_tasks.difference_update(tasks)
+            if cancelled is not None:
+                raise cancelled
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
     def _describe_browser_schema(self) -> None:
         """Attach explicit model-facing descriptions for browser action routing."""
@@ -611,17 +672,25 @@ class BrowserTools(Toolkit):
 
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
-        for profile_name in list(self._profiles.keys()):
-            await self._stop_profile(profile_name)
+        errors: list[Exception] = []
+        async with self._lock:
+            for profile_name in list(self._profiles):
+                try:
+                    await self._stop_profile_locked(profile_name)
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            msg = "Failed to close browser profiles"
+            raise ExceptionGroup(msg, errors)
 
     def close(self) -> None:
         """Close toolkit resources."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            asyncio.run(self._close_profiles())
+            asyncio.run(self.aclose())
             return
-        self._close_task = loop.create_task(self._close_profiles())
+        self._close_task = loop.create_task(self.aclose())
 
     async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
@@ -889,7 +958,11 @@ class BrowserTools(Toolkit):
 
     def _resolve_target(self, *, target: str | None, node: str | None) -> str:
         self._validate_target(target=target, node=node)
-        return _clean_str(target) or self._default_target
+        resolved = _clean_str(target) or self._default_target
+        if self._worker_display is not None and resolved != "host":
+            msg = "Worker computer does not support desktop browser routing."
+            raise ValueError(msg)
+        return resolved
 
     @staticmethod
     def _validated_default_target(default_target: str) -> str:
@@ -1005,13 +1078,13 @@ class BrowserTools(Toolkit):
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
         async with self._lock:
             state = self._profiles.get(profile_name)
-            if state is None:
+            if state is None or state.cleanup_required:
                 return {"action": "status", "profile": profile_name, "running": False, "status": "ok", "tabs": []}
             return await self._profile_status(profile_name, state)
 
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
         async with self._lock:
-            running = sorted(self._profiles.keys())
+            running = sorted(name for name, state in self._profiles.items() if not state.cleanup_required)
         advertised = sorted({_DEFAULT_PROFILE, "chrome", *running})
         return {
             "action": "profiles",
@@ -1036,7 +1109,7 @@ class BrowserTools(Toolkit):
     async def _tab_list(self, state: _BrowserProfileState) -> list[dict[str, Any]]:
         payload_tabs: list[dict[str, Any]] = []
         stale: list[str] = []
-        for target_id, tab in state.tabs.items():
+        for target_id, tab in list(state.tabs.items()):
             if tab.page.is_closed():
                 stale.append(target_id)
                 continue
@@ -1068,6 +1141,8 @@ class BrowserTools(Toolkit):
         page = await state.context.new_page()
         target_id = self._register_tab(state, page)
         await page.goto(target_url, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
+        if self._worker_display is not None:
+            await page.bring_to_front()
         state.active_target_id = target_id
         return {
             "action": "open",
@@ -1083,8 +1158,10 @@ class BrowserTools(Toolkit):
         if target_id not in state.tabs or state.tabs[target_id].page.is_closed():
             msg = f"tab not found: {target_id}"
             raise ValueError(msg)
-        state.active_target_id = target_id
         page = state.tabs[target_id].page
+        if self._worker_display is not None:
+            await page.bring_to_front()
+        state.active_target_id = target_id
         return {
             "action": "focus",
             "profile": profile_name,
@@ -1506,54 +1583,97 @@ class BrowserTools(Toolkit):
         payload.update(extra)
         return payload
 
-    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:
+    async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901, PLR0915 - one startup ownership boundary
         async with self._lock:
             state = self._profiles.get(profile_name)
             if state is not None:
-                return state
+                if not state.cleanup_required:
+                    return state
+                await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
 
-            playwright = await async_playwright().start()
-            launch_kwargs = _persistent_launch_kwargs(self._runtime_paths, profile_name, headless=True)
-            user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
-            _clear_stale_singleton_locks(user_data_dir)
+            manager = async_playwright()
+            acquisition = asyncio.create_task(manager.start())
+            context: BrowserContext | None = None
             try:
+                # The public manager cannot stop its transport during subprocess
+                # creation. Let acquisition settle before attempting cleanup.
+                playwright = await asyncio.shield(acquisition)
+                launch_kwargs = _persistent_launch_kwargs(
+                    self._runtime_paths,
+                    profile_name,
+                    headless=self._worker_display is None,
+                )
+                if self._worker_display is not None:
+                    launch_kwargs["env"] = {
+                        **os.environ,
+                        **self._runtime_paths.process_env,
+                        "DISPLAY": self._worker_display,
+                    }
+                    launch_kwargs["viewport"] = {"width": 1280, "height": 800}
+                    launch_kwargs["downloads_path"] = str(self._resolve_output_dir())
+                user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
+                _clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
-            except PlaywrightError as exc:
-                await playwright.stop()
-                friendly_message = _friendly_playwright_browser_error_message(exc)
-                if friendly_message is not None:
-                    raise RuntimeError(friendly_message) from exc
-                raise
-            except Exception:
-                await playwright.stop()
-                raise
-            await context.route(
-                "**/*",
-                lambda route: continue_or_abort_browser_fetch(
-                    route,
-                    allow_private_networks=self._allow_private_networks,
-                ),
-            )
-            state = _BrowserProfileState(playwright=playwright, context=context)
-            self._profiles[profile_name] = state
+                await context.route(
+                    "**/*",
+                    lambda route: continue_or_abort_browser_fetch(
+                        route,
+                        allow_private_networks=self._allow_private_networks,
+                    ),
+                )
+                state = _BrowserProfileState(playwright=playwright, context=context)
 
-            for page in context.pages:
-                target_id = self._register_tab(state, page)
+                def register_page(page: Page) -> None:
+                    self._register_tab(state, page)
+
+                context.on("page", register_page)
+                for page in context.pages:
+                    target_id = self._register_tab(state, page)
+                    if state.active_target_id is None:
+                        state.active_target_id = target_id
                 if state.active_target_id is None:
-                    state.active_target_id = target_id
-            if state.active_target_id is None:
-                page = await context.new_page()
-                target_id = self._register_tab(state, page)
-                state.active_target_id = target_id
+                    page = await context.new_page()
+                    state.active_target_id = self._register_tab(state, page)
+            except BaseException as exc:
+
+                async def cleanup_startup() -> None:
+                    try:
+                        driver = await acquisition
+                    except BaseException:
+                        await manager.__aexit__(None, None, None)
+                    else:
+                        try:
+                            if context is not None:
+                                await context.close()
+                        finally:
+                            await driver.stop()
+
+                cleanup = asyncio.create_task(cleanup_startup())
+                self._startup_cleanup_tasks.add(cleanup)
+                await asyncio.shield(cleanup)
+                self._startup_cleanup_tasks.discard(cleanup)
+                if isinstance(exc, PlaywrightError):
+                    friendly_message = _friendly_playwright_browser_error_message(exc)
+                    if friendly_message is not None:
+                        raise RuntimeError(friendly_message) from exc
+                raise
+            self._profiles[profile_name] = state
             return state
 
     async def _stop_profile(self, profile_name: str) -> None:
         async with self._lock:
-            state = self._profiles.pop(profile_name, None)
-            if state is None:
-                return
+            await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
+
+    async def _stop_profile_locked(self, profile_name: str) -> None:
+        state = self._profiles.get(profile_name)
+        if state is None:
+            return
+        state.cleanup_required = True
+        try:
             await state.context.close()
+        finally:
             await state.playwright.stop()
+        del self._profiles[profile_name]
 
     async def _resolve_tab(
         self,
@@ -1564,25 +1684,42 @@ class BrowserTools(Toolkit):
         if resolved_target_id is not None:
             tab = state.tabs.get(resolved_target_id)
             if tab is not None and not tab.page.is_closed():
+                if self._worker_display is not None:
+                    await tab.page.bring_to_front()
                 state.active_target_id = resolved_target_id
                 return resolved_target_id, tab
         for candidate_id, tab in state.tabs.items():
             if not tab.page.is_closed():
+                if self._worker_display is not None:
+                    await tab.page.bring_to_front()
                 state.active_target_id = candidate_id
                 return candidate_id, tab
         page = await state.context.new_page()
         candidate_id = self._register_tab(state, page)
+        if self._worker_display is not None:
+            await page.bring_to_front()
         state.active_target_id = candidate_id
         return candidate_id, state.tabs[candidate_id]
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
+        for tab in state.tabs.values():
+            if tab.page is page:
+                return tab.target_id
         target_id = uuid4().hex[:8]
         tab = _BrowserTabState(target_id=target_id, page=page)
         state.tabs[target_id] = tab
         page.on("console", lambda message: self._record_console(tab, message))
         page.on("dialog", lambda dialog: asyncio.create_task(self._handle_dialog(tab, dialog)))
         page.on("close", lambda _: self._remove_tab(state, target_id))
+        if self._worker_display is not None:
+            page.on("download", self._save_worker_download)
         return target_id
+
+    async def _save_worker_download(self, download: Download) -> None:
+        """Copy completed downloads out of Playwright's context-owned temporary files."""
+        filename = Path(download.suggested_filename).name or "download"
+        destination = self._resolve_output_dir() / f"{uuid4().hex}-{filename}"
+        await download.save_as(destination)
 
     @staticmethod
     def _record_console(tab: _BrowserTabState, message: ConsoleMessage) -> None:
@@ -1641,6 +1778,8 @@ class BrowserTools(Toolkit):
             roots = [(self._runtime_paths.storage_root / "browser").resolve()]
         if context is not None and context.storage_path is not None:
             roots.append(context.storage_path.resolve())
+        if self._worker_workspace is not None:
+            roots.append(self._worker_workspace)
         return tuple(roots)
 
     def _resolve_upload_path(self, path: str) -> Path:

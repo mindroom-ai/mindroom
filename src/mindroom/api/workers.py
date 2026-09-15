@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Request
 
 from mindroom.api import config_lifecycle
+from mindroom.api.computers import touch_computer_workers
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
     SandboxWorkerListResponse,
@@ -60,6 +61,7 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
         touch_live_workers = config_lifecycle.app_state(request.app).script_worker_keepalive
         if touch_live_workers is not None:
             touch_live_workers(worker_manager)
+        touch_computer_workers(request.app, worker_manager)
         cleaned_workers = [
             serialize_sandbox_worker_response(worker) for worker in worker_manager.cleanup_idle_workers()
         ]

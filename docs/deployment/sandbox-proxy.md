@@ -298,6 +298,18 @@ In a live validation, separate `code` and `research` requests produced separate 
 
 ## Environment variable reference
 
+### Interactive worker computers
+
+[Worker Computer](../tools/worker-computer.md) adds a persistent headed Chromium browser and a Chat viewer to dedicated Docker and Kubernetes workers.
+Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true` on the primary runtime, use `worker_scope: user_agent`, and include `browser` in the agent's `worker_tools`.
+Set `MINDROOM_COMPUTER_ALLOWED_ORIGINS` to an explicit JSON list of trusted Chat origins and route the public computer HTTP/WebSocket gateway to the actual runtime API.
+The shared static-runner Compose sidecar does not support interactive computers.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the dedicated worker's persistent browser/display | `false` |
+| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | Explicit allowed Chat origins for computer HTTP and WebSocket requests | `[]` |
+
 ### Primary MindRoom runtime (proxy client)
 
 | Variable | Description | Default |
