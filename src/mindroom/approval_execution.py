@@ -23,7 +23,7 @@ from mindroom.agents import create_agent
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
-from mindroom.delegation_execution import drive_delegation_stream, has_delegation_state
+from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator

@@ -49,7 +49,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     is_silent_schedule_no_report_response,
 )
-from mindroom.delegation_execution import drive_delegation_stream, drive_delegations, has_delegation_state
+from mindroom.delegation.execution import drive_delegation_stream, drive_delegations, has_delegation_state
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (

@@ -14,11 +14,11 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_session_storage
-from mindroom.delegation_hooks import after_delegation
-from mindroom.delegation_lifecycle import child_execution_identity, finish_child_turn, settle_child_response
-from mindroom.delegation_sessions import load_subagent, subagent_recovery_lock
-from mindroom.delegation_state import DELEGATION_STATE_KEY, DelegationChild, DelegationState
-from mindroom.delegation_storage import delegation_storage_config
+from mindroom.delegation.hooks import after_delegation
+from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
+from mindroom.delegation.sessions import load_subagent, subagent_recovery_lock
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationState
+from mindroom.delegation.storage import delegation_storage_config
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.types import HistoryScope
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload

@@ -20,7 +20,7 @@ from agno.run.agent import (
 )
 from agno.run.base import RunStatus
 
-from mindroom.delegation_records import (
+from mindroom.delegation.records import (
     DelegationEvent,
     DelegationMetadata,
     DelegationRecordHandle,
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation_state import DelegationChild
+    from mindroom.delegation.state import DelegationChild
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 

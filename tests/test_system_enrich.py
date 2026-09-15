@@ -44,6 +44,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
 from tests.access_schema_support import with_current_room_member_access
@@ -636,6 +637,10 @@ async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Pat
     ):
         generation = await bot._response_runner._process_and_respond(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="Please reply",
                 user_id="@user:localhost",
@@ -688,6 +693,10 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
     ):
         generation = await bot._response_runner._process_and_respond_streaming(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="Please reply",
                 user_id="@user:localhost",

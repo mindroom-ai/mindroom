@@ -177,7 +177,7 @@ def _special_tool_names(
     tool_names: list[str] = []
 
     if agent_config.delegate_to:
-        from mindroom.delegation_lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
+        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
         if delegation_depth < MAX_DELEGATION_DEPTH:
             tool_names.append("delegate")

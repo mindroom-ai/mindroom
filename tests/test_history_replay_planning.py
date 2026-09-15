@@ -20,7 +20,12 @@ from mindroom.history.policy import (
     context_budget_after_reserve,
     resolve_history_execution_plan,
 )
-from mindroom.history.replay import apply_replay_plan, estimate_prompt_visible_history_tokens, plan_replay_that_fits
+from mindroom.history.replay import (
+    _HistorySummaryBudgetError,
+    apply_replay_plan,
+    estimate_prompt_visible_history_tokens,
+    plan_replay_that_fits,
+)
 from mindroom.history.runtime import _compaction_fallback_is_distinct
 from mindroom.history.storage import (
     read_scope_state,
@@ -1299,7 +1304,7 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_when_no_runs_fit(
+async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds_final_budget(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(
@@ -1343,8 +1348,9 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
                 return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
             ),
         ),
+        pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
-        prepared = await prepare_history_for_run_for_test(
+        await prepare_history_for_run_for_test(
             agent=agent,
             agent_name="test_agent",
             full_prompt="Current prompt",
@@ -1365,13 +1371,64 @@ async def test_prepare_history_for_run_forced_compaction_uses_summary_replay_whe
     state = read_scope_state(persisted, scope)
     assert state.last_compacted_run_count == 2
     assert state.force_compact_before_next_run is False
-    assert len(prepared.compaction_outcomes) == 1
-    assert prepared.compaction_outcomes[0].runs_after == 0
-    assert prepared.compaction_outcomes[0].summary == "merged summary"
-    assert prepared.replay_plan is not None
-    assert prepared.replay_plan.mode == "disabled"
-    assert prepared.replay_plan.estimated_tokens > 0
-    assert prepared.replays_persisted_history is True
+
+
+def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_history() -> None:
+    """A summary-only session must fail explicitly instead of returning an oversized replay plan."""
+    summary = SessionSummary(summary="Project fact. " * 2000)
+    session = _session("summary-only", runs=[])
+    session.summary = summary
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    size = estimate_prompt_visible_history_tokens(session=session, scope=scope, history_settings=settings)
+
+    with pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"):
+        plan_replay_that_fits(
+            session=session,
+            scope=scope,
+            history_settings=settings,
+            available_history_budget=500,
+            current_history_tokens=size,
+        )
+
+    assert session.summary is summary
+    assert session.summary.summary == "Project fact. " * 2000
+    assert session.runs == []
+
+    recovered = plan_replay_that_fits(
+        session=session,
+        scope=scope,
+        history_settings=settings,
+        available_history_budget=10_000,
+        current_history_tokens=size,
+    )
+    assert recovered.mode == "configured"
+    assert recovered.estimated_tokens <= 10_000
+
+
+def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() -> None:
+    """A fitting summary remains available when only the raw runs exceed the replay budget."""
+    session = _session(
+        "summary-and-runs",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="x" * 4000)])],
+    )
+    session.summary = SessionSummary(summary="Project facts")
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    plan = plan_replay_that_fits(
+        session=session,
+        scope=scope,
+        history_settings=settings,
+        available_history_budget=100,
+        current_history_tokens=estimate_prompt_visible_history_tokens(
+            session=session,
+            scope=scope,
+            history_settings=settings,
+        ),
+    )
+    assert plan.mode == "disabled"
+    assert 0 < plan.estimated_tokens <= 100
+    assert session.summary.summary == "Project facts"
 
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:

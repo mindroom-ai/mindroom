@@ -11,8 +11,8 @@ from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.delegation_state import DelegationChild
-from mindroom.delegation_storage import freeze_delegation_storage
+from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity

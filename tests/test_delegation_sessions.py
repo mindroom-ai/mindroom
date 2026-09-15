@@ -11,17 +11,17 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.delegation_lifecycle import reserve_child_turn
-from mindroom.delegation_recovery import resolve_subagent
-from mindroom.delegation_sessions import (
+from mindroom.delegation.lifecycle import reserve_child_turn
+from mindroom.delegation.recovery import resolve_subagent
+from mindroom.delegation.sessions import (
     SubagentSessionError,
     load_subagent,
     reserve_subagent_turn,
     subagent_liveness,
     update_subagent_turn,
 )
-from mindroom.delegation_state import DelegationChild
-from mindroom.delegation_storage import freeze_delegation_storage
+from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.test_delegate_tools import _runtime_paths
 from tests.test_delegation_direct_audit import _identity

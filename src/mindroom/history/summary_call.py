@@ -23,8 +23,8 @@ from mindroom.history.summary_provider_compat import (
     configure_summary_model,
     effective_summary_timeout_seconds,
     response_output_tokens,
+    summary_completion_status,
     summary_output_token_limit,
-    summary_response_was_truncated,
 )
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
@@ -45,6 +45,10 @@ class _CompactionSummaryTimeoutError(TimeoutError):
 
 class CompactionSummaryOutputLimitError(RuntimeError):
     """Raised when the summary response reaches the configured output-token cap."""
+
+
+class CompactionSummaryIncompleteError(RuntimeError):
+    """Raised when a provider returns partial text without completing the summary."""
 
 
 class _CompactionSummaryEmptyResultError(RuntimeError):
@@ -241,9 +245,13 @@ async def generate_compaction_summary(
             f"has_reasoning={bool(response.reasoning_content or response.redacted_reasoning_content)})"
         )
         raise _CompactionSummaryEmptyResultError(msg)
-    if summary_response_was_truncated(response, output_token_limit=summary_output_limit):
+    completion = summary_completion_status(response, output_token_limit=summary_output_limit)
+    if completion == "output_limit":
         msg = "compaction summary hit configured output token limit; refusing to persist incomplete summary"
         raise CompactionSummaryOutputLimitError(msg)
+    if completion == "incomplete":
+        msg = "provider returned an incomplete compaction summary; refusing to persist partial text"
+        raise CompactionSummaryIncompleteError(msg)
     return SessionSummary(summary=normalized_text, updated_at=datetime.now(UTC))
 
 

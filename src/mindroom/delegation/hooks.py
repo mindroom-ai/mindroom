@@ -6,7 +6,7 @@ import time
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
-from mindroom.delegation_state import DelegationHookState
+from mindroom.delegation.state import DelegationHookState
 from mindroom.hooks import HookRegistry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks

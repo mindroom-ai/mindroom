@@ -583,6 +583,7 @@ def test_codex_tool_search_items_round_trip_through_streaming_history() -> None:
         "tool_search_items": expected_items,
         "response_id": "resp_1",
         "mindroom_response_stored": False,
+        "mindroom_portable_replay": False,
     }
     assert client.responses.captured_kwargs[1]["input"] == [
         {"role": "user", "content": "What is the weather?"},
@@ -617,7 +618,6 @@ def test_codex_tool_search_items_replay_ahead_of_the_discovered_function_call() 
         dict(_TOOL_SEARCH_OUTPUT_ITEM),
         {
             "type": "function_call",
-            "id": "fc_1",
             "call_id": "call_1",
             "name": "get_weather",
             "arguments": "{}",

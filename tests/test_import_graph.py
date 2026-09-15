@@ -373,25 +373,25 @@ def test_tool_auto_install_smoke_entrypoint_imports() -> None:
     ("module", "forbidden"),
     [
         (
-            "mindroom.delegation_sessions",
+            "mindroom.delegation.sessions",
             (
-                "mindroom.delegation_recovery",
-                "mindroom.delegation_execution",
-                "mindroom.delegation_lifecycle",
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
+                "mindroom.delegation.lifecycle",
                 "mindroom.custom_tools.delegate",
             ),
         ),
         (
-            "mindroom.delegation_audit",
+            "mindroom.delegation.audit",
             (
-                "mindroom.delegation_sessions",
-                "mindroom.delegation_lifecycle",
-                "mindroom.delegation_recovery",
-                "mindroom.delegation_execution",
+                "mindroom.delegation.sessions",
+                "mindroom.delegation.lifecycle",
+                "mindroom.delegation.recovery",
+                "mindroom.delegation.execution",
             ),
         ),
-        ("mindroom.delegation_execution", ("mindroom.ai", "mindroom.custom_tools.delegate")),
-        ("mindroom.delegation_state", ("agno", "mindroom.config", "mindroom.knowledge")),
+        ("mindroom.delegation.execution", ("mindroom.ai", "mindroom.custom_tools.delegate")),
+        ("mindroom.delegation.state", ("agno", "mindroom.config", "mindroom.knowledge")),
     ],
 )
 def test_delegation_dependencies_point_toward_state_and_storage(module: str, forbidden: tuple[str, ...]) -> None:

@@ -160,16 +160,20 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 The child uses the normal agent response envelope, so its history, tools, and model behavior follow the existing runtime.
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
 
+The runtime lives in the `src/mindroom/delegation/` package, with explicit imports between its modules.
+
 | Module | Owns |
 | --- | --- |
 | `custom_tools/delegate.py` | Agent-facing tool schemas and direct invocation |
 | `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
-| `delegation_execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
-| `delegation_lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
-| `delegation_recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
-| `delegation_sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |
-| `delegation_audit.py` / `delegation_records.py` | Workspace audit projections, event logs, transcripts, and receipts |
-| `delegation_state.py` | Serializable runtime state and the child-runner protocol |
+| `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
+| `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
+| `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
+| `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |
+| `delegation/audit.py` / `delegation/records.py` | Workspace audit projections, event logs, transcripts, and receipts |
+| `delegation/state.py` | Serializable runtime state and the child-runner protocol |
+| `delegation/hooks.py` | Persisted plugin hook phases across approval continuations |
+| `delegation/storage.py` | Frozen storage bindings for retained runs |
 
 Both direct and native invocation use the same child preparation and lifecycle owner.
 The native driver receives its response runner explicitly and does not construct the agent-facing toolkit.

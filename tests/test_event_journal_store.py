@@ -71,6 +71,7 @@ from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix_delivery import MatrixDeliveryWorker
+from mindroom.response_sources import ResponseSources
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.conftest import postgres_journal_schema_url
 from tests.journal_membership_helpers import admit_room_membership
@@ -6244,7 +6245,7 @@ class TestApprovalContinuations:
             thread_id="$thread",
             requester_id=ALICE,
             response_event_id="$waiting",
-            source_event_ids=("$source-1", "$source-2"),
+            sources=ResponseSources(("$source-1", "$source-2"), ("$source-1", "$source-2")),
             calls=(
                 ApprovalCall(
                     tool_call_id="call-1",
@@ -6517,10 +6518,16 @@ class TestApprovalContinuations:
         await alice.acknowledge_matrix_delivery(
             delivery_id="$source-1",
             stage=DeliveryStage.INITIAL,
-            event_id="$different" if proof == "wrong_response" else "$waiting",
+            event_id="$waiting",
             delivered_projections=(),
         )
         await alice.create_approval_continuation(self.continuation(state="ready" if proof == "ready" else "failing"))
+        if proof == "wrong_response":
+            await journal_store.backend.write(
+                lambda tx: tx.execute(
+                    "UPDATE matrix_delivery_outbox SET acknowledged_event_id = '$different' WHERE stage = 'initial'",
+                ),
+            )
         if proof == "owed_final":
             await alice.enqueue_matrix_delivery(
                 delivery_id="$source-1",
@@ -7717,6 +7724,7 @@ class TestApprovalContinuations:
             room_id=ROOM,
             thread_id="$thread",
             payload=text("finished"),
+            edits_event_id="$waiting",
         )
         await alice.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
         await alice.acknowledge_matrix_delivery(
@@ -7747,6 +7755,7 @@ class TestApprovalContinuations:
             room_id=ROOM,
             thread_id="$thread",
             payload=text("finished"),
+            edits_event_id="$waiting",
         )
         await responder.claim_matrix_delivery(delivery_id="$source-1", stage=DeliveryStage.FINAL)
         await responder.acknowledge_matrix_delivery(
@@ -8088,7 +8097,7 @@ class TestApprovalContinuations:
                 self.continuation(state="waiting"),
                 approval_id=f"approval-page-{index}",
                 entity_name="removed" if index != 2 else "configured",
-                source_event_ids=(source_event_id,),
+                sources=ResponseSources((source_event_id,), (source_event_id,)),
             )
             assert await alice.create_approval_continuation(continuation) == continuation
 

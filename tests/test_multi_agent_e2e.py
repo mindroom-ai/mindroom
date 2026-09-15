@@ -33,6 +33,7 @@ from tests.conftest import (
     patch_response_runner_module,
     runtime_paths_for,
 )
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
@@ -323,6 +324,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             rooms=[test_room_id],
             enable_streaming=False,
         )
+        install_direct_response_admission(bot)
         install_runtime_journal_support(bot)
 
         # Mock orchestrator

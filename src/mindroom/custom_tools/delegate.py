@@ -16,7 +16,7 @@ from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import run_delegated_child_response
-from mindroom.delegation_lifecycle import (
+from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_run_context,
     finish_child_turn,
@@ -24,8 +24,8 @@ from mindroom.delegation_lifecycle import (
     reserve_child_turn,
     start_child_turn,
 )
-from mindroom.delegation_recovery import resolve_subagent
-from mindroom.delegation_sessions import (
+from mindroom.delegation.recovery import resolve_subagent
+from mindroom.delegation.sessions import (
     SubagentSessionError,
     subagent_liveness,
 )
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation_state import DelegationChild
+    from mindroom.delegation.state import DelegationChild
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 

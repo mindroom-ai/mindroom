@@ -101,6 +101,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
 )
 from mindroom.response_runner import PostLockRequestPreparationError, ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams import TeamIntent, TeamMode, select_ad_hoc_team_mode
 from mindroom.text_ingress_dispatch import dispatch_text_message
@@ -288,8 +289,8 @@ class _EditRegenerator(Protocol):
         event: nio.RoomMessageFormatted,
         event_info: EventInfo,
         requester_user_id: str,
-    ) -> None:
-        """Regenerate the owned response for one edited user turn."""
+    ) -> bool | None:
+        """Regenerate an edit and report any durable source handoff."""
 
 
 @dataclass(frozen=True)
@@ -826,7 +827,7 @@ class TurnController:
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[nio.RoomMessageFormatted],
         event_info: EventInfo,
-    ) -> None:
+    ) -> bool | None:
         """Hand one edited user turn to the edit regenerator."""
         async with admitted_response_decision(
             self.deps.runtime.response_admission_gate,
@@ -836,8 +837,8 @@ class TurnController:
                 prechecked_event.requester_user_id,
                 room.room_id,
             ):
-                return
-            await self.deps.edit_regenerator.handle_message_edit(
+                return None
+            return await self.deps.edit_regenerator.handle_message_edit(
                 room,
                 prechecked_event.event,
                 event_info,
@@ -1709,6 +1710,13 @@ class TurnController:
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
                 thread_history=thread_history,
+                sources=ResponseSources(
+                    pending_event_ids=tuple(
+                        dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)),
+                    ),
+                    logical_source_event_ids=selection_handled_turn.source_event_ids,
+                    discovery_event_ids=selection_handled_turn.discovery_event_ids,
+                ),
                 history_boundary_event_id=source_event_id,
                 member_display_names=room_member_display_names(room),
                 existing_event_id=ack_event_id,
@@ -2049,6 +2057,13 @@ class TurnController:
                     thread_history=dispatch.context.thread_history,
                     member_display_names=room_member_display_names(room),
                     prompt=event.body,
+                    sources=ResponseSources(
+                        pending_event_ids=tuple(
+                            dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
+                        ),
+                        logical_source_event_ids=handled_turn.source_event_ids,
+                        discovery_event_ids=handled_turn.discovery_event_ids,
+                    ),
                     user_id=dispatch.requester_user_id,
                     existing_event_id=recovered_response_event_id,
                     existing_event_is_placeholder=recovered_response_event_id is not None,
@@ -2239,8 +2254,8 @@ class TurnController:
         try:
             if event_info.is_edit:
                 await reservation_owner.release()
-                await self._handle_edit_event(room, prechecked_event, event_info)
-                return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+                handed_off = await self._handle_edit_event(room, prechecked_event, event_info)
+                return TurnDispatchOutcome.DEFERRED if handed_off is True else TurnDispatchOutcome.INTENTIONALLY_IGNORED
             routed_alias = self.deps.ingress.router_relay_original_event_id(event)
             claim_aliases = (routed_alias,) if routed_alias else ()
             pending_turn = TurnRecord.create(

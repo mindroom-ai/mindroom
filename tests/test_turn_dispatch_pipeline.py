@@ -60,6 +60,7 @@ from mindroom.response_runner import (
     ResponseRunner,
     _ResponseGenerationOutcome,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
 from mindroom.text_ingress_dispatch import _run_claimed_response
 from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent, _ReadyVoiceFallback
@@ -102,6 +103,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
+from tests.response_attempt_helpers import install_direct_response_admission
 from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
 from tests.turn_dispatch_helpers import dispatch_test_turn
 
@@ -3198,6 +3200,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-deliver-suppress-existing",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -3220,6 +3223,7 @@ class TestAgentBot(AgentBotTestBase):
         """Failed edits of an existing visible response must keep the prior event visible but retryable."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
         gateway = replace_delivery_gateway_deps(
@@ -3250,6 +3254,10 @@ class TestAgentBot(AgentBotTestBase):
                         response_kind="ai",
                         response_envelope=response_envelope,
                         correlation_id="corr-deliver-existing-failure",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
                     ),
                     tool_trace=None,
                     extra_content=None,
@@ -3293,6 +3301,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-deliver-before-hook-crash",
+                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
                 extra_content=None,
@@ -3339,6 +3348,10 @@ class TestAgentBot(AgentBotTestBase):
                         response_kind="ai",
                         response_envelope=response_envelope,
                         correlation_id="corr-deliver-before-hook-cancel",
+                        sources=ResponseSources(
+                            (response_envelope.source_event_id,),
+                            (response_envelope.source_event_id,),
+                        ),
                     ),
                     tool_trace=None,
                     extra_content=None,

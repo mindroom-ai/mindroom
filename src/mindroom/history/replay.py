@@ -9,7 +9,12 @@ from agno.run.team import TeamRunOutput
 from agno.utils.message import filter_tool_calls
 
 from mindroom.constants import prompt_roles_for_history_storage
-from mindroom.history.message_content import media_payload_snapshot, message_media_entries, render_message_content
+from mindroom.history.message_content import (
+    image_content_for_token_estimation,
+    media_payload_snapshot,
+    message_media_entries,
+    render_message_content,
+)
 from mindroom.history.types import HistoryPolicy, HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
 from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
@@ -25,8 +30,14 @@ if TYPE_CHECKING:
     from agno.session.team import TeamSession
     from agno.team import Team
 
+    from mindroom.native_compaction import NativeCompactionModel
+
 
 logger = get_logger(__name__)
+
+
+class _HistorySummaryBudgetError(RuntimeError):
+    """The saved summary cannot fit in the current run's history budget."""
 
 
 def estimate_prompt_visible_history_tokens(
@@ -35,6 +46,7 @@ def estimate_prompt_visible_history_tokens(
     scope: HistoryScope,
     history_settings: ResolvedHistorySettings,
     native_route: str | None = None,
+    replay_model: NativeCompactionModel | None = None,
 ) -> int:
     """Estimate the durable summary plus visible persisted history for one run."""
     summary_tokens = _estimate_session_summary_tokens(current_summary_text(session))
@@ -44,14 +56,43 @@ def estimate_prompt_visible_history_tokens(
         history_settings=history_settings,
     )
     if native_route is None:
-        return summary_tokens + _estimate_history_messages_tokens(history_messages)
+        provider_estimate = (
+            replay_model.estimate_portable_replay_tokens(history_messages) if replay_model is not None else None
+        )
+        if (
+            replay_model is not None
+            and provider_estimate is not None
+            and replay_model.portable_replay_uses_visual_tokens()
+        ):
+            # The provider accounts for visual input. Do not reintroduce
+            # encoded image bytes through the canonical chars/4 fallback.
+            history_messages = [_without_image_transport(message) for message in history_messages]
+        return summary_tokens + max(_estimate_history_messages_tokens(history_messages), provider_estimate or 0)
     projected = native_replay_messages(history_messages, native_route)
-    return summary_tokens + sum(
-        checkpoint_estimated_tokens(items)
-        if (items := checkpoint_items(message, native_route))
-        else (_estimated_message_chars(message) + 3) // 4
-        for message in projected
+    checkpoint_tokens = 0
+    tail = []
+    for message in projected:
+        if items := checkpoint_items(message, native_route):
+            checkpoint_tokens += checkpoint_estimated_tokens(items)
+        else:
+            tail.append(message)
+    provider_estimate = (
+        replay_model.estimate_portable_replay_tokens(tail) if replay_model is not None and tail else None
     )
+    if replay_model is not None and provider_estimate is not None and replay_model.portable_replay_uses_visual_tokens():
+        tail = [_without_image_transport(message) for message in tail]
+    tail_tokens = sum((_estimated_message_chars(message) + 3) // 4 for message in tail)
+    return summary_tokens + checkpoint_tokens + max(tail_tokens, provider_estimate or 0)
+
+
+def _without_image_transport(message: Message) -> Message:
+    """Project canonical images for estimation without changing saved messages."""
+    updates: dict[str, object] = {}
+    if isinstance(message.content, list):
+        updates["content"] = [image_content_for_token_estimation(block) for block in message.content]
+    if message.images:
+        updates["images"] = [image.model_copy(update={"url": None}) for image in message.images]
+    return message.model_copy(update=updates) if updates else message
 
 
 def _estimate_session_summary_tokens(summary_text: str | None) -> int:
@@ -208,8 +249,17 @@ def plan_replay_that_fits(
     history_settings: ResolvedHistorySettings,
     available_history_budget: int,
     current_history_tokens: int,
+    replay_model: NativeCompactionModel | None = None,
 ) -> ResolvedReplayPlan:
     """Return the safest persisted-replay plan that fits the current run budget."""
+    summary_tokens = _session_summary_replay_tokens(session)
+    if summary_tokens > available_history_budget:
+        msg = (
+            "Saved conversation summary exceeds the available history budget "
+            f"({summary_tokens} estimated tokens; {available_history_budget} available). "
+            "Choose a model with a larger context window or reduce the current prompt."
+        )
+        raise _HistorySummaryBudgetError(msg)
     if current_history_tokens <= available_history_budget:
         return configured_replay_plan(
             history_settings=history_settings,
@@ -228,6 +278,7 @@ def plan_replay_that_fits(
         available_history_budget=available_history_budget,
         limit_mode=limit_mode,
         max_limit=max_limit,
+        replay_model=replay_model,
     )
     if fitting_limit > 0:
         num_history_runs, num_history_messages = _history_limit_fields(limit_mode, fitting_limit)
@@ -281,6 +332,7 @@ def _find_fitting_history_limit_for_budget(
     available_history_budget: int,
     limit_mode: Literal["runs", "messages"],
     max_limit: int,
+    replay_model: NativeCompactionModel | None = None,
 ) -> tuple[int, int]:
     if max_limit <= 0 or available_history_budget <= 0:
         return 0, 0
@@ -299,6 +351,7 @@ def _find_fitting_history_limit_for_budget(
                 mode=limit_mode,
                 limit=mid,
             ),
+            replay_model=replay_model,
         )
         if candidate_tokens <= available_history_budget:
             best = mid

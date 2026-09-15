@@ -17,8 +17,8 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
-from mindroom.delegation_execution import drive_delegations
-from mindroom.delegation_state import DelegationState
+from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.state import DelegationState
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity

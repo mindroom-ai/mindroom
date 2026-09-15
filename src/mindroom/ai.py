@@ -37,8 +37,8 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
-from mindroom.delegation_execution import drive_delegation_stream, drive_delegations
-from mindroom.delegation_lifecycle import (
+from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
+from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
     note_child_run_id,
@@ -125,7 +125,7 @@ if TYPE_CHECKING:
     from mindroom.ai_turn_state import AITurnState
     from mindroom.config.main import Config, ResolvedRuntimeModel
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation_state import DelegationChild
+    from mindroom.delegation.state import DelegationChild
     from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage

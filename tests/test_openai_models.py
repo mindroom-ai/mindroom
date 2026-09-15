@@ -197,6 +197,24 @@ def test_responses_reject_background_mode_with_disabled_storage(storage_kwargs: 
         MindRoomOpenAIResponses(id="custom-alias", background=True, **storage_kwargs)
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"request_params": {"previous_response_id": "resp_stale"}},
+        {"extra_body": {"previous_response_id": "resp_stale", "custom_option": True}},
+        {"request_params": {"extra_body": {"previous_response_id": "resp_stale", "custom_option": True}}},
+    ],
+)
+def test_portable_replay_removes_explicit_continuation_overrides(params: dict) -> None:
+    """Extra request overrides must not reintroduce context excluded by history fitting."""
+    model = MindRoomOpenAIResponses(id="gpt-6-astra", **params)
+    model.configure_portable_replay()
+    request = model.get_request_params(messages=[Message(role="user", content="Continue")])
+    assert "previous_response_id" not in request
+    if "extra_body" in request:
+        assert request["extra_body"] == {"custom_option": True}
+
+
 @pytest.mark.parametrize("storage_kwargs", [{"store": False}, {"request_params": {"store": False}}])
 def test_explicit_reasoning_respects_disabled_response_storage(storage_kwargs: dict) -> None:
     """Reasoning aliases must not turn a stateless request into server-side storage."""

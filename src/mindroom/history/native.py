@@ -26,6 +26,7 @@ def configure_native_history(
     """Enable native requests only when they preserve the scope's authored semantics."""
     if not isinstance(model, NativeCompactionModel):
         return None
+    model.configure_portable_replay(enabled=plan.hard_replay_budget_tokens is not None)
     threshold = plan.trigger_threshold_tokens
     static_tokens = plan.static_prompt_tokens
     hard_budget = plan.hard_replay_budget_tokens
@@ -59,6 +60,7 @@ def restore_native_history(
     if not isinstance(model, NativeCompactionModel):
         return
     latest = next((message for message in reversed(persisted_run.messages or []) if message.role == "assistant"), None)
+    model.restore_portable_replay(latest)
     saved = recorded_native_settings(latest) if latest is not None else None
     summary = session.summary.summary.strip() if session is not None and session.summary is not None else ""
     model.configure_native_compaction(

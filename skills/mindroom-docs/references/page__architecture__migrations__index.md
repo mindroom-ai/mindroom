@@ -28,9 +28,10 @@ The remaining rows were already focused boundaries and complete the current map.
 | --- | --- | --- |
 | [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
 | [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion and usage diagnostics encounter an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, diagnostics, and byte accounting remain with current owners. |
-| [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters replay histories written before empty tool arguments were preserved. | Repair copies changed messages, supplies empty arguments, and drops placeholder calls with their associated orphan tool results without mutating stored history. |
+| [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `openai_response_replay.py`. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
+| [`src/mindroom/event_journal/legacy_response_attempts.py`][legacy-response-attempts] | Backend startup finds released approval/outbox tables without `response_attempts`. | One schema transaction adopts stable source identity, preserves pending approvals and frozen wire payloads, and aborts corrupt required live ownership; a second open does not repeat adoption. |
 | [`src/mindroom/legacy_delivery_payloads.py`][legacy-delivery] | Outbox reads or Matrix writes encounter inline FINAL results and the bounded marker. | Old inline outcomes keep rolling-writer precedence, current local results remain authoritative otherwise, and full recovery data stays off the wire. |
 | [`src/mindroom/legacy_approval_payloads.py`][legacy-approval] | Approval claim or resume encounters missing historical context or the older card ID. | Current approval ownership, authorization, exact-call checks, transaction settlement, and failure handling remain with current owners. |
 | [`src/mindroom/event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | Approval settlement encounters an INITIAL retired by historical deleted-response cleanup. | The helper proves exact source and response tombstones with no FINAL; current owners retain card expiration, failure fencing, retries, locking, and transactional settlement. |
@@ -60,7 +61,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | --- | --- |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
 | [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover precedence and retained duplicates. |
-| [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments, streamed placeholders, matching orphan results, copying, and input nonmutation. |
+| [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments and placeholder pairs; [Responses replay tests][openai-replay-tests] and [history tests][native-history-tests] cover reasoning tails, filtered call/result links, bounded SQLite replay, and unchanged canonical state. |
 | [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
 | [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] start from literal pre-Nio DDL and verify retained history and terminal facts, retired unfinished work, and stable repeat opening. |
 | [`legacy_delivery_payloads.py`][legacy-delivery] and [`legacy_approval_payloads.py`][legacy-approval] | [Journal store][journal-store-tests], [response runner][response-runner-tests], and [approval][approval-tests] tests cover visible-result precedence, wire sanitation, frozen visibility, origin recovery, and sparse card identity. |
@@ -82,6 +83,11 @@ This index intentionally excludes current authoring shorthands, protocol adapter
 Sparse publication, job, and failure fields in [`knowledge/index_metadata.py`][knowledge-index] remain a current writer contract: the writer still omits optional values and the reader accepts those sparse in-progress and failed records.
 Dependency-owned schemas remain attributed to their dependency, and removed readers remain documented as removed rather than recreated only to obtain conversion coverage.
 The coverage delivered here is limited to Python owners, including the SSO route; inventoried SQL migrations, browser cleanup, and infrastructure setup below remain outside this implementation and carry no new annotation or test claim.
+
+The explicit response attempt schema replaces ownership inference used by the last verified native writer, v2026.9.137.
+SQLite holds its startup writer transaction and PostgreSQL its schema advisory lock while the migration runs.
+Literal released SQL and JSON in [response attempt migration tests][response-attempt-migration-tests] cover both backends, rollback, repeated opens, inline result precedence, ordinary completed turns, and retained delivery debt.
+The migration assumes no active responses; current callers pass typed ownership independently of terminal recovery snapshots.
 
 ## Journal, delivery, approvals, and sync
 
@@ -315,6 +321,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [memory-flush-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_memory_auto_flush.py
 [oauth-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_oauth_credential_store.py
 [openai-model-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_models.py
+[openai-replay-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_openai_native_compaction.py
+[native-history-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_native_compaction_history.py
 [partial-reply-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_partial_reply_context.py
 [private-storage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_private_storage_migration.py
 [report-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_report_publishing.py
@@ -328,3 +336,6 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [turn-store-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_turn_store.py
 [usage-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_usage_stats_storage.py
 [workflow-scheduling-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_workflow_scheduling.py
+
+[legacy-response-attempts]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/event_journal/legacy_response_attempts.py
+[response-attempt-migration-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_response_attempts_migration.py

@@ -12,6 +12,7 @@ from mindroom.approval_response import ApprovalResponseCoordinator
 from mindroom.config.main import Config
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.event_journal import ApprovalContinuation, EventJournalStore, PrincipalStore
+from mindroom.response_sources import ResponseSources
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ def _continuation() -> ApprovalContinuation:
         thread_id="$thread",
         requester_id="@human:test",
         response_event_id="$response",
-        source_event_ids=("$source",),
+        sources=ResponseSources(("$source",), ("$source",)),
         calls=(),
         state="failing",
         failure_reason="cancelled_by_user",

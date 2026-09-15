@@ -13,16 +13,16 @@ from agno.run.base import RunStatus
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.delegation_audit import (
+from mindroom.delegation.audit import (
     child_audit_context,
     finish_child_record,
     record_child_response,
     start_child_record,
 )
-from mindroom.delegation_audit import observe_child_event as record_child_event
-from mindroom.delegation_sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
-from mindroom.delegation_state import DelegationChild
-from mindroom.delegation_storage import freeze_delegation_storage
+from mindroom.delegation.audit import observe_child_event as record_child_event
+from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
+from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 

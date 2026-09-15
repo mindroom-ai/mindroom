@@ -44,6 +44,7 @@ from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import (
@@ -86,6 +87,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -333,6 +335,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_direct_response_admission(helper_bot)
         install_runtime_journal_support(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
@@ -352,6 +355,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
@@ -473,6 +477,7 @@ class TestStreamingBehavior:
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
+        install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
 
@@ -2036,6 +2041,10 @@ class TestStreamingBehavior:
         ):
             generation = await bot._response_runner._process_and_respond_streaming(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(envelope.source_event_id,),
+                        logical_source_event_ids=(envelope.source_event_id,),
+                    ),
                     thread_history=[],
                     prompt="Continue",
                     user_id="@user:localhost",
@@ -2144,6 +2153,10 @@ class TestStreamingBehavior:
             event_id = await asyncio.wait_for(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=("$event",),
+                            logical_source_event_ids=("$event",),
+                        ),
                         thread_history=[],
                         prompt="Please check the docs",
                         user_id="@user:localhost",
@@ -2211,6 +2224,10 @@ class TestStreamingBehavior:
         ):
             generation = await bot._response_runner._process_and_respond(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$event",),
+                        logical_source_event_ids=("$event",),
+                    ),
                     thread_history=[],
                     prompt="Please check the docs",
                     user_id="@user:localhost",

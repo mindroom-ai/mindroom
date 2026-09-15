@@ -19,10 +19,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation_execution import drive_delegations
-from mindroom.delegation_hooks import before_delegation
-from mindroom.delegation_recovery import _cancel_delegations
-from mindroom.delegation_state import DelegationState
+from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.hooks import before_delegation
+from mindroom.delegation.recovery import _cancel_delegations
+from mindroom.delegation.state import DelegationState
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -124,7 +124,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
                 content="Child cancelled",
             )
 
-        monkeypatch.setattr("mindroom.delegation_execution._execute_child", cancelled)
+        monkeypatch.setattr("mindroom.delegation.execution._execute_child", cancelled)
     toolkit = DelegateTools("leader", ["child"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)

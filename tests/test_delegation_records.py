@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 def _records_module() -> ModuleType:
-    return importlib.import_module("mindroom.delegation_records")
+    return importlib.import_module("mindroom.delegation.records")
 
 
 @pytest.mark.asyncio

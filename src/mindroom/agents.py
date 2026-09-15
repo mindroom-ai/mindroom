@@ -704,7 +704,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     if tool_name == "delegate":
         # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
         from mindroom.custom_tools import delegate  # noqa: PLC0415
-        from mindroom.delegation_lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
+        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
 
         if not agent_config.delegate_to:
             logger.warning(

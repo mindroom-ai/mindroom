@@ -23,8 +23,8 @@ from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
 
 from mindroom.agent_storage import create_session_storage
 from mindroom.approval_receipt import install_approval_receipt_hooks
-from mindroom.delegation_hooks import after_delegation, before_delegation
-from mindroom.delegation_lifecycle import (
+from mindroom.delegation.hooks import after_delegation, before_delegation
+from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_execution_identity,
     child_run_context,
@@ -36,13 +36,13 @@ from mindroom.delegation_lifecycle import (
     settle_child_response,
     start_child_turn,
 )
-from mindroom.delegation_recovery import interrupt_child, read_child_run, resolve_subagent
-from mindroom.delegation_sessions import (
+from mindroom.delegation.recovery import interrupt_child, read_child_run, resolve_subagent
+from mindroom.delegation.sessions import (
     SubagentSessionError,
     subagent_liveness,
 )
-from mindroom.delegation_state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
-from mindroom.delegation_storage import freeze_delegation_storage
+from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
+from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation_state import ChildResponseRunner
+    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 

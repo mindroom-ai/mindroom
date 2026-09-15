@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.legacy_openai_tool_replay import repair_legacy_responses_span
 from mindroom.native_compaction import checkpoint_items
 
 if TYPE_CHECKING:
@@ -83,9 +84,32 @@ def formatted_input_with_provider_items(
             cursor = anchor + len(replacement)
         else:
             items = data.get(_TOOL_SEARCH_ITEMS_KEY) or []
-            prepared_input[anchor:anchor] = items
-            cursor = anchor + len(items) + size
+            span = prepared_input[anchor : anchor + size]
+            if replay_reasoning:
+                span = _reconstructed_response_input(message, span)
+            prepared_input[anchor : anchor + size] = [*items, *span]
+            cursor = anchor + len(items) + len(span)
     return prepared_input
+
+
+def _reconstructed_response_input(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]]:
+    """Build valid input from canonical content when original output cannot be reused."""
+    repaired_span = repair_legacy_responses_span(message, formatted_span)
+    content = message.content
+    if isinstance(content, list):
+        content = [
+            {"type": "input_text", "text": part}
+            if isinstance(part, str)
+            else {"type": "input_text", "text": part["text"]}
+            if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+            else part
+            for part in content
+        ]
+    if not message.tool_calls:
+        return [{**repaired_span[0], "content": content if content is not None else ""}]
+    if content:
+        repaired_span.insert(0, {"role": "assistant", "content": content})
+    return repaired_span
 
 
 def _canonical_response_output(message: Message, formatted_span: list[Any]) -> list[dict[str, Any]] | None:

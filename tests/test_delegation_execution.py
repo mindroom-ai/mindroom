@@ -26,15 +26,16 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation_execution import (
+from mindroom.delegation.execution import (
     drive_delegation_stream,
     drive_delegations,
 )
-from mindroom.delegation_lifecycle import note_child_run_id
-from mindroom.delegation_records import DelegationRecordLocator, DelegationRecordOwner
-from mindroom.delegation_recovery import _cancel_delegations, cancel_approval_delegations
-from mindroom.delegation_state import DelegationState
+from mindroom.delegation.lifecycle import note_child_run_id
+from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
+from mindroom.delegation.recovery import _cancel_delegations, cancel_approval_delegations
+from mindroom.delegation.state import DelegationState
 from mindroom.event_journal import ApprovalContinuation
+from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.teams import (
     _attach_team_pause_presentation,
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
     from agno.models.message import Message
 
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation_state import DelegationChild
+    from mindroom.delegation.state import DelegationChild
 
 
 @dataclass
@@ -361,7 +362,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                             thread_id=None,
                             requester_id=identity.requester_id,
                             response_event_id="$response",
-                            source_event_ids=("$source",),
+                            sources=ResponseSources(("$source",), ("$source",)),
                             calls=(),
                             state="failing",
                             execution_identity=state.children[0].execution_identity
@@ -527,7 +528,7 @@ async def test_failed_nested_resume_settles_descendants_and_visible_tools(
         message = "resume failed"
         raise RuntimeError(message)
 
-    monkeypatch.setattr("mindroom.delegation_execution._continue_child", failed_resume)
+    monkeypatch.setattr("mindroom.delegation.execution._continue_child", failed_resume)
     await test_child_approval_survives_parent_reconstruction(
         tmp_path,
         monkeypatch,

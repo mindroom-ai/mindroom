@@ -35,6 +35,27 @@ class NativeCompactionModel:
     id: str
     provider: str
 
+    def configure_portable_replay(self, *, enabled: bool = True) -> None:
+        """Let adapters keep local history budgets authoritative over stored state."""
+
+    def restore_portable_replay(self, message: Message | None) -> None:
+        """Restore adapter-owned replay policy from the latest completed response."""
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
+        """Return a provider-aware estimate, or None for canonical history sizing.
+
+        Callers retain the canonical transport floor unless
+        portable_replay_uses_visual_tokens() returns True. In that case, this
+        estimate must include the cost of all images whose transport data the
+        shared history estimator removes. Returning None always preserves the
+        canonical transport estimate.
+        """
+        return None
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        """Return whether portable estimates replace image transport with visual cost."""
+        return False
+
     def native_compaction_supported(self) -> bool:
         """Return whether this concrete route can use automatic compaction."""
         raise NotImplementedError

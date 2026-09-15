@@ -17,18 +17,18 @@ from agno.run.base import RunStatus
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.delegation_audit import (
+from mindroom.delegation.audit import (
     child_audit_context,
     finish_child_record,
     observe_child_event,
     record_child_response,
 )
-from mindroom.delegation_lifecycle import settle_child_response, start_child_turn
-from mindroom.delegation_records import DelegationRecordLocator, DelegationRecordOwner
-from mindroom.delegation_recovery import interrupt_child
-from mindroom.delegation_sessions import reserve_subagent_turn
-from mindroom.delegation_state import DelegationChild
-from mindroom.delegation_storage import freeze_delegation_storage
+from mindroom.delegation.lifecycle import settle_child_response, start_child_turn
+from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
+from mindroom.delegation.recovery import interrupt_child
+from mindroom.delegation.sessions import reserve_subagent_turn
+from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,

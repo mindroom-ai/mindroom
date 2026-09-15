@@ -31,7 +31,6 @@ from mindroom.background_tasks import create_background_task, run_coroutine_unti
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
-    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -88,6 +87,7 @@ from mindroom.response_shutdown_diagnostics import (
     context_with_response_shutdown_trace,
     response_shutdown_phase,
 )
+from mindroom.response_sources import ResponseAttempt, ResponseSources
 from mindroom.response_terminal import (
     PendingVisibleResponse,
     TerminalFailureStatus,
@@ -468,6 +468,7 @@ class ResponseRequest:
     thread_history: Sequence[ResolvedVisibleMessage]
     prompt: str
     response_envelope: MessageEnvelope
+    sources: ResponseSources
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
@@ -502,6 +503,15 @@ class ResponseRequest:
     on_visible_response: Callable[[str], Awaitable[None]] | None = None
     # Set only after another durable owner can finish the source.
     source_handoff: asyncio.Event | None = None
+
+    def __post_init__(self) -> None:
+        """Require the envelope to name the source driving this response."""
+        if not isinstance(self.sources, ResponseSources):
+            message = "ResponseRequest requires ResponseSources"
+            raise TypeError(message)
+        if self.sources.pending_event_ids[0] != self.response_envelope.source_event_id:
+            message = "ResponseRequest first pending event must equal the envelope source event"
+            raise ValueError(message)
 
     @property
     def room_id(self) -> str:
@@ -1205,23 +1215,6 @@ class ResponseRunner:
             default_agent_name=self.deps.agent_name,
         )
         approval_id = uuid4().hex
-        raw_source_event_ids = (
-            request.matrix_run_metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY)
-            if request.matrix_run_metadata is not None
-            else None
-        )
-        source_event_ids = (
-            tuple(
-                dict.fromkeys(
-                    (
-                        request.response_envelope.source_event_id,
-                        *(value for value in raw_source_event_ids if isinstance(value, str)),
-                    ),
-                ),
-            )
-            if isinstance(raw_source_event_ids, list)
-            else (request.response_envelope.source_event_id,)
-        )
         try:
             plan = await self._approval_responses.plan_pause(identified_tools, requester_id=requester_id)
             response_event_id = progress.tracked_event_id
@@ -1265,6 +1258,7 @@ class ResponseRunner:
             if response_event_id is None:
                 msg = "Could not publish the suspended approval response"
                 raise RuntimeError(msg)  # noqa: TRY301
+            progress.track_event(response_event_id)
 
             continuation_state: Literal["waiting", "ready"] = (
                 "ready" if all(call.decision is not None for call in plan.calls) else "waiting"
@@ -1280,7 +1274,8 @@ class ResponseRunner:
                     thread_id=target.resolved_thread_id,
                     requester_id=requester_id,
                     response_event_id=response_event_id,
-                    source_event_ids=source_event_ids,
+                    sources=request.sources,
+                    prepared_edit_record=request.prepared_edit_record,
                     calls=plan.calls,
                     state=continuation_state,
                     response_text=snapshot_text,
@@ -1324,7 +1319,6 @@ class ResponseRunner:
             if continuation is None or continuation.state != continuation_state:
                 msg = "Approval continuation lost its journal source ownership"
                 raise RuntimeError(msg)  # noqa: TRY301
-            progress.track_event(response_event_id)
             if delivery_kind == "sent" and request.on_visible_response is not None:
                 await request.on_visible_response(response_event_id)
 
@@ -1388,6 +1382,7 @@ class ResponseRunner:
                             claimed.attachment_ids,
                         ),
                         defer_source_handoff=True,
+                        prepared_edit_record=claimed.prepared_edit_record,
                     ),
                 ),
                 current,
@@ -1725,6 +1720,7 @@ class ResponseRunner:
             thread_history=self._approval_memory_history(continuation),
             prompt=envelope.body,
             response_envelope=envelope,
+            sources=continuation.sources,
             existing_event_id=continuation.response_event_id,
             user_id=continuation.requester_id,
             attachment_ids=continuation.attachment_ids,
@@ -2276,14 +2272,25 @@ class ResponseRunner:
             cancellation_requested = self.deps.stop_manager.request_stop_if(message_id, should_cancel)
 
         async def finalize_locked() -> bool:
-            approval_settled = await self._settle_user_stopped_approval(
+            edited_sources = await self.deps.approval_store.edited_approval_sources_for_user_stop(
+                room_id=target.room_id,
                 response_event_id=message_id,
                 source_event_id=source_event_id,
-                target=target,
+                stop_receipt_order=stop_receipt_order,
             )
-            if approval_settled is None:
-                return False
-            return await finalize(approval_settled)
+            approval_settled = False
+            unresolved_final = False
+            for approval_source in dict.fromkeys((*edited_sources, source_event_id)):
+                settled = await self._settle_user_stopped_approval(
+                    response_event_id=message_id,
+                    source_event_id=approval_source,
+                    target=target,
+                )
+                if settled is None:
+                    unresolved_final = True
+                else:
+                    approval_settled |= settled
+            return False if unresolved_final else await finalize(approval_settled)
 
         try:
             return await self._lifecycle_coordinator.run_locked_target_operation(
@@ -2907,6 +2914,7 @@ class ResponseRunner:
         return ResponseIdentity(
             response_kind=response_kind,
             response_envelope=request.response_envelope,
+            sources=request.sources,
             correlation_id=_correlation_id_for_request(request),
             participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
         )
@@ -3343,6 +3351,42 @@ class ResponseRunner:
             )
         progress.settle(delivery_outcome)
 
+    async def _finalize_failed_approval_handoff(
+        self,
+        *,
+        target: MessageTarget,
+        request: ResponseRequest,
+        progress: _DeliveryProgress,
+        failure_reason: str,
+    ) -> FinalDeliveryOutcome:
+        """Replace an unowned pause with durable failure, even after streaming began."""
+        event_id = progress.tracked_event_id or request.existing_event_id
+        text = "Tool approval could not be started. Please try again."
+        extra_content = {STREAM_STATUS_KEY: STREAM_STATUS_ERROR}
+        delivered = False
+        if event_id is not None:
+            # Only completed answers consume prepared edit revisions. This
+            # error settles delivery without claiming the edit was answered.
+            delivered = await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(
+                    target=target,
+                    event_id=event_id,
+                    new_text=text,
+                    extra_content=extra_content,
+                    delivery_turn_id=request.response_envelope.source_event_id,
+                    response_attempt=ResponseAttempt(self.deps.agent_name, request.sources),
+                ),
+            )
+        return FinalDeliveryOutcome(
+            terminal_status="error",
+            event_id=event_id,
+            is_visible_response=event_id is not None,
+            final_visible_body=text if delivered else None,
+            delivery_kind="edited" if delivered else None,
+            failure_reason=failure_reason,
+            extra_content=extra_content,
+        )
+
     async def _finalize_locked_outcome(
         self,
         lifecycle: ResponseLifecycle,
@@ -3423,13 +3467,13 @@ class ResponseRunner:
             except Exception as suspension_error:
                 self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
                 progress.failure_reason = str(suspension_error) or "approval_suspension_failed"
-                await self._settle_missing_delivery_outcome(
-                    target=target,
-                    request=request,
-                    identity=lifecycle.identity,
-                    progress=progress,
-                    terminal_status="error",
-                    failure_reason=progress.failure_reason,
+                progress.settle(
+                    await self._finalize_failed_approval_handoff(
+                        target=target,
+                        request=request,
+                        progress=progress,
+                        failure_reason=progress.failure_reason,
+                    ),
                 )
         except asyncio.CancelledError as error:
             if current_task_is_process_shutdown():

@@ -1325,7 +1325,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             execution_identity=None,
             storage=storage,
             session=session,
-            available_history_budget=1,
+            available_history_budget=100,
         )
         persisted_before_second = get_agent_session(storage, "session-1")
         assert persisted_before_second is not None
@@ -1339,7 +1339,7 @@ async def test_prepare_history_for_run_reuses_completed_auto_compaction(
             execution_identity=None,
             storage=storage,
             session=persisted_before_second,
-            available_history_budget=1,
+            available_history_budget=100,
         )
 
     persisted = get_agent_session(storage, "session-1")

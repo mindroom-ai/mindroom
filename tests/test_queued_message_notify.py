@@ -81,6 +81,7 @@ from mindroom.response_runner import (
     ResponseRunner,
     _ResponseGenerationOutcome,
 )
+from mindroom.response_sources import ResponseSources
 from mindroom.teams import TeamMode, _create_team_instance
 from mindroom.turn_controller import _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
@@ -1126,6 +1127,10 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1189,6 +1194,10 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1305,6 +1314,10 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1348,6 +1361,10 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         first_task = asyncio.create_task(
             bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(first_envelope.source_event_id,),
+                        logical_source_event_ids=(first_envelope.source_event_id,),
+                    ),
                     prompt="hello",
                     thread_history=[],
                     user_id="first",
@@ -1360,6 +1377,10 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         second_task = asyncio.create_task(
             bot._response_runner.generate_response(
                 ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(second_envelope.source_event_id,),
+                        logical_source_event_ids=(second_envelope.source_event_id,),
+                    ),
                     prompt="stop",
                     thread_history=[],
                     user_id="second",
@@ -1437,6 +1458,10 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1481,6 +1506,10 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
     ) as mock_fetch_thread_history:
         request = await coordinator._refresh_model_history_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1519,6 +1548,10 @@ async def test_refresh_model_history_after_lock_does_not_reprove_room_target(
     ):
         request = await coordinator._refresh_model_history_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=(envelope.source_event_id,),
+                    logical_source_event_ids=(envelope.source_event_id,),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1584,6 +1617,10 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
     ):
         result = await coordinator.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1671,6 +1708,10 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     ):
         result = await coordinator.generate_response(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1738,6 +1779,10 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
     ):
         result = await coordinator.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1819,6 +1864,10 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     ):
         result = await coordinator.generate_team_response_helper(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1855,6 +1904,10 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
     ):
         await coordinator._prepare_request_after_lock(
             ResponseRequest(
+                sources=ResponseSources(
+                    pending_event_ids=("$event",),
+                    logical_source_event_ids=("$event",),
+                ),
                 thread_history=[],
                 prompt="hello",
                 user_id="@user:localhost",
@@ -1893,6 +1946,10 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
             task = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope.source_event_id,),
+                            logical_source_event_ids=(response_envelope.source_event_id,),
+                        ),
                         thread_history=[],
                         prompt="hello",
                         user_id="@user:localhost",
@@ -1941,6 +1998,10 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
             task_b = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_b.source_event_id,),
+                            logical_source_event_ids=(response_envelope_b.source_event_id,),
+                        ),
                         prompt="hello",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -1952,6 +2013,10 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
             task_c = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_c.source_event_id,),
+                            logical_source_event_ids=(response_envelope_c.source_event_id,),
+                        ),
                         prompt="hello again",
                         thread_history=[],
                         user_id="@user:localhost",
@@ -2008,6 +2073,10 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
             task_b = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_b.source_event_id,),
+                            logical_source_event_ids=(response_envelope_b.source_event_id,),
+                        ),
                         thread_history=[],
                         prompt="hello",
                         user_id="@user:localhost",
@@ -2021,6 +2090,10 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
             task_c = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
                     ResponseRequest(
+                        sources=ResponseSources(
+                            pending_event_ids=(response_envelope_c.source_event_id,),
+                            logical_source_event_ids=(response_envelope_c.source_event_id,),
+                        ),
                         thread_history=[],
                         prompt="hello again",
                         user_id="@user:localhost",

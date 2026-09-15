@@ -41,7 +41,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.delegation_state import DelegationState
+from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation

@@ -14,6 +14,7 @@ from mindroom.hooks import hook_ingress_policy
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.response_runner import ResponseRequest
+from mindroom.response_sources import ResponseSources
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError, canonicalize_turn_record
@@ -84,6 +85,7 @@ class _Mailbox:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending: dict[str, _Edit] = field(default_factory=dict)
     reserved_revisions: dict[str, SourceEventRevision] = field(default_factory=dict)
+    handed_off_revisions: set[str] = field(default_factory=set)
     participants: int = 0
     rebuild_requested: bool = False
 
@@ -136,14 +138,14 @@ class EditRegenerator:
         event: nio.RoomMessageFormatted,
         event_info: EventInfo,
         requester_user_id: str,
-    ) -> None:
-        """Handle an edited message by regenerating the owned response."""
+    ) -> bool | None:
+        """Regenerate an edit, returning True when a durable continuation owns it."""
         if not event_info.original_event_id:
-            return
+            return None
         original_event_id = event_info.original_event_id
         registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
         if registry.current_entity_name_for_user_id(event.sender):
-            return
+            return None
 
         context = await self.deps.resolver.extract_message_context(
             room,
@@ -171,36 +173,36 @@ class EditRegenerator:
                 requester_user_id=requester_user_id,
             )
         if turn_record is None:
-            return
+            return None
         if (
             turn_record.conversation_target is None
             or turn_record.history_scope is None
             or turn_record.response_owner is None
         ):
-            return
+            return None
         if turn_record.requester_id_for_source(original_event_id) != requester_user_id:
-            return
+            return None
         context = await self._edit_regeneration_context(
             context,
             room,
             conversation_target=turn_record.conversation_target,
         )
         if turn_record.response_owner != self.deps.agent_name:
-            return
+            return None
         if original_event_id in turn_record.redacted_source_event_ids:
-            return
+            return None
         receipt_order = await self.deps.receipt_order()
         revision = (event.server_timestamp, event.event_id)
         committed = (turn_record.source_event_revisions or {}).get(original_event_id)
         watermark = turn_record.revision_watermark(original_event_id)
         if watermark is not None and revision < watermark:
-            return
+            return None
         registered = await self.deps.turn_store.register_edit_revision(original_event_id, revision)
         if registered is None:
-            return
+            return None
         replay = (registered.revision_replay or {}).get(revision[1])
         if replay is not None and replay.redacted:
-            return
+            return None
 
         edited_content, _ = await extract_visible_edit_body(
             event.source,
@@ -209,7 +211,7 @@ class EditRegenerator:
             runtime_paths=self.deps.runtime_paths,
         )
         if edited_content is None:
-            return
+            return None
         envelope = self.deps.resolver.build_message_envelope(
             event=event,
             requester_user_id=requester_user_id,
@@ -223,7 +225,7 @@ class EditRegenerator:
         mailbox = self._mailboxes.setdefault(key, _Mailbox())
         reserved_revision = mailbox.reserved_revisions.get(original_event_id)
         if reserved_revision is not None and revision <= reserved_revision:
-            return
+            return None
         mailbox.reserved_revisions[original_event_id] = revision
         mailbox.participants += 1
         try:
@@ -238,7 +240,7 @@ class EditRegenerator:
                 )
             )
             if mailbox.reserved_revisions.get(original_event_id) != revision:
-                return
+                return None
             mailbox.pending[original_event_id] = _Edit(
                 original_event_id=original_event_id,
                 body=edited_content,
@@ -250,6 +252,7 @@ class EditRegenerator:
             )
             async with mailbox.lock:
                 await self._drain(room, turn_record, mailbox)
+            return event.event_id in mailbox.handed_off_revisions
         finally:
             mailbox.participants -= 1
             if mailbox.participants == 0 and self._mailboxes.get(key) is mailbox:
@@ -396,6 +399,16 @@ class EditRegenerator:
                 member_display_names=room_member_display_names(room),
                 prompt=prompt,
                 response_envelope=driving_edit.envelope,
+                sources=ResponseSources(
+                    pending_event_ids=tuple(
+                        dict.fromkeys(
+                            (driving_edit.revision[1], *(edit.revision[1] for edit in active.values())),
+                        ),
+                    ),
+                    logical_source_event_ids=record.source_event_ids,
+                    discovery_event_ids=record.discovery_event_ids,
+                    edit_receipt_order=active_receipt_order,
+                ),
                 existing_event_id=record.response_event_id,
                 user_id=requester_id,
                 correlation_id=driving_edit.revision[1],
@@ -404,6 +417,7 @@ class EditRegenerator:
                 current_prompt_is_structured=structured,
                 prepare_source_turn=prepare_snapshot,
                 prepared_edit_record=record,
+                source_handoff=asyncio.Event(),
                 on_interrupted_response_recoverable=record_interrupted_turn,
                 sync_restart_retry_source_event_id=retry_source_event_id,
                 on_deferred_outcome_handled=record_deferred_outcome,
@@ -527,6 +541,8 @@ class EditRegenerator:
                     return
                 continue
             regenerated_event_id = await self.deps.generate_response(request)
+            if request.source_handoff is not None and request.source_handoff.is_set():
+                mailbox.handed_off_revisions.update(request.sources.pending_event_ids)
             if mailbox.rebuild_requested:
                 mailbox.rebuild_requested = False
                 continue

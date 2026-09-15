@@ -17,8 +17,8 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation_execution import drive_delegation_stream, drive_delegations
-from mindroom.delegation_state import DelegationState
+from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
+from mindroom.delegation.state import DelegationState
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import tool_runtime_context
