@@ -355,6 +355,15 @@ wheels = [
 ]
 
 [[package]]
+name = "altgraph"
+version = "0.17.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7e/f8/97fdf103f38fed6792a1601dbc16cc8aac56e7459a9fff08c812d8ae177a/altgraph-0.17.5.tar.gz", hash = "sha256:c87b395dd12fabde9c99573a9749d67da8d29ef9de0125c7f536699b4a9bc9e7", size = 48428, upload-time = "2025-11-21T20:35:50.583Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/ba/000a1996d4308bc65120167c21241a3b205464a2e0b58deda26ae8ac21d1/altgraph-0.17.5-py2.py3-none-any.whl", hash = "sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597", size = 21228, upload-time = "2025-11-21T20:35:49.444Z" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3851,6 +3860,18 @@ wheels = [
 ]
 
 [[package]]
+name = "macholib"
+version = "1.16.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "altgraph" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/10/2f/97589876ea967487978071c9042518d28b958d87b17dceb7cdc1d881f963/macholib-1.16.4.tar.gz", hash = "sha256:f408c93ab2e995cd2c46e34fe328b130404be143469e41bc366c807448979362", size = 59427, upload-time = "2025-11-22T08:28:38.373Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c7/d1/a9f36f8ecdf0fb7c9b1e78c8d7af12b8c8754e74851ac7b94a8305540fc7/macholib-1.16.4-py2.py3-none-any.whl", hash = "sha256:da1a3fa8266e30f0ce7e97c6a54eefaae8edd1e5f86f3eb8b95457cae90265ea", size = 38117, upload-time = "2025-11-22T08:28:36.939Z" },
+]
+
+[[package]]
 name = "markdown"
 version = "3.10.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4218,6 +4239,7 @@ desktop = [
     { name = "pyautogui" },
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-screencapturekit", marker = "sys_platform == 'darwin'" },
 ]
 discord = [
     { name = "requests" },
@@ -4474,6 +4496,20 @@ zoom = [
 ]
 
 [package.dev-dependencies]
+desktop-helper = [
+    { name = "mcp", extra = ["cli"] },
+    { name = "mindroom-nio", extra = ["e2e"] },
+    { name = "pillow", version = "10.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "pyautogui" },
+    { name = "pyinstaller" },
+    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
+    { name = "pyobjc-framework-screencapturekit", marker = "sys_platform == 'darwin'" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "structlog" },
+]
 dev = [
     { name = "aioresponses" },
     { name = "hypothesis" },
@@ -4594,7 +4630,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.0.8" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.1" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4624,6 +4660,7 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.13" },
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
+    { name = "pyobjc-framework-screencapturekit", marker = "sys_platform == 'darwin' and extra == 'desktop'", specifier = ">=12.2.1" },
     { name = "pypdf", marker = "extra == 'arxiv'" },
     { name = "pytelegrambotapi", marker = "extra == 'telegram'", specifier = ">=4.32" },
     { name = "python-docx", marker = "extra == 'file-generation'", specifier = ">=1.2" },
@@ -4681,6 +4718,19 @@ requires-dist = [
 provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-voice-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "supabase", "tavily", "telegram", "thread-model", "thread-resolution", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
+desktop-helper = [
+    { name = "mcp", extras = ["cli"], specifier = ">=1.28.1,<2" },
+    { name = "mindroom-nio", extras = ["e2e"] },
+    { name = "pillow", specifier = ">=10.2" },
+    { name = "pyautogui", specifier = ">=0.9.54" },
+    { name = "pyinstaller", specifier = "==6.16" },
+    { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'", specifier = ">=12.2.1" },
+    { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'", specifier = ">=12.2.1" },
+    { name = "pyobjc-framework-screencapturekit", marker = "sys_platform == 'darwin'", specifier = ">=12.2.1" },
+    { name = "python-dotenv", specifier = ">=1.1.1" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "structlog", specifier = ">=25.4" },
+]
 dev = [
     { name = "aioresponses", specifier = ">=0.7.8" },
     { name = "hypothesis", specifier = ">=6.161.1" },
@@ -4706,7 +4756,7 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "1.0.8"
+version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4719,9 +4769,9 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a9/17/e09f396db07cd51cc7fe9d178f79f552e7313195f73f3d99b9c8ad96c33b/mindroom_nio-1.0.8.tar.gz", hash = "sha256:22c848272088224da71222fa59dd1ee7b1d2330c514743adde3e61f8f6616dbe", size = 212638, upload-time = "2026-09-13T16:10:45.613Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/99/d5ea557f666db694c771400d974d075be180bb042f5bce48223ea5c89746/mindroom_nio-1.1.0.tar.gz", hash = "sha256:ba45634a41a79e702cb84696197548041d343dee036d87ef6879ec04af798a2b", size = 216965, upload-time = "2026-09-15T12:54:39.607Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f5/24/2cc27dbca4f85497d58c0123af62c2626a9ac8c2571f6de83e11620b28ae/mindroom_nio-1.0.8-py3-none-any.whl", hash = "sha256:c6479ad94d43bd869067077b564fa7855f2516db9151694c26196b3bc2ff5001", size = 247834, upload-time = "2026-09-13T16:10:43.953Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/46/01331b62a1e3be3a5ab3d2bebbbb49bbfb65731c7854a93ae132096d7777/mindroom_nio-1.1.0-py3-none-any.whl", hash = "sha256:92620881887370028254eaf6a8f0a976ff53cefbe701fd5e6ca62269d7ed31ab", size = 252816, upload-time = "2026-09-15T12:54:37.77Z" },
 ]
 
 [package.optional-dependencies]
@@ -6302,6 +6352,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pefile"
+version = "2023.2.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/c5/3b3c62223f72e2360737fd2a57c30e5b2adecd85e70276879609a7403334/pefile-2023.2.7.tar.gz", hash = "sha256:82e6114004b3d6911c77c3953e3838654b04511b8b66e8583db70c65998017dc", size = 74854, upload-time = "2023-02-07T12:23:55.958Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/26/d0ad8b448476d0a1e8d3ea5622dc77b916db84c6aa3cb1e1c0965af948fc/pefile-2023.2.7-py3-none-any.whl", hash = "sha256:da185cd2af68c08a6cd4481f7325ed600a88f6a813bad9dea07ab3ef73d8d8d6", size = 71791, upload-time = "2023-02-07T12:28:36.678Z" },
+]
+
+[[package]]
 name = "pillow"
 version = "10.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -7269,6 +7328,46 @@ wheels = [
 ]
 
 [[package]]
+name = "pyinstaller"
+version = "6.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "altgraph" },
+    { name = "macholib", marker = "sys_platform == 'darwin'" },
+    { name = "packaging" },
+    { name = "pefile", marker = "sys_platform == 'win32'" },
+    { name = "pyinstaller-hooks-contrib" },
+    { name = "pywin32-ctypes", marker = "sys_platform == 'win32'" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/94/1f62e95e4a28b64cfbb5b922ef3046f968b47170d37a1e1a029f56ac9cb4/pyinstaller-6.16.0.tar.gz", hash = "sha256:53559fe1e041a234f2b4dcc3288ea8bdd57f7cad8a6644e422c27bb407f3edef", size = 4008473, upload-time = "2025-09-13T20:07:01.733Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/0a/c42ce6e5d3de287f2e9432a074fb209f1fb72a86a72f3903849fdb5e4829/pyinstaller-6.16.0-py3-none-macosx_10_13_universal2.whl", hash = "sha256:7fd1c785219a87ca747c21fa92f561b0d2926a7edc06d0a0fe37f3736e00bd7a", size = 1027899, upload-time = "2025-09-13T20:05:59.2Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/d0/f18fedde32835d5a758f464c75924e2154065625f09d5456c3c303527654/pyinstaller-6.16.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:b756ddb9007b8141c5476b553351f9d97559b8af5d07f9460869bfae02be26b0", size = 727990, upload-time = "2025-09-13T20:06:03.583Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/db/c8bb47514ce857b24bf9294cf1ff74844b6a489fa0ab4ef6f923288c4e38/pyinstaller-6.16.0-py3-none-manylinux2014_i686.whl", hash = "sha256:0a48f55b85ff60f83169e10050f2759019cf1d06773ad1c4da3a411cd8751058", size = 739238, upload-time = "2025-09-13T20:06:07.69Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/3e/451dc784a8fcca0fe9f9b6b802d58555364a95b60f253613a2c83fc6b023/pyinstaller-6.16.0-py3-none-manylinux2014_ppc64le.whl", hash = "sha256:73ba72e04fcece92e32518bbb1e1fb5ac2892677943dfdff38e01a06e8742851", size = 737142, upload-time = "2025-09-13T20:06:11.732Z" },
+    { url = "https://files.pythonhosted.org/packages/71/37/2f457479ef8fa2821cdb448acee2421dfb19fbe908bf5499d1930c164084/pyinstaller-6.16.0-py3-none-manylinux2014_s390x.whl", hash = "sha256:b1752488248f7899281b17ca3238eefb5410521291371a686a4f5830f29f52b3", size = 734133, upload-time = "2025-09-13T20:06:15.477Z" },
+    { url = "https://files.pythonhosted.org/packages/63/c4/0f7daac4d062a4d1ac2571d8a8b9b5d6812094fcd914d139af591ca5e1ba/pyinstaller-6.16.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:ba618a61627ee674d6d68e5de084ba17c707b59a4f2a856084b3999bdffbd3f0", size = 733817, upload-time = "2025-09-13T20:06:19.683Z" },
+    { url = "https://files.pythonhosted.org/packages/11/e4/b6127265b42bef883e8873d850becadf748bc5652e5a7029b059328f3c31/pyinstaller-6.16.0-py3-none-musllinux_1_1_aarch64.whl", hash = "sha256:c8b7ef536711617e12fef4673806198872033fa06fa92326ad7fd1d84a9fa454", size = 732912, upload-time = "2025-09-13T20:06:23.46Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/00/c6663107bdf814b2916e71563beabd09f693c47712213bc228994cb2cc65/pyinstaller-6.16.0-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:d1ebf84d02c51fed19b82a8abb4df536923abd55bb684d694e1356e4ae2a0ce5", size = 732773, upload-time = "2025-09-13T20:06:27.352Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/14/cabe9bc5f60b95d2e70e7d045ab94b0015ff8f6c8b16e2142d3597e30749/pyinstaller-6.16.0-py3-none-win32.whl", hash = "sha256:6d5f8617f3650ff9ef893e2ab4ddbf3c0d23d0c602ef74b5df8fbef4607840c8", size = 1313878, upload-time = "2025-09-13T20:06:33.234Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/99/2005efbc297e7813c1d6f18484aa94a1a81ce87b6a5b497c563681f4c4ea/pyinstaller-6.16.0-py3-none-win_amd64.whl", hash = "sha256:bc10eb1a787f99fea613509f55b902fbd2d8b73ff5f51ff245ea29a481d97d41", size = 1374706, upload-time = "2025-09-13T20:06:39.95Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/f4/4dfcf69b86d60fcaae05a42bbff1616d48a91e71726e5ed795d773dae9b3/pyinstaller-6.16.0-py3-none-win_arm64.whl", hash = "sha256:d0af8a401de792c233c32c44b16d065ca9ab8262ee0c906835c12bdebc992a64", size = 1315923, upload-time = "2025-09-13T20:06:45.846Z" },
+]
+
+[[package]]
+name = "pyinstaller-hooks-contrib"
+version = "2026.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/26/60/d881fa1ba8c160c18d8e6f782bb16ec4640c08bc08fc50f704c368ad4f9e/pyinstaller_hooks_contrib-2026.7.tar.gz", hash = "sha256:5fbcaacb22c4f4aac869a127dce283f67a4b4cfcc37d496f2446603e6d68aefa", size = 175992, upload-time = "2026-08-24T21:26:58.713Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/67/350377af7b50416344ab8792756d414eef7629c618a73e9a0b13bb1552d9/pyinstaller_hooks_contrib-2026.7-py3-none-any.whl", hash = "sha256:24257a04c7a5a7a034cf28e39dcee20fbeeb9f043076729480f2e1b69904408a", size = 459445, upload-time = "2026-08-24T21:26:57.274Z" },
+]
+
+[[package]]
 name = "pyjwt"
 version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -7394,6 +7493,25 @@ wheels = [
 ]
 
 [[package]]
+name = "pyobjc-framework-coremedia"
+version = "12.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e3/79/f501d730a9c320e0b2b3916e95f57e66dd6736d210a1aa5b63eb6c43e605/pyobjc_framework_coremedia-12.2.1.tar.gz", hash = "sha256:71b45f7cd52bd997d836c15a0e1016db90815a219dc87fd20435a6f08b87df7b", size = 98252, upload-time = "2026-06-19T16:20:15.75Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/17/6bf365530573a6b7719b5a47efe6c38ac8c42f6b556babe419f5de48a84c/pyobjc_framework_coremedia-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:fd0e25bc704dd91882bc29d682880c42f712b39bdfe3d3168780d24a9d9eaf26", size = 29419, upload-time = "2026-06-19T16:08:53.52Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/2a/9e5beae2961c9d22ce16258f39edae69996ee0167dd4cfe4e771454086c1/pyobjc_framework_coremedia-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:45878f686ce8ea1735ce382b34ef3a5852cafe0ae2a27a49c08701f4c3ab830b", size = 29431, upload-time = "2026-06-19T16:08:54.41Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/51/00b7f012e55475502296cc8ef276b94ad7d4d10d97ce2e88bf9d87f9b664/pyobjc_framework_coremedia-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:9f2b30ef288c9f2fa1599a1cc5868f8cd949c7138a7f15244c7a6884afcef273", size = 29491, upload-time = "2026-06-19T16:08:55.297Z" },
+    { url = "https://files.pythonhosted.org/packages/16/dc/7083e6781fcd843d210ec6d247d28c6e1032ea1c5655b9e1182d0a85f331/pyobjc_framework_coremedia-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:84e9fb3f7b6420fc3865a5812604c63546b5777f4999e0e0e830a9a0816e8743", size = 29468, upload-time = "2026-06-19T16:08:56.129Z" },
+    { url = "https://files.pythonhosted.org/packages/11/74/edb3ec87d2e5f962c75af990207e4df39b290f11b4f4c3cc446ee141e4e7/pyobjc_framework_coremedia-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:541d64d2fc7576054bdc3508a94f37671e81e5ca1582e16ebec2c0e05dd75412", size = 29519, upload-time = "2026-06-19T16:08:56.956Z" },
+    { url = "https://files.pythonhosted.org/packages/28/0f/9176b6a7666e46273c0392c8f77bc812e006dc74a1c21263c4bdf385012f/pyobjc_framework_coremedia-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:2a355770b66b4caf99560c11af44dfeca53066ece75807fc6a391a16369ccc72", size = 29502, upload-time = "2026-06-19T16:08:57.918Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/27/13e7d8d16528734690f83abd901cbc53dd6f7c1adbcb3a902166735c6c21/pyobjc_framework_coremedia-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:5536453ba631227810a1141fb1761149244bd6d0e7cd4b12477be3b164f5bb11", size = 29555, upload-time = "2026-06-19T16:08:58.792Z" },
+]
+
+[[package]]
 name = "pyobjc-framework-coretext"
 version = "12.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -7430,6 +7548,26 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e2/d6/b917e4b63d72ea84a27121076f3033f23f6497c0e6ce8d304766c899897f/pyobjc_framework_quartz-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:8105c98b798f2bf81c05c54bddeeadbf62f0b5dfec13bd6e719dd2cdf7e1cddf", size = 224717, upload-time = "2026-06-19T16:16:10.215Z" },
     { url = "https://files.pythonhosted.org/packages/04/e2/f3c1ed3228f7430ef5ade23db6f1fcbae99290f177ce5653348fd9e05f4d/pyobjc_framework_quartz-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:bbc214f1a216b5d3651bc832d0ac4589f029f3f37cd6cbb370aac12a7c77942c", size = 219825, upload-time = "2026-06-19T16:16:11.433Z" },
     { url = "https://files.pythonhosted.org/packages/66/2a/2c99a5ad2fe0a11600ea123b8e9a08ff138fcb2ad1e13e376f4bd4aa1d96/pyobjc_framework_quartz-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:ca61624a0b0e6286d8a0f97f47eb9011e4e81e9a339db436d48af527e7065bb1", size = 224770, upload-time = "2026-06-19T16:16:13.035Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-screencapturekit"
+version = "12.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-framework-coremedia" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/64/a6/b7e72e32d3334e13eae592cbcd9f3c060c43adf78ddfebd0eb9c6be0ab05/pyobjc_framework_screencapturekit-12.2.1.tar.gz", hash = "sha256:e419cbf9c2f9cbd172d1c6e5bc69a44e0a7d9e45cf43058d48eeda4f785ce860", size = 37840, upload-time = "2026-06-19T16:21:36.099Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/eb/76a25a68695f8502ca17ad0f482ed3e8d1714a7fdaed86728388778510c7/pyobjc_framework_screencapturekit-12.2.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:407dfcd80e493d11ce54163d4cc973119f6a507cd695875f4cdbfde6f2db42d8", size = 11596, upload-time = "2026-06-19T16:16:52.953Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/db/c65ea6d42f9873ee6a1d63d4db1db334d60536ba679382688647bd626cc0/pyobjc_framework_screencapturekit-12.2.1-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:d23bc1d0ac0068f328a97c1ed95d611cb2b8517c76345ddbbd21e5e8bc85a898", size = 11616, upload-time = "2026-06-19T16:16:53.772Z" },
+    { url = "https://files.pythonhosted.org/packages/40/8f/b57ec1a7632d7d49f01fc4b322c2c81fe62757c5ad78bd19f0fe085b6aed/pyobjc_framework_screencapturekit-12.2.1-cp313-cp313t-macosx_10_13_universal2.whl", hash = "sha256:3269ee9ecc1cde271cffb1e763672469b70375fb6aff00394a0387cc622070ae", size = 11794, upload-time = "2026-06-19T16:16:54.604Z" },
+    { url = "https://files.pythonhosted.org/packages/30/1a/efebaf2d5f48ecbd231b2b79df2be4c25a7ebe1804a7c36c3902acd81457/pyobjc_framework_screencapturekit-12.2.1-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:fd1cc27066b907726389bde47aca1afd27c2af13c4eb88b40f3b813082987e01", size = 11673, upload-time = "2026-06-19T16:16:55.347Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/95/55ce785f8e619d4e953b3672ccb5b81b16b11c48509dbe38689426022b8a/pyobjc_framework_screencapturekit-12.2.1-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:9d4493a95a5eca7b8d5287fda6b2614a1d62def22b24f01eb743fc371c018ae6", size = 11876, upload-time = "2026-06-19T16:16:56.285Z" },
+    { url = "https://files.pythonhosted.org/packages/72/11/f010d9fcb42fad7251a84b061f79b0347c23ee19789b28ac137373bf3579/pyobjc_framework_screencapturekit-12.2.1-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:9f6041f81a7a9b4da29fb4ab1cd6912447ccf557cfdea294db3754898895d6b2", size = 11669, upload-time = "2026-06-19T16:16:57.114Z" },
+    { url = "https://files.pythonhosted.org/packages/50/2f/720037603723ffeeb5ffbc1be47af1b1253647493ca245f01d457823b021/pyobjc_framework_screencapturekit-12.2.1-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:075f1faf3fb6239b104b2ef6f78f9bf5b0bac062aa48c560c9abfeb629282196", size = 11869, upload-time = "2026-06-19T16:16:57.89Z" },
 ]
 
 [[package]]
@@ -7798,6 +7936,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/31/097f2e132c4f16d99a22bfb777e0fd88bd8e1c634304e102f313af69ace5/pywin32-311-cp314-cp314-win32.whl", hash = "sha256:b7a2c10b93f8986666d0c803ee19b5990885872a7de910fc460f9b0c2fbf92ee", size = 8840714, upload-time = "2025-07-14T20:13:32.449Z" },
     { url = "https://files.pythonhosted.org/packages/90/4b/07c77d8ba0e01349358082713400435347df8426208171ce297da32c313d/pywin32-311-cp314-cp314-win_amd64.whl", hash = "sha256:3aca44c046bd2ed8c90de9cb8427f581c479e594e99b5c0bb19b29c10fd6cb87", size = 9656800, upload-time = "2025-07-14T20:13:34.312Z" },
     { url = "https://files.pythonhosted.org/packages/c0/d2/21af5c535501a7233e734b8af901574572da66fcc254cb35d0609c9080dd/pywin32-311-cp314-cp314-win_arm64.whl", hash = "sha256:a508e2d9025764a8270f93111a970e1d0fbfc33f4153b388bb649b7eec4f9b42", size = 8932540, upload-time = "2025-07-14T20:13:36.379Z" },
+]
+
+[[package]]
+name = "pywin32-ctypes"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/9f/01a1a99704853cb63f253eea009390c88e7131c67e66a0a02099a8c917cb/pywin32-ctypes-0.2.3.tar.gz", hash = "sha256:d162dc04946d704503b2edc4d55f3dba5c1d539ead017afa00142c38b9885755", size = 29471, upload-time = "2024-08-14T10:15:34.626Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/de/3d/8161f7711c017e01ac9f008dfddd9410dff3674334c233bde66e7ba65bbf/pywin32_ctypes-0.2.3-py3-none-any.whl", hash = "sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8", size = 30756, upload-time = "2024-08-14T10:15:33.187Z" },
 ]
 
 [[package]]

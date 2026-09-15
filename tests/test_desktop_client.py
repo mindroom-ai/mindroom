@@ -8,11 +8,11 @@ import weakref
 from unittest.mock import AsyncMock
 
 import pytest
+from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 
 from mindroom.desktop.client import _ROUTERS, DesktopRequestError, DesktopResponseRouter, desktop_response_router
 from mindroom.desktop.protocol import DESKTOP_RESPONSE_EVENT_TYPE, DesktopCommand, DesktopResponse
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 
 TARGET = PinnedMatrixDevice("@desktop:example.org", "DESKTOP", "fingerprint")
 
@@ -46,7 +46,7 @@ def _event(response: DesktopResponse) -> AuthenticatedToDeviceEvent:
         source={"content": response.to_content()},
         sender=TARGET.user_id,
         type=DESKTOP_RESPONSE_EVENT_TYPE,
-        authenticated_device_id=TARGET.device_id,
+        authenticated_sender=AuthenticatedDevice(TARGET.user_id, TARGET.device_id, "curve", TARGET.ed25519),
     )
 
 
@@ -106,6 +106,8 @@ async def test_request_timeout_is_bounded(monkeypatch: pytest.MonkeyPatch) -> No
         await router.request(TARGET, _command(), timeout_seconds=0.001)
 
     assert "mindroom desktop run" in str(exc_info.value)
+    assert exc_info.value.request_id == _command().request_id
+    assert exc_info.value.action_outcome == "unknown"
 
 
 @pytest.mark.asyncio

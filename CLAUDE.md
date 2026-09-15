@@ -78,7 +78,7 @@ Matrix sync callback
        -> ingress_validation.py                                  (trust, dedup, echo drop; commands exit before batching)
        -> inbound_turn_normalizer.py + conversation_resolver.py  (canonical turn input, conversation identity)
        -> ingress_lanes.py                                       (per-(room, sender) receipt-order FIFO; STT readiness waits here)
-       -> coalescing.py                                          (text dispatches immediately; media-tailed batches debounce)
+       -> coalescing.py                                          (ordinary text dispatches immediately; adaptive text and media debounce)
        -> text_ingress_dispatch.py + turn_policy.py              (ignore / route / respond decision, command execution)
        -> response_runner.py -> ai.py / teams.py                 (lifecycle lock, entity envelopes)
             -> response_turn.py                                  (shared blocking/streaming turn drivers)
@@ -102,10 +102,15 @@ Matrix sync callback
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
 | `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
-| `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
+| `coalescing.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `coalescing_batch.py` | Coalesced dispatch batch construction |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
+| `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
+| `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
+| `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
+| `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |
@@ -165,6 +170,10 @@ Matrix sync callback
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `model_loading.py` | Model instantiation and provider-specific loader selection |
+| `model_catalog.py` | Allowlisted model metadata, Matrix icon upload/cache, and catalog revision |
+| `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
+| `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
+| `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
@@ -210,6 +219,19 @@ Matrix sync callback
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
+| `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
+| `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
+| `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
+| `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
+| `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
+| `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |
+| `desktop/macos_input.py` | Sends bounded Quartz pointer input in global logical coordinates |
+| `desktop/macos_capture.py` | Captures verified windows and displays through ScreenCaptureKit |
+| `desktop/native_config.py` | Validates and persists private native-helper configuration |
+| `desktop/native_protocol.py` | Parses and bounds requests on the local NDJSON channel |
+| `desktop/native_host.py` | Owns helper setup, runtime lifecycle, local control, and stdio dispatch |
+| `desktop/native_entry.py` | Starts the packaged native desktop helper |
 | `tool_system/events.py` | Tool-event formatting and metadata for Matrix messages |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |

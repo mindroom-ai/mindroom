@@ -33,6 +33,7 @@ nav = [
     { "Data & Databases" = "tools/data-and-databases.md" },
     { "Web Search" = "tools/web-search.md" },
     { "Web Scraping & Browser" = "tools/web-scraping-and-browser.md" },
+    { "Worker Computer" = "tools/worker-computer.md" },
     { "Research Sources" = "tools/research-sources.md" },
     { "AI & Generation" = "tools/ai-and-generation.md" },
     { "Media & Content" = "tools/media-and-content.md" },

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Collection, Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
 from itertools import islice
 from pathlib import Path
@@ -525,8 +525,17 @@ def _normalized_structured_value(value: object) -> object:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="python", exclude_none=True)
     if not isinstance(value, type) and is_dataclass(value):
-        return asdict(value)
+        # Let redaction own recursion and limits without deep-copying live transports.
+        return {field.name: getattr(value, field.name) for field in fields(value)}
     return value
+
+
+def _is_structured_mapping_key(value: object) -> bool:
+    if type(value) is str:
+        return False
+    return isinstance(value, BaseModel | Mapping | list | tuple | set | frozenset) or (
+        not isinstance(value, type) and is_dataclass(value)
+    )
 
 
 def _redact_mapping(
@@ -538,23 +547,39 @@ def _redact_mapping(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
+    ancestor_ids: frozenset[int],
 ) -> dict[str, _RedactedValue]:
     redacted: dict[str, _RedactedValue] = {}
     mapping_is_truncated = max_collection_items is not None and len(value) > max_collection_items
     has_secret_context_label = mapping_is_truncated or _mapping_has_secret_context_label(value)
     parent_is_query_container = _is_query_container(parent_key)
-    for index, (key, item) in enumerate(value.items()):
-        if max_collection_items is not None and index >= max_collection_items:
-            redacted["__truncated__"] = f"{len(value) - max_collection_items} more items"
-            break
-        key_text = _safe_str(key)
+    items = list(value.items()) if max_collection_items is None else list(islice(value.items(), max_collection_items))
+    key_texts = [_safe_str(key) for key, _ in items]
+    reserved_keys: set[str] | None = None
+    for index, (key, item) in enumerate(items):
+        key_text = key_texts[index]
         classification = _classify_key(key)
         redact_key = (
             _should_redact_value_for_key(key, item)
             or (parent_is_query_container and classification.is_redacted_query)
             or (has_secret_context_label and classification.is_context_secret_value)
         )
-        redacted[key_text] = _redact_sensitive_data(
+        # Structured keys may hide secrets behind custom displays; keep them opaque.
+        if _is_structured_mapping_key(key):
+            if reserved_keys is None:
+                reserved_keys = {
+                    key_texts[item_index]
+                    for item_index, (item_key, _) in enumerate(items)
+                    if not _is_structured_mapping_key(item_key)
+                }
+            label_index = index
+            redacted_key = f"<redacted structured key {label_index}>"
+            while redacted_key in reserved_keys or redacted_key in redacted:
+                label_index += 1
+                redacted_key = f"<redacted structured key {label_index}>"
+        else:
+            redacted_key = key_text
+        redacted[redacted_key] = _redact_sensitive_data(
             item,
             max_string_length=max_string_length,
             max_collection_items=max_collection_items,
@@ -562,7 +587,10 @@ def _redact_mapping(
             _parent_key=key_text,
             _depth=depth + 1,
             _force_redact=force_redact or redact_key,
+            _ancestor_ids=ancestor_ids,
         )
+    if mapping_is_truncated:
+        redacted["__truncated__"] = f"{len(value) - len(items)} more items"
     return redacted
 
 
@@ -575,6 +603,7 @@ def _redact_sequence(
     max_collection_items: int | None,
     max_depth: int | None,
     force_redact: bool,
+    ancestor_ids: frozenset[int],
 ) -> list[_RedactedValue]:
     items = list(value) if max_collection_items is None else list(islice(value, max_collection_items))
     redacted_items = [
@@ -586,6 +615,7 @@ def _redact_sequence(
             _parent_key=parent_key,
             _depth=depth + 1,
             _force_redact=force_redact,
+            _ancestor_ids=ancestor_ids,
         )
         for item in items
     ]
@@ -630,8 +660,28 @@ def _redact_sensitive_data(
     _parent_key: str | None = None,
     _depth: int = 0,
     _force_redact: bool = False,
+    _ancestor_ids: frozenset[int] = frozenset(),
 ) -> _RedactedValue:
     if max_depth is not None and _depth >= max_depth:
+        return _TRUNCATED
+    value_type = type(value)
+    # Built-in scalars cannot recurse; subclasses may still have structured fields.
+    if (
+        value_type is str
+        or value_type is int
+        or value_type is float
+        or value_type is bool
+        or value_type is bytes
+        or value is None
+    ):
+        return _redact_scalar_value(
+            value,
+            parent_key=_parent_key,
+            max_string_length=max_string_length,
+            force_redact=_force_redact,
+        )
+    value_id = id(value)
+    if value_id in _ancestor_ids:
         return _TRUNCATED
     value = _normalized_structured_value(value)
 
@@ -644,6 +694,7 @@ def _redact_sensitive_data(
             max_collection_items=max_collection_items,
             max_depth=max_depth,
             force_redact=_force_redact,
+            ancestor_ids=_ancestor_ids | {value_id},
         )
     elif isinstance(value, list | tuple | set | frozenset):
         redacted = _redact_sequence(
@@ -654,6 +705,7 @@ def _redact_sensitive_data(
             max_collection_items=max_collection_items,
             max_depth=max_depth,
             force_redact=_force_redact,
+            ancestor_ids=_ancestor_ids | {value_id},
         )
     else:
         redacted = _redact_scalar_value(

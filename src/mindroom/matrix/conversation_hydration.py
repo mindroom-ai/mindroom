@@ -166,7 +166,7 @@ def _redaction_target(event: nio.Event) -> str | None:
     return event.event_id if _is_redacted(event.source) else None
 
 
-def _readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event | None:
+def readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event | None:
     """Return one fetched event in the clear, or nothing if it stayed unreadable.
 
     ``room_get_event_relations`` is why this exists. nio decrypts what
@@ -343,7 +343,7 @@ def _project_room_page(
     logical_messages = 0
     unreadable = False
     for event in page:
-        readable = _readable_event(client, event)
+        readable = readable_event(client, event)
         unreadable = unreadable or readable is None
         projected = None if readable is None else _projected_from_event(room_id, readable, self_sender=self_sender)
         if projected is None:
@@ -808,7 +808,7 @@ class ConversationHydrator:
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
             raise _HydrationError(msg)
         events: list[ProjectedEvent] = []
-        readable_root = _readable_event(self._client(), root.event)
+        readable_root = readable_event(self._client(), root.event)
         root_projected = (
             None
             if readable_root is None
@@ -884,7 +884,7 @@ class ConversationHydrator:
             async with contextlib.aclosing(relations):
                 async for event in relations:
                     fetched += 1
-                    readable = _readable_event(client, event)
+                    readable = readable_event(client, event)
                     if readable is None:
                         # nio hands relations over exactly as they arrived, so
                         # in an encrypted room this is every one of them until
@@ -980,7 +980,7 @@ class ConversationHydrator:
                 # `receive_response`, so unlike the relation walk this is only
                 # reached when decryption was tried and failed. The walk still
                 # cannot say it read the room.
-                readable = _readable_event(client, event)
+                readable = readable_event(client, event)
                 unreadable = unreadable or readable is None
                 projected = (
                     None if readable is None else _projected_from_event(room_id, readable, self_sender=self.self_sender)
@@ -1062,7 +1062,7 @@ class ConversationHydrator:
                 logical_event_id=request.logical_event_id,
             )
             return False
-        readable_original = _readable_event(self._client(), original.event)
+        readable_original = readable_event(self._client(), original.event)
         if readable_original is None:
             # Unreadable is not deleted, and the branch below would treat it as
             # deleted: an event that projects to nothing is how "the server no

@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 import nio
 import pytest
+from nio import AuthenticatedToDeviceEvent
 from nio.crypto import DeviceStore, OlmDevice
 from nio.durable import RecordKind, SyncBatch, SyncRecord
+from nio.durable.codec import restore_event
 from nio.durable.model import CryptoEvidence, OwnMembership
 
 from mindroom.constants import STREAM_STATUS_KEY
@@ -33,10 +35,9 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal import store as journal_store
 from mindroom.matrix import durable_ingestion
-from mindroom.matrix.client_session import authenticate_to_device_event
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch, validate_ingestion_batch
 from mindroom.matrix.journal_ingress import parse_journal_event
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
+from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.pending_event_worker import PendingEventWorker
 
 if TYPE_CHECKING:
@@ -85,7 +86,7 @@ class Session:
         self.batch = None
 
     async def dispatch(self, record: SyncRecord, *, event: object = None) -> None:
-        self.dispatched_events.append(event)
+        self.dispatched_events.append(restore_event(record) if event is None else event)
         self.dispatched.append(record)
 
 
@@ -584,7 +585,7 @@ async def test_encrypted_semantic_source_keeps_crypto_evidence(
 
 
 @pytest.mark.asyncio
-async def test_auxiliary_replay_reauthenticates_removed_device(
+async def test_auxiliary_replay_preserves_evidence_but_current_authority_can_be_revoked(
     journal_database: Callable[[], EventJournalStore],
 ) -> None:
     store = journal_database()
@@ -599,27 +600,40 @@ async def test_auxiliary_replay_reauthenticates_removed_device(
             "sender": device.user_id,
             "content": {"algorithm": "m.olm.v1.curve25519-aes-sha2", "sender_key": "curve"},
         },
-        clear={"type": "org.example.call", "sender": device.user_id, "content": {"key": "value"}},
+        clear={
+            "type": "org.example.call",
+            "sender": device.user_id,
+            "sender_device": device.device_id,
+            "keys": {"ed25519": device.ed25519},
+            "content": {"key": "value"},
+        },
         route="to_device",
+        crypto=CryptoEvidence(
+            None,
+            "curve",
+            authenticated_sender=nio.AuthenticatedDevice(device.user_id, "ALICE", "curve", "signing"),
+        ),
     )
     batch = SyncBatch(uuid4(), 1, (record,))
     principal = await principal_for(store, batch.stream_id)
     session = Session(batch)
-    authenticate = partial(authenticate_to_device_event, device_store=devices)
-    await consume_one_ingestion_batch(session, principal, account_id=ACCOUNT, authenticate_to_device=authenticate)
+    client = SimpleNamespace(olm=SimpleNamespace(device_store=devices))
+    await consume_one_ingestion_batch(session, principal, account_id=ACCOUNT)
     assert isinstance(session.dispatched_events[0], AuthenticatedToDeviceEvent)
+    assert authenticated_sender_is_current(client, session.dispatched_events[0])
     device.deleted = True
     replay = Session(batch)
     facts = await consume_one_ingestion_batch(
         replay,
         principal,
         account_id=ACCOUNT,
-        authenticate_to_device=authenticate,
     )
     assert facts is not None
     assert not facts.receipt_new
     assert len(replay.dispatched_events) == 1
-    assert not isinstance(replay.dispatched_events[0], AuthenticatedToDeviceEvent)
+    assert isinstance(replay.dispatched_events[0], AuthenticatedToDeviceEvent)
+    assert replay.dispatched_events[0].authenticated_sender == session.dispatched_events[0].authenticated_sender
+    assert not authenticated_sender_is_current(client, replay.dispatched_events[0])
 
 
 @pytest.mark.asyncio

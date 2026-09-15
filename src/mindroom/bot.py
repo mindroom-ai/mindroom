@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 import nio
+from nio import AuthenticatedToDeviceEvent
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from mindroom.approval_inbound import (
@@ -61,6 +62,7 @@ from mindroom.matrix_delivery import TurnHandoff
 from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manager
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
+from mindroom.model_catalog_receiver import register_model_catalog_receiver
 from mindroom.post_response_effects import PostResponseEffectsSupport
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
@@ -125,7 +127,6 @@ from .matrix.room_member_joins import (
     emit_room_member_join_at_least_once,
     room_member_left_from_event,
 )
-from .matrix.to_device import AuthenticatedToDeviceEvent
 from .media_inputs import MediaInputs
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .response_admission import admitted_response_decision
@@ -172,7 +173,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
     from mindroom.handled_turns import TurnRecord
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
-    from mindroom.matrix.client_session import MindRoomAsyncClient
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.response_admission import ResponseAdmissionGate
@@ -1826,6 +1826,17 @@ class AgentBot:
                     owner=self._runtime_view,
                 ),
             )
+            register_model_catalog_receiver(
+                client=client,
+                agent_name=self.agent_name,
+                runtime_paths=self.runtime_paths,
+                config_getter=lambda: self.config,
+                membership_index=self._runtime_view.agent_reply_memberships,
+                callback_wrapper=lambda callback: _create_best_effort_task_wrapper(
+                    callback,
+                    owner=self._runtime_view,
+                ),
+            )
             await self._set_presence_with_model_info()
             self.running = True
 
@@ -2412,10 +2423,6 @@ class AgentBot:
                 after_sync=self._on_ingestion_frame_completion,
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
-                authenticate_to_device=lambda source, event: cast("MindRoomAsyncClient", client).authenticate_to_device(
-                    source,
-                    event,
-                ),
                 schedule_trigger_sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",

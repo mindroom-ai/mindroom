@@ -216,6 +216,7 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ app     Run the native app's private structured helper over inherited standard I/O.    │
 │ login   Log in once, create an Olm device, and save its access token privately.        │
 │ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
 │ setup   Log in when needed, then claim one requester-agent pairing.                    │

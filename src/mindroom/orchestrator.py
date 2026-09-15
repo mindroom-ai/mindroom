@@ -120,6 +120,7 @@ from .config.main import Config, load_config
 from .credentials_sync import sync_env_to_credentials
 from .event_journal_open import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
+from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle
 from .orchestration.config_updates import build_config_update_plan, configured_entity_names
 from .orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
@@ -422,6 +423,7 @@ class _MultiAgentOrchestrator:
         init=False,
         repr=False,
     )
+    _computer_runtime: ComputerRuntimeCoordinator = field(init=False, repr=False)
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
@@ -441,6 +443,11 @@ class _MultiAgentOrchestrator:
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler)
         self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
+        self._computer_runtime = ComputerRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            api_enabled=self.api_enabled,
+            agent_reply_memberships=self.agent_reply_memberships,
+        )
         self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
@@ -692,6 +699,7 @@ class _MultiAgentOrchestrator:
             update_runtime_state=False,
         )
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+        self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
 
     def _configure_approval_store_transport(self) -> None:
         """Bind approval transport hooks to the current shared runtime services."""
@@ -946,6 +954,7 @@ class _MultiAgentOrchestrator:
                     if config is not None:
                         await self._recover_pending_replacement_rooms(config)
                     self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+                    self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
                     return
 
                 attempt += 1
@@ -1830,6 +1839,7 @@ class _MultiAgentOrchestrator:
     async def _remove_deleted_entities(self, removed_entities: set[str]) -> None:
         """Leave rooms before canceling ingestion and releasing removed entities."""
         self._external_trigger_runtime.unbind_for_entity_changes(removed_entities)
+        self._computer_runtime.unbind_for_entity_changes(removed_entities)
         for entity_name in removed_entities:
             self._pending_replacement_recovery_room_ids.pop(entity_name, None)
             await self._cancel_bot_start_task(entity_name)
@@ -1873,6 +1883,7 @@ class _MultiAgentOrchestrator:
             return set()
 
         self._external_trigger_runtime.unbind_for_entity_changes(affected_entities)
+        self._computer_runtime.unbind_for_entity_changes(affected_entities)
         replaced_bots = self._replacement_bots(affected_entities)
         for entity_name in affected_entities:
             await self._cancel_bot_start_task(entity_name)
@@ -1897,6 +1908,7 @@ class _MultiAgentOrchestrator:
         replaced_bots = self._replacement_bots(plan.entities_to_restart)
         if entities_to_stop:
             self._external_trigger_runtime.unbind_for_entity_changes(entities_to_stop)
+            self._computer_runtime.unbind_for_entity_changes(entities_to_stop)
             for entity_name in entities_to_stop:
                 await self._cancel_bot_start_task(entity_name)
             await self._stop_runtime_entities(
@@ -1965,6 +1977,7 @@ class _MultiAgentOrchestrator:
             )
             self._permanently_failed_entities.difference_update(changed_entities)
             self._external_trigger_runtime.unbind_for_entity_changes(changed_entities)
+            self._computer_runtime.unbind_for_entity_changes(changed_entities)
             replaced_bots = self._replacement_bots(changed_entities)
             for entity_name in changed_entities:
                 await self._cancel_bot_start_task(entity_name)
@@ -1983,6 +1996,7 @@ class _MultiAgentOrchestrator:
                 await self._setup_rooms_and_memberships(start_results.started_bots)
             await self._recover_pending_replacement_rooms(self.config)
             self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
+            self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
             for entity_name in start_results.retryable_entities:
                 await self._schedule_bot_start_retry(entity_name)
             if start_results.permanently_failed_entities:
@@ -2044,6 +2058,7 @@ class _MultiAgentOrchestrator:
         )
         await self._approval_recovery.mark_startup_runtime_support_ready()
         self._external_trigger_runtime.bind_if_ready(new_config, self.agent_bots)
+        self._computer_runtime.bind_if_ready(new_config, self.agent_bots)
         await self._emit_config_reloaded(
             new_config=new_config,
             changed_entities=changed_entities,
@@ -2097,6 +2112,7 @@ class _MultiAgentOrchestrator:
                 "updating_config_authorization",
                 platform_administrator_ids=new_config.administrators,
             )
+            self._computer_runtime.unbind()
             await self._external_trigger_runtime.sync_api_config_snapshot(new_config)
             if changed_runtime_mcp_servers:
                 plan = replace(
@@ -2430,6 +2446,7 @@ class _MultiAgentOrchestrator:
         if self._runtime_shutdown_event is not None:
             self._runtime_shutdown_event.set()
         self._external_trigger_runtime.unbind()
+        self._computer_runtime.unbind()
         try:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:

@@ -42,8 +42,8 @@ dependencies = [
   "mcp[cli]>=1.28.1,<2",
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
-  # Arbitrary Olm to-device encryption uses the fork's tested internal API; update only with its round-trip tests.
-  "mindroom-nio[e2e]==1.0.8",
+  # Owned to-device transport requires the durable NIO API.
+  "mindroom-nio[e2e]==1.1",
   "openai",
   "packaging>=24",
   "pydantic>=2",
@@ -442,6 +442,7 @@ desktop = [
   "pyautogui>=0.9.54",
   "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
 ]
 [project.scripts]
 mindroom = "mindroom.cli.main:main"
@@ -472,6 +473,21 @@ dev = [
   "ty>=0.0.17",
   "vulture>=2.16",
   "zensical",
+]
+# Only the frozen helper's dependencies; the backend's ML packages are not needed.
+# uv resolves this group with the application's exact NIO pin in the same lockfile.
+desktop-helper = [
+  "mcp[cli]>=1.28.1,<2",
+  "mindroom-nio[e2e]",
+  "pillow>=10.2",
+  "pyautogui>=0.9.54",
+  "pyinstaller==6.16",
+  "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
+  "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
+  "python-dotenv>=1.1.1",
+  "pyyaml>=6.0.2",
+  "structlog>=25.4",
 ]
 
 [tool.hatch.build.targets.wheel]

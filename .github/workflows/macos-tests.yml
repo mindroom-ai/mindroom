@@ -1,0 +1,68 @@
+name: macOS tests
+
+on:
+  pull_request:
+    paths:
+      - "macos/**"
+      - "!macos/appcast.xml"
+      - "src/mindroom/desktop/**"
+      - "src/mindroom/matrix/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/macos-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "macos/**"
+      - "!macos/appcast.xml"
+      - "src/mindroom/desktop/**"
+      - "src/mindroom/matrix/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/macos-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  swift-tests:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [arm64, x86_64]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and test native app
+        run: /usr/bin/arch -${{ matrix.architecture }} swift test --package-path macos/MindRoom --arch ${{ matrix.architecture }}
+
+  packaging:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: astral-sh/setup-uv@v7
+      - name: Build universal uv binary
+        run: macos/build-universal-uv.sh "$RUNNER_TEMP/uv-universal"
+      - name: Build universal installer
+        env:
+          UV_BINARY: ${{ runner.temp }}/uv-universal
+          APP_VERSION: '0.0.0'
+          BUILD_VERSION: '1'
+        run: macos/build-macos-app.sh --universal --dmg
+      - name: Verify installer and both packaged helpers
+        run: |
+          codesign --verify --deep --strict dist/macos/MindRoom.app
+          hdiutil verify dist/macos/MindRoom.dmg
+          for architecture in arm64 x86_64; do
+            uv run --no-project python macos/smoke-desktop-helper.py \
+              "dist/macos/MindRoom.app/Contents/Helpers/$architecture/MindRoom Desktop Helper.app" "$architecture"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/macos/MindRoom.dmg
+          retention-days: 7

@@ -21,7 +21,7 @@ from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import streaming as streaming_mod
-from mindroom.cancellation import USER_STOP_CANCEL_MSG
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
@@ -544,6 +544,56 @@ def test_delivery_preparation_builds_thread_relation_only_for_initial_send(confi
     assert edit_kwargs["thread_event_id"] is None
     assert edit_kwargs["reply_to_event_id"] is None
     assert edit_kwargs["latest_thread_event_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+@pytest.mark.parametrize("terminal", ["restart", "user_stop", "error"])
+@pytest.mark.parametrize(("allowed", "existing"), [(False, False), (True, False), (False, True)])
+async def test_terminal_cleanup_requires_permission_to_create_response(
+    config: Config,
+    terminal: str,
+    allowed: bool,
+    existing: bool,
+) -> None:
+    """Cleanup preserves cancellation facts without creating an unapproved response."""
+    gateway = _FakeGateway()
+
+    async def interrupted_stream() -> AsyncIterator[object]:
+        if terminal == "error":
+            message = "Provider failed"
+            raise RuntimeError(message)
+        raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG if terminal == "restart" else USER_STOP_CANCEL_MSG)
+        yield  # pragma: no cover
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+        pytest.raises(StreamingDeliveryError) as raised,
+    ):
+        await send_streaming_response(
+            client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
+            target=MessageTarget.resolve("!test:localhost", "$thread", "$source"),
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            response_stream=interrupted_stream(),
+            existing_event_id="$existing" if existing else None,
+            adopt_existing_placeholder=existing,
+            allow_new_terminal_message=lambda: allowed,
+        )
+
+    outcome = raised.value.transport_outcome
+    assert outcome.terminal_status == ("error" if terminal == "error" else "cancelled")
+    if terminal != "error":
+        assert outcome.resolved_cancel_source == ("sync_restart" if terminal == "restart" else "user_stop")
+    if allowed or existing:
+        assert len(gateway.ops) == 1
+        assert gateway.ops[0].kind == ("edit" if existing else "send")
+    else:
+        assert gateway.ops == []
+        assert outcome.last_physical_stream_event_id is None
+        assert outcome.rendered_body is None
+        assert raised.value.accumulated_text == ""
 
 
 @pytest.mark.asyncio

@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
+    from mindroom.api.computers import ComputerRuntime
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.config_reload import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from mindroom.response_activity import ResponseIdentity
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
+    from mindroom.worker_computer.sessions import ComputerSessionStore
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
@@ -130,6 +132,8 @@ class _MindroomAppState:
     config_reload_status: Callable[[], ConfigReloadStatus] | None = None
     script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
     mcp_gateway_runtime: GatewayRuntime | None = None
+    computer_runtime: ComputerRuntime | None = None
+    computer_sessions: ComputerSessionStore | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:

@@ -19,6 +19,7 @@
 - [Data & Databases](https://docs.mindroom.chat/tools/data-and-databases/)
 - [Web Search](https://docs.mindroom.chat/tools/web-search/)
 - [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/)
+- [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/)
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/)
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/)
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/)

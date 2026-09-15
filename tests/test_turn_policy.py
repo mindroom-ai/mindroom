@@ -7,7 +7,7 @@ has a direct safety net that does not go through bot-level integration tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import nio
@@ -17,13 +17,16 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.participation import RoomParticipationConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
+from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.teams import TeamIntent, TeamMode, TeamOutcome
+from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
@@ -43,6 +46,7 @@ if TYPE_CHECKING:
 
     from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.identity import MatrixID
+    from mindroom.turn_policy import _ResponderAvailability
 
 _ROOM_ID = "!test:localhost"
 _SENDER = "@user:localhost"
@@ -650,3 +654,115 @@ async def test_current_room_grant_preserves_existing_thread_owner(config: Config
     context = _context(thread_id="$root", thread_history=history)
     plan = await _plan(policy, room, _dispatch(context, agent_name=agent_name))
     assert plan.kind == ("respond" if agent_name == "general" else "ignore")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("history_sender", ["@other:localhost", _SENDER])
+@pytest.mark.parametrize("active_follow_up", [False, True])
+async def test_adaptive_participation_counts_current_sender(
+    config: Config,
+    history_sender: str,
+    active_follow_up: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an actual second human makes an untagged turn adaptive."""
+    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
+    room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "general").full_id)
+    context = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender=history_sender, body="earlier"),
+            make_visible_message(sender=_entity_id(config, "general").full_id, body="answer"),
+        ],
+    )
+    dispatch = _dispatch(context, agent_name="general")
+    if active_follow_up:
+        dispatch = replace(
+            dispatch,
+            envelope=replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND),
+        )
+    snapshots = 0
+    original_snapshot = TurnPolicy.responder_availability
+
+    def snapshot(policy: TurnPolicy) -> _ResponderAvailability:
+        nonlocal snapshots
+        snapshots += 1
+        return original_snapshot(policy)
+
+    monkeypatch.setattr(TurnPolicy, "responder_availability", snapshot)
+    plan = await _plan(_policy_for(config, "general"), room, dispatch)
+    assert plan.kind == "respond"
+    assert (plan.response_action.participation is not None) == (history_sender != _SENDER)
+    assert snapshots == 1, "One dispatch must reuse its responder liveness snapshot"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["idle", "active", "backlog"])
+async def test_adaptive_participation_non_designated_agent_skips(config: Config, mode: str) -> None:
+    """Opt-in does not grant other agents untagged access to multi-human threads."""
+    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
+    room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "research").full_id)
+    context = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender="@other:localhost", body="earlier"),
+            make_visible_message(sender=_entity_id(config, "research").full_id, body="answer"),
+        ],
+    )
+    dispatch = _dispatch(context, agent_name="research")
+    if mode == "backlog":
+        dispatch = replace(
+            dispatch,
+            envelope=replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND),
+        )
+    plan = await _plan(_policy_for(config, "research"), room, dispatch, has_active_response=mode == "active")
+    assert plan.kind == "ignore"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    ["agent_mention", "human_mention", "unavailable", "scheduled", "unauthorized", "bot_history"],
+)
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_adaptive_participation_exclusions(config: Config, mode: str) -> None:
+    """Mention intent, degraded context, and access rules cannot become adaptive turns."""
+    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
+    config.bot_accounts = ["@bridge:localhost"]
+    with_responder_access(config, "general", users=["@owner:localhost" if mode == "unauthorized" else _SENDER])
+    room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "general").full_id)
+    context = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(
+                sender="@bridge:localhost" if mode == "bot_history" else "@other:localhost",
+                body="earlier",
+            ),
+            make_visible_message(sender=_entity_id(config, "general").full_id, body="answer"),
+        ],
+        full_history=mode != "unavailable",
+    )
+    if mode == "agent_mention":
+        context = replace(context, mentioned_agents=[_entity_id(config, "general")], am_i_mentioned=True)
+    if mode == "human_mention":
+        context = replace(context, has_non_agent_mentions=True)
+    if mode == "unavailable":
+        context = replace(context, requires_model_history_refresh=True)
+    dispatch = _dispatch(context, agent_name="general")
+    if mode == "scheduled":
+        dispatch = replace(
+            dispatch,
+            envelope=replace(
+                dispatch.envelope,
+                origin=replace(
+                    dispatch.envelope.origin,
+                    intent=TurnIntent.SCHEDULED_FIRE,
+                ),
+            ),
+        )
+    plan = await _plan(_policy_for(config, "general"), room, dispatch)
+    assert plan.response_action is None or plan.response_action.participation is None
+    if mode in {"unauthorized", "human_mention"}:
+        assert plan.kind == "ignore"
+    if mode == "agent_mention":
+        assert plan.kind == "respond"

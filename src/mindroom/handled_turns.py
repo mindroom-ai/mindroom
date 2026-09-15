@@ -42,6 +42,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.legacy_handled_turns import import_legacy_ledger, restore_legacy_revision_replay
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
+from mindroom.model_selection import command_result_content_to_dict, freeze_command_result_content
 from mindroom.turn_record import (
     SourceEventMetadata,
     SourceEventRevision,
@@ -164,6 +165,10 @@ class TurnRecordCodec:
             payload["command_execution_started"] = True
         if record.command_result_text is not None:
             payload["command_result_text"] = record.command_result_text
+        if record.command_result_extra_content is not None:
+            payload["command_result_extra_content"] = command_result_content_to_dict(
+                record.command_result_extra_content,
+            )
         if record.history_scope is not None:
             payload["history_scope"] = record.history_scope.to_metadata()
         if record.conversation_target is not None:
@@ -236,6 +241,7 @@ class TurnRecordCodec:
             correlation_id=canonical_optional_string(record.get("correlation_id")),
             command_execution_started=record.get("command_execution_started") is True,
             command_result_text=canonical_optional_string(record.get("command_result_text")),
+            command_result_extra_content=freeze_command_result_content(record.get("command_result_extra_content")),
             history_scope=HistoryScope.from_metadata(record.get("history_scope")),
             conversation_target=MessageTarget.from_metadata(record.get("conversation_target")),
             timestamp=float(timestamp),
@@ -988,6 +994,11 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
         ),
         command_execution_started=newer.command_execution_started or older.command_execution_started,
         command_result_text=newer.command_result_text or older.command_result_text,
+        command_result_extra_content=(
+            newer.command_result_extra_content
+            if newer.command_result_text is not None
+            else older.command_result_extra_content
+        ),
         latest_edit_receipt_order=max(
             newer.latest_edit_receipt_order or 0,
             older.latest_edit_receipt_order or 0,

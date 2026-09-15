@@ -14,14 +14,11 @@ import nio
 from mindroom.constants import RuntimePaths, encryption_keys_dir, runtime_matrix_ssl_verify
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
-from mindroom.matrix.event_types import CALL_ENCRYPTION_KEYS_EVENT_TYPE
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
 
-    from nio.crypto import DeviceStore
 
 logger = get_logger(__name__)
 
@@ -33,22 +30,6 @@ _PERMANENT_MATRIX_STARTUP_ERROR_CODES = frozenset(
         "M_INVALID_USERNAME",
     },
 )
-
-
-def _log_custom_olm_rejection(
-    event: nio.UnknownToDeviceEvent,
-    reason: str,
-    **details: object,
-) -> None:
-    """Log why a security-sensitive custom event failed provenance checks."""
-    log_event = "call_key_olm_rejected" if event.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE else "custom_olm_rejected"
-    logger.warning(
-        log_event,
-        sender=event.sender,
-        event_type=event.type,
-        reason=reason,
-        **details,
-    )
 
 
 class PermanentMatrixStartupError(PermanentStartupError):
@@ -118,86 +99,6 @@ class MindRoomAsyncClient(nio.AsyncClient):
         )
         encrypted_content.update(encryption_visible_metadata(content))
         return encrypted_message_type, encrypted_content
-
-    def _handle_olm_events(
-        self,
-        response: object,
-    ) -> None:
-        """Preserve an explicit zero OTK count so nio replenishes a drained pool."""
-        sync_response = cast("nio.SyncResponse", response)
-        super()._handle_olm_events(sync_response)
-        count = sync_response.device_key_count.signed_curve25519
-        if self.olm is not None and count is not None:
-            self.olm.uploaded_key_count = count
-
-    def _handle_decrypt_to_device(
-        self,
-        to_device_event: nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent,
-    ) -> nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent | None:
-        decrypted = super()._handle_decrypt_to_device(to_device_event)
-        if not isinstance(to_device_event, nio.OlmEvent):
-            return decrypted
-        return cast(
-            "nio.ToDeviceEvent | nio.BadEvent | nio.UnknownBadEvent | None",
-            self.authenticate_to_device(to_device_event.source, decrypted),
-        )
-
-    def authenticate_to_device(self, source: dict[str, object], event: object) -> object:
-        """Authenticate fresh or restored custom events against current device keys."""
-        if not isinstance(event, nio.UnknownToDeviceEvent):
-            return event
-        result = authenticate_to_device_event(
-            source,
-            event,
-            device_store=self.olm.device_store if self.olm is not None else None,
-        )
-        if not isinstance(result, AuthenticatedToDeviceEvent):
-            if self.olm is not None:
-                self.olm.users_for_key_query.add(event.sender)
-            _log_custom_olm_rejection(event, "signed_device_authentication_failed")
-        elif result.type == CALL_ENCRYPTION_KEYS_EVENT_TYPE:
-            logger.info(
-                "call_key_olm_authenticated",
-                sender=result.sender,
-                sender_device=result.authenticated_device_id,
-            )
-        return result
-
-
-def authenticate_to_device_event(  # noqa: PLR0911 - fail-closed identity checks
-    source: dict[str, object],
-    event: object,
-    *,
-    device_store: DeviceStore | None,
-) -> object:
-    """Pure post-decrypt authentication shared by live and durable replay paths."""
-    if not isinstance(event, nio.UnknownToDeviceEvent):
-        return event
-    if device_store is None or source.get("type") != "m.room.encrypted" or source.get("sender") != event.sender:
-        return event
-    content = source.get("content")
-    if not isinstance(content, dict):
-        return event
-    envelope = cast("dict[str, object]", content)
-    if envelope.get("algorithm") != "m.olm.v1.curve25519-aes-sha2":
-        return event
-    sender_key = envelope.get("sender_key")
-    matching = [device for device in device_store.active_user_devices(event.sender) if device.curve25519 == sender_key]
-    if len(matching) != 1:
-        return event
-    device = matching[0]
-    sender_device = event.source.get("sender_device")
-    sender_keys = event.source.get("keys")
-    if sender_device is not None and sender_device != device.id:
-        return event
-    if sender_keys is not None and (not isinstance(sender_keys, dict) or sender_keys.get("ed25519") != device.ed25519):
-        return event
-    return AuthenticatedToDeviceEvent(
-        source=event.source,
-        sender=event.sender,
-        type=event.type,
-        authenticated_device_id=device.id,
-    )
 
 
 def require_runtime_paths_arg(runtime_paths: object) -> RuntimePaths:
@@ -398,82 +299,6 @@ async def login(
     raise matrix_startup_error(msg, response=response)
 
 
-async def login_with_token(
-    homeserver: str,
-    login_token: str,
-    runtime_paths: RuntimePaths,
-    *,
-    expected_user_id: str | None = None,
-    http_headers: Mapping[str, str] | None = None,
-    sync_storage: MatrixSyncStorage = DEFAULT_MATRIX_SYNC_STORAGE,
-) -> nio.AsyncClient:
-    """Exchange one short-lived Matrix login token and restore its exact device."""
-    runtime_paths = require_runtime_paths_arg(runtime_paths)
-    login_client = _create_matrix_client(
-        homeserver,
-        runtime_paths,
-        http_headers=http_headers,
-        sync_storage=sync_storage,
-    )
-    try:
-        response = await login_client.login(
-            token=login_token,
-            device_name="MindRoom Desktop Bridge",
-        )
-        if not isinstance(response, nio.LoginResponse):
-            msg = f"Failed to exchange Matrix login token: {response}"
-            raise matrix_startup_error(msg, response=response)
-        if expected_user_id is not None and response.user_id != expected_user_id:
-            await _revoke_unexpected_login(
-                login_client,
-                expected_user_id=expected_user_id,
-                actual_user_id=response.user_id,
-            )
-            msg = f"Matrix SSO returned {response.user_id}, but {expected_user_id} was requested."
-            raise matrix_startup_error(msg, permanent=True)
-        credentials = (response.user_id, response.device_id, response.access_token)
-    finally:
-        await login_client.close()
-
-    user_id, device_id, access_token = credentials
-    logger.info("matrix_login_succeeded", user_id=user_id, login_method="token")
-    return create_authenticated_client(
-        homeserver,
-        user_id,
-        device_id,
-        access_token,
-        runtime_paths,
-        http_headers=http_headers,
-        sync_storage=sync_storage,
-    )
-
-
-async def _revoke_unexpected_login(
-    client: nio.AsyncClient,
-    *,
-    expected_user_id: str,
-    actual_user_id: str,
-) -> None:
-    """Best-effort revoke an SSO session issued for an unexpected identity."""
-    try:
-        response = await client.logout()
-    except Exception:
-        logger.warning(
-            "matrix_unexpected_sso_session_revoke_failed",
-            expected_user_id=expected_user_id,
-            actual_user_id=actual_user_id,
-            exc_info=True,
-        )
-        return
-    if isinstance(response, nio.ErrorResponse):
-        logger.warning(
-            "matrix_unexpected_sso_session_revoke_failed",
-            expected_user_id=expected_user_id,
-            actual_user_id=actual_user_id,
-            error=str(response),
-        )
-
-
 async def login_flows(
     homeserver: str,
     runtime_paths: RuntimePaths,
@@ -537,12 +362,10 @@ __all__ = [
     "MatrixSyncStorage",
     "MindRoomAsyncClient",
     "PermanentMatrixStartupError",
-    "authenticate_to_device_event",
     "create_authenticated_client",
     "create_matrix_http_client",
     "login",
     "login_flows",
-    "login_with_token",
     "matrix_client",
     "matrix_client_config",
     "matrix_startup_error",

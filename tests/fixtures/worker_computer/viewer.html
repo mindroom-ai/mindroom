@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <title>Worker computer acceptance viewer</title>
+  <body style="margin:0">
+    <div id="screen" style="width:1280px;height:800px"></div>
+    <script type="module">
+      import RFB from '/novnc/core/rfb.js';
+      window.connectComputer = async session => {
+        const path = '/api/computers/sessions/' + session.session_id;
+        const response = await fetch(path + '/stream-ticket', {
+          method: 'POST', credentials: 'omit',
+          headers: {Authorization: 'Bearer ' + session.session_token},
+        });
+        if (!response.ok) throw new Error('Ticket failed: ' + response.status);
+        const {ticket} = await response.json();
+        document.querySelector('#screen').replaceChildren();
+        window.probe = {connected: false, disconnected: false};
+        window.rfb = new RFB(document.querySelector('#screen'),
+          `ws://${location.host}${path}/stream`,
+          {wsProtocols: ['binary', 'mindroom-ticket.' + ticket]});
+        // Deliberately bypass frontend watch mode: the worker must reject input.
+        window.rfb.viewOnly = false;
+        window.rfb.addEventListener('connect', () => { window.probe.connected = true; });
+        window.rfb.addEventListener('disconnect', () => { window.probe.disconnected = true; });
+      };
+    </script>
+  </body>
+</html>

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,8 @@ import aiohttp
 import httpx
 import nio
 import pytest
+from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
+from nio.crypto import DeviceStore, OlmDevice
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -23,7 +26,6 @@ from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.to_device import AuthenticatedToDeviceEvent
 from mindroom.matrix_rtc.call_manager import (
     _MAX_PENDING_KEYS_PER_ROOM,
     _PENDING_KEY_TTL_MS,
@@ -165,6 +167,10 @@ def _client() -> AsyncMock:
     client.user_id = BOT_USER
     client.device_id = BOT_DEVICE
     client.rooms = {}
+    devices = DeviceStore()
+    for device_id in ("ALICEDEV", "ALICESECOND"):
+        devices.add(OlmDevice("@alice:example.org", device_id, {"curve25519": "curve", "ed25519": "signing"}))
+    client.olm = SimpleNamespace(device_store=devices)
     client.get_openid_token.return_value = nio.responses.GetOpenIDTokenResponse(
         "opaque-token",
         3600,
@@ -434,7 +440,7 @@ def _frame_key_event(
         source=source,
         sender=user_id,
         type=CALL_ENCRYPTION_KEYS_EVENT_TYPE,
-        authenticated_device_id=device_id,
+        authenticated_sender=AuthenticatedDevice(user_id, device_id, "curve", "signing"),
     )
 
 
@@ -2902,6 +2908,7 @@ def test_manager_bounds_and_deduplicates_pending_keys(tmp_path: Path) -> None:
                 key_index=index,
                 received_at_ms=index,
             ),
+            _frame_key_event(),
         )
 
     pending = manager._pending_keys[ROOM_ID]
@@ -2915,15 +2922,17 @@ def test_manager_bounds_and_deduplicates_pending_keys(tmp_path: Path) -> None:
         key_index=1,
         received_at_ms=999,
     )
-    manager._queue_pending_key(ROOM_ID, replacement)
+    manager._queue_pending_key(ROOM_ID, replacement, _frame_key_event())
     assert len(pending) == _MAX_PENDING_KEYS_PER_ROOM
-    assert pending[("@alice:example.org", "ALICEDEV", 1)] is replacement
+    assert pending[("@alice:example.org", "ALICEDEV", 1)].received is replacement
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [False, True])
 async def test_manager_replays_a_key_received_while_starting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    revoked: bool,
 ) -> None:
     """A key received after call membership publication is applied once the bridge is ready."""
 
@@ -2955,10 +2964,12 @@ async def test_manager_replays_a_key_received_while_starting(
     assert ROOM_ID in manager._pending_keys
     assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) not in bridge.frame_keys
 
+    if revoked:
+        client.olm.device_store["@alice:example.org"]["ALICEDEV"].deleted = True
     release_agent.set()
     await asyncio.gather(join_task, key_task)
 
-    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+    assert (("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys) is (not revoked)
     await manager.shutdown()
 
 

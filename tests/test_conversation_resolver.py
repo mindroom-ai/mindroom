@@ -24,10 +24,12 @@ from mindroom.constants import SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
+    ConversationCursor,
     ConversationPage,
     EventClass,
     EventJournalStore,
     EventKind,
+    RefreshRequest,
     VisibleMessage,
 )
 from mindroom.logging_config import get_logger
@@ -208,6 +210,36 @@ def _room() -> nio.MatrixRoom:
     # A synced cache is what makes an absent mention mean absent rather than "not fetched yet".
     room.members_synced = True
     return room
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incomplete", ["refresh", "cursor", "truncated"])
+async def test_dispatch_repairs_pending_refresh_before_counting_participants(config: Config, incomplete: str) -> None:
+    """Repair a withheld streamed reply before planning, without retrying permanent bounds."""
+    messages = (
+        replace(_projected(_THREAD_ROOT, "First participant"), thread_id=_THREAD_ROOT),
+        replace(_projected("$second", "Second participant"), thread_id=_THREAD_ROOT, sender=_HUMAN_USER_ID),
+    )
+    reader = _conversation_reader(*messages)
+    reader.read.return_value = ConversationPage(  # type: ignore[attr-defined]
+        messages=messages,
+        refresh_pending=(RefreshRequest(_ROOM_ID, _THREAD_ROOT, "$answer", "$final-edit", 1, 1),)
+        if incomplete == "refresh"
+        else (),
+        next_cursor=ConversationCursor(500, "$older") if incomplete == "cursor" else None,
+    )
+    reader.hydration_was_truncated.return_value = incomplete == "truncated"  # type: ignore[attr-defined]
+    resolver = _resolver(config, conversation_reader=reader)
+
+    result = await resolver.extract_dispatch_context(_room(), _threaded_event())
+
+    if incomplete == "refresh":
+        reader.read_strict.assert_awaited_once()  # type: ignore[attr-defined]
+        assert not result.context.planning_thread_history_unavailable
+        assert {message.sender for message in result.context.planning_thread_history} == {_SENDER, _HUMAN_USER_ID}
+    else:
+        reader.read_strict.assert_not_awaited()  # type: ignore[attr-defined]
+        assert result.context.planning_thread_history_unavailable
 
 
 @pytest.mark.asyncio

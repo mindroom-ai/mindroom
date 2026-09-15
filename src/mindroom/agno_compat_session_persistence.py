@@ -7,6 +7,7 @@ import contextvars
 import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from functools import partial
@@ -15,6 +16,7 @@ from pathlib import Path
 from queue import SimpleQueue
 from typing import TYPE_CHECKING, Any, cast
 
+from agno.agent import _run as agent_run
 from agno.agent import _session as agent_session
 from agno.agent import _storage as agent_storage
 from agno.db.base import SessionType
@@ -24,10 +26,12 @@ from agno.team import _session as team_session
 from mindroom.background_tasks import run_blocking_until_complete, wait_for_future_until_complete
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
+    from contextlib import AbstractContextManager
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
+    from agno.run import RunContext
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.team import Team
@@ -61,6 +65,7 @@ _ORIGINAL_AGENT_ASAVE_SESSION = agent_session.asave_session
 _ORIGINAL_AGENT_SAVE_SESSION = agent_session.save_session
 _ORIGINAL_AGENT_ASAVE_RUN = agent_session.asave_run
 _ORIGINAL_AGENT_SAVE_RUN = agent_session.save_run
+_ORIGINAL_CANCELLED_RUN_PERSIST = agent_run._persist_cancelled_run_in_background
 _ORIGINAL_TEAM_AGET_SESSION = team_session.aget_session
 _ORIGINAL_TEAM_GET_SESSION = team_session.get_session
 _ORIGINAL_TEAM_ASAVE_SESSION = team_session.asave_session
@@ -85,6 +90,81 @@ class _PersistenceLane:
             thread_name_prefix="session-persistence",
         ),
     )
+
+
+# Reason: Agno persists cancelled runs in detached background tasks without a
+# public drain boundary before the caller writes canonical history.
+# Upstream issue: No matching public cancelled-run persistence drain issue identified.
+# Upstream PR: None identified for this extension point.
+# Remove when: Agno exposes an awaited cancellation-persistence boundary with exact
+# agent/run ownership; preserve caller history ownership and cross-task stream safety.
+# Coverage: tests/test_agno_cancellation.py exercises exact-run ownership and drainage.
+# Additional coverage: tests/test_ai_cancellation_lifecycle.py and tests/test_delegation_stream_lifecycle.py.
+@dataclass
+class _CancellationOwner:
+    agent: Agent
+    run_id: str
+    tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+
+    @contextmanager
+    def bind(self) -> Iterator[None]:
+        """Bind only one call or iterator operation, never a yielded stream chunk."""
+        token = _CANCELLATION_OWNER.set(self)
+        try:
+            yield
+        finally:
+            _CANCELLATION_OWNER.reset(token)
+
+
+_CANCELLATION_OWNER: contextvars.ContextVar[_CancellationOwner | None] = contextvars.ContextVar(
+    "agent_cancellation_owner",
+    default=None,
+)
+
+
+@asynccontextmanager
+async def drain_agent_cancellation(
+    agent: Agent,
+    run_id: str,
+) -> AsyncIterator[Callable[[], AbstractContextManager[None]]]:
+    """Finish this attempt's detached Agno save before its caller writes canonical history.
+
+    Keep upstream persistence, approval updates, and cleanup intact. Ownership
+    matches the exact agent and run, so inherited contexts cannot adopt helper
+    runs. The yielded factory binds each call, pull, or close in its own context;
+    API streams may move between tasks. Close the iterator before leaving this scope.
+    """
+    if _agent_lane(agent) is None:
+        yield nullcontext
+        return
+    owner = _CancellationOwner(agent, run_id)
+    try:
+        yield owner.bind
+    finally:
+        if owner.tasks:
+            await wait_for_future_until_complete(asyncio.gather(*owner.tasks))
+
+
+def _persist_cancelled_run_in_background(
+    agent: Agent,
+    run_response: RunOutput,
+    session: AgentSession,
+    run_context: RunContext | None = None,
+    user_id: str | None = None,
+) -> None:
+    """Retain the exact tasks accepted by the pinned synchronous scheduling helper."""
+    owner = _CANCELLATION_OWNER.get()
+    if owner is None or owner.agent is not agent or owner.run_id != run_response.run_id:
+        _ORIGINAL_CANCELLED_RUN_PERSIST(agent, run_response, session, run_context, user_id)
+        return
+    before = set(agent_run._background_tasks)
+    try:
+        _ORIGINAL_CANCELLED_RUN_PERSIST(agent, run_response, session, run_context, user_id)
+    finally:
+        # The helper registers its task without yielding. Other event loops may
+        # share Agno's registry, so only adopt tasks from this loop.
+        loop = asyncio.get_running_loop()
+        owner.tasks.update(task for task in agent_run._background_tasks - before if task.get_loop() is loop)
 
 
 def _register_sync_session_storage(
@@ -277,6 +357,7 @@ def _is_applied() -> bool:
         and agent_storage.aread_session is _agent_aread_session
         and agent_session.asave_session is _agent_asave_session
         and agent_session.asave_run is _agent_asave_run
+        and agent_run._persist_cancelled_run_in_background is _persist_cancelled_run_in_background
         and team_session.aget_session is _team_aget_session
         and team_session.asave_session is _team_asave_session
         and team_session.asave_run is _team_asave_run
@@ -297,6 +378,7 @@ def _apply_patch() -> bool:
             or agent_storage.aread_session is not _ORIGINAL_AGENT_AREAD_SESSION
             or agent_session.asave_session is not _ORIGINAL_AGENT_ASAVE_SESSION
             or agent_session.asave_run is not _ORIGINAL_AGENT_ASAVE_RUN
+            or agent_run._persist_cancelled_run_in_background is not _ORIGINAL_CANCELLED_RUN_PERSIST
             or team_session.aget_session is not _ORIGINAL_TEAM_AGET_SESSION
             or team_session.asave_session is not _ORIGINAL_TEAM_ASAVE_SESSION
             or team_session.asave_run is not _ORIGINAL_TEAM_ASAVE_RUN
@@ -305,6 +387,7 @@ def _apply_patch() -> bool:
         agent_storage.aread_session = cast("Any", _agent_aread_session)
         agent_session.asave_session = cast("Any", _agent_asave_session)
         agent_session.asave_run = cast("Any", _agent_asave_run)
+        agent_run._persist_cancelled_run_in_background = cast("Any", _persist_cancelled_run_in_background)
         team_session.aget_session = cast("Any", _team_aget_session)
         team_session.asave_session = cast("Any", _team_asave_session)
         team_session.asave_run = cast("Any", _team_asave_run)

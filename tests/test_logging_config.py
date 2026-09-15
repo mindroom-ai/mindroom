@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
 import warnings
 from typing import TYPE_CHECKING, NoReturn
 
+import aiohttp
+import nio
 import pytest
 
 from mindroom.constants import RuntimePaths
@@ -289,6 +292,66 @@ def test_setup_logging_json_mode_foreign_logger_inherits_bound_log_context(
     assert payload["logger"] == "test.foreign"
     assert payload["room_id"] == "!room:example.org"
     assert payload["thread_id"] == "$thread:example.org"
+
+
+@pytest.mark.parametrize("log_format", ["json", "text"])
+@pytest.mark.parametrize("foreign_logger", [False, True])
+@pytest.mark.asyncio
+async def test_logging_preserves_nio_errors_with_real_transport_and_redacts_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    log_format: str,
+    foreign_logger: bool,
+) -> None:
+    """Live transport objects must not erase diagnostics or leak their credentials."""
+
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        body = json.dumps(
+            {"errcode": "M_FORBIDDEN", "error": "synthetic denial; api_key=synthetic-message-secret"},
+        ).encode()
+        writer.write(
+            b"HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n"
+            b"Set-Cookie: session=synthetic-transport-secret\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body,
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", log_format)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    capsys.readouterr()
+    server = await asyncio.start_server(respond, "127.0.0.1", 0)
+    async with server, aiohttp.ClientSession() as session:
+        url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/synthetic"
+        async with session.get(url, headers={"Authorization": "Bearer synthetic-request-secret"}) as transport:
+            response = nio.RoomSendError.from_dict(await transport.json(), room_id="!room:example.test")
+            response.transport_response = transport
+            logger_name = "tests.logging.transport"
+            if foreign_logger:
+                logging.getLogger(logger_name).warning("matrix_operation_failed", extra={"response": response})
+            else:
+                get_logger(logger_name).warning("matrix_operation_failed", response=response)
+
+    output = capsys.readouterr().err
+    assert "matrix_operation_failed" in output
+    assert logger_name in output
+    assert "warning" in output
+    assert "M_FORBIDDEN" in output
+    assert "synthetic denial" in output
+    assert "[redaction failed]" not in output
+    for secret in ("synthetic-message-secret", "synthetic-transport-secret", "synthetic-request-secret"):
+        assert secret not in output
+    if log_format == "json":
+        payload = json.loads(output.strip().splitlines()[-1])
+        assert payload["event"] == "matrix_operation_failed"
+        assert payload["level"] == "warning"
+        assert payload["logger"] == logger_name
+        assert payload["response"]["status_code"] == "M_FORBIDDEN"
+        assert payload["response"]["message"] == "synthetic denial; api_key=***redacted***"
+    assert response.transport_response is transport
 
 
 def test_setup_logging_text_mode_does_not_emit_json(

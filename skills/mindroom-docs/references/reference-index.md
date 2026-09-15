@@ -26,6 +26,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Data & Databases | `tools/data-and-databases.md` | `tools/data-and-databases/index.md` | `page__tools__data-and-databases__index.md` |
 | Web Search | `tools/web-search.md` | `tools/web-search/index.md` | `page__tools__web-search__index.md` |
 | Web Scraping & Browser | `tools/web-scraping-and-browser.md` | `tools/web-scraping-and-browser/index.md` | `page__tools__web-scraping-and-browser__index.md` |
+| Worker Computer | `tools/worker-computer.md` | `tools/worker-computer/index.md` | `page__tools__worker-computer__index.md` |
 | Research Sources | `tools/research-sources.md` | `tools/research-sources/index.md` | `page__tools__research-sources__index.md` |
 | AI & Generation | `tools/ai-and-generation.md` | `tools/ai-and-generation/index.md` | `page__tools__ai-and-generation__index.md` |
 | Media & Content | `tools/media-and-content.md` | `tools/media-and-content/index.md` | `page__tools__media-and-content__index.md` |

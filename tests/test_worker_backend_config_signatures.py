@@ -178,9 +178,13 @@ def test_kubernetes_signature_preserves_config_fields_and_adds_client_identity(
         storage_root=storage_root,
     )
 
-    assert signature[:15] == legacy_signature[:15]
-    assert signature[16:] == legacy_signature[15:]
-    assert signature[15].startswith(("in-cluster:", "kubeconfig:"))
+    # Computer opt-in and concrete client identity are additive cache-key fields;
+    # keep the independent oracle for every legacy configuration field.
+    assert signature[0] == legacy_signature[0]
+    assert signature[1] == ""
+    assert signature[2:16] == legacy_signature[1:15]
+    assert signature[17:] == legacy_signature[15:]
+    assert signature[16].startswith(("in-cluster:", "kubeconfig:"))
 
 
 def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> None:

@@ -9,6 +9,9 @@ from pathlib import Path
 
 from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
+from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
+from mindroom.workers.backends.docker_config import docker_backend_config_signature
+from mindroom.workers.backends.kubernetes_config import kubernetes_backend_config_signature
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_CREDENTIAL_SEEDS_",
@@ -541,3 +544,46 @@ def test_runtime_control_env_literals_stay_in_policy_module() -> None:
             violations[str(path.relative_to(source_root))] = leaked_names
 
     assert violations == {}
+
+
+def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_identity(tmp_path: Path) -> None:
+    """Opt-in reaches both worker backends and invalidates cached backend configuration."""
+    flag = runtime_env_policy.WORKER_COMPUTER_ENABLED_ENV
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test",
+        "MINDROOM_KUBERNETES_WORKER_IMAGE": "worker:test",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "storage",
+    }
+    disabled = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=env,
+    )
+    enabled = constants.resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={**env, flag: "true"},
+    )
+    for backend in ("docker", "kubernetes"):
+        worker = build_dedicated_worker_runtime_paths(
+            runtime_paths=enabled,
+            backend_name=backend,
+            worker_key="worker",
+            config_path=tmp_path / "worker-config.yaml",
+            dedicated_root=tmp_path / "worker",
+            worker_port=8766,
+            shared_storage_root=str(tmp_path / "shared"),
+            extra_env={},
+        )
+        assert worker.env_flag(flag)
+        assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
+    for signature in (docker_backend_config_signature, kubernetes_backend_config_signature):
+        assert signature(disabled, auth_token=None) != signature(enabled, auth_token=None)
+
+
+def test_computer_origins_remain_primary_runtime_configuration() -> None:
+    """Browser origin policy must not enter worker startup or execution env."""
+    env = {"MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]'}
+    assert runtime_env_policy.public_worker_startup_env(env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
+    assert runtime_env_policy.worker_extra_env(env) == {}

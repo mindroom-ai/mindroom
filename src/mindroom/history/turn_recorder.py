@@ -106,6 +106,14 @@ class TurnRecorder:
         """Record successful completion."""
         self.outcome = "completed"
 
+    def mark_skipped(self) -> None:
+        """Record quiet nonparticipation without success or interrupted replay."""
+        self.outcome = "skipped"
+        self.original_status = None
+        self.assistant_text = ""
+        self.completed_tools = []
+        self.interrupted_tools = []
+
     def mark_suspended(self) -> None:
         """Record a native pause without classifying it as terminal."""
         self.outcome = "suspended"

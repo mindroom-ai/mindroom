@@ -14,6 +14,7 @@ from mindroom.constants import runtime_env_values
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
     is_worker_backend_config_env_name,
 )
@@ -462,6 +463,7 @@ def kubernetes_backend_config_signature(
     client_identity = _kubernetes_client_identity(runtime_paths)
     return (
         "kubernetes",
+        runtime_paths.env_value(WORKER_COMPUTER_ENABLED_ENV, default="") or "",
         config.namespace,
         config.image,
         config.image_pull_policy,

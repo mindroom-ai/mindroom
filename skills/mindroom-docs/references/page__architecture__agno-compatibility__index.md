@@ -11,7 +11,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
-| `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store. | `agent_storage.py` and storage lifecycle callers. |
+| `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |

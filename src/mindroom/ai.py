@@ -28,6 +28,8 @@ from agno.run.base import RunStatus
 from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
+from mindroom.agno_compat_session_persistence import drain_agent_cancellation
+from mindroom.agno_participation import participation_model
 from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
@@ -101,9 +103,11 @@ from mindroom.response_turn import (
     paused_attempt_from_event,
     paused_attempt_from_response,
     run_blocking_response_turn,
+    skip_unapproved_attempt,
     stream_response_turn,
 )
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
@@ -245,7 +249,7 @@ class _AgentAttempt:
 
     attempt_prompt: list[Message]
     attempt_media_inputs: MediaInputs
-    attempt_run_id: str | None
+    attempt_run_id: str
 
     @classmethod
     def initial(
@@ -259,7 +263,7 @@ class _AgentAttempt:
         return cls(
             attempt_prompt=ai_runtime.copy_run_input(run_input),
             attempt_media_inputs=media_inputs,
-            attempt_run_id=run_id,
+            attempt_run_id=run_id or str(uuid4()),
         )
 
 
@@ -858,24 +862,26 @@ async def _run_cached_agent_attempt(
     session_id: str,
     *,
     user_id: str | None = None,
-    run_id: str | None = None,
+    run_id: str,
     run_id_callback: Callable[[str], None] | None = None,
     media: MediaInputs | None = None,
     metadata: dict[str, Any] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> RunOutput:
     """Run one non-streaming Agno request with timing instrumentation."""
-    return await ai_runtime.cached_agent_run(
-        agent,
-        run_input,
-        session_id,
-        user_id=user_id,
-        run_id=run_id,
-        run_id_callback=run_id_callback,
-        media=media,
-        metadata=metadata,
-        pipeline_timing=pipeline_timing,
-    )
+    async with drain_agent_cancellation(agent, run_id) as bind_owner:
+        with bind_owner():
+            return await ai_runtime.cached_agent_run(
+                agent,
+                run_input,
+                session_id,
+                user_id=user_id,
+                run_id=run_id,
+                run_id_callback=run_id_callback,
+                media=media,
+                metadata=metadata,
+                pipeline_timing=pipeline_timing,
+            )
 
 
 async def _run_non_streaming_agent_attempts(
@@ -889,14 +895,17 @@ async def _run_non_streaming_agent_attempts(
     """Run one non-streaming agent response attempt."""
     agent = run_context.prepared_run.agent
     try:
-        with bind_llm_request_log_context(
-            **_attempt_request_log_context(
-                run_context.turn,
-                session_id=run_context.session_id,
-                prompt=run_context.prompt,
-                model_prompt=run_context.model_prompt,
-                attempt_prompt=attempt.attempt_prompt,
-                metadata=run_context.metadata,
+        with (
+            participation_model(agent.model, run_context.turn.participation, run_id=attempt.attempt_run_id),
+            bind_llm_request_log_context(
+                **_attempt_request_log_context(
+                    run_context.turn,
+                    session_id=run_context.session_id,
+                    prompt=run_context.prompt,
+                    model_prompt=run_context.model_prompt,
+                    attempt_prompt=attempt.attempt_prompt,
+                    metadata=run_context.metadata,
+                ),
             ),
         ):
             response = await _run_cached_agent_attempt(
@@ -927,6 +936,23 @@ async def _run_non_streaming_agent_attempts(
             session_type=SessionType.AGENT,
             entity_name=run_context.agent_name,
         )
+
+
+def _failed_agent_attempt(
+    ctx: ResponseTurnContext,
+    error: Exception,
+    *,
+    session_id: str | None = None,
+    run_id: str | None = None,
+) -> BlockingAttemptResolution:
+    """Keep pre-decision failures quiet; approved turns retain ordinary error replies."""
+    skipped = skip_unapproved_attempt(
+        ctx.participation,
+        reason="preparation_failed",
+        session_id=session_id,
+        run_id=run_id,
+    )
+    return skipped or ExcludedAttempt(RunStatus.error, get_user_friendly_error_message(error, ctx.entity_label))
 
 
 def _assert_agent_target(agent_name: str, config: Config) -> None:
@@ -1502,7 +1528,7 @@ async def ai_response(  # noqa: C901, PLR0915
         retain_agent_runtime_state=reusable_agent is not None,
     )
 
-    async def _run_blocking_attempt(
+    async def _run_blocking_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> BlockingAttemptResolution:
@@ -1540,7 +1566,7 @@ async def ai_response(  # noqa: C901, PLR0915
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
-            return ExcludedAttempt(RunStatus.error, get_user_friendly_error_message(e, agent_name))
+            return _failed_agent_attempt(ctx, e)
         prepared_run = run_context.prepared_run
         holder.agent = prepared_run.agent
         run.unseen_event_ids = prepared_run.unseen_event_ids
@@ -1564,24 +1590,42 @@ async def ai_response(  # noqa: C901, PLR0915
             ),
         )
         if attempt_result.user_error is not None:
-            error_text = get_user_friendly_error_message(attempt_result.user_error, agent_name)
-            return ExcludedAttempt(RunStatus.error, error_text)
-        response = cast("RunOutput", attempt_result.response)
-        if supports_native_tool_approval:
-            response = cast(
-                "RunOutput",
-                await drive_delegations(
-                    prepared_run.agent,
-                    response,
-                    run_child=run_delegated_child_response,
-                    agent_name=agent_name,
-                    config=config,
-                    runtime_paths=runtime_paths,
-                    execution_identity=execution_identity,
-                    delegation_depth=delegation_depth,
-                    refresh_scheduler=refresh_scheduler,
-                ),
+            return _failed_agent_attempt(
+                ctx,
+                attempt_result.user_error,
+                session_id=session_id,
+                run_id=attempt.attempt_run_id,
             )
+        response = cast("RunOutput", attempt_result.response)
+        if response.status in (RunStatus.completed, RunStatus.error) and (
+            skipped := skip_unapproved_attempt(
+                ctx.participation,
+                reason="participation_declined"
+                if response.status == RunStatus.completed
+                else "run_failed_before_decision",
+                session_id=response.session_id or session_id,
+                run_id=response.run_id or attempt.attempt_run_id,
+                output_tokens=_usage_metric_int(response.metrics, "output_tokens"),
+            )
+        ):
+            return skipped
+        if supports_native_tool_approval:
+            async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
+                with bind_owner():
+                    response = cast(
+                        "RunOutput",
+                        await drive_delegations(
+                            prepared_run.agent,
+                            response,
+                            run_child=run_delegated_child_response,
+                            agent_name=agent_name,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            execution_identity=execution_identity,
+                            delegation_depth=delegation_depth,
+                            refresh_scheduler=refresh_scheduler,
+                        ),
+                    )
 
         response_tool_trace = _extract_tool_trace(response)
         if tool_trace_collector is not None:
@@ -1842,21 +1886,24 @@ async def _stream_agent_attempt_chunks(
                 yield_run_output=True,
                 metadata=run_context.metadata,
             )
+        provider_stream = stream_generator
         stream_generator = stream_with_llm_request_log_context(
             stream_generator,
             request_context=request_context,
         )
         if transform_events is not None:
             stream_generator = transform_events(stream_generator)
-        async for stream_chunk in _process_stream_events(
+        chunks = _process_stream_events(
             stream_generator,
             state=state,
             show_tool_calls=show_tool_calls,
             agent_name=run_context.agent_name,
             state_updated=state_updated,
             pipeline_timing=pipeline_timing,
-        ):
-            yield stream_chunk
+        )
+        async with closing_async_stream(provider_stream), closing_async_stream(stream_generator), aclosing(chunks):
+            async for stream_chunk in chunks:
+                yield stream_chunk
     except Exception as e:
         logger.exception("Error starting streaming AI response")
         state.user_error = e
@@ -1981,7 +2028,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901
+    async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2019,6 +2066,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
         except Exception as e:
             logger.exception("Error preparing agent for streaming", agent=agent_name)
+            if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
+                yield AttemptResolved(skipped)
+                return
             yield get_user_friendly_error_message(e, agent_name)
             yield AttemptResolved(HandledAttempt())
             return
@@ -2112,13 +2162,28 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             ),
             active_model_name=prepared_run.runtime_model_name,
         )
-        async for stream_chunk in attempt_stream:
-            yield stream_chunk
+        with participation_model(prepared_run.agent.model, ctx.participation, run_id=attempt.attempt_run_id):
+            async with drain_agent_cancellation(prepared_run.agent, attempt.attempt_run_id) as bind_owner:
+                owned_stream = context_bound_async_stream(
+                    context_factory=bind_owner,
+                    stream_factory=attempt_stream.__aiter__,
+                )
+                async with closing_async_stream(owned_stream):
+                    async for stream_chunk in owned_stream:
+                        yield stream_chunk
 
         run_error = state.user_error or state.stream_exception
         if run_error is not None:
-            yield get_user_friendly_error_message(run_error, agent_name)
-            yield AttemptResolved(HandledAttempt())
+            if skipped := skip_unapproved_attempt(
+                ctx.participation,
+                reason="run_failed_before_decision",
+                session_id=session_id,
+                run_id=attempt.attempt_run_id,
+            ):
+                yield AttemptResolved(skipped)
+            else:
+                yield get_user_friendly_error_message(run_error, agent_name)
+                yield AttemptResolved(HandledAttempt())
             return
 
         if state.cancelled_run_event is not None:
@@ -2139,6 +2204,16 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     metadata_content=cancelled_metadata,
                 ),
             )
+            return
+
+        if skipped := skip_unapproved_attempt(
+            ctx.participation,
+            reason="participation_declined",
+            session_id=session_id,
+            run_id=attempt.attempt_run_id,
+            output_tokens=state.request_metric_totals.get("output_tokens"),
+        ):
+            yield AttemptResolved(skipped)
             return
 
         if state.paused_run_event is not None:

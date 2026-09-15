@@ -924,6 +924,37 @@ You can also validate a specific file directly:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+## Adaptive Room Participation
+
+By default, threads with multiple human participants require explicit agent mentions.
+Opt a room into adaptive participation to let one designated agent decide whether an untagged message needs a response or should be left unanswered.
+The designated agent must be a configured individual agent with permission to reply to the sender.
+Room keys can be concrete room IDs, managed room keys, or persisted full aliases.
+
+```yaml
+room_participation:
+  lobby:
+    agent: assistant
+    debounce_seconds: 3.0
+    instructions: "Join when you can help; leave human conversation uninterrupted."
+```
+
+The pause applies only to eligible untagged text in threads with at least two human participants, including the current sender.
+Configured human aliases count as one participant across their transport identities.
+Registered agents, the internal service account, and configured `bot_accounts` do not count as humans.
+The pause defaults to three seconds and accepts finite values from zero to thirty seconds.
+A burst from one sender becomes one turn after the pause; explicit agent or human mentions bypass adaptive selection and end that sender's pending pause immediately.
+Single-human conversations keep their usual response behavior.
+A declined or failed decision stays quiet and does not record a completed assistant response.
+The check reuses the prepared conversation and tool definitions, but cannot execute tools.
+With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
+Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
+Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
+Cancellation before approval does not create an interruption notice.
+If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
+Commands and scheduled work do not opt into adaptive participation.
+Omit `room_participation` to keep the default behavior.
+
 ## Splitting the Configuration Into Multiple Files
 
 Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.
@@ -2592,6 +2623,8 @@ Each model configuration supports the following fields:
 |-------|----------|---------|-------------|
 | `provider` | Yes | - | The AI provider (see supported providers above) |
 | `id` | Yes | - | Model ID specific to the provider |
+| `display_name` | No | `null` | Friendly model name shown in clients |
+| `icon` | No | `null` | Image path relative to the config file's directory, or a Matrix `mxc://` URI |
 | `api` | No | `null` | For `openai`, force `responses` or `chat_completions`; unset keeps automatic selection |
 | `host` | No | `null` | Host URL for self-hosted models (e.g., Ollama) |
 | `extra_kwargs` | No | `null` | Additional provider-specific parameters |
@@ -2599,6 +2632,34 @@ Each model configuration supports the following fields:
 
 For Azure OpenAI, `id` is the Azure deployment name, not the underlying base-model name.
 Provider credentials come from supported environment variables, stored credentials, CLI authentication, or deliberately supplied `extra_kwargs`; the top-level `ModelConfig.api_key` field is not used during model construction.
+
+Presentation metadata is optional:
+
+```yaml
+models:
+  default:
+    provider: openai
+    id: gpt-6-astra
+    display_name: Quick helper
+    icon: icons/helper.png
+```
+
+`display_name` changes the label clients show, while the mapping key (`default` above) remains the stable name used by agents, teams, routing, and commands.
+For `icon`, use either a path relative to the directory containing the active config file or a Matrix media URI such as `mxc://server/media`.
+Blank metadata uses the client's default presentation.
+A missing or unreadable relative image also falls back at presentation time and does not prevent the runtime from starting.
+These fields are presentation-only and are not passed to the model provider.
+
+The Matrix model picker publishes only model keys, display names, provider names, model IDs, and optional Matrix media URLs.
+Local icons must be valid PNG, JPEG, WebP, or GIF images no larger than 1 MiB.
+At publication, the resolved image target must remain inside the resolved config directory, including when the path contains parent components or symlinks.
+A contained path such as `icons/../helper.png` is accepted; an escaping target falls back to the client's provider icon.
+The runtime validates image bytes and uploads them to Matrix media; identical bytes reuse the upload within that runtime client.
+Changed bytes publish a new icon.
+Unsupported, missing, or unreadable images fall back to the client's provider icon.
+External image URLs are not fetched.
+Local paths, API keys, provider hosts, and extra provider settings never enter discovery responses.
+See [Matrix model selection protocol](https://docs.mindroom.chat/architecture/matrix/#model-selection-protocol) for private discovery and confirmed thread changes.
 
 ## Hot Reload
 
@@ -5560,6 +5621,8 @@ Use these tools when you need lightweight text extraction, structured scraping A
 `spider` also needs credentials in practice even though the current MindRoom metadata marks it as `setup_type: none`, because the installed `spider-client` raises when `SPIDER_API_KEY` is missing.
 `jina` is the middle ground here, because the installed `JinaReaderTools` only adds an `Authorization` header when `api_key` is present, so public `read_url()` usage works without a key while authenticated plans can still set one.
 `browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window.
+For a visible, persistent browser inside a dedicated Docker or Kubernetes worker, see [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
+MindRoom Chat can watch or control that same browser while its downloads remain accessible to worker shell tools.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
 Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth.
 `crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser.
@@ -6288,6 +6351,224 @@ open_page("https://matrix.org/blog/", new_window=True)
 
 - [Tools Overview](https://docs.mindroom.chat/tools/)
 - [Per-Agent Tool Configuration](https://docs.mindroom.chat/configuration/agents/#per-agent-tool-configuration)
+
+# Worker Computer
+
+Worker Computer shows the Chromium browser that an agent uses inside its dedicated worker.
+MindRoom Chat can watch that screen, take control, resume the agent, and stop the computer.
+Browser and shell tools share the worker's files.
+
+## Requirements and opt-in
+
+Use a dedicated **Docker** or **Kubernetes** worker with the current MindRoom worker image.
+Shared static runners and local process execution do not support interactive computers.
+The feature is disabled by default; existing headless and connected-user desktop browser behavior stays unchanged.
+
+Set these values on the **primary MindRoom runtime**:
+
+```dotenv
+MINDROOM_WORKER_BACKEND=docker
+MINDROOM_DOCKER_WORKER_IMAGE=mindroom:dev
+MINDROOM_WORKER_COMPUTER_ENABLED=true
+MINDROOM_COMPUTER_ALLOWED_ORIGINS=["https://chat.example.org"]
+MATRIX_HOMESERVER=https://matrix.example.org
+MATRIX_SERVER_NAME=matrix.example.org
+```
+
+Keep the normal worker authentication/storage configuration from [Sandbox Workers](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+For Docker development, build the existing image:
+
+```bash
+docker build -t mindroom:dev -f local/instances/deploy/Dockerfile.mindroom .
+```
+
+Route the browser and shell to the same requester-and-agent scope:
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Research with a browser and save results.
+    model: default
+    tools: [browser, shell, file]
+    worker_tools: [browser, shell, file]
+    worker_scope: user_agent
+```
+
+Interactive sessions require effective `worker_scope: user_agent` and worker-routed `browser`.
+The normal requester/agent worker resolver supplies the same worker to Chat and tool calls.
+Keep the browser's default `target: host` for this managed worker browser.
+The connected-user `target: desktop` is a separate feature and is not supported inside the worker computer.
+Browser URL restrictions still apply; enabling a display does not enable access to private networks.
+
+For the runtime Helm chart:
+
+```yaml
+workers:
+  backend: kubernetes
+  computerEnabled: true
+env:
+  extra:
+    - name: MINDROOM_COMPUTER_ALLOWED_ORIGINS
+      value: '["https://chat.example.org"]'
+```
+
+Use the chart's existing worker image, authentication secret, storage, and RBAC settings.
+The instance chart names its opt-in values `workerBackend: kubernetes` and `workerComputerEnabled: true`; supply the allowed-origin environment value to its primary runtime through your deployment's environment configuration.
+Changing the feature flag changes the worker configuration signature, so workers are replaced as needed.
+
+## Connect MindRoom Chat
+
+Configure an explicitly trusted **origin**, without a path, in Chat's operator-managed configuration:
+
+```json
+{
+  "mindroom": {
+    "computers": {
+      "apiUrl": "https://computer.example.org"
+    }
+  }
+}
+```
+
+The shipped value is empty.
+Remote origins require HTTPS; loopback HTTP works for local development.
+Chat does not discover endpoints from room messages or agent output.
+It shows the Computer action when this origin is configured and the room has a joined MindRoom agent.
+With multiple agents, choose the exact agent before opening its computer.
+
+The backend verifies a fresh Matrix OpenID token against its configured homeserver and checks requester membership, agent membership, and responder access policy.
+The Matrix server name must match the configured server.
+HTTP session credentials remain in Chat memory; stream tickets are single-use and expire after 30 seconds.
+Sessions last at most one hour.
+Each verified requester can hold up to eight concurrent viewer sessions, within a process-wide limit of 256.
+Closing a viewer or reaching session expiry frees its slot; excess requests are rejected before allocating a worker.
+The worker token stays between the backend and worker.
+
+### Reverse proxy and host routing
+
+Route `/api/computers/*`, including WebSocket upgrades, to the **MindRoom runtime API**.
+Preserve the `Origin` and `Sec-WebSocket-Protocol` headers and allow long-lived WSS connections.
+Use the explicit `MINDROOM_COMPUTER_ALLOWED_ORIGINS` list for both HTTP CORS and WebSocket origin checks.
+Allowed browser origins require HTTPS except for localhost and literal loopback IP addresses, which also support HTTP.
+These routes use computer-session authentication, separately from dashboard authentication.
+Do not log bearer tokens or stream-ticket subprotocols.
+
+For example, a dedicated Caddy origin pointing to a runtime on the same host:
+
+```caddy
+computer.example.org {
+    reverse_proxy /api/computers/* 127.0.0.1:8765
+}
+```
+
+Use your actual runtime address and port.
+Expose only the gateway; raw VNC uses a worker-local Unix socket and has no public TCP listener.
+
+In the documented MindRoom host layout, the local `mindroom` LXC runs the full `mindroom-lab` and `mindroom-chat` application services.
+The production `mindroom-hetzner` host serves Matrix, Chat, bridges, and local provisioning; it does not run the full backend.
+Its `/v1/local-mindroom/*` provisioning route does not serve computers.
+A Chat deployment on that host must point its computer origin at the actual runtime that owns the agent workers.
+
+## Watch, take control, and resume
+
+- **Watch** opens the existing computer without input rights.
+  The worker rejects viewer input even if someone changes noVNC's frontend view-only setting.
+- **Take control** waits for an active browser operation to settle and grants input to one connected viewer.
+  Managed agent browser calls return a clear blocked result while control is held.
+  Background shell processes continue.
+- **Resume agent** releases control, reconnects the screen in watch mode, and sends one ordinary message mentioning the selected agent in the originating room or thread.
+  A screen reconnect failure does not suppress that message after release.
+  A send failure is shown explicitly and is not automatically retried.
+- **Close** disconnects only this viewer and releases its control.
+  It keeps the browser and files for later work.
+- **Stop** closes the browser and display and invalidates the old session.
+  **Start computer** creates a fresh session; persisted profiles and files remain.
+
+Changing room, thread, account, or selected agent tears down the old viewer.
+On desktop the panel sits beside the conversation and closes the Members drawer.
+On mobile it fills the screen and provides a close button.
+Keyboard input over the controlled screen stays out of the composer and command palette.
+
+The browser process persists across runner requests, including stable target IDs and native tabs opened by the user.
+When the agent selects a managed tab with focus or a page action, Chromium brings that page to the visible foreground.
+A tool's screenshot or snapshot therefore observes the page shown in the viewer.
+
+## Storage and lifetime
+
+Browser profiles live under `browser-profiles/<profile>` in the dedicated worker's persistent storage root.
+Completed downloads are copied into the agent workspace's `browser/` directory with a unique filename prefix, so the shell/file tools can read them.
+These files survive computer stop/restart and worker recreation while the storage volume remains.
+Stopping the computer is not a sign-out or profile reset.
+
+To reset a profile, stop the computer and recycle/stop its dedicated worker first.
+Remove only that worker's `browser-profiles/<profile>` directory from its persistent storage, then let the next browser action create a new profile.
+Do not remove the whole worker storage root unless you also intend to delete its files.
+
+An active stream refreshes worker activity at least every 30 seconds.
+After the last viewer disconnects, normal worker idle cleanup applies:
+`MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS` or `MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS`, both defaulting to 1800 seconds.
+Closing the panel does not immediately stop the worker.
+
+## Reconnect and recovery
+
+Use **Reconnect** after a transient stream failure.
+It requests a new one-use stream ticket; never reuse old tickets.
+Expiry, membership/access revocation, a changed worker scope/configuration, backend restart, or worker replacement invalidates old sessions.
+Reopen the panel to obtain a new session after restoring access or configuration.
+
+If the screen shows an empty desktop after startup, ask the agent to open a page.
+If it shows a permission error, verify room membership, agent access policy, `user_agent` scope, browser worker routing, and the allowed origin.
+If the WebSocket fails, verify the gateway's TLS/upgrades and actual runtime routing.
+
+Safe browser cleanup can wait for an unfinished local Playwright driver handshake.
+There is no strict browser shutdown deadline.
+If that driver wedges, recycle the dedicated worker; persistent storage remains the recovery source.
+
+## Reproduce local acceptance
+
+The committed probe uses real Docker workers, Chromium, Xvnc and noVNC, with controlled local identity/membership for standalone checks.
+It creates a fresh output directory, records exact container IDs, and removes only its own containers.
+Use persistent local directories for its state and screenshots.
+
+After installing the repository dependencies and Chat's npm dependencies:
+
+```bash
+uv sync --all-extras
+uv run scripts/test-worker-computer.py --build \
+  --output ./worker-computer-results \
+  --novnc ../mindroom-chat/node_modules/@novnc/novnc
+```
+
+Use `--image <already-built-image>` without `--build` to reuse a local worker image.
+Use `--chromium <executable>` if host Chromium is not discoverable.
+The probe verifies same-target reuse, framebuffer pixels, rejected watch input, takeover/agent blocking, native-tab focus/navigation, downloads through shell, stop/restart persistence, and requester isolation.
+
+For the Chat desktop/mobile spec, make a local Tuwunel image available, start Chat on loopback, then start this fixture:
+
+```bash
+uv run scripts/test-worker-computer.py --serve \
+  --image mindroom-worker-computer-test:local \
+  --matrix-image ghcr.io/mindroom-ai/mindroom-tuwunel:latest \
+  --chat-origin http://127.0.0.1:4173 \
+  --output ./worker-computer-chat-results
+```
+
+This creates an isolated loopback Matrix container, test users, a room/thread, and a gateway.
+It writes mode-0600 `chat-fixture.json` with test credentials.
+From the Chat checkout, pass that file's location explicitly:
+
+```bash
+E2E_COMPUTER_FIXTURE=../mindroom/worker-computer-chat-results/chat-fixture.json \
+E2E_BASE_URL=http://127.0.0.1:4173 \
+npm run test:e2e -- e2e/worker-computer.spec.ts
+```
+
+The spec does not use a default homeserver or real account.
+It checks native canvas typing with agent readback, exactly one thread continuation, desktop/mobile placement, close/reopen and stop/start.
+Interrupt the fixture with Ctrl+C to remove its workers and Matrix container.
+An optional `--matrix-fixture` accepts the same generated Matrix fixture schema for reuse; that externally supplied container remains owned by its creator.
+Keep fixture credentials, traces and generated output outside commits.
 
 # Research Sources
 
@@ -7986,9 +8267,13 @@ That handle reuses the existing encrypted Matrix media instead of saving or uplo
 
 The bridge is accessibility-first on macOS.
 It returns a bounded accessibility tree with roles, names, values, bounds, writable state, and advertised actions, plus a screenshot cropped to the selected app window.
-The agent normally selects an element index from that state instead of guessing a screen coordinate.
-Every element index is bound to one opaque `state_id`, and a new state invalidates the old indexes.
-The local bridge also pins the exact local process and window, rechecks the current app structure and values before acting, and rejects stale state.
+The agent normally selects an opaque `element_ref` from that state instead of guessing a screen coordinate.
+The bridge retains up to 128 observations for 120 seconds, bound to the requester, agent, command session, and exact app.
+An `element_index` remains supported within its matching `state_id`.
+A new observation does not invalidate an older unchanged target; expiration, process/window changes, and changed target identity still reject it.
+The local bridge pins the exact local process, window, element, and ancestor identity and rechecks them before acting.
+Passive labels such as clocks may change without invalidating an unchanged actionable target.
+Full actionable text and identity stay checked even when returned text is truncated.
 On macOS, a complete tree is sampled until it is briefly stable before its `state_id` is returned, while a capped partial tree is returned immediately with `truncated: true`.
 
 Pixel and keyboard operations remain explicit fallbacks for controls that do not expose useful accessibility elements.
@@ -7997,23 +8282,53 @@ Every completed action normally returns a new accessibility state and a new app-
 If follow-up state or capture fails after an action completes, the tool tells the agent not to repeat the action automatically.
 On macOS, taking the scoped screenshot foregrounds the selected application, so observation can change which local window is active.
 
+## Observations and recovery
+
+Pass `observation="tree"` to native app actions when semantic state is sufficient.
+Tree mode skips screenshot capture, encrypted media upload, and image input entirely.
+`observation="screenshot"` omits the element list while retaining app/state/coordinate metadata; `both` remains the default.
+The explicit `screenshot` action requires pixels.
+Results include elapsed execution time and structured/image byte counts.
+
+A timeout returns the original `request_id` and an unknown outcome.
+Call `desktop(action="request_status", request_id="...")` with a new query request to read `queued`, `running`, `completed`, `unknown`, or `not_found`.
+The query can recover the same requester's and agent's receipt across command sessions, including after local restart.
+It does not wait behind the action executor or evict the receipt it reads.
+Request IDs must be unique across actions and queries.
+A missing receipt is not evidence that the action never ran.
+Do not repeat an uncertain action automatically; inspect current state first.
+
+The local SQLite journal commits command admission before Matrix acknowledgement and records an execution start before input.
+After a crash, queued work is rechecked against current trust, deadline, policy, and lease.
+Started work with no outcome becomes unknown; it is never executed again automatically.
+Responses retry independently without repeating the original action.
+The private journal contains command arguments and structured outcomes, including encrypted media descriptors; it does not store plaintext screenshot files.
+An existing legacy replay journal is imported without resending historical outcomes.
+
+On macOS, captures return logical bounds, display identity and scale, source pixel dimensions, and output image dimensions.
+Secondary displays and negative logical origins are supported when the window fits one unambiguous display.
+Move a window fully onto one display if it spans displays or its mapping cannot be verified.
+
 ## Security Model
 
-The local bridge starts in observe-only mode unless a person at the computer grants a short control lease on the command line.
+The local bridge starts in observe-only mode unless a person at the computer grants a short control lease in Desktop Control or on the command line.
 The local process independently checks the exact cloud Matrix user, device ID, Ed25519 fingerprint, human requester ID, agent name, app ID, command expiry, request ID, and monotonic session sequence.
-Only applications named with local `--allow-app` options can be listed, launched, inspected, captured, or controlled.
+Only applications selected locally in Desktop Control or named with `--allow-app` can be listed, launched, inspected, captured, or controlled.
 Cloud configuration and model output cannot add an application to that allowlist.
 The allowlist restricts the bridge's direct target, but an allowed app can still cause operating-system side effects such as opening a link or document in another app.
 The bridge cannot then inspect or control that newly opened app unless its exact app ID is also locally allowlisted.
-The local bridge executes only one cloud request at a time, and state binding prevents parallel controls planned from the same state from both succeeding.
+The local bridge executes actions serially and revalidates each target immediately before input.
+Matrix polling, durable admission, and response delivery continue independently during slow actions.
 Cloud configuration cannot enable control, extend a running lease, or change any local allowlist.
 Restarting the local bridge returns it to observe-only mode unless `--allow-control` is supplied again.
-Moving the pointer to the upper-left corner triggers PyAutoGUI's emergency stop and latches control off until the local bridge is restarted.
+Moving the pointer to the upper-left corner of the primary display triggers the emergency stop and latches control off.
+Desktop Control can reset the latch while idle and away from that corner; resetting does not grant control.
 The local process writes an audit log entry for each completed or rejected parsed command without logging action parameters, values, or typed text.
 
 The observation actions are:
 
 - `status` reports coarse screen, cursor, accessibility-backend, and local lease state.
+- `request_status` reads a retained request outcome for the original requester and agent without executing it again.
 - `list_apps` lists only locally allowlisted app IDs and whether each is running.
 - `get_app_state` returns a fresh accessibility state and app-window screenshot.
 - `screenshot` returns a fresh state and requires its app-window screenshot to succeed.
@@ -8030,10 +8345,13 @@ The control actions are:
 - `set_value` changes an accessibility value only when the selected element reports that it is writable.
 - `scroll_element` scrolls at the selected element's current bounds.
 - `perform_action` invokes an exact action advertised by the selected element.
-- `click` clicks a normalized fallback coordinate inside the app window.
-- `type_text` types up to 2,000 characters into the validated and focused app.
-- `scroll` scrolls a bounded number of pages at the app or an optional normalized app coordinate.
-- `keypress` presses one locally safe navigation key in the validated app.
+- `click` and `double_click` click a normalized fallback coordinate inside the app window.
+- `hover` moves the pointer within the validated app window.
+- `drag` moves with the left button held between two normalized points in the same window, over 100–2,000 milliseconds.
+- `type_text` types up to 2,000 characters into the validated and focused app; an optional `element_ref` or `element_index` requires that exact element to have focus.
+- `scroll` scrolls a bounded number of pages up, down, left, or right at the app or an optional normalized app coordinate.
+- `keypress` supports navigation keys, shift plus navigation, command/ctrl plus a/c/x/v/z/f, and command/ctrl plus shift plus z.
+  Global switching, quit, launch, and address-bar shortcuts are rejected.
 
 The bridge does not expose a shell, filesystem, clipboard, microphone, webcam, unlock operation, privilege elevation, or arbitrary local RPC.
 It operates only the currently logged-in graphical session and cannot bypass operating-system permission prompts.
@@ -8041,12 +8359,15 @@ It operates only the currently logged-in graphical session and cannot bypass ope
 The optional Playwright MCP extension path is a separate browser capability on the same pinned Matrix transport and local control lease.
 It returns semantic page snapshots and stable element references from the browser, which are usually more precise for forms and interactive websites than desktop coordinates.
 Its observation actions are `status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`.
-Its supported control actions are `start`, `stop`, `open`, current-tab `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`.
-The browser `act` action supports semantic click, type, key press, hover, drag, select, multi-field fill, resize, wait, evaluate, and close operations.
+Its supported control actions are `start`, `stop`, and `open` a new tab.
+Existing-page mutations, including `act`, `navigate`, `close`, `focus`, `pdf`, `upload`, and `dialog`, fail before MCP dispatch because this pinned backend does not expose stable page identity.
+The provider reports `stable_targeting: false` and `supported_control_actions` explicitly.
 Enabling the extension grants access to the tabs and signed-in state in the connected browser profile, and the desktop application allowlist does not narrow that access to one tab or origin.
-Extension mode is not a network sandbox: MindRoom validates URLs passed directly to `open` and `navigate`, but redirects, page scripts, and evaluated JavaScript retain the connected profile's normal network reach.
-The local MCP process is pinned to the documented package version and can read upload files only from its `<storage>/desktop-browser` workspace.
-The desktop browser target operates the extension's current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric tab indices that can point at a different signed-in tab after another tab closes.
+Extension mode is not a network sandbox: MindRoom validates URLs passed to `open`, while redirects and page scripts retain the connected profile's normal network reach.
+The local MCP process uses the pinned package version documented below.
+Browser observations describe the current page.
+A closed or crashed tab can cause upstream MCP to select another page automatically.
+A fresh snapshot, reconnect, URL/title match, or numeric index cannot make subsequent existing-page mutation safe with this backend.
 The browser extension and MCP process communicate over a machine-local loopback connection, while every cloud-to-local command still travels through pinned Matrix Olm encryption.
 
 Matrix protects the local-to-cloud transport, but accessibility state and screenshots become model input after MindRoom decrypts them in the cloud process.
@@ -8072,12 +8393,36 @@ uv tool install 'mindroom[desktop]'
 ```
 
 macOS supports native semantic state through AXUIElement and requires Accessibility permission for state and control.
-macOS also requires Screen Recording permission for screenshots.
+macOS screenshots require macOS 14 or newer and Screen Recording permission.
+ScreenCaptureKit captures the exact selected window, with its process and bounds checked before capture.
 Windows and Linux currently expose screenshot-only observation and state through the explicit `primary-screen` app ID, while coordinate input through PyAutoGUI is available during a control lease.
 Linux pixel operation currently targets an active X11 desktop because PyAutoGUI does not provide native Wayland control.
 A headless or locked graphical session is not a supported target.
 Playwright extension mode requires Node.js 18 or newer, a Chromium-family browser, and the official Playwright MCP Bridge extension installed in the browser profile that MindRoom will use.
 Chrome and Brave are supported by the local command through an explicit browser executable and user-data root.
+
+## Native macOS setup
+
+Open **Desktop Control** from the MindRoom menu app.
+In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
+Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
+Save the setup, confirm that exact identity locally, and claim pairing.
+Return the displayed `!desktop confirm ...` command to the same chat.
+For a homeserver behind Cloudflare Access, complete the printed terminal login flow first.
+
+The permission controls show Accessibility and Screen Recording readiness and link to the corresponding System Settings panes.
+Start in observe-only mode, then grant a bounded local lease when control is needed.
+Stop and Revoke remain available while another setup operation is waiting.
+The menu displays the current mode, remaining lease, and active action without exposing its arguments.
+Changing configuration or restarting the app/helper does not renew control.
+Once a command journal exists, saving a different controller identity is rejected before settings change.
+Pending work remains bound to its original controller.
+Saving settings can repair malformed local configuration or restore private file permissions; revision checks still apply.
+
+Release builds package the existing Python provider inside a separately signed helper app with a fixed bundle identity.
+The menu app owns that foreground helper through inherited private standard-I/O pipes.
+There is no listening management socket or separate background daemon.
+The terminal workflow remains available below.
 
 ## 1. Create the Local Desktop Device
 
@@ -8261,7 +8606,8 @@ The process opens outbound HTTPS connections to Matrix and does not listen on a 
 Authenticated, unexpired commands received by the initial Matrix sync are dispatched during startup, including control commands when the new process has a valid local control lease.
 Wait until the terminal says `Desktop bridge online` before sending new work when the caller needs confirmation that startup and device pinning completed.
 The bridge durably journals an accepted command before local execution, so a Matrix redelivery after a crash returns the cached response or an unknown-outcome warning instead of repeating a started control.
-Completed journal records retain bounded desktop or browser response content and screenshot decryption metadata in `<storage>/desktop_bridge/command_journal.json`, which MindRoom requires to be owner-only (`0600`) before reading.
+Completed journal records retain bounded desktop or browser response content and screenshot decryption metadata in `<storage>/desktop_bridge/commands.sqlite3`, which MindRoom requires to be owner-only (`0600`) before reading.
+Existing `command_journal.json` files are imported as legacy receipts; current admission and delivery state lives in SQLite.
 
 To grant semantic and fallback control for fifteen minutes, stop the observe-only process and restart it locally with an explicit lease:
 
@@ -8279,7 +8625,8 @@ mindroom desktop run \
 
 The maximum lease accepted by the CLI is sixty minutes.
 The running process enforces the lease with a monotonic local deadline, so moving the wall clock backward does not extend control.
-The bridge continues running after the lease expires, but every control action is rejected until a person restarts it with a new lease.
+The bridge continues observing after the lease expires, but every control action is rejected until a person grants another local lease.
+Desktop Control can grant or revoke without restarting; the CLI requires a new invocation.
 
 ### Use the Signed-In Browser Profile
 
@@ -8309,15 +8656,14 @@ The connection page lets the user choose an initial tab and displays a reconnect
 To reconnect after local bridge restarts without another browser prompt, store that value as `PLAYWRIGHT_MCP_EXTENSION_TOKEN` in the local MindRoom `.env` file with owner-only permissions.
 Treat the reconnect token like a local browser-control credential, never commit it, and regenerate it from the extension page if it is exposed.
 MindRoom passes only the safe MCP subprocess environment, this explicit reconnect token, and the selected browser profile root to the Node child, so unrelated provider API keys are not inherited.
-The local bridge terminal remains the only place that can grant or renew the control lease.
-Files used with `browser(action="upload", target="desktop")` must already exist under `<storage>/desktop-browser` on the local computer.
+Only Desktop Control and the local bridge terminal can grant or renew the control lease.
 
 ## 5. Agent Flow
 
 The agent calls `list_apps` and selects an exact returned app ID.
 If the selected app is not running, the agent calls `launch_app`, which requires the local control lease and returns fresh state when the app becomes accessible.
 It then calls `get_app_state` and inspects the returned roles, names, actions, hierarchy, and screenshot.
-It prefers a semantic action using an element index and the matching `state_id`.
+It prefers a semantic action using an `element_ref` and the matching `state_id`.
 The action response contains a new `state_id`, new element indexes, and a new screenshot for the next decision.
 The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only when the accessibility state lacks the needed semantic control.
 If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
@@ -8327,9 +8673,8 @@ If the user asks to receive the screenshot, the agent calls `desktop(action="scr
 
 For browser work, the agent first uses `browser(action="start", target="desktop")` while the local control lease is active, then calls `browser(action="tabs", target="desktop")` or `browser(action="snapshot", target="desktop")`.
 The snapshot returns semantic roles, names, current values, and element references from the current page.
-Reading and operating the current tab avoids treating Playwright MCP's mutable tab-list indices as durable identities.
-Element references are opaque and may include frame identity, so the agent must pass each returned reference through unchanged.
-The agent passes those references to `browser(action="act", target="desktop", request=...)` for form filling and interactive steps.
+Existing-page control is unavailable through this pinned extension backend until stable page targeting is supported.
+For app-level control, an explicitly allowlisted browser can still use the native desktop state and input path.
 After navigation or a significant page update, the agent requests a new snapshot instead of reusing old references.
 The `screenshot` action is useful for visual context, but semantic actions should use snapshot references rather than guessing image coordinates.
 For a browser screenshot that the user should receive, the agent passes `returnAttachment=true` with `target="desktop"` and sends the returned `attachment_id` through `matrix_message` in the same turn.
@@ -8347,6 +8692,9 @@ CONTROL_ACTIONS = {
     "scroll_element",
     "perform_action",
     "click",
+    "double_click",
+    "hover",
+    "drag",
     "type_text",
     "scroll",
     "keypress",
@@ -8386,12 +8734,13 @@ For stronger isolation, run the bridge in a dedicated operating-system account a
 
 Native semantic accessibility is implemented only for macOS in this version.
 Playwright extension mode is limited to Chromium-family browsers, so Safari and other unsupported browsers continue to use the accessibility and scoped-screenshot path.
-Screenshots and pixel fallback currently target the primary display, so an app window must fit fully on that display for a scoped screenshot to succeed.
-The bridge foregrounds and revalidates the allowed app before an on-screen window crop, but an always-on-top overlay inside those bounds can still appear in the screenshot.
+On macOS, window-bound screenshots and coordinate input support secondary displays when the window fits one unambiguous display.
+ScreenCaptureKit captures the selected window, with process and window identity revalidated around capture.
+Windows and Linux pixel operations currently target the primary display.
 Global keyboard shortcut chords are intentionally unavailable because they could switch to or launch an application outside the local allowlist.
 The returned accessibility tree is capped and depth-bounded, and the state reports when it was truncated.
 Table and outline state prefers the rows that macOS reports as visible so off-screen Finder-style content does not crowd current controls out of the bounded tree.
-There is no MatrixRTC live screen stream, tray application, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
+There is no MatrixRTC live screen stream, multi-monitor selector, unattended service installer, or remote approval of local lease changes yet.
 Commands and encrypted responses are Matrix to-device messages rather than persistent room events, while normal MindRoom tool traces and optional approval cards remain visible in the Matrix conversation.
 
 # Messaging & Social
@@ -17447,9 +17796,14 @@ MindRoom's architecture consists of several key components working together.
 | `inbound_turn_normalizer.py` | Raw input shaping (text, voice, sidecars, media) into canonical turn inputs |
 | `conversation_resolver.py` | Conversation identity, thread history, and ingress envelope assembly |
 | `ingress_lanes.py` | Per-(room, sender) receipt-order FIFO delivering resolving ingress (voice/STT readiness) to conversations |
-| `coalescing.py` | Live message coalescing gate (text dispatches immediately; media waits for attachments and a trailing caption) |
+| `coalescing.py` | Live message coalescing gate; ordinary text dispatches immediately, adaptive text waits for its quiet window, and media waits for attachments and a trailing caption |
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
+| `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
+| `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
+| `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
+| `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
+| `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
@@ -17477,6 +17831,19 @@ MindRoom's architecture consists of several key components working together.
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |
+| `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
+| `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
+| `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
+| `desktop/bridge.py` | Enforces current local authority and coordinates serial execution and response delivery |
+| `desktop/observations.py` | Bounds observation references by requester, agent, session, application, and age |
+| `desktop/displays.py` | Maps verified logical display bounds to capture pixel scale |
+| `desktop/input.py` | Defines the allowed application-local keyboard and scroll inputs |
+| `desktop/macos_input.py` | Sends bounded Quartz pointer input in global logical coordinates |
+| `desktop/macos_capture.py` | Captures verified windows and displays through ScreenCaptureKit |
+| `desktop/native_config.py` | Validates and persists private native-helper configuration |
+| `desktop/native_protocol.py` | Parses and bounds requests on the local NDJSON channel |
+| `desktop/native_host.py` | Owns helper setup, runtime lifecycle, local control, and stdio dispatch |
+| `desktop/native_entry.py` | Starts the packaged native desktop helper |
 
 ## Storage upgrade boundaries
 
@@ -17496,7 +17863,11 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
 
 1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
-3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches per conversation — a live batch ending in text is a complete utterance and dispatches immediately, a live batch ending in media waits a debounce window for more attachments or a trailing caption, and follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other
+3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches each sender's live conversation burst.
+   Ordinary text completes an utterance and dispatches immediately; adaptive text waits its configured quiet period.
+   Later adaptive text cannot extend an earlier immediate text's wait.
+   A live batch ending in media waits for more attachments or a trailing caption.
+   Follow-up backlogs queued behind an active response flush as one combined turn at idle; conversations never wait on each other.
 4. **The turn is planned**: `turn_policy.py` decides to ignore, route, or respond; a direct responder is resolved when one eligible agent or team remains, otherwise the router selects among candidates
 5. **Selected entity processes** the message via `response_runner.py` and the Agno runtime, executing tools as needed
 6. **Response is delivered** through `delivery_gateway.py`, which owns Matrix send/edit/finalization while `streaming.py` owns progressive response state
@@ -17809,6 +18180,107 @@ teams:
 Room aliases are resolved to room IDs automatically. Full room IDs (starting with `!`) are also supported.
 
 When a room doesn't exist, it's created with an AI-generated topic, power users are invited, and managed avatars are resolved from workspace overrides or bundled defaults if available.
+
+## Model Selection Protocol
+
+Implementation owners under `src/mindroom/`:
+
+| Module | Responsibility |
+| --- | --- |
+| `model_catalog.py` | Allowlisted metadata, Matrix icon upload/cache, and catalog revision |
+| `model_catalog_receiver.py` | Router discovery admission, authenticated response, and scope/lifetime checks |
+| `model_selection.py` | Structured request/result values and frozen acknowledgement metadata |
+| `model_selection_scope.py` | Current joined membership and readable-root eligibility |
+
+Model discovery uses Olm-encrypted to-device events, including for unencrypted rooms.
+Only the configured router registers the receiver.
+No room-state advertisement, extra state permissions, or external discovery endpoint is required.
+The receiver authenticates the actual requesting device and checks current joined requester/router membership plus at least one configured, permitted, joined agent.
+Teams alone do not qualify.
+An included thread must be a readable, unredacted root in that room; encrypted roots are decrypted before validation.
+Replies target only that authenticated device.
+Sending a catalog never verifies a previously untrusted device.
+Blocked devices, malformed requests, and unauthorized room/thread scopes receive no response.
+
+Send type `io.mindroom.models.request` with exact content:
+
+```json
+{"version":1,"request_id":"random-uuid","room_id":"!room:example.org","thread_id":"$root"}
+```
+
+Omit `thread_id` for room capability discovery; `null` is invalid.
+Request IDs allow up to 128 characters; room/thread IDs allow up to 1024.
+Do not add claimed sender or device fields.
+
+The private reply type is `io.mindroom.models.response`:
+
+```json
+{
+  "version": 1,
+  "request_id": "random-uuid",
+  "room_id": "!room:example.org",
+  "thread_id": "$root",
+  "capabilities": ["model_selection"],
+  "agent_user_ids": ["@mindroom_helper:example.org"],
+  "catalog_revision": "sha256-of-published-entries",
+  "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image"}],
+  "selection": {"override":null,"inherited":[{"entity":"helper","model":"fast"}]}
+}
+```
+
+The response omits `thread_id` when the request did.
+`selection.override` is always present and is `null` for absent or deleted model overrides.
+`inherited` lists requester-visible responding entities with their room-level model, ignoring thread overrides.
+This explains what resetting the thread will use, including different defaults across agents and teams.
+
+Each request reads current config.
+Models are sorted by stable key; the SHA-256 revision covers only published entries, including labels and resolved Matrix icons.
+Display names may repeat and fall back to the key.
+Icons use Matrix `mxc://` URIs only; local raster publication follows the [model configuration rules](https://docs.mindroom.chat/configuration/models/).
+Catalogs exceeding 256 models or 64 KiB UTF-8 JSON are unavailable rather than truncated.
+Application processing expires after 12 seconds; cancellation does not retract a send already retained by NIO.
+Admission caps queued/in-flight requests at eight and accepts at most eight fresh requests per device in 12 seconds; concurrent duplicate requests share the active request.
+Immediately before handing the response to NIO, MindRoom rechecks current scope, captured device identity, and config identity, including after the final awaited scope check.
+NIO then owns device validation, encryption, persistence, and delivery retries.
+A requester who loses room access during NIO preparation or retry can still receive that already-authorized catalog.
+Clients must independently enforce current joined-agent eligibility and discard expired responses.
+
+Clients register their response listener before sending, correlate request, room, thread, and actual authenticated runtime device, and independently check returned agent membership.
+Candidate runtime accounts are hints; clients require an owner-signed runtime device.
+Multiple runtime devices remain separate choices.
+Refresh on picker opening; expire requests after 12 seconds and discard late results.
+An older or unavailable backend leaves the existing `!model` command available.
+
+### Thread Changes and Acknowledgements
+
+Mutations use the ordinary `m.room.message` / `m.text` path with readable body `!model fast` or `!model reset`, carrying this additional content:
+
+```json
+{"io.mindroom.model_selection":{"version":1,"runtime_user_id":"@mindroom_router:example.org","runtime_device_id":"ROUTER_DEVICE","operation":"set","model":"fast"}}
+```
+
+`operation` is `set` or `reset`; reset omits `model`.
+Explicit set permits keys such as `default`, `reset`, or `list`.
+The required runtime device ID comes from authenticated discovery, routes the command, and grants no authority.
+Actual room and canonical thread come from Matrix event routing.
+Malformed structured metadata is rejected without falling back to text parsing; unrelated runtime users/devices ignore targeted commands.
+Existing authorization, command policy, and durable deduplication still apply.
+
+The normal command reply carries the persisted result alongside readable text:
+
+```json
+{"io.mindroom.model_selection_result":{"version":1,"command_event_id":"$command","room_id":"!room:example.org","thread_id":"$root","runtime_user_id":"@mindroom_router:example.org","runtime_device_id":"ROUTER_DEVICE","operation":"set","model":"fast","status":"applied","override":"fast"}}
+```
+
+Applied reset omits `model` and has `override:null`.
+Rejection has `status:"rejected"`, no `override`, and may include a readable `error`.
+Uncertain crash recovery may omit result metadata; clients refresh after timeout rather than infer success from sending.
+Text and metadata share the existing durable command-result checkpoint and delivery outbox.
+Accept an acknowledgement only for the client's current pending command event, exact room/thread, runtime user/device, operation, and model.
+Encrypted events additionally authenticate the sender device.
+In plaintext rooms, Matrix authenticates the sender account; device metadata only correlates the result.
+Serialize pending changes per runtime/thread and prevent earlier discovery results from replacing later confirmed changes.
+Other clients and text commands become visible on refresh; there is no global selection revision.
 
 # Agent Orchestration
 
@@ -18413,7 +18885,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
-| `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store. | `agent_storage.py` and storage lifecycle callers. |
+| `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
@@ -20360,6 +20832,18 @@ In a live validation, separate `code` and `research` requests produced separate 
 
 ## Environment variable reference
 
+### Interactive worker computers
+
+[Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) adds a persistent headed Chromium browser and a Chat viewer to dedicated Docker and Kubernetes workers.
+Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true` on the primary runtime, use `worker_scope: user_agent`, and include `browser` in the agent's `worker_tools`.
+Set `MINDROOM_COMPUTER_ALLOWED_ORIGINS` to an explicit JSON list of trusted Chat origins and route the public computer HTTP/WebSocket gateway to the actual runtime API.
+The shared static-runner Compose sidecar does not support interactive computers.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the dedicated worker's persistent browser/display | `false` |
+| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | Explicit allowed Chat origins for computer HTTP and WebSocket requests | `[]` |
+
 ### Primary MindRoom runtime (proxy client)
 
 | Variable | Description | Default |
@@ -21496,6 +21980,7 @@ See the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) guide
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ app     Run the native app's private structured helper over inherited standard I/O.    │
 │ login   Log in once, create an Olm device, and save its access token privately.        │
 │ pair    Claim one requester-agent pairing through authenticated Matrix E2EE.           │
 │ setup   Log in when needed, then claim one requester-agent pairing.                    │

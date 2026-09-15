@@ -1,5 +1,6 @@
 # ruff: noqa: D100, B018, F821
 # Generated Vulture baseline for dynamic/framework entry points.
+desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py
 dashboard_credentials_supported  # unused variable (src/mindroom/agent_policy.py)
@@ -142,6 +143,7 @@ _.validate_thread_key  # Pydantic field validator (src/mindroom/external_trigger
 _.validate_auth  # unused method (src/mindroom/external_triggers/store.py)
 post_external_trigger  # unused function (src/mindroom/api/external_triggers.py)
 _.validate_team_agents  # unused method (src/mindroom/config/main.py)
+_.validate_room_participation  # Pydantic model validator (src/mindroom/config/main.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)
 _._normalize_data  # unused method (src/mindroom/thread_tags.py)
@@ -162,6 +164,8 @@ _.normalize_shorthand  # unused method (src/mindroom/config/memory.py)
 _.validate_include_patterns  # unused method (src/mindroom/config/memory.py)
 _._check_history_config  # unused method (src/mindroom/config/models.py)
 _._validate_credentials_service  # Pydantic field validator (src/mindroom/config/models.py)
+_._normalize_display_name  # Pydantic field validator (src/mindroom/config/models.py)
+_._normalize_icon  # Pydantic field validator (src/mindroom/config/models.py)
 _._validate_api_provider  # Pydantic model validator (src/mindroom/config/models.py)
 _._using_reasoning_model  # Agno Responses continuation hook (src/mindroom/openai_models.py)
 _.handle_starttag  # unused method (src/mindroom/matrix/message_builder.py)
@@ -376,3 +380,15 @@ _collections_to_query  # Agno calls this hook to resolve the exact published rea
 
 response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
 detailed_response_activity  # FastAPI endpoint (src/mindroom/api/response_activity.py)
+
+icon_url  # ModelCatalogEntry optional Matrix wire field, accessed through JSON dictionary keys.
+
+_.controller_session_id  # serialized TypedDict field (src/mindroom/worker_computer/protocol.py)
+control  # FastAPI endpoint (src/mindroom/api/worker_computer.py)
+
+# Computer routes are invoked by FastAPI; dataclass equality binds config identity.
+create_session  # FastAPI Computer endpoint
+session_status  # FastAPI Computer endpoint
+stream_ticket  # FastAPI Computer endpoint
+delete_session  # FastAPI Computer endpoint
+_.config_identity  # ComputerTarget dataclass equality field
