@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import subprocess
+import sys
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from threading import Event
@@ -283,7 +285,105 @@ def test_registry_initialization_accepts_superseded_state_snapshot(
     _publish(space, key, "replacement")
     config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
     knowledge = registry._load_queryable_index_from_state(
-        key, state, config=config, runtime_paths=runtime_paths_for(config),
+        key,
+        state,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
     )
     assert knowledge is not None
     assert [document.content for document in knowledge.search("alpha")] == ["replacement"]
+
+
+@pytest.mark.parametrize("orphan", [False, True])
+def test_native_reader_deadline_releases_lock_after_parent_death(tmp_path: Path, orphan: bool) -> None:
+    """A kernel deadline releases the lease even when native code holds the GIL."""
+    if sys.platform != "linux":
+        pytest.skip("The isolated orphan supervisor uses Linux child adoption")
+    probe = tmp_path / "reader_probe.py"
+    probe.write_text(
+        """import ctypes, fcntl, os, signal, subprocess, sys, time
+from pathlib import Path
+root = Path(__file__).parent
+pid_path = root / "worker.pid"
+if len(sys.argv) > 1 and sys.argv[1] == "worker":
+    from mindroom.knowledge import read_worker
+    class BlockedNative:
+        def __init__(self, **kwargs): pass
+        def close(self): pass
+        def search(self, **kwargs):
+            pid_path.write_text(str(os.getpid()))
+            ctypes.PyDLL(None).pause()
+    read_worker._PublishedChromaDb = BlockedNative
+    read_worker._main(timeout=float(sys.argv[2]))
+elif len(sys.argv) > 1 and sys.argv[1] == "parent":
+    from mindroom.knowledge import read_process
+    from mindroom.knowledge.read_protocol import ReadRequest
+    original = subprocess.run
+    def launch(command, **kwargs):
+        return original([sys.executable, __file__, "worker", command[-1]], **kwargs)
+    read_process.subprocess.run = launch
+    read_process.read_chroma(ReadRequest(str(root), "published", "query", [1.0]), timeout=2)
+else:
+    assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
+    orphan = sys.argv[1] == "orphan"
+    child = None
+    process = subprocess.Popen(
+        [sys.executable, __file__, "parent"] if orphan else
+        [sys.executable, __file__, "worker", "0.3"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    try:
+        if not orphan:
+            process.stdin.write(('{"path":' + __import__('json').dumps(str(root)) +
+                ',"collection":"published","query":"query","embedding":[1.0]}').encode())
+            process.stdin.close()
+        deadline = time.monotonic() + 15
+        while not pid_path.exists():
+            assert process.poll() is None, process.stderr.read().decode()
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        child = int(pid_path.read_text())
+        with (root / "collection_lifetime.lock").open("a+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError("native reader did not hold its lease")
+            if orphan:
+                process.kill()
+                process.wait()
+            deadline = time.monotonic() + 4
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < deadline, "orphan retained reader lease"
+                    time.sleep(.01)
+            if orphan:
+                _, status = os.waitpid(child, 0)
+                assert os.waitstatus_to_exitcode(status) == -signal.SIGALRM
+            else:
+                assert process.wait(timeout=2) == -signal.SIGALRM
+            child = None
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if child is not None and orphan:
+            try:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+            except ProcessLookupError:
+                pass
+""",
+    )
+    result = subprocess.run(
+        [sys.executable, str(probe), "orphan" if orphan else "direct"],
+        capture_output=True,
+        text=True,
+        timeout=25,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

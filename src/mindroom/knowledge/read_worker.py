@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import signal
 import sys
 import traceback
 from contextlib import closing
@@ -66,8 +68,14 @@ def _read(request: ReadRequest) -> ReadResult:
         return ReadResult(exists=True, documents=[ReadDocument.from_document(document) for document in documents])
 
 
-def _main() -> None:
+def _main(*, timeout: float = 30.0) -> None:
     """Read one JSON request from stdin and return one JSON result on stdout."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        message = "Knowledge reader deadline must be finite and positive"
+        raise ValueError(message)
+    # The kernel terminates even GIL-blocked native code after the parent dies.
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
     # Redirect the descriptor too: native code and preconfigured log handlers
     # may retain the original stdout object, bypassing redirect_stdout.
     output = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
@@ -90,4 +98,4 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
-    _main()
+    _main(timeout=float(sys.argv[1]) if len(sys.argv) > 1 else 30.0)

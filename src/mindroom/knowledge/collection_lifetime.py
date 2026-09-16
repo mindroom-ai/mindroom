@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.file_locks import advisory_file_lock
 from mindroom.knowledge.index_metadata import load_published_index_state
-from mindroom.knowledge.indexing_config import IndexingSettings, published_index_settings_compatible
+from mindroom.knowledge.indexing_config import IndexingSettings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -37,13 +37,8 @@ def read_collection(request: ReadRequest) -> Iterator[str]:
             return
         expected = IndexingSettings.from_metadata(request.published_settings)
         state = load_published_index_state(Path(request.path) / "indexing_settings.json")
-        if (
-            expected is None
-            or state is None
-            or state.status != "complete"
-            or state.collection is None
-            or not published_index_settings_compatible(state.settings, expected)
-        ):
+        if expected is None or state is None or not state.queryable_for(expected):
             message = "Published knowledge index is unavailable or incompatible with this reader"
             raise ValueError(message)
+        assert state.collection is not None
         yield state.collection

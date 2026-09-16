@@ -415,11 +415,7 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
 
 
 def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
-    return (
-        state.status == "complete"
-        and state.collection is not None
-        and published_index_settings_compatible(state.settings, key.indexing_settings)
-    )
+    return state.queryable_for(key.indexing_settings)
 
 
 def _published_index_availability(
