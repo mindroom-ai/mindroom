@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -27,6 +28,97 @@ from tests.test_delegation_execution import DelegationModel, _call
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_failed", [False, True])
+@pytest.mark.parametrize("consumer_failure", [None, RuntimeError, asyncio.CancelledError])
+async def test_closed_stream_observes_driver_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    already_failed: bool,
+    consumer_failure: type[BaseException] | None,
+) -> None:
+    """Early close retrieves driver errors without replacing the consumer's outcome."""
+    response = RunOutput(
+        run_id="parent-run",
+        status=RunStatus.paused,
+        metadata={DELEGATION_STATE_KEY: DelegationState().to_dict()},
+    )
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+
+    async def drive(
+        _entity: Agent,
+        _response: RunOutput,
+        *,
+        on_event: Callable[[object], None],
+        **_kwargs: object,
+    ) -> RunOutput:
+        try:
+            on_event("partial output")
+            if not already_failed:
+                await asyncio.Future()
+        finally:
+            message = "Driver failed"
+            raise RuntimeError(message)
+
+    async def paused_run() -> AsyncIterator[RunOutput]:
+        yield response
+
+    async def consume() -> None:
+        stream = execution.drive_delegation_stream(Agent(telemetry=False), paused_run())
+        try:
+            assert await anext(stream) == "partial output"
+            if consumer_failure is not None:
+                message = "Consumer stopped"
+                raise consumer_failure(message)
+        finally:
+            await stream.aclose()
+
+    monkeypatch.setattr(execution, "drive_delegations", drive)
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        if consumer_failure is None:
+            await consume()
+        else:
+            with pytest.raises(consumer_failure, match="Consumer stopped"):
+                await consume()
+        gc.collect()
+        assert unhandled == []
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_stream_propagates_driver_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retrieving a task during cleanup must not hide failures from active consumers."""
+    response = RunOutput(
+        run_id="parent-run",
+        status=RunStatus.paused,
+        metadata={DELEGATION_STATE_KEY: DelegationState().to_dict()},
+    )
+
+    async def drive(
+        _entity: Agent,
+        _response: RunOutput,
+        *,
+        on_event: Callable[[object], None],
+        **_kwargs: object,
+    ) -> RunOutput:
+        on_event("partial output")
+        message = "Driver failed"
+        raise RuntimeError(message)
+
+    async def paused_run() -> AsyncIterator[RunOutput]:
+        yield response
+
+    monkeypatch.setattr(execution, "drive_delegations", drive)
+    stream = execution.drive_delegation_stream(Agent(telemetry=False), paused_run())
+    assert await anext(stream) == "partial output"
+    with pytest.raises(RuntimeError, match="Driver failed"):
+        await anext(stream)
 
 
 @pytest.mark.asyncio

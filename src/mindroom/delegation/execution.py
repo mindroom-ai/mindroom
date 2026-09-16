@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import suppress
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -1032,5 +1031,7 @@ async def _stream_driven_run(
         if not task.done():
             task.cancel()
             await wait_for_future_until_complete(asyncio.gather(task, return_exceptions=True))
-            with suppress(asyncio.CancelledError):
-                task.result()
+        elif not task.cancelled():
+            # An early-closing consumer may never reach the await above.
+            # Observe failure without replacing its error or cancellation.
+            task.exception()
