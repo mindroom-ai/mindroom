@@ -277,6 +277,55 @@ def test_reader_keeps_usage_when_run_timestamp_is_unusable(tmp_path: Path, creat
     assert row.runs[0].metrics["total_tokens"] == 20
 
 
+def test_reader_uses_run_table_timestamp_when_dict_payload_omits_it(tmp_path: Path) -> None:
+    """Agno's fallback timestamp remains available even when run_data omits it."""
+    storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
+    run = _run()
+    run.pop("created_at")
+    try:
+        storage.upsert_session(AgentSession(session_id="session-1", agent_id="code", user_id="@alice:example.test"))
+        storage.upsert_run(run, session_id="session-1", user_id="@alice:example.test")
+    finally:
+        storage.close()
+    database = tmp_path / "sessions" / "code.db"
+    with sqlite3.connect(database) as connection:
+        created_at = connection.execute("SELECT created_at FROM code_sessions_runs").fetchone()[0]
+    assert isinstance(created_at, int)
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.runs[0].created_at == created_at
+    assert row.runs[0].metrics["total_tokens"] == 20
+
+
+@pytest.mark.parametrize("updated_timestamp", [None, "invalid", 1_723_924_000])
+def test_reader_preserves_run_table_creation_date_after_updates(tmp_path: Path, updated_timestamp: object) -> None:
+    """Updating a payload must not lose or move the run's original creation date."""
+    storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
+    run = _run()
+    try:
+        storage.upsert_session(AgentSession(session_id="session-1", agent_id="code", user_id="@alice:example.test"))
+        storage.upsert_run(run, session_id="session-1", user_id="@alice:example.test")
+        storage.upsert_run(
+            {**run, "created_at": updated_timestamp},
+            session_id="session-1",
+            user_id="@alice:example.test",
+        )
+    finally:
+        storage.close()
+
+    result = list(iter_usage_storage_rows(_source(tmp_path / "sessions" / "code.db")))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.runs[0].created_at == 1_723_837_600
+    assert row.runs[0].metrics["total_tokens"] == 20
+
+
 @pytest.mark.parametrize("legacy_encoding", [False, True])
 def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, legacy_encoding: bool) -> None:
     """Admin totals use Agno's member-inclusive team session aggregate."""

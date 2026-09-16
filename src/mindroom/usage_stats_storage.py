@@ -395,10 +395,18 @@ def _is_valid_payload_size(value: object) -> bool:
 
 
 @dataclass(slots=True)
+class _PersistedRun:
+    """One raw run payload and its authoritative creation timestamp."""
+
+    payload: object
+    created_at: object
+
+
+@dataclass(slots=True)
 class _PersistedRuns:
     """Raw run payloads for one session, in run-table order."""
 
-    payloads: list[object] = field(default_factory=list)
+    payloads: list[_PersistedRun] = field(default_factory=list)
     payload_bytes: int = 0
 
 
@@ -446,13 +454,14 @@ def _persisted_runs(connection: sqlite3.Connection, runs_table: str, session_id:
     if not isinstance(session_id, str):
         return persisted
     query = (
-        "SELECT run_data AS run_payload, length(CAST(run_data AS BLOB)) AS run_payload_bytes "  # noqa: S608
+        "SELECT run_data AS run_payload, created_at, "  # noqa: S608
+        "length(CAST(run_data AS BLOB)) AS run_payload_bytes "
         f"FROM {_quote_identifier(runs_table)} WHERE session_id = ? "
         "ORDER BY run_index ASC, created_at ASC, run_id ASC"
     )
     for row in connection.execute(query, (session_id,)):
         payload_bytes = row["run_payload_bytes"]
-        persisted.payloads.append(row["run_payload"])
+        persisted.payloads.append(_PersistedRun(payload=row["run_payload"], created_at=row["created_at"]))
         if isinstance(payload_bytes, int) and not isinstance(payload_bytes, bool) and payload_bytes > 0:
             persisted.payload_bytes += payload_bytes
     return persisted
@@ -512,7 +521,7 @@ def _extract_row(
 
 
 def _extract_runs(
-    run_payloads: list[object],
+    run_payloads: list[_PersistedRun],
     legacy_runs_payload: object,
     *,
     row_requester: str | None,
@@ -522,10 +531,14 @@ def _extract_runs(
     Run-table rows come first and win on ``run_id``; legacy-only runs are
     appended. Aggregation does not depend on the order.
     """
-    raw_runs = merge_legacy_run_payloads(
-        [decode_persisted_session_json(payload) for payload in run_payloads],
-        legacy_runs_payload,
-    )
+    current_runs: list[object] = []
+    for persisted_run in run_payloads:
+        decoded = decode_persisted_session_json(persisted_run.payload)
+        if not isinstance(decoded, dict):
+            raise TypeError
+        # Agno preserves the column on updates, even when run_data loses or changes its timestamp.
+        current_runs.append({**decoded, "created_at": persisted_run.created_at})
+    raw_runs = merge_legacy_run_payloads(current_runs, legacy_runs_payload)
     runs: list[UsageRunNode] = []
     for raw_run in raw_runs:
         extracted = _extract_run(raw_run, row_requester=row_requester)
