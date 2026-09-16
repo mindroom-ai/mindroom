@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 from agno.agent import Agent
@@ -232,5 +232,44 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
         assert (await runtime.lookup("member-job", owner=owner, depth=0)).wait_acknowledged
     finally:
         storage.close()
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["tool", "delegation"])
+async def test_discovery_bounds_large_results_without_truncating_wait(
+    tmp_path: Path,
+    kind: Literal["tool", "delegation"],
+) -> None:
+    """Discovering large ordinary and native outcomes cannot flood context or discard their saved result."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    result = "large result " * 100_000
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome(
+            "completed",
+            result,
+            result_payload={"value": encode_tool_result(result)} if kind == "tool" else None,
+        )
+
+    try:
+        await runtime.start(JobSpec("large", "large_tool", 0, kind=kind), owner=owner, operation=operation)
+        waited = await runtime.wait("large", owner=owner, depth=0)
+        await runtime.release_wait("large", waited.token)
+        with tool_runtime_context(context):
+            tools = JobTools(paths, owner)
+            discovery = await tools.job("list")
+            assert len(discovery) < 2_000
+            summary = json.loads(discovery)[0]
+            assert summary["job_id"] == "large"
+            assert summary["summary_truncated"] is True
+            assert result.startswith(summary["summary"])
+            assert await tools.job("wait", "large") == result
+    finally:
         register_background_runtime(paths, None)
         await runtime.shutdown()

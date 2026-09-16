@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import asdict, fields, replace
 from typing import TYPE_CHECKING, Any
@@ -10,14 +11,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from agno.agent import Agent
+from agno.tools import Toolkit
 from agno.tools.function import Function
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agents import create_agent
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
@@ -29,12 +34,19 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator, _build_completion_content
 from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
+from mindroom.tool_jobs.authorization import (
+    AUTHORITY_METADATA_KEY,
+    authority_snapshot,
+    bind_toolkit_authority,
+    function_authority,
+)
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import (
     authorized_tool_call,
     check_current_execution_authority,
     set_execution_authorizer,
 )
+from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
@@ -42,6 +54,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     register_background_runtime,
 )
+from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -417,7 +430,13 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
         kind="tool",
         tool_name="add",
         toolkit_name="calculator",
-        adapter={"origin": {"module": "agno.tools.calculator", "qualname": "CalculatorTools.add"}},
+        adapter={
+            "origin": {"module": "agno.tools.calculator", "qualname": "CalculatorTools.add"},
+            "authority": {
+                **authority_snapshot(config, "lead"),
+                "construction": {"name": "calculator", "factory_origin": tool_registry_origins()["calculator"]},
+            },
+        },
     )
     assert coordinator._authorized(job)
     config.agents["lead"].tools = []
@@ -525,7 +544,11 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
         runtime_paths=coordinator.runtime_paths,
         caller_execution_identity=_job().owner,
     )
-    function = Function(name="add", entrypoint=lambda: None, owning_toolkit="calculator")
+    function = Function(name="add", entrypoint=lambda: None)
+    toolkit = Toolkit(name="calculator", auto_register=False)
+    toolkit.functions["add"] = function
+    bind_toolkit_authority(toolkit, authored_name="calculator", concrete_name="calculator")
+    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "worker")})
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
         with tool_runtime_context(
@@ -563,8 +586,8 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
         server_config=config.mcp_servers["demo"],
     )
     function = next(item for name, item in toolkit.async_functions.items() if name.endswith("_call_tool"))
-    function.source_toolkit = toolkit
-    function.owning_toolkit = "mcp_demo"
+    bind_toolkit_authority(toolkit, authored_name="mcp_demo", concrete_name="mcp_demo")
+    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     set_execution_authorizer(coordinator._authorize_execution)
     try:
@@ -585,3 +608,70 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
     finally:
         await coordinator.stop()
         sync_mcp_tool_registry(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("authored", "function_name"),
+    [("matrix_message", "list_attachments"), ("openclaw_compat", "run_shell_command")],
+)
+async def test_expanded_tool_authority_retains_exact_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authored: str,
+    function_name: str,
+) -> None:
+    """Implied filters and preset child factory identity survive Function copying and saved-result projection."""
+    config = _config(tmp_path)
+    config.agents["lead"].tools = [
+        ToolConfigEntry(
+            name=authored,
+            overrides={"include_tools": ["matrix_message"]} if authored == "matrix_message" else {},
+        ),
+    ]
+    config.memory.backend = "none"
+    config.models["default"] = ModelConfig(provider="openai", id="gpt-6-astra")
+    coordinator = _delivery_coordinator(tmp_path, config)
+    owner = _job().owner
+    register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
+    try:
+        with tool_runtime_context(
+            _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
+        ):
+            agent = create_agent(
+                "lead",
+                config,
+                coordinator.runtime_paths,
+                execution_identity=owner,
+                persist_runtime_state=False,
+            )
+            function = next(
+                function
+                for toolkit in agent.tools
+                for function in toolkit.get_async_functions().values()
+                if function.name == function_name
+            ).model_copy(deep=True)
+            function._agent = agent
+            assert function.owning_toolkit == authored
+            stored = replace(
+                _job(),
+                kind="tool",
+                tool_name=function_name,
+                toolkit_name=authored,
+                adapter=json.loads(
+                    json.dumps({"authority": function_authority(function), "origin": function_provenance(function)}),
+                ),
+            )
+            coordinator._authorize_execution(owner, function)
+            assert coordinator._authorized(stored)
+            if authored == "openclaw_compat":
+
+                def replaced_factory() -> type[Toolkit]:
+                    pytest.fail("Current authority must not construct replacement tools")
+
+                monkeypatch.setitem(TOOL_REGISTRY, "shell", replaced_factory)
+                with pytest.raises(JobAccessError):
+                    coordinator._authorize_execution(owner, function)
+                assert not coordinator._authorized(stored)
+    finally:
+        await coordinator.stop()

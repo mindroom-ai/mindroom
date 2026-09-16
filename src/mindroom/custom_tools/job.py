@@ -31,8 +31,17 @@ def is_job_function(function: Function) -> bool:
     )
 
 
+_SUMMARY_MAX_CHARS = 500
+
+
 def _summary(job: BackgroundJob) -> dict[str, Any]:
-    return {"job_id": job.job_id, "tool": job.tool_name, "status": job.status, "summary": job.result}
+    return {
+        "job_id": job.job_id,
+        "tool": job.tool_name,
+        "status": job.status,
+        "summary": job.result[:_SUMMARY_MAX_CHARS] if job.result is not None else None,
+        "summary_truncated": job.result is not None and len(job.result) > _SUMMARY_MAX_CHARS,
+    }
 
 
 class JobTools(Toolkit):

@@ -37,7 +37,7 @@ from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
-from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot
+from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot, bind_toolkit_authority
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1382,12 +1382,6 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
-def _set_toolkit_approval_origin(toolkit: Toolkit, authored_name: str) -> None:
-    """Attach the configured toolkit identity to its executable functions."""
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = authored_name
-
-
 def _assemble_agent_toolkits(
     agent_name: str,
     config: Config,
@@ -1504,7 +1498,11 @@ def _assemble_agent_toolkits(
             )
             if toolkit:
                 toolkit = prepend_tool_hook_bridge(toolkit, tool_hook_bridge)
-                _set_toolkit_approval_origin(toolkit, tool_entry.authored_name or tool_name)
+                bind_toolkit_authority(
+                    toolkit,
+                    authored_name=tool_entry.authored_name or tool_name,
+                    concrete_name=tool_name,
+                )
                 tools.append(toolkit)
                 target_names = (
                     worker_routed_tool_names

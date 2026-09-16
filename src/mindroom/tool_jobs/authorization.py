@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
+
+from agno.tools import Toolkit
 
 from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
@@ -19,29 +23,53 @@ if TYPE_CHECKING:
 AUTHORITY_METADATA_KEY = "mindroom_tool_authority"
 
 
+@dataclass(frozen=True)
+class _ToolkitConstruction:
+    name: str
+    factory_origin: tuple[str, ...] | None
+
+
+_CONSTRUCTIONS: WeakKeyDictionary[Toolkit, _ToolkitConstruction] = WeakKeyDictionary()
+
+
+def bind_toolkit_authority(toolkit: Toolkit, *, authored_name: str, concrete_name: str) -> None:
+    """Bind exact registry construction beside the authored approval owner."""
+    origin = tool_registry_origins().get(concrete_name)
+    _CONSTRUCTIONS[toolkit] = _ToolkitConstruction(concrete_name, tuple(origin) if origin is not None else None)
+    for function in toolkit.get_async_functions().values():
+        function.owning_toolkit = authored_name
+        function.source_toolkit = toolkit
+
+
 def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
-    """Freeze construction scope and registered origins without constructing tools."""
+    """Freeze the actor execution scope without constructing tools."""
     policy = resolve_agent_policy_from_data(
         agent_name,
         config.agents[agent_name],
         default_worker_scope=config.defaults.worker_scope,
     )
-    origins = tool_registry_origins()
-    granted = config.resolve_entity(agent_name).available_tools
-    return {
-        "scope": policy.effective_execution_scope,
-        "origins": {name: origins[name] for name in granted if name in origins},
-    }
+    return {"scope": policy.effective_execution_scope}
 
 
 def function_authority(function: Function) -> dict[str, Any]:
     """Read the construction snapshot retained by the actual executing actor."""
     actor = function._agent or function._team
     snapshot = (actor.metadata or {}).get(AUTHORITY_METADATA_KEY, {}) if actor is not None else {}
-    if not snapshot:
-        return {}
-    origin = snapshot.get("origins", {}).get(function.owning_toolkit)
-    return {"scope": snapshot.get("scope"), "origins": {function.owning_toolkit: origin} if origin is not None else {}}
+    toolkit = function.source_toolkit
+    construction = _CONSTRUCTIONS.get(toolkit) if isinstance(toolkit, Toolkit) else None
+    return {
+        "scope": snapshot.get("scope"),
+        "construction": (
+            {
+                "name": construction.name,
+                "factory_origin": list(construction.factory_origin)
+                if construction.factory_origin is not None
+                else None,
+            }
+            if construction is not None
+            else None
+        ),
+    }
 
 
 def _framework_tool_allowed(config: Config, agent_name: str, tool_name: str, origin: dict[str, Any]) -> bool:
@@ -97,6 +125,9 @@ def locally_allowed(
     if toolkit_name is None:
         # Framework-owned knowledge and memory functions have no authored toolkit.
         return _framework_tool_allowed(config, owner.agent_name, tool_name, origin)
+    construction = authority.get("construction")
+    if not isinstance(construction, dict):
+        return False
     view = config.resolve_entity(owner.agent_name)
     surface = visible_tool_surface(
         agent_name=owner.agent_name,
@@ -107,12 +138,16 @@ def locally_allowed(
         include_matrix_room_runtime_tools=owner.room_id is not None,
     )
     entry = next(
-        (item for item in surface.runtime_tool_configs if (item.authored_name or item.name) == toolkit_name),
+        (
+            item
+            for item in surface.runtime_tool_configs
+            if (item.authored_name or item.name) == toolkit_name and item.name == construction.get("name")
+        ),
         None,
     )
     if entry is None:
         return False
-    return _configured_tool_allowed(config, owner, entry, tool_name, toolkit_name, origin, authority)
+    return _configured_tool_allowed(config, owner, entry, tool_name, origin, construction)
 
 
 def _configured_tool_allowed(
@@ -120,12 +155,10 @@ def _configured_tool_allowed(
     owner: ToolExecutionIdentity,
     entry: EffectiveToolConfig,
     tool_name: str,
-    toolkit_name: str,
     origin: dict[str, Any],
-    authority: dict[str, Any],
+    construction: dict[str, Any],
 ) -> bool:
-    factory_origin = authority.get("origins", {}).get(toolkit_name)
-    if factory_origin is not None and tool_registry_origins().get(entry.name) != factory_origin:
+    if tool_registry_origins().get(entry.name) != construction.get("factory_origin"):
         return False
     metadata = TOOL_METADATA.get(entry.name)
     if metadata is not None and metadata.requires_room_context and owner.room_id is None:

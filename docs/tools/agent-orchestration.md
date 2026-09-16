@@ -255,6 +255,8 @@ The management function never backgrounds itself.
 | `resume` | Release a cooperative human hold; never grant approval. |
 | `cancel` | Cancel the exact job and wait for owned execution and cleanup to settle. |
 
+Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
 Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
