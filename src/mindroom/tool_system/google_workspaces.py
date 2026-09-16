@@ -7,7 +7,7 @@ and their stored connections are never changed.
 
 from __future__ import annotations
 
-from dataclasses import fields, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -142,13 +142,29 @@ def register_google_workspace_tools(workspace: GoogleWorkspaceConfig) -> None:
 
     for service, provider in zip(workspace.services, google_workspace_oauth_providers(workspace), strict=True):
         base = TOOL_METADATA[service]
-        registration = {field.name: getattr(base, field.name) for field in fields(base) if field.name != "factory"}
-        registration.update(
+        assert provider.tool_config_service is not None
+        register_tool_with_metadata(
             name=provider.tool_config_service,
             display_name=provider.display_name,
             description=f"{base.description} using the connected {workspace.display_name} account",
-            auth_provider=provider.id,
-            function_names=tuple(f"{workspace.name}_{name}" for name in base.function_names),
+            category=base.category,
+            status=base.status,
+            setup_type=base.setup_type,
+            default_execution_target=base.default_execution_target,
+            consumes_workspace_paths=base.consumes_workspace_paths,
+            requires_room_context=base.requires_room_context,
             requires_primary_runtime=True,
-        )
-        register_tool_with_metadata(**registration)(_workspace_tool_factory(base, provider, workspace.name))
+            icon=base.icon,
+            icon_color=base.icon_color,
+            config_fields=base.config_fields,
+            agent_override_fields=base.agent_override_fields,
+            authored_override_validator=base.authored_override_validator,
+            dependencies=base.dependencies,
+            auth_provider=provider.id,
+            oauth_fallback_fields=base.oauth_fallback_fields,
+            docs_url=base.docs_url,
+            helper_text=base.helper_text,
+            function_names=tuple(f"{workspace.name}_{name}" for name in base.function_names),
+            managed_init_args=base.managed_init_args,
+            supports_toolkit_filters=base.supports_toolkit_filters,
+        )(_workspace_tool_factory(base, provider, workspace.name))

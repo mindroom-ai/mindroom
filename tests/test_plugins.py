@@ -2772,6 +2772,70 @@ def test_load_plugins_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path
     assert [hook.hook_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["from-hooks-module"]
 
 
+def _nested_module_plugins(tmp_path: Path, capability: str) -> tuple[Config, RuntimePaths, Path]:
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    _write_working_tool_plugin(inner, plugin_name="inner", tool_name="nested_root_tool")
+    (outer / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "outer", "tools_module": "inner/tools.py"}),
+        encoding="utf-8",
+    )
+    (inner / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "inner", f"{capability}_module": "tools.py"}),
+        encoding="utf-8",
+    )
+    module_path = inner / "tools.py"
+    module_path.write_text(
+        module_path.read_text(encoding="utf-8")
+        + "\ndef register_oauth_providers(settings, runtime_paths):\n    return ()\n",
+        encoding="utf-8",
+    )
+    return Config(plugins=[str(outer), str(inner)]), _minimal_runtime_paths(tmp_path), module_path
+
+
+@pytest.mark.parametrize("capability", ["hooks", "oauth"])
+def test_nested_plugin_roots_preserve_each_module_owner(tmp_path: Path, capability: str) -> None:
+    """Loading a shared file through another root must retain the active tool owner."""
+    config, runtime_paths, _module_path = _nested_module_plugins(tmp_path, capability)
+    with plugins_module.isolated_plugin_runtime(config, runtime_paths) as plugins:
+        if capability == "oauth":
+            load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        plugins_module._sync_loaded_plugin_tools(plugins)
+        assert get_tool_by_name("nested_root_tool", runtime_paths, worker_target=None).name == "working"
+        assert TOOL_REGISTRY["nested_root_tool"].__module__ in sys.modules
+
+
+@pytest.mark.parametrize("capability", ["hooks", "oauth"])
+def test_failed_nested_plugin_module_reload_preserves_other_owner(tmp_path: Path, capability: str) -> None:
+    """A failed reload of one shared-file owner must leave another owner's tool usable."""
+    config, runtime_paths, module_path = _nested_module_plugins(tmp_path, capability)
+    with plugins_module.isolated_plugin_runtime(config, runtime_paths) as plugins:
+        if capability == "oauth":
+            load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
+        inner_module = plugins_module.load_plugin_module("inner", module_path.parent, module_path, kind=capability)
+        assert inner_module is not None
+        outer_module = plugins_module.load_plugin_module(
+            "outer",
+            module_path.parent.parent,
+            module_path,
+            kind="tools",
+        )
+        assert outer_module is not None
+        plugins_module._sync_loaded_plugin_tools(plugins)
+        original_factory = TOOL_REGISTRY["nested_root_tool"]
+        module_path.write_text(
+            module_path.read_text(encoding="utf-8") + "\nraise RuntimeError('reload failed')\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(plugin_module.PluginValidationError, match="reload failed"):
+            plugins_module.load_plugin_module("inner", module_path.parent, module_path, kind=capability)
+        plugins_module._sync_loaded_plugin_tools(plugins)
+        assert TOOL_REGISTRY["nested_root_tool"] is original_factory
+        assert get_tool_by_name("nested_root_tool", runtime_paths, worker_target=None).name == "working"
+        assert sys.modules[inner_module.__name__] is inner_module
+        assert sys.modules[outer_module.__name__] is outer_module
+
+
 def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_path: Path) -> None:
     """One shared tools/hooks file should be imported only once."""
     plugin_root = tmp_path / "plugins" / "same-file"

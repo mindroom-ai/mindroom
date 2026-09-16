@@ -164,6 +164,7 @@ Matrix sync callback
 | `knowledge/refresh_locks.py` | Process-wide refresh serialization (in-loop and cross-process source-root locks) and active-refresh bookkeeping |
 | `tool_system/skills.py` | Skill integration system (OpenClaw-compatible) |
 | `tool_system/plugins.py` | Plugin loading and tool/skill extension |
+| `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `scheduling.py` | Cron and natural-language task scheduling |
 | `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
