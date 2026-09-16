@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +12,11 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.metrics import ModelMetrics, RunMetrics
+from agno.run.agent import RunOutput
+from agno.session.agent import AgentSession
 
+from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -24,6 +30,7 @@ from mindroom.usage_stats_storage import (
     UsageStorageDiagnostic,
     UsageStorageSource,
 )
+from tests.conftest import create_agno_2_sessions_db, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -333,6 +340,244 @@ def test_daily_usage_returns_empty_breakdown_without_retained_runs(
     assert payload["daily_breakdown"] == []
     assert payload["daily_coverage"]["scanned_sources"] == 1
     assert payload["totals"]["total_tokens"] == 100
+
+
+@pytest.mark.parametrize("admin", [False, True])
+def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool) -> None:
+    paths = _paths(tmp_path)
+    config = Config(agents={"code": AgentConfig(display_name="Code")})
+    storage = create_state_storage(
+        "code",
+        paths.storage_root / "agents" / "code",
+        subdir="sessions",
+        session_table="code_sessions",
+    )
+    first_day = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
+    metrics = RunMetrics(
+        input_tokens=17,
+        output_tokens=7,
+        total_tokens=24,
+        cache_read_tokens=10,
+        cache_write_tokens=3,
+        details={
+            "model": [
+                ModelMetrics(
+                    id="model-a",
+                    provider="provider-a",
+                    input_tokens=10,
+                    output_tokens=4,
+                    total_tokens=14,
+                    cache_read_tokens=6,
+                    cache_write_tokens=2,
+                ),
+            ],
+            "reasoning_model": [
+                ModelMetrics(
+                    id="model-a",
+                    provider="provider-a",
+                    input_tokens=2,
+                    output_tokens=1,
+                    total_tokens=3,
+                    cache_read_tokens=1,
+                ),
+            ],
+            "output_model": [
+                ModelMetrics(
+                    id="model-b",
+                    provider="provider-b",
+                    input_tokens=5,
+                    output_tokens=2,
+                    total_tokens=7,
+                    cache_read_tokens=3,
+                    cache_write_tokens=1,
+                ),
+            ],
+        },
+    )
+    totals = {
+        "input_tokens": 41,
+        "output_tokens": 11,
+        "total_tokens": 52,
+        "cache_read_tokens": 24,
+        "cache_write_tokens": 7,
+    }
+    try:
+        seed_session(
+            storage,
+            AgentSession(
+                session_id="session-1",
+                agent_id="code",
+                user_id="@alice:example.test",
+                session_data={"session_metrics": totals},
+                runs=[
+                    RunOutput(
+                        run_id="mixed",
+                        model_provider="provider-a",
+                        model="model-a",
+                        created_at=first_day,
+                        metrics=metrics,
+                    ),
+                    RunOutput(
+                        run_id="other-provider",
+                        model_provider="other-provider",
+                        model="model-a",
+                        created_at=first_day,
+                        metrics=RunMetrics(
+                            input_tokens=20,
+                            output_tokens=3,
+                            total_tokens=23,
+                            cache_read_tokens=12,
+                            cache_write_tokens=4,
+                        ),
+                    ),
+                    RunOutput(
+                        run_id="next-day",
+                        model_provider="provider-a",
+                        model="model-a",
+                        created_at=first_day + 86400,
+                        metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5, cache_read_tokens=2),
+                    ),
+                ],
+            ),
+        )
+    finally:
+        storage.close()
+
+    report = (
+        collect_admin_usage(config=config, runtime_paths=paths, include_daily=True)
+        if admin
+        else collect_self_usage(
+            agent_name="code",
+            requester_id="@alice:example.test",
+            config=config,
+            runtime_paths=paths,
+            execution_identity=_identity(),
+            include_daily=True,
+        )
+    ).to_dict()
+
+    assert {key: report["totals"][key] for key in totals} == totals
+    daily = report["daily_breakdown"]
+    assert [(row["date"], row["run_count"]) for row in daily] == [("2026-09-14", 2), ("2026-09-15", 1)]
+    assert [
+        (row["provider"], row["model"], row["run_count"], row["totals"]["total_tokens"])
+        for row in daily[0]["model_breakdown"]
+    ] == [
+        ("other-provider", "model-a", 1, 23),
+        ("provider-a", "model-a", 1, 17),
+        ("provider-b", "model-b", 1, 7),
+    ]
+    assert {key: daily[0]["totals"][key] for key in totals} == {
+        "input_tokens": 37,
+        "output_tokens": 10,
+        "total_tokens": 47,
+        "cache_read_tokens": 22,
+        "cache_write_tokens": 7,
+    }
+    assert {key: daily[0]["model_breakdown"][1]["totals"][key] for key in totals} == {
+        "input_tokens": 12,
+        "output_tokens": 5,
+        "total_tokens": 17,
+        "cache_read_tokens": 7,
+        "cache_write_tokens": 2,
+    }
+    assert [
+        (row["provider"], row["model"], row["run_count"], row["totals"]["total_tokens"])
+        for row in report["model_breakdown"]
+    ] == [
+        ("other-provider", "model-a", 1, 23),
+        ("provider-a", "model-a", 2, 22),
+        ("provider-b", "model-b", 1, 7),
+    ]
+    assert report["daily_coverage"]["unavailable_sources"] == 0
+    if admin:
+        assert report["user_breakdown"][0]["run_count"] == 3
+        assert report["user_breakdown"][0]["totals"]["total_tokens"] == 52
+        assert report["user_breakdown"][0]["model_breakdown"] == report["model_breakdown"]
+
+
+@pytest.mark.parametrize("double_encoded", [False, True])
+def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: bool) -> None:
+    paths = _paths(tmp_path)
+    database = create_agno_2_sessions_db(paths.storage_root / "agents" / "code" / "sessions" / "code.db")
+    if not double_encoded:
+        with sqlite3.connect(database) as connection:
+            runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
+            connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=paths,
+        execution_identity=_identity(),
+        include_daily=True,
+    ).to_dict()
+
+    assert report["totals"]["total_tokens"] == 12
+    assert len(report["daily_breakdown"]) == 1
+    day = report["daily_breakdown"][0]
+    assert day["date"] == "2023-11-14"
+    assert day["run_count"] == 3
+    assert day["totals"]["input_tokens"] == 6
+    assert day["totals"]["output_tokens"] == 6
+    assert day["totals"]["cache_read_tokens"] == 0
+    assert day["model_breakdown"] == report["model_breakdown"]
+    assert day["model_breakdown"][0]["provider"] == "unknown"
+    assert day["model_breakdown"][0]["model"] == "unknown"
+    assert day["model_breakdown"][0]["totals"]["total_tokens"] == 12
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        "invalid",
+        {"model": ["invalid"]},
+        {"model": [{"id": "model-a", "provider": "provider-a", "total_tokens": -1}]},
+        {"model": [{"id": "model-a", "provider": "provider-a", "total_tokens": 5}]},
+    ],
+)
+def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: object) -> None:
+    paths = _paths(tmp_path)
+    config = Config(agents={"code": AgentConfig(display_name="Code")})
+    storage = create_state_storage(
+        "code",
+        paths.storage_root / "agents" / "code",
+        subdir="sessions",
+        session_table="code_sessions",
+    )
+    try:
+        storage.upsert_session(AgentSession(session_id="session-1", agent_id="code", user_id="@alice:example.test"))
+        storage.upsert_run(
+            {
+                "run_id": "run-1",
+                "model_provider": "provider-a",
+                "model": "model-a",
+                "created_at": 1_700_000_000,
+                "metrics": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20, "details": details},
+            },
+            session_id="session-1",
+        )
+    finally:
+        storage.close()
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=config,
+        runtime_paths=paths,
+        execution_identity=_identity(),
+        include_daily=True,
+    ).to_dict()
+
+    assert report["totals"]["total_tokens"] == 20
+    day = report["daily_breakdown"][0]
+    assert day["totals"]["total_tokens"] == 20
+    assert day["model_breakdown"][0]["provider"] == "unknown"
+    assert day["model_breakdown"][0]["model"] == "unknown"
+    assert day["model_breakdown"][0]["totals"]["total_tokens"] == 20
+    assert report["model_coverage"]["unavailable_sources"] == 1
+    assert report["daily_coverage"]["unavailable_sources"] == 1
 
 
 def test_admin_resolves_repeated_requesters_once_per_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

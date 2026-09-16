@@ -89,7 +89,7 @@ class UsageStatsTools(Toolkit):
         """Return retained usage for the current agent and canonical requester.
 
         Args:
-            include_daily: Include token totals and run counts by UTC date for retained runs.
+            include_daily: Include token totals, per-model breakdowns, and run counts by UTC date.
 
         """
         resolved = self._context_or_error()
@@ -126,7 +126,7 @@ class UsageStatsTools(Toolkit):
         """Return retained usage for all sources when both admin gates grant access.
 
         Args:
-            include_daily: Include token totals and run counts by UTC date for retained runs.
+            include_daily: Include token totals, per-model breakdowns, and run counts by UTC date.
 
         """
         resolved = self._admin_context_or_error()

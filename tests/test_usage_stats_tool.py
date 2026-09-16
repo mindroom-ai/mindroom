@@ -119,8 +119,16 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
                     RunOutput(
                         run_id="run-1",
                         user_id="@alice:example.test",
+                        model_provider="test-provider",
+                        model="test-model",
                         created_at=int(datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
-                        metrics=RunMetrics(input_tokens=12, output_tokens=8, total_tokens=20),
+                        metrics=RunMetrics(
+                            input_tokens=12,
+                            output_tokens=8,
+                            total_tokens=20,
+                            cache_read_tokens=9,
+                            cache_write_tokens=2,
+                        ),
                     ),
                 ],
             ),
@@ -139,6 +147,13 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
         assert payload["daily_breakdown"][0]["date"] == "2026-09-15"
         assert payload["daily_breakdown"][0]["totals"]["total_tokens"] == 20
         assert payload["daily_breakdown"][0]["run_count"] == 1
+        assert payload["daily_breakdown"][0]["model_breakdown"] == payload["model_breakdown"]
+        model = payload["daily_breakdown"][0]["model_breakdown"][0]
+        assert (model["provider"], model["model"]) == ("test-provider", "test-model")
+        assert model["totals"]["input_tokens"] == 12
+        assert model["totals"]["output_tokens"] == 8
+        assert model["totals"]["cache_read_tokens"] == 9
+        assert model["totals"]["cache_write_tokens"] == 2
         assert payload["daily_coverage"]["unavailable_sources"] == 0
     else:
         assert "daily_breakdown" not in payload

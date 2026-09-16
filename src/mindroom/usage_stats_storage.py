@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TOKEN_FIELDS",
+    "UsageModelMetrics",
     "UsageRunNode",
     "UsageSessionRow",
     "UsageStorageDiagnostic",
@@ -80,6 +81,15 @@ class UsageStorageSource:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageModelMetrics:
+    """Token counters attributed to one model within a retained run."""
+
+    model_provider: str | None
+    model: str | None
+    metrics: Mapping[str, _MetricValue]
+
+
+@dataclass(frozen=True, slots=True)
 class UsageRunNode:
     """Usage fields from one top-level retained run."""
 
@@ -90,6 +100,8 @@ class UsageRunNode:
     model: str | None
     metrics: Mapping[str, _MetricValue]
     created_at: int | float | None = None
+    # Empty means no detailed attribution was stored; None means it was malformed.
+    model_metrics: tuple[UsageModelMetrics, ...] | None = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,7 +591,8 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
     metrics = run.get("metrics", {})
     if not isinstance(metrics, dict):
         raise TypeError
-    selected_metrics = _select_metrics(cast("dict[str, object]", metrics))
+    run_metrics = cast("dict[str, object]", metrics)
+    selected_metrics = _select_metrics(run_metrics)
     created_at = run.get("created_at")
     if (
         isinstance(created_at, bool)
@@ -595,7 +608,35 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
         created_at=created_at,
+        model_metrics=_extract_model_metrics(run_metrics.get("details")),
     )
+
+
+def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | None:
+    """Read Agno's per-role model lists without discarding usable run totals."""
+    if details is None:
+        return ()
+    if not isinstance(details, dict):
+        return None
+    models: list[UsageModelMetrics] = []
+    try:
+        for entries in details.values():
+            if not isinstance(entries, list):
+                return None
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    return None
+                model_metrics = cast("dict[str, object]", entry)
+                models.append(
+                    UsageModelMetrics(
+                        model_provider=_optional_string(model_metrics.get("provider")),
+                        model=_optional_string(model_metrics.get("id")),
+                        metrics=_select_metrics(model_metrics),
+                    ),
+                )
+    except (TypeError, ValueError):
+        return None
+    return tuple(models)
 
 
 def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]:

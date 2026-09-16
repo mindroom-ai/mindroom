@@ -48,6 +48,8 @@ _COVERAGE_NOTE = (
 )
 _MODEL_COVERAGE_NOTE = (
     "Model breakdown uses retained top-level runs with usable token metrics. "
+    "Stored per-model details take precedence over a run's primary model. "
+    "Runs with unusable model details are grouped as unknown. "
     "It does not necessarily sum to report totals, which may include compacted history "
     "and nested team-member usage."
 )
@@ -60,6 +62,7 @@ _USER_COVERAGE_NOTE = (
 _DAILY_COVERAGE_NOTE = (
     "Daily breakdown uses retained top-level runs with usable token metrics and creation timestamps, "
     "grouped by UTC date. Runs without usable timestamps are excluded. "
+    "Runs with unusable model details retain their totals under the unknown model. "
     "It does not necessarily sum to report totals, which may include compacted history "
     "and nested team-member usage. Deleted sessions are unavailable."
 )
@@ -188,6 +191,7 @@ class UsageDailyBreakdownRow:
     date: str
     totals: TokenTotals
     run_count: int
+    model_breakdown: tuple[UsageModelBreakdownRow, ...]
 
     def to_dict(self) -> dict[str, object]:
         """Return the public daily breakdown row."""
@@ -195,6 +199,7 @@ class UsageDailyBreakdownRow:
             "date": self.date,
             "totals": self.totals.to_dict(),
             "run_count": self.run_count,
+            "model_breakdown": [row.to_dict() for row in self.model_breakdown],
         }
 
 
@@ -289,9 +294,17 @@ class _UsageAccumulator:
 @dataclass(slots=True)
 class _DailyUsageAccumulator:
     buckets: dict[str, _Aggregate] = dataclass_field(default_factory=dict)
+    model_buckets: dict[str, dict[tuple[str, str], _Aggregate]] = dataclass_field(default_factory=dict)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
 
-    def add_run(self, run: UsageRunNode, totals: TokenTotals, *, source_path: str) -> None:
+    def add_run(
+        self,
+        run: UsageRunNode,
+        totals: TokenTotals,
+        models: Mapping[tuple[str, str], TokenTotals],
+        *,
+        source_path: str,
+    ) -> None:
         if run.created_at is None:
             self.unavailable_sources.add(source_path)
             return
@@ -301,12 +314,14 @@ class _DailyUsageAccumulator:
             self.unavailable_sources.add(source_path)
             return
         self.buckets.setdefault(date, _Aggregate()).add(totals)
+        _add_model_totals(self.model_buckets.setdefault(date, {}), models)
 
 
 @dataclass(slots=True)
 class _ModelUsageAccumulator:
     buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
     user_buckets: dict[str | None, dict[tuple[str, str], _Aggregate]] = dataclass_field(default_factory=dict)
+    user_totals: dict[str | None, _Aggregate] = dataclass_field(default_factory=dict)
     seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
     daily_usage: _DailyUsageAccumulator | None = None
@@ -332,15 +347,22 @@ class _ModelUsageAccumulator:
         except ValueError:
             self.unavailable_sources.add(row.source.path_label)
             return
-        _add_model_entries(
-            entries,
-            source_path=row.source.path_label,
-            row_key=row.row_key,
-            buckets=self.buckets,
-            seen_runs=self.seen_runs,
-            user_buckets=self.user_buckets if scope == "admin" else None,
-            daily_usage=self.daily_usage,
-        )
+        for run, totals in entries:
+            if run.run_id is not None:
+                identity = (row.source.path_label, row.row_key, run.run_id)
+                if identity in self.seen_runs:
+                    continue
+                self.seen_runs.add(identity)
+            models = _run_model_totals(run, totals)
+            if models is None:
+                self.unavailable_sources.add(row.source.path_label)
+                models = {("unknown", "unknown"): totals}
+            _add_model_totals(self.buckets, models)
+            if scope == "admin":
+                self.user_totals.setdefault(run.requester_id, _Aggregate()).add(totals)
+                _add_model_totals(self.user_buckets.setdefault(run.requester_id, {}), models)
+            if self.daily_usage is not None:
+                self.daily_usage.add_run(run, totals, models, source_path=row.source.path_label)
 
 
 def collect_self_usage(
@@ -464,9 +486,14 @@ def _collect_usage(
         ),
         model_breakdown=model_breakdown,
         model_coverage=model_coverage,
-        user_breakdown=_user_breakdown(model_usage.user_buckets),
+        user_breakdown=_user_breakdown(model_usage.user_buckets, model_usage.user_totals),
         daily_breakdown=tuple(
-            UsageDailyBreakdownRow(date=date, totals=aggregate.totals, run_count=aggregate.count)
+            UsageDailyBreakdownRow(
+                date=date,
+                totals=aggregate.totals,
+                run_count=aggregate.count,
+                model_breakdown=_model_breakdown(daily_usage.model_buckets[date]),
+            )
             for date, aggregate in sorted(daily_usage.buckets.items())
         )
         if daily_usage is not None
@@ -483,15 +510,12 @@ def _collect_usage(
 
 def _user_breakdown(
     buckets: Mapping[str | None, dict[tuple[str, str], _Aggregate]],
+    user_totals: Mapping[str | None, _Aggregate],
 ) -> tuple[UsageUserBreakdownRow, ...]:
     rows: list[UsageUserBreakdownRow] = []
     for user_id, models in buckets.items():
-        totals = TokenTotals()
-        run_count = 0
-        for aggregate in models.values():
-            totals = totals.plus(aggregate.totals)
-            run_count += aggregate.count
-        rows.append(UsageUserBreakdownRow(user_id, totals, run_count, _model_breakdown(models)))
+        aggregate = user_totals[user_id]
+        rows.append(UsageUserBreakdownRow(user_id, aggregate.totals, aggregate.count, _model_breakdown(models)))
     return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.user_id or "")))
 
 
@@ -512,33 +536,33 @@ def _model_breakdown(
     )
 
 
-def _add_model_entries(
-    entries: Iterable[tuple[UsageRunNode, TokenTotals]],
-    *,
-    source_path: str,
-    row_key: str,
+def _add_model_totals(
     buckets: dict[tuple[str, str], _Aggregate],
-    seen_runs: set[tuple[str, str, str]],
-    user_buckets: dict[str | None, dict[tuple[str, str], _Aggregate]] | None = None,
-    daily_usage: _DailyUsageAccumulator | None = None,
+    models: Mapping[tuple[str, str], TokenTotals],
 ) -> None:
-    row_seen_runs: set[tuple[str, str, str]] = set()
-    accepted_entries: list[tuple[UsageRunNode, tuple[str, str], TokenTotals]] = []
-    for run, totals in entries:
-        if run.run_id is not None:
-            identity = (source_path, row_key, run.run_id)
-            if identity in seen_runs or identity in row_seen_runs:
-                continue
-            row_seen_runs.add(identity)
-        key = (run.model_provider or "unknown", run.model or "unknown")
-        accepted_entries.append((run, key, totals))
-    seen_runs.update(row_seen_runs)
-    for run, key, totals in accepted_entries:
+    for key, totals in models.items():
         buckets.setdefault(key, _Aggregate()).add(totals)
-        if user_buckets is not None:
-            user_buckets.setdefault(run.requester_id, {}).setdefault(key, _Aggregate()).add(totals)
-        if daily_usage is not None:
-            daily_usage.add_run(run, totals, source_path=source_path)
+
+
+def _run_model_totals(run: UsageRunNode, totals: TokenTotals) -> dict[tuple[str, str], TokenTotals] | None:
+    """Use detailed attribution only when it accounts for the run's token counters."""
+    if run.model_metrics is None:
+        return None
+    if not run.model_metrics:
+        return {(run.model_provider or "unknown", run.model or "unknown"): totals}
+    models: dict[tuple[str, str], TokenTotals] = {}
+    combined = TokenTotals()
+    try:
+        for entry in run.model_metrics:
+            model_totals = _metrics_totals(entry.metrics)
+            if model_totals is None:
+                continue
+            key = (entry.model_provider or "unknown", entry.model or "unknown")
+            models[key] = models.get(key, TokenTotals()).plus(model_totals)
+            combined = combined.plus(model_totals)
+    except ValueError:
+        return None
+    return models if models and combined == totals else None
 
 
 def _model_entries_for_row(
