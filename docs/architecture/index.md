@@ -105,6 +105,7 @@ MindRoom's architecture consists of several key components working together.
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |
+| `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
