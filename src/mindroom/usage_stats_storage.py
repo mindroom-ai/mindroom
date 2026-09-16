@@ -7,7 +7,7 @@ import math
 import re
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
@@ -131,6 +131,7 @@ class UsageStorageDiagnostic:
     path_label: str
     status: Literal["absent", "busy", "corrupt", "unsupported_schema", "partial"]
     detail: str
+    scope: _UsageStorageScope | None = None
 
 
 @contextmanager
@@ -222,13 +223,24 @@ def discover_private_usage_sources(
                 resolved_thread_id=None,
                 session_id=None,
             )
-            for source in discover_self_usage_sources(
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=identity,
-            ):
-                if isinstance(source, UsageStorageDiagnostic) or source.path.is_file():
+            try:
+                agent_sources = discover_self_usage_sources(
+                    agent_name=agent_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=identity,
+                )
+            except (OSError, ValueError):
+                agent_sources = (_diagnostic("self", "partial", "source discovery unavailable"),)
+            for source in agent_sources:
+                if isinstance(source, UsageStorageDiagnostic):
+                    diagnostic = replace(
+                        source,
+                        path_label=f"private discovery:{agent_name}:{user_id}",
+                        scope="private_agent",
+                    )
+                    sources[diagnostic.path_label] = diagnostic
+                elif source.path.is_file():
                     sources[source.path_label] = source
     return tuple(sources[key] for key in sorted(sources))
 
@@ -283,7 +295,7 @@ def _private_agent_sources(
     private_root = root / "private_instances"
     directory_entries = _directory_entries(private_root)
     if isinstance(directory_entries, UsageStorageDiagnostic):
-        return [directory_entries]
+        return [replace(directory_entries, scope="private_agent")]
     entries = directory_entries
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []

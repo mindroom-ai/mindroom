@@ -283,3 +283,49 @@ def test_private_rows_report_unreadable_run_detail(tmp_path: Path, monkeypatch: 
     report = usage_stats.collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
     assert report["private_agent_breakdown"][0]["totals"]["total_tokens"] == 100
     assert report["private_agent_coverage"]["unavailable_sources"] == 1
+
+
+def test_private_coverage_reports_unreadable_namespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failed private discovery must not look like an empty, complete report."""
+    data = private_usage_data(tmp_path)
+    private_root = tmp_path / "sessions" / "private_instances"
+    original_iterdir = Path.iterdir
+
+    def fail_private_directory(path: Path) -> Iterator[Path]:
+        if path == private_root:
+            raise OSError
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_private_directory)
+    report = usage_stats.collect_admin_usage(config=data.config, runtime_paths=data.paths).to_dict()
+    assert report["totals"]["total_tokens"] == 500
+    assert report["coverage"]["unavailable_sources"] == 1
+    assert report["private_agent_breakdown"] == []
+    assert report["private_agent_coverage"]["unavailable_sources"] == 1
+
+
+@pytest.mark.parametrize("separate_sessions", [False, True])
+def test_personal_usage_isolates_rejected_private_paths(tmp_path: Path, separate_sessions: bool) -> None:
+    """One unsafe worker path cannot hide usage from other owned private agents."""
+    data = private_usage_data(tmp_path, separate_sessions=separate_sessions)
+    database = seed_private_usage(
+        data,
+        "code",
+        ALICE,
+        session_tokens=100,
+        run_tokens=20,
+        stored_requester=None,
+    )
+    worker_root = data.paths.storage_root / "private_instances" / database.parents[2].name
+    blocked_root = worker_root.rename(tmp_path / "blocked-worker")
+    worker_root.symlink_to(blocked_root, target_is_directory=True)
+
+    report = usage_stats.collect_private_usage(
+        requester_id=ALICE,
+        config=data.config,
+        runtime_paths=data.paths,
+    ).to_dict()
+    assert report["totals"]["total_tokens"] == 50
+    assert [row["agent_name"] for row in report["private_agent_breakdown"]] == ["helper"]
+    assert report["coverage"]["unavailable_sources"] == 1
+    assert report["private_agent_coverage"]["unavailable_sources"] == 1

@@ -460,6 +460,11 @@ class _PrivateUsageAccumulator:
     sources: set[str] = dataclass_field(default_factory=set)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
 
+    def mark_unavailable(self, source: UsageStorageSource | UsageStorageDiagnostic) -> None:
+        """Retain private discovery and read failures in private coverage."""
+        if source.scope == "private_agent":
+            self.unavailable_sources.add(source.path_label)
+
     def bucket(self, user_id: str | None, agent_name: str) -> tuple[_UsageAccumulator, _ModelUsageAccumulator]:
         """Reuse the report accumulators without rescanning a database."""
         key = (user_id, agent_name)
@@ -616,6 +621,7 @@ def _collect_usage(
         if isinstance(discovered, UsageStorageDiagnostic):
             usage.unavailable_sources.add(discovered.path_label)
             model_usage.unavailable_sources.add(discovered.path_label)
+            private_usage.mark_unavailable(discovered)
             continue
         source = discovered
         scanned_sources.add(source.path_label)
@@ -626,8 +632,7 @@ def _collect_usage(
             if isinstance(item, UsageStorageDiagnostic):
                 usage.unavailable_sources.add(item.path_label)
                 model_usage.unavailable_sources.add(item.path_label)
-                if source.scope == "private_agent":
-                    private_usage.unavailable_sources.add(item.path_label)
+                private_usage.mark_unavailable(source)
                 continue
             owner = canonical_requester(item.source.owner_id) if item.source.owner_id is not None else None
             row = replace(
@@ -693,8 +698,9 @@ def _collect_usage(
         )
         if daily_usage is not None
         else None,
-        private_agent_breakdown=private_usage.rows(),
-        private_agent_coverage=private_usage.coverage(),
+        # Current-agent self reports keep their existing compact payload.
+        private_agent_breakdown=private_usage.rows() if expected_agent is None else (),
+        private_agent_coverage=private_usage.coverage() if expected_agent is None else None,
     )
 
 

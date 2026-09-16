@@ -722,6 +722,8 @@ def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: p
     assert "window" not in payload
     assert "run_count" not in payload
     assert "first_observed_at" not in payload
+    assert "private_agent_breakdown" not in payload
+    assert "private_agent_coverage" not in payload
 
 
 def test_shared_self_reads_each_source_once_for_totals_and_models(
@@ -791,6 +793,9 @@ def test_private_self_usage_uses_compaction_safe_session_metrics(
     assert report.session_count == 1
     assert report.model_breakdown[0].totals.total_tokens == 10
     assert report.model_breakdown[0].run_count == 1
+    payload = report.to_dict()
+    assert "private_agent_breakdown" not in payload
+    assert "private_agent_coverage" not in payload
 
 
 def test_self_usage_marks_missing_shared_requester_incomplete(
