@@ -41,6 +41,9 @@ def _sync_bindings[Actor: _Actor](
         for toolkit in actor.tools if isinstance(actor.tools, list) else []:
             if not isinstance(toolkit, Toolkit) or not toolkit.requires_connect:
                 continue
+            initialized = actor._connectable_tools_initialized_on_run or []
+            if toolkit in initialized:
+                continue
             captured = copy(actor)
             captured.tools = [toolkit]
             captured._connectable_tools_initialized_on_run = []
@@ -49,9 +52,7 @@ def _sync_bindings[Actor: _Actor](
                 lambda captured=captured: connect(captured),
                 lambda captured=captured: disconnect(captured),
             )
-            initialized = actor._connectable_tools_initialized_on_run or []
-            if toolkit not in initialized:
-                initialized.append(toolkit)
+            initialized.append(toolkit)
             actor._connectable_tools_initialized_on_run = initialized
 
     def close_tools(actor: Actor) -> None:
@@ -79,12 +80,13 @@ def _async_bindings[Actor: _Actor](
                 base.__name__ == "MCPTools" for base in type(toolkit).__mro__
             ):
                 continue
+            initialized = actor._mcp_tools_initialized_on_run or []
+            if toolkit in initialized:
+                continue
             captured = copy(actor)
             captured.tools = [toolkit]
             captured._mcp_tools_initialized_on_run = []
-            initialized = actor._mcp_tools_initialized_on_run or []
-            if toolkit not in initialized:
-                initialized.append(toolkit)
+            initialized.append(toolkit)
             actor._mcp_tools_initialized_on_run = initialized
             await connect_async_execution_resource(
                 toolkit,
@@ -109,7 +111,7 @@ def _async_bindings[Actor: _Actor](
 # Upstream issue: No matching public resource-lease extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK connections can be owned through a public run/job lease.
-# Coverage: tests/test_tool_job_execution.py.
+# Coverage: tests/test_tool_job_execution.py and tests/test_tool_job_resources.py.
 def install_execution_resource_bindings() -> None:
     """Bind only connection admission and exact toolkit-list teardown ownership."""
     global _INSTALLED

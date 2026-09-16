@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -122,7 +123,7 @@ class _SyncConnection:
     resource: object
     close: Callable[[], None]
     thread_id: int
-    owners: set[ExecutionResources] = field(default_factory=set)
+    owners: Counter[ExecutionResources] = field(default_factory=Counter)
 
 
 @dataclass
@@ -131,7 +132,7 @@ class _AsyncConnection:
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     closing: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
-    owners: set[ExecutionResources] = field(default_factory=set)
+    owners: Counter[ExecutionResources] = field(default_factory=Counter)
 
 
 _SYNC_CONNECTIONS: dict[int, _SyncConnection] = {}
@@ -149,16 +150,19 @@ def connect_execution_resource(resource: object, connect: Callable[[], None], cl
         connect()
         connection = _SyncConnection(resource, close, threading.get_ident())
         _SYNC_CONNECTIONS[id(resource)] = connection
-    connection.owners.add(owner)
+    connection.owners[owner] += 1
 
 
 def disconnect_execution_resource(resource: object) -> None:
     """Transfer this run's exact connection reference to its accepted children."""
     owner = current_execution_resources()
+    assert owner is not None
     connection = _SYNC_CONNECTIONS[id(resource)]
 
     def close() -> None:
-        connection.owners.discard(owner)
+        connection.owners[owner] -= 1
+        if connection.owners[owner] == 0:
+            del connection.owners[owner]
         if not connection.owners:
             if connection.thread_id != threading.get_ident():
                 msg = "Synchronous toolkit cleanup requires its original connection thread"
@@ -171,7 +175,8 @@ def disconnect_execution_resource(resource: object) -> None:
     async def deferred() -> None:
         close()
 
-    if not defer_execution_cleanup(deferred, resource=resource):
+    # Each actor acquisition needs a release, even when one parent owns them all.
+    if not defer_execution_cleanup(deferred, resource=deferred):
         close()
 
 
@@ -186,6 +191,10 @@ async def connect_async_execution_resource(
         msg = "Managed connection requires a resource owner"
         raise RuntimeError(msg)
     connection = _ASYNC_CONNECTIONS.get(id(resource))
+    while connection is not None and connection.closing.is_set():
+        assert connection.task is not None
+        await run_coroutine_until_complete(_join_connection(connection.task))
+        connection = _ASYNC_CONNECTIONS.get(id(resource))
     if connection is None:
         connection = _AsyncConnection(resource)
         _ASYNC_CONNECTIONS[id(resource)] = connection
@@ -200,10 +209,11 @@ async def connect_async_execution_resource(
                 try:
                     await close()
                 finally:
-                    _ASYNC_CONNECTIONS.pop(id(resource), None)
+                    if _ASYNC_CONNECTIONS.get(id(resource)) is connection:
+                        _ASYNC_CONNECTIONS.pop(id(resource))
 
         connection.task = asyncio.create_task(manage(), name="tool-connection-owner")
-    connection.owners.add(owner)
+    connection.owners[owner] += 1
     await run_coroutine_until_complete(connection.ready.wait())
     if connection.task is not None and connection.task.done():
         connection.task.result()
@@ -212,16 +222,19 @@ async def connect_async_execution_resource(
 async def disconnect_async_execution_resource(resource: object) -> None:
     """Release one run while retaining shared and detached connection users."""
     owner = current_execution_resources()
+    assert owner is not None
     connection = _ASYNC_CONNECTIONS[id(resource)]
 
     async def close() -> None:
-        connection.owners.discard(owner)
+        connection.owners[owner] -= 1
+        if connection.owners[owner] == 0:
+            del connection.owners[owner]
         if not connection.owners:
             connection.closing.set()
             if connection.task is not None:
                 await run_coroutine_until_complete(_join_connection(connection.task))
 
-    if not defer_execution_cleanup(close, resource=resource):
+    if not defer_execution_cleanup(close, resource=close):
         await close()
 
 
