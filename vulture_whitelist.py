@@ -392,3 +392,4 @@ session_status  # FastAPI Computer endpoint
 stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
+elapsed_time  # Restored SDK Timer value read by Agno metrics (src/mindroom/tool_jobs/agno_execution.py)

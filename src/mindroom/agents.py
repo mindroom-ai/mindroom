@@ -35,6 +35,7 @@ from mindroom.runtime_resolution import (
 from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1961,6 +1962,7 @@ def create_agent(
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
     install_subagent_model_control(model, agent.fallback_config)
+    install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
 
     logger.info(
         "Created agent",

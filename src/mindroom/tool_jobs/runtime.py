@@ -26,6 +26,7 @@ from mindroom.tool_jobs.control import (
     human_message_signal_context,
     job_control_context,
 )
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
@@ -304,12 +305,26 @@ class ToolJobRuntime:
         operation: Callable[[], Awaitable[BackgroundOutcome]],
         human_signal: HumanMessageSignal | None = None,
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] | None = None,
+        initial_wait_token: str | None = None,
+        reattach: bool = False,
     ) -> BackgroundJob:
         """Durably accept exact operation ownership before spawning execution."""
         async with self._lock:
             if self._closed:
                 msg = "Tool job runtime is closed."
                 raise RuntimeError(msg)
+            if reattach and spec.job_id in self._entries:
+                existing = self._entry(spec.job_id, owner, spec.depth)
+                if (
+                    existing.job.tool_name != spec.tool_name
+                    or existing.job.toolkit_name != spec.toolkit_name
+                    or existing.job.kind != spec.kind
+                    or existing.job.adapter != spec.adapter
+                ):
+                    raise JobAccessError(_UNAVAILABLE)
+                if existing.wait_token is None:
+                    existing.wait_token = initial_wait_token
+                return self._snapshot(existing)
             if spec.job_id in self._entries or self._path(spec.job_id).exists():
                 msg = "Tool job already exists."
                 raise ValueError(msg)
@@ -317,7 +332,12 @@ class ToolJobRuntime:
             job.adapter = spec.adapter
             if not owner.session_id or spec.depth < 0 or not self._allowed(job):
                 raise JobAccessError(_UNAVAILABLE)
-            entry = _Entry(job, human_signal=human_signal or current_human_message_signal(), cancel=cancel)
+            entry = _Entry(
+                job,
+                human_signal=human_signal or current_human_message_signal(),
+                cancel=cancel,
+                wait_token=initial_wait_token,
+            )
             self._entries[job.job_id] = entry
             if entry.human_signal is not None:
                 entry.human_signal.subscribe(entry.control.pause)
@@ -380,7 +400,8 @@ class ToolJobRuntime:
                 queued_message_signal_context(None) as notice,
             ):
                 try:
-                    outcome = await operation()
+                    async with execution_resources():
+                        outcome = await operation()
                 finally:
                     await finalize_queued_notice_response_turn_async(notice)
             async with self._lock:
@@ -462,17 +483,18 @@ class ToolJobRuntime:
         owner: ToolExecutionIdentity,
         depth: int,
         timeout: float = 10.0,  # noqa: ASYNC109
+        reserved_token: str | None = None,
     ) -> _BackgroundWait:
         """Wait without cancelling execution; retain ready-result ownership until acknowledgement."""
         if timeout < 0 or not float("inf") > timeout:
             msg = "Tool job wait timeout must be finite and non-negative."
             raise ValueError(msg)
-        token = uuid4().hex
+        token = reserved_token or uuid4().hex
         deadline = asyncio.get_running_loop().time() + timeout
         retained = False
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
-            if entry.wait_token is not None:
+            if entry.wait_token is not None and entry.wait_token != reserved_token:
                 return _BackgroundWait(self._snapshot(entry), delivery_queued=True)
             entry.wait_token = token
         try:
@@ -507,8 +529,8 @@ class ToolJobRuntime:
     async def release_wait(self, job_id: str, token: str | None) -> None:
         """Release an unpersisted result claim so completion delivery remains possible."""
         async with self._lock:
-            entry = self._entries[job_id]
-            if token is not None and entry.wait_token == token:
+            entry = self._entries.get(job_id)
+            if entry is not None and token is not None and entry.wait_token == token:
                 entry.wait_token = None
                 self.changed.set()
 

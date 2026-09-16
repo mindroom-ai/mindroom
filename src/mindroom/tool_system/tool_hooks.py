@@ -27,6 +27,7 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
+from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system import agno_compat_tool_hooks
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -664,7 +665,7 @@ async def _maybe_emit_after_call_timed(
     )
 
 
-async def _execute_bridge(
+async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
     *,
     hook_registry: HookRegistry,
     tool_name: str,
@@ -751,6 +752,7 @@ async def _execute_bridge(
     tool_body_started_at = time.perf_counter()
     try:
         await job_checkpoint()
+        check_current_execution_authority()
         result = await _call_tool(
             func,
             args,

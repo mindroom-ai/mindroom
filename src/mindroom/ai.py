@@ -107,6 +107,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
@@ -365,7 +366,12 @@ async def _finalize_agent_turn_model(
     if model is None and holder.agent is not None:
         model = holder.agent.model
     if model is not None:
-        await run_coroutine_until_complete(aclose_anthropic_async_client(model))
+
+        async def close() -> None:
+            await aclose_anthropic_async_client(model)
+
+        if not defer_execution_cleanup(close, resource=model):
+            await run_coroutine_until_complete(close())
 
 
 def _build_agent_turn_callbacks(
