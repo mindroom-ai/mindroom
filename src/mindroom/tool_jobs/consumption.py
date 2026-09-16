@@ -230,6 +230,9 @@ async def consume_tool_job(
     if job.result_payload and job.result_payload.get("control"):
         control = decode_tool_result(job.result_payload["control"])
         raise AgentRunException(control.pop("message"), **control)
+    if call.function.name == "job" and job.status == "failed":
+        error = job.result_payload.get("error") if isinstance(job.result_payload, dict) else None
+        raise RuntimeError(str(error or job.result or "Background tool job failed."))
     if call.function.name == "job" and job.result_payload and job.result_payload.get("events"):
         events = decode_tool_result(job.result_payload["events"])
         if events:

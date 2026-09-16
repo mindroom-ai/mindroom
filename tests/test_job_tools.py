@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.db.base import BaseDb
+    from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
 
 
@@ -230,6 +231,79 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
         assert json.loads(results[0].result)[0]["job_id"] == "member-job"
         assert results[1].result == "saved member answer"
         assert (await runtime.lookup("member-job", owner=owner, depth=0)).wait_acknowledged
+    finally:
+        storage.close()
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "stored_error", "expected_error"),
+    [
+        ("failed", "controlled HTTP 500 failure", True),
+        ("completed", None, False),
+    ],
+)
+async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
+    tmp_path: Path,
+    status: Literal["completed", "failed"],
+    stored_error: str | None,
+    expected_error: bool,
+) -> None:
+    """The reserved Agno control retains failure state while consuming exact saved evidence."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome(
+            status,
+            "None",
+            result_payload={
+                "value": encode_tool_result(None),
+                "state_delta": encode_tool_result({}),
+                "error": stored_error,
+                "elapsed": 0.1,
+                "events": encode_tool_result([]),
+                "replay": encode_tool_result([]),
+                "control": None,
+            },
+        )
+
+    storage = storage_factory()
+    try:
+        await runtime.start(JobSpec("ordinary", "slow", 0), owner=owner, operation=operation)
+        waited = await runtime.wait("ordinary", owner=owner, depth=0)
+        await runtime.release_wait("ordinary", waited.token)
+        model = DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("job", "wait", action="wait", job_id="ordinary")]),
+                ModelResponse(content="done"),
+            ],
+        )
+        install_tool_job_execution(model)
+        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage)
+
+        @owned_tool_execution
+        async def run() -> RunOutput:
+            set_consumption_storage(storage_factory)
+            return await agent.arun("wait", session_id=context.session_id, user_id=context.requester_id)
+
+        with tool_runtime_context(context):
+            response = await run()
+
+        tool = response.tools[0]
+        assert tool.tool_call_error is expected_error
+        assert tool.result == (stored_error if expected_error else "None")
+        assert (await runtime.lookup("ordinary", owner=owner, depth=0)).wait_acknowledged
     finally:
         storage.close()
         register_background_runtime(paths, None)
