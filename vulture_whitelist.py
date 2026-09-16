@@ -1,5 +1,7 @@
 # ruff: noqa: D100, B018, F821
 # Generated Vulture baseline for dynamic/framework entry points.
+_.unique_services  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
+_.normalize_domains  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
 # Regenerate with:
 #   uv run vulture --make-whitelist src/mindroom --min-confidence 60 --sort-by-size | perl -pe 's/\.py:\d+/.py/g' > vulture_whitelist.py

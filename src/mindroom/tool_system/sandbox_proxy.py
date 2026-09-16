@@ -726,7 +726,7 @@ def sandbox_proxy_enabled_for_tool(
     means "route nothing through the proxy for this agent".
     """
     proxy_config = sandbox_proxy_config(runtime_paths)
-    if proxy_config.runner_mode or tool_stays_local(tool_name):
+    if proxy_config.runner_mode or tool_stays_local(tool_name, metadata=TOOL_METADATA.get(tool_name)):
         return False
 
     if not _sandbox_proxy_requested_for_tool(

@@ -418,33 +418,31 @@ def _materialize_plugin(
 
 def _prepare_plugin_tool_module_reload(
     module_name: str,
-    cached: plugin_imports._ModuleCacheEntry | None,
 ) -> dict[str, dict[str, ToolMetadata]]:
     """Snapshot one tool module's cached registrations before reload."""
-    previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]] = {}
-    for candidate_module_name in {module_name, cached.module_name if cached is not None else None}:
-        if candidate_module_name is None:
-            continue
-        previous_registrations_by_module_name[candidate_module_name] = snapshot_plugin_tool_registrations(
-            candidate_module_name,
-        )
-        clear_plugin_tool_registrations(candidate_module_name)
-    return previous_registrations_by_module_name
+    # Nested plugin roots can import one physical file under different owners.
+    # Only the owner being re-executed is replacing its registrations.
+    previous_registrations = snapshot_plugin_tool_registrations(module_name)
+    clear_plugin_tool_registrations(module_name)
+    return {module_name: previous_registrations}
 
 
 def _restore_failed_plugin_tool_module_reload(
     module_path: Path,
     module_name: str,
     cached: plugin_imports._ModuleCacheEntry | None,
+    previous_module: ModuleType | None,
     previous_registrations_by_module_name: dict[str, dict[str, ToolMetadata]],
 ) -> None:
     """Restore cached tool registrations and module imports after one failed reload."""
-    sys.modules.pop(module_name, None)
+    if previous_module is None:
+        sys.modules.pop(module_name, None)
+    else:
+        sys.modules[module_name] = previous_module
     for restored_module_name, registrations in previous_registrations_by_module_name.items():
         restore_plugin_tool_registrations(restored_module_name, registrations)
     if cached is not None:
         plugin_imports._MODULE_IMPORT_CACHE[module_path] = cached
-        sys.modules[cached.module_name] = cached.module
     else:
         plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
 
@@ -459,6 +457,9 @@ def load_plugin_module(
     """Load a plugin module from a configured plugin root."""
     if module_path is None:
         return None
+    # Built-in decorators must run before any plugin registration owner is active.
+    import mindroom.tools  # noqa: F401, PLC0415
+
     try:
         mtime = module_path.stat().st_mtime
     except OSError as exc:
@@ -471,12 +472,9 @@ def load_plugin_module(
     if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
         return cached.module
 
-    previous_registrations_by_module_name = (
-        _prepare_plugin_tool_module_reload(module_name, cached) if kind == "tools" else {}
-    )
+    previous_registrations_by_module_name = _prepare_plugin_tool_module_reload(module_name)
 
-    if cached is not None and cached.module_name != module_name:
-        sys.modules.pop(cached.module_name, None)
+    previous_module = sys.modules.get(module_name)
 
     prepared_module = plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name)
     if prepared_module is None:
@@ -486,26 +484,18 @@ def load_plugin_module(
     module, _, previous_packages = prepared_module
 
     try:
-        if kind == "tools":
-            with scoped_plugin_registration_owner(module_name):
-                _exec_plugin_source(module_path, module)
-        else:
+        # A module may provide several capabilities and be discovered through any
+        # of them first. Registrations always belong to that plugin module.
+        with scoped_plugin_registration_owner(module_name):
             _exec_plugin_source(module_path, module)
     except BaseException as exc:
-        if kind == "tools":
-            _restore_failed_plugin_tool_module_reload(
-                module_path,
-                module_name,
-                cached,
-                previous_registrations_by_module_name,
-            )
-        else:
-            sys.modules.pop(module_name, None)
-            if cached is not None:
-                plugin_imports._MODULE_IMPORT_CACHE[module_path] = cached
-                sys.modules[cached.module_name] = cached.module
-            else:
-                plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
+        _restore_failed_plugin_tool_module_reload(
+            module_path,
+            module_name,
+            cached,
+            previous_module,
+            previous_registrations_by_module_name,
+        )
         plugin_imports._restore_plugin_package_chain(previous_packages)
         _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
