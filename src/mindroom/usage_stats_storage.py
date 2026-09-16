@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TOKEN_FIELDS",
+    "UsageModelMetrics",
     "UsageRunNode",
     "UsageSessionRow",
     "UsageStorageDiagnostic",
@@ -80,6 +81,15 @@ class UsageStorageSource:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageModelMetrics:
+    """Token counters attributed to one model within a retained run."""
+
+    model_provider: str | None
+    model: str | None
+    metrics: Mapping[str, _MetricValue]
+
+
+@dataclass(frozen=True, slots=True)
 class UsageRunNode:
     """Usage fields from one top-level retained run."""
 
@@ -89,6 +99,9 @@ class UsageRunNode:
     model_provider: str | None
     model: str | None
     metrics: Mapping[str, _MetricValue]
+    created_at: int | float | None = None
+    # Empty means no detailed attribution was stored; None means it was unusable.
+    model_metrics: tuple[UsageModelMetrics, ...] | None = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,10 +407,18 @@ def _is_valid_payload_size(value: object) -> bool:
 
 
 @dataclass(slots=True)
+class _PersistedRun:
+    """One raw run payload and its authoritative creation timestamp."""
+
+    payload: object
+    created_at: object
+
+
+@dataclass(slots=True)
 class _PersistedRuns:
     """Raw run payloads for one session, in run-table order."""
 
-    payloads: list[object] = field(default_factory=list)
+    payloads: list[_PersistedRun] = field(default_factory=list)
     payload_bytes: int = 0
 
 
@@ -445,13 +466,14 @@ def _persisted_runs(connection: sqlite3.Connection, runs_table: str, session_id:
     if not isinstance(session_id, str):
         return persisted
     query = (
-        "SELECT run_data AS run_payload, length(CAST(run_data AS BLOB)) AS run_payload_bytes "  # noqa: S608
+        "SELECT run_data AS run_payload, created_at, "  # noqa: S608
+        "length(CAST(run_data AS BLOB)) AS run_payload_bytes "
         f"FROM {_quote_identifier(runs_table)} WHERE session_id = ? "
         "ORDER BY run_index ASC, created_at ASC, run_id ASC"
     )
     for row in connection.execute(query, (session_id,)):
         payload_bytes = row["run_payload_bytes"]
-        persisted.payloads.append(row["run_payload"])
+        persisted.payloads.append(_PersistedRun(payload=row["run_payload"], created_at=row["created_at"]))
         if isinstance(payload_bytes, int) and not isinstance(payload_bytes, bool) and payload_bytes > 0:
             persisted.payload_bytes += payload_bytes
     return persisted
@@ -511,7 +533,7 @@ def _extract_row(
 
 
 def _extract_runs(
-    run_payloads: list[object],
+    run_payloads: list[_PersistedRun],
     legacy_runs_payload: object,
     *,
     row_requester: str | None,
@@ -521,10 +543,14 @@ def _extract_runs(
     Run-table rows come first and win on ``run_id``; legacy-only runs are
     appended. Aggregation does not depend on the order.
     """
-    raw_runs = merge_legacy_run_payloads(
-        [decode_persisted_session_json(payload) for payload in run_payloads],
-        legacy_runs_payload,
-    )
+    current_runs: list[object] = []
+    for persisted_run in run_payloads:
+        decoded = decode_persisted_session_json(persisted_run.payload)
+        if not isinstance(decoded, dict):
+            raise TypeError
+        # Agno preserves the column on updates, even when run_data loses or changes its timestamp.
+        current_runs.append({**decoded, "created_at": persisted_run.created_at})
+    raw_runs = merge_legacy_run_payloads(current_runs, legacy_runs_payload)
     runs: list[UsageRunNode] = []
     for raw_run in raw_runs:
         extracted = _extract_run(raw_run, row_requester=row_requester)
@@ -565,7 +591,15 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
     metrics = run.get("metrics", {})
     if not isinstance(metrics, dict):
         raise TypeError
-    selected_metrics = _select_metrics(cast("dict[str, object]", metrics))
+    run_metrics = cast("dict[str, object]", metrics)
+    selected_metrics = _select_metrics(run_metrics)
+    created_at = run.get("created_at")
+    if (
+        isinstance(created_at, bool)
+        or not isinstance(created_at, (int, float))
+        or (isinstance(created_at, float) and not math.isfinite(created_at))
+    ):
+        created_at = None
     return UsageRunNode(
         team_id=_optional_string(run.get("team_id")),
         requester_id=metadata_requester or _optional_string(run.get("user_id")) or row_requester,
@@ -573,7 +607,36 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         model_provider=_optional_string(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
+        created_at=created_at,
+        model_metrics=_extract_model_metrics(run_metrics.get("details")),
     )
+
+
+def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | None:
+    """Read Agno's per-role model lists without discarding usable run totals."""
+    if details is None:
+        return ()
+    if not isinstance(details, dict):
+        return None
+    models: list[UsageModelMetrics] = []
+    try:
+        for entries in details.values():
+            if not isinstance(entries, list):
+                return None
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    return None
+                model_metrics = cast("dict[str, object]", entry)
+                models.append(
+                    UsageModelMetrics(
+                        model_provider=_optional_string(model_metrics.get("provider")),
+                        model=_optional_string(model_metrics.get("id")),
+                        metrics=_select_metrics(model_metrics),
+                    ),
+                )
+    except (TypeError, ValueError):
+        return None
+    return tuple(models) if models else None
 
 
 def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]:
