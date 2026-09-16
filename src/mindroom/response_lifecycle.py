@@ -12,10 +12,10 @@ from agno.db.base import SessionType
 
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
-from mindroom.delegation.control import HumanMessageSignal, human_message_signal_context
 from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.post_response_effects import apply_post_response_effects
+from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
 if TYPE_CHECKING:

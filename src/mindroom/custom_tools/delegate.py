@@ -16,7 +16,7 @@ from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.background import get_background_runtime
+from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_run_context,
@@ -32,6 +32,7 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
@@ -221,7 +222,7 @@ class DelegateTools(Toolkit):
                 runtime_paths=self._runtime_paths,
                 depth=self._delegation_depth,
             )
-        except SubagentSessionError as error:
+        except (SubagentSessionError, JobAccessError) as error:
             return str(error)
         return await self._run_child(child.child_agent_name, message, continuation=child)
 
@@ -235,8 +236,8 @@ class DelegateTools(Toolkit):
             job = await runtime.lookup(job_id, owner=owner, depth=self._delegation_depth)
             authorization = authorize_delegation(
                 self._agent_name,
-                job.child.child_agent_name,
-                job.child.task,
+                delegation_child(job).child_agent_name,
+                delegation_child(job).task,
                 config=self._config,
                 runtime_paths=self._runtime_paths,
                 execution_identity=owner,
@@ -248,10 +249,10 @@ class DelegateTools(Toolkit):
             if operation == "resume":
                 job = await runtime.resume(job_id, owner=owner, depth=self._delegation_depth)
             elif operation == "cancel":
-                job = await runtime.cancel(job_id, owner=owner, depth=self._delegation_depth)
-        except SubagentSessionError as error:
+                job = await runtime.cancel(job_id, owner=owner, depth=self._delegation_depth, await_completion=True)
+        except (SubagentSessionError, JobAccessError) as error:
             return str(error)
-        result = f"Job ID: {job.job_id}\nSubagent ID: {job.child.subagent_id}\nStatus: {job.status}"
+        result = f"Job ID: {job.job_id}\nSubagent ID: {delegation_child(job).subagent_id}\nStatus: {job.status}"
         if job.result is not None:
             result += f"\n\n{job.result}"
         return result
@@ -336,7 +337,7 @@ class DelegateTools(Toolkit):
             await liveness.enter_async_context(subagent_liveness(child, self._runtime_paths))
             try:
                 await reserve_child_turn(child, owner=owner, runtime_paths=self._runtime_paths)
-            except SubagentSessionError as error:
+            except (SubagentSessionError, JobAccessError) as error:
                 return str(error)
             await start_child_turn(
                 child,

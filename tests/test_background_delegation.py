@@ -21,19 +21,20 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation import background as background_module
-from mindroom.delegation.background import BackgroundSubagentRuntime, register_background_runtime
-from mindroom.delegation.control import (
-    HumanMessageSignal,
-    SubagentControl,
-    human_message_signal_context,
-    subagent_control_context,
-)
+from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.model_control import install_subagent_model_control
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
+from mindroom.tool_jobs import runtime as background_module
+from mindroom.tool_jobs.control import (
+    HumanMessageSignal,
+    JobControl,
+    human_message_signal_context,
+    job_control_context,
+)
+from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
@@ -75,7 +76,7 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
         users=["@alice:example.org"],
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
-    runtime = BackgroundSubagentRuntime(tmp_path)
+    runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
@@ -186,7 +187,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         None,
         "parent",
     )
-    runtime = BackgroundSubagentRuntime(tmp_path)
+    runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
     monkeypatch.setattr("mindroom.delegation.execution._FOREGROUND_WAIT_SECONDS", 0.01 if detach and not human else 10)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
@@ -299,7 +300,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert not completed.is_set()
                 assert DelegationState.from_metadata(result.metadata).children == []
                 if human:
-                    assert "Status: paused_for_human" in await toolkit.inspect_subagent(child.delegation_id)
+                    assert "Status: running" in await toolkit.inspect_subagent(child.delegation_id)
                     assert "Status: running" in await toolkit.resume_subagent(child.delegation_id)
                 release.set()
                 await asyncio.wait_for(completed.wait(), 5)
@@ -381,7 +382,7 @@ async def test_human_pause_stops_next_provider_invocation_without_cancelling_act
 
     model = ProviderModel(id="test")
     install_subagent_model_control(model, None)
-    control = SubagentControl()
+    control = JobControl()
 
     async def invoke() -> str:
         called.set()
@@ -390,7 +391,7 @@ async def test_human_pause_stops_next_provider_invocation_without_cancelling_act
             return str(chunks[0].content)
         return str((await model.ainvoke()).content)
 
-    with subagent_control_context(control):
+    with job_control_context(control):
         first = asyncio.create_task(invoke())
         await entered.wait()
         control.pause()
@@ -417,7 +418,7 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
 ) -> None:
     """Managed team jobs project the actual member and nested tool owner on reconstruction."""
     paths = _runtime_paths(tmp_path)
-    runtime = BackgroundSubagentRuntime(tmp_path)
+    runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
     try:
         await _native_approval_scenario(
@@ -433,7 +434,7 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
         assert len(jobs) == 1
         assert jobs[0].status == ("completed" if outcome in {"approve", "cancel_completed"} else "cancelled")
         if outcome != "approve":
-            assert jobs[0].child.status == jobs[0].status
+            assert delegation_child(jobs[0]).status == jobs[0].status
     finally:
         await runtime.shutdown()
         register_background_runtime(paths, None)

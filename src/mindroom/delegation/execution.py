@@ -30,7 +30,7 @@ from mindroom.approval_tools import (
     validate_approval_tool_owners,
 )
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.delegation.background import BackgroundOutcome, get_background_runtime
+from mindroom.delegation.background import continue_delegation, owns_delegation, retained_child, start_delegation
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -57,6 +57,8 @@ from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
+from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.tool_jobs.runtime import BackgroundOutcome, get_background_runtime
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -611,7 +613,6 @@ async def _background_child_outcome(
                     "response": outcome.response.to_dict(),
                     "toolkit_owners": [[*key, value] for key, value in outcome.toolkit_owners.items()],
                 },
-                live_result=outcome,
             )
     except asyncio.CancelledError:
         await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
@@ -663,7 +664,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
         msg = "Native delegation requires a Matrix execution owner"
         raise RuntimeError(msg)
     state = DelegationState.from_metadata(response.metadata)
-    background = get_background_runtime(runtime_paths) if delegation_depth == 0 else None
+    background = get_background_runtime(runtime_paths) if delegation_depth == 0 and not job_owns_execution() else None
     if not state.storage_bindings and isinstance(response, RunOutput):
         state.storage_bindings = freeze_delegation_storage(config, (agent_name,))
     pending_id = state.pending_child_id
@@ -743,7 +744,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 except SubagentSessionError as error:
                     resolve_result(str(error))
                     continue
-                retained = background_job.child
+                retained = retained_child(background, background_job)
                 retained.parent_requirement_id = requirement.id
                 if not any(item.delegation_id == retained.delegation_id for item in state.children):
                     state.children.append(retained)
@@ -925,7 +926,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 owner=caller_identity,
                                 depth=delegation_depth,
                             )
-                            child = background_job.child
+                            child = retained_child(background, background_job)
                             child.parent_requirement_id = requirement.id
                             state.children = [
                                 child if item.delegation_id == child.delegation_id else item for item in state.children
@@ -944,14 +945,16 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             fresh=fresh,
                         )
                         if child_decisions is not None:
-                            background_job = await background.continue_job(
+                            background_job = await continue_delegation(
+                                background,
                                 child.delegation_id,
                                 owner=caller_identity,
                                 depth=delegation_depth,
                                 operation=operation,
                             )
                         elif background_job is None:
-                            background_job = await background.start(
+                            background_job = await start_delegation(
+                                background,
                                 child,
                                 owner=caller_identity,
                                 operation=operation,
@@ -969,7 +972,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             timeout=_FOREGROUND_WAIT_SECONDS,
                         )
                         background_job = waited.job
-                        child = background_job.child
+                        child = retained_child(background, background_job)
                         try:
                             if child_decisions is not None and on_event is not None:
                                 for pending_tool in prior_pending_tools:
@@ -1051,7 +1054,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         await _persist(entity, response, state)
                         return response
                 except asyncio.CancelledError:
-                    if background is not None and (background_job is not None or background.owns_child(child)):
+                    if background is not None and (background_job is not None or owns_delegation(background, child)):
                         state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
                         await _persist(entity, response, state)
                         raise
@@ -1071,7 +1074,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     await _persist(entity, response, state)
                     raise
                 except Exception as error:
-                    if background is not None and (background_job is not None or background.owns_child(child)):
+                    if background is not None and (background_job is not None or owns_delegation(background, child)):
                         state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
                         await _persist(entity, response, state)
                         raise

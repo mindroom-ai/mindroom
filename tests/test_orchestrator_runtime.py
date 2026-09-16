@@ -43,7 +43,6 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.delegation.background import BackgroundSubagentRuntime, get_background_runtime
 from mindroom.event_journal_open import record_opened_event_journal
 from mindroom.hooks import (
     ConfigReloadedContext,
@@ -82,6 +81,7 @@ from mindroom.runtime_state import (
 )
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_approval import shutdown_approval_runtime
+from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -3290,7 +3290,7 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = MagicMock(source_fingerprint=None)
         responder_started = False
         runtime_support_bound = False
-        runtimes_before_sync: list[BackgroundSubagentRuntime | None] = []
+        runtimes_before_sync: list[ToolJobRuntime | None] = []
         start_sync = orchestrator._start_sync_task
 
         def record_runtime_before_sync(entity_name: str, bot: AgentBot | TeamBot) -> None:

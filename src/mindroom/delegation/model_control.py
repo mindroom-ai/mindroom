@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
-from mindroom.delegation.control import subagent_tool_checkpoint
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ type _Stream = Callable[..., AsyncIterator[ModelResponse]]
 
 def _wrap_invoke(original: _Invoke) -> _Invoke:
     async def invoke(*args: object, **kwargs: object) -> ModelResponse:
-        await subagent_tool_checkpoint()
+        await job_checkpoint()
         return await original(*args, **kwargs)
 
     return invoke
@@ -29,7 +29,7 @@ def _wrap_invoke(original: _Invoke) -> _Invoke:
 
 def _wrap_stream(original: _Stream) -> _Stream:
     async def stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
-        await subagent_tool_checkpoint()
+        await job_checkpoint()
         events = original(*args, **kwargs)
         async with closing_async_stream(events):
             async for event in events:

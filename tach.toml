@@ -645,7 +645,7 @@ depends_on = [
     "mindroom.media_inputs",
 ]
 visibility = [
-    "mindroom.delegation.background",
+    "mindroom.tool_jobs.runtime",
     "mindroom.ai",
     "mindroom.api.openai_compat",
     "mindroom.approval_execution",
@@ -992,6 +992,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.delegate"
 depends_on = [
+    "mindroom.tool_jobs.runtime",
     "mindroom.delegation.background",
     "mindroom.delegation.sessions",
     "mindroom.agent_descriptions",
@@ -2071,8 +2072,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
-    "mindroom.delegation.control",
-    "mindroom.delegation.background",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.runtime",
     "mindroom.config.participation",
     "mindroom.participation",
     "mindroom.response_activity",
@@ -2152,7 +2153,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_lifecycle"
 depends_on = [
-    "mindroom.delegation.control",
+    "mindroom.tool_jobs.control",
     "mindroom.agent_storage",
     "mindroom.ai_runtime",
     "mindroom.hooks",
@@ -3915,7 +3916,7 @@ depends_on = ["mindroom.constants"]
 [[modules]]
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
-    "mindroom.delegation.control",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_system.agno_compat_tool_hooks",
     "mindroom.hooks",
     "mindroom.llm_request_logging",
@@ -5778,6 +5779,8 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.delegation.execution"
 depends_on = [
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.runtime",
     "mindroom.delegation.background",
     "mindroom.background_tasks",
     "mindroom.tool_system.context_bound_streams",
@@ -5988,6 +5991,7 @@ visibility = [
 [[modules]]
 path = "mindroom.delegation.recovery"
 depends_on = [
+    "mindroom.tool_jobs.runtime",
     "mindroom.delegation.background",
     "mindroom.agent_storage",
     "mindroom.delegation.hooks",
@@ -6349,15 +6353,28 @@ expose = ["AgnoGoogleAuthBindingMixin"]
 [[modules]]
 path = "mindroom.delegation.background"
 depends_on = [
-    "mindroom.ai_runtime",
-    "mindroom.background_tasks",
-    "mindroom.delegation.control",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
+    "mindroom.tool_jobs.runtime",
+]
+visibility = [
+    "mindroom.delegation.recovery",
+    "mindroom.delegation.execution",
+    "mindroom.custom_tools.delegate",
+    "mindroom.orchestration.subagent_runtime",
+]
+
+[[modules]]
+path = "mindroom.tool_jobs.runtime"
+depends_on = [
+    "mindroom.ai_runtime",
+    "mindroom.background_tasks",
+    "mindroom.tool_jobs.control",
     "mindroom.durable_write",
     "mindroom.tool_system.worker_routing",
 ]
 visibility = [
+    "mindroom.delegation.background",
     "mindroom.delegation.recovery",
     "mindroom.response_runner",
     "mindroom.delegation.execution",
@@ -6366,12 +6383,13 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.delegation.control"
+path = "mindroom.tool_jobs.control"
 depends_on = [
 ]
 visibility = [
+    "mindroom.delegation.execution",
     "mindroom.response_runner",
-    "mindroom.delegation.background",
+    "mindroom.tool_jobs.runtime",
     "mindroom.delegation.model_control",
     "mindroom.response_lifecycle",
     "mindroom.tool_system.tool_hooks",
@@ -6381,7 +6399,7 @@ visibility = [
 path = "mindroom.delegation.model_control"
 depends_on = [
     "mindroom.agno_compat_model_hooks",
-    "mindroom.delegation.control",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",
 ]
 visibility = [
@@ -6391,6 +6409,7 @@ visibility = [
 [[modules]]
 path = "mindroom.orchestration.subagent_runtime"
 depends_on = [
+    "mindroom.tool_jobs.runtime",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.delegation.background",

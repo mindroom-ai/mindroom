@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from dataclasses import fields, replace
+from dataclasses import asdict, fields, replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,19 +18,20 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
-from mindroom.delegation.background import (
-    BackgroundJob,
-    BackgroundOutcome,
-    get_background_runtime,
-    register_background_runtime,
-)
-from mindroom.delegation.control import subagent_tool_checkpoint
+from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.state import DelegationChild
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.subagent_runtime import SubagentRuntimeCoordinator, _build_completion_content
 from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
+from mindroom.tool_jobs.control import job_checkpoint
+from mindroom.tool_jobs.runtime import (
+    BackgroundJob,
+    BackgroundOutcome,
+    get_background_runtime,
+    register_background_runtime,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 from tests.test_queued_message_notify import _envelope
@@ -64,7 +65,16 @@ def _job() -> BackgroundJob:
         depth=1,
         execution_identity={},
     )
-    return BackgroundJob(job_id="job_123", child=child, owner=owner, status="completed", result="Finished @worker")
+    return BackgroundJob(
+        job_id="job_123",
+        tool_name="delegate",
+        depth=0,
+        kind="delegation",
+        adapter={"child": asdict(child)},
+        owner=owner,
+        status="completed",
+        result="Finished @worker",
+    )
 
 
 def _config(tmp_path: Path) -> Config:
@@ -151,7 +161,12 @@ async def _finish_job(coordinator: SubagentRuntimeCoordinator) -> BackgroundJob:
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "Saved answer")
 
-    job = await coordinator.runtime.start(fixture.child, owner=fixture.owner, operation=operation)
+    job = await start_delegation(
+        coordinator.runtime,
+        delegation_child(fixture),
+        owner=fixture.owner,
+        operation=operation,
+    )
     result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
     await coordinator.runtime.release_wait(job.job_id, result.token)
     return result.job
@@ -246,7 +261,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
         raise AssertionError
 
     fixture = _job()
-    await coordinator.runtime.start(fixture.child, owner=fixture.owner, operation=operation)
+    await start_delegation(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     await started.wait()
     assert get_background_runtime(coordinator.runtime_paths) is coordinator.runtime
     owner = coordinator.runtime
@@ -268,7 +283,7 @@ def test_constructing_orchestrator_support_does_not_claim_runtime_storage(tmp_pa
     first = _delivery_coordinator(tmp_path, config)
     second = _delivery_coordinator(tmp_path, config)
     assert first is not second
-    assert not (first.runtime_paths.storage_root / "background_subagents").exists()
+    assert not (first.runtime_paths.storage_root / "tool_jobs").exists()
 
 
 @pytest.mark.asyncio
@@ -332,12 +347,18 @@ async def test_replaced_response_runner_pauses_retained_background_job(
     async def operation() -> BackgroundOutcome:
         await advance.wait()
         checkpoint_reached.set()
-        await subagent_tool_checkpoint()
+        await job_checkpoint()
         tool_executed.set()
         return BackgroundOutcome("completed", "Executed")
 
     fixture = _job()
-    job = await runtime.start(fixture.child, owner=fixture.owner, operation=operation, human_signal=signal)
+    job = await start_delegation(
+        runtime,
+        delegation_child(fixture),
+        owner=fixture.owner,
+        operation=operation,
+        human_signal=signal,
+    )
     replacement = ResponseRunner(deps)
     unrelated_thread = target.with_thread_root("$unrelated")
     replacement._lifecycle_coordinator.reserve_waiting_human_message(

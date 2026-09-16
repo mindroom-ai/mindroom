@@ -46,28 +46,33 @@ class HumanMessageSignal:
 
 
 @dataclass
-class SubagentControl:
+class JobControl:
     """Pause only future tool entry; leave already-running external work alone."""
 
     paused: asyncio.Event = field(default_factory=asyncio.Event)
     resumed: asyncio.Event = field(default_factory=asyncio.Event)
     cancelled: bool = False
+    blocked: asyncio.Event = field(default_factory=asyncio.Event)
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
     _owner_loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.get_running_loop, repr=False)
 
     def pause(self) -> None:
         """Latch human intent until explicit resumption."""
         self.resumed.clear()
         self.paused.set()
+        self.changed.set()
 
     def resume(self) -> None:
         """Allow future tools without modifying native approval decisions."""
         self.paused.clear()
         self.resumed.set()
+        self.changed.set()
 
     def cancel(self) -> None:
         """Prevent future tool entry even when a cancelled operation catches cancellation."""
         self.cancelled = True
         self.resumed.set()
+        self.changed.set()
 
     async def checkpoint(self) -> None:
         """Wait for explicit resume or fail on cancellation before entering a tool."""
@@ -78,14 +83,20 @@ class SubagentControl:
         await self._checkpoint_on_owner()
 
     async def _checkpoint_on_owner(self) -> None:
-        while self.paused.is_set() and not self.cancelled:
-            await self.resumed.wait()
+        try:
+            while self.paused.is_set() and not self.cancelled:
+                self.blocked.set()
+                self.changed.set()
+                await self.resumed.wait()
+        finally:
+            self.blocked.clear()
+            self.changed.set()
         if self.cancelled:
             raise asyncio.CancelledError
 
 
-_human_signal: ContextVar[HumanMessageSignal | None] = ContextVar("subagent_human_signal", default=None)
-_control: ContextVar[SubagentControl | None] = ContextVar("subagent_control", default=None)
+_human_signal: ContextVar[HumanMessageSignal | None] = ContextVar("job_human_signal", default=None)
+_control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
 
 
 def current_human_message_signal() -> HumanMessageSignal | None:
@@ -104,7 +115,7 @@ def human_message_signal_context(signal: HumanMessageSignal | None) -> Iterator[
 
 
 @contextmanager
-def subagent_control_context(control: SubagentControl) -> Iterator[None]:
+def job_control_context(control: JobControl) -> Iterator[None]:
     """Carry one owning job's control through nested child and tool execution."""
     token = _control.set(control)
     try:
@@ -113,8 +124,13 @@ def subagent_control_context(control: SubagentControl) -> Iterator[None]:
         _control.reset(token)
 
 
-async def subagent_tool_checkpoint() -> None:
+async def job_checkpoint() -> None:
     """Enforce the active job's human hold immediately before tool execution."""
     control = _control.get()
     if control is not None:
         await control.checkpoint()
+
+
+def job_owns_execution() -> bool:
+    """Return whether this task already belongs to one managed operation."""
+    return _control.get() is not None

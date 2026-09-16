@@ -5,17 +5,19 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
-from mindroom.delegation.background import BackgroundSubagentRuntime, register_background_runtime
+from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.recovery import interrupt_child
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,8 +26,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.background import BackgroundJob
-    from mindroom.delegation.state import DelegationChild
+    from mindroom.tool_jobs.runtime import BackgroundJob
 
 logger = get_logger(__name__)
 _RETRY_SECONDS = 5.0
@@ -71,30 +72,34 @@ class SubagentRuntimeCoordinator:
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], AgentBot | TeamBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
-    _runtime: BackgroundSubagentRuntime | None = field(default=None, init=False)
+    _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
 
     @property
-    def runtime(self) -> BackgroundSubagentRuntime:
+    def runtime(self) -> ToolJobRuntime:
         """Claim storage only when the service starts using the job owner."""
         if self._runtime is None:
-            self._runtime = BackgroundSubagentRuntime(
+            self._runtime = ToolJobRuntime(
                 self.runtime_paths.storage_root,
                 authorize=self._authorized,
                 cancel=self._interrupt_child,
             )
         return self._runtime
 
-    async def _interrupt_child(self, child: DelegationChild) -> None:
+    async def _interrupt_child(self, job: BackgroundJob) -> BackgroundOutcome | None:
         config = self.config_provider()
         if config is None:
-            msg = "Cannot settle a background subagent without runtime configuration."
+            msg = "Cannot settle a background job without runtime configuration."
             raise RuntimeError(msg)
-        await interrupt_child(
-            child,
-            config=config,
+        return await reconcile_delegation(
+            job,
+            cleanup=partial(
+                interrupt_child,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                reason="Background execution was cancelled or interrupted; tools were not replayed.",
+            ),
             runtime_paths=self.runtime_paths,
-            reason="Background subagent execution was cancelled or interrupted; its tools were not replayed.",
         )
 
     def _authorized(self, job: BackgroundJob) -> bool:
@@ -104,7 +109,7 @@ class SubagentRuntimeCoordinator:
         if config is None or owner.channel != "matrix" or owner.requester_id is None or owner.room_id is None:
             return False
         caller = config.agents.get(owner.agent_name)
-        if caller is None or job.child.child_agent_name not in caller.delegate_to:
+        if caller is None or delegation_child(job).child_agent_name not in caller.delegate_to:
             return False
         recipient = owner.transport_agent_name or owner.agent_name
         if recipient != owner.agent_name:
@@ -120,7 +125,7 @@ class SubagentRuntimeCoordinator:
                 self.runtime_paths,
                 self.agent_reply_memberships,
             )
-            for entity_name in {owner.agent_name, job.child.child_agent_name, recipient}
+            for entity_name in {owner.agent_name, delegation_child(job).child_agent_name, recipient}
         )
 
     async def sync(self) -> None:

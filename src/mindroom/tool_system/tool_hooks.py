@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
-from mindroom.delegation.control import subagent_tool_checkpoint
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -27,6 +26,7 @@ from mindroom.llm_request_logging import current_llm_request_log_context
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.timing import elapsed_ms_since, emit_timing_event
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_system import agno_compat_tool_hooks
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -680,7 +680,7 @@ async def _execute_bridge(
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
-    await subagent_tool_checkpoint()
+    await job_checkpoint()
     timing = _ToolBridgeTiming(started_at=started_at)
     effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
     bridge_context = _ToolHookBridgeContext(
@@ -750,7 +750,7 @@ async def _execute_bridge(
     error: BaseException | None = None
     tool_body_started_at = time.perf_counter()
     try:
-        await subagent_tool_checkpoint()
+        await job_checkpoint()
         result = await _call_tool(
             func,
             args,
