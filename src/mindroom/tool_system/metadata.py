@@ -17,7 +17,6 @@ import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     ConfigField,
     ToolAuthoredOverrideValidator,
@@ -661,9 +660,7 @@ def _build_tool_instance(
     )
 
     metadata = TOOL_METADATA[tool_name]
-    factory = TOOL_REGISTRY[tool_name]
-    construction = ToolConstruction.from_factory(tool_name, factory)
-    tool_class = factory()
+    tool_class = TOOL_REGISTRY[tool_name]()
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         metadata,
         runtime_paths,
@@ -725,20 +722,20 @@ def _build_tool_instance(
         else None
     )
     wrap_toolkit_for_output_files(toolkit, output_file_policy)
-    if not disable_sandbox_proxy:
-        toolkit = maybe_wrap_toolkit_for_sandbox_proxy(
-            tool_name,
-            toolkit,
-            runtime_paths=runtime_paths,
-            credentials_manager=resolved_credentials_manager,
-            tool_init_overrides=proxy_tool_init_overrides or None,
-            tool_config_overrides=validated_tool_config_overrides,
-            extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
-            worker_tools_override=worker_tools_override,
-            shared_storage_root_path=shared_storage_root_path,
-            worker_target=worker_target,
-        )
-    return bind_toolkit_construction(toolkit, construction)
+    if disable_sandbox_proxy:
+        return toolkit
+    return maybe_wrap_toolkit_for_sandbox_proxy(
+        tool_name,
+        toolkit,
+        runtime_paths=runtime_paths,
+        credentials_manager=resolved_credentials_manager,
+        tool_init_overrides=proxy_tool_init_overrides or None,
+        tool_config_overrides=validated_tool_config_overrides,
+        extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
+        worker_tools_override=worker_tools_override,
+        shared_storage_root_path=shared_storage_root_path,
+        worker_target=worker_target,
+    )
 
 
 def get_tool_by_name(

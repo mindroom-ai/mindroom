@@ -2522,11 +2522,8 @@ The model-facing tools are `run_subagent(task: str, agent_name: str | None = Non
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
 The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
-Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
-Managed Matrix calls wait up to 10 seconds before returning an exact job handle while the child continues in the background.
-Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
-The accepted `action` values are `list`, `inspect`, `wait`, `resume`, and `cancel`; every action except `list` requires `job_id`.
-Use `continue_subagent` with the reusable subagent ID for a follow-up in the same child session after its previous turn returns.
+The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
+Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
 The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
 Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
 The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
@@ -2566,7 +2563,7 @@ agents:
 - Targets must reference existing agent names in the config
 - An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
-- Detached managed jobs may overlap; each accepted job owns its execution and exact result independently
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
 
 ## Naming Rules
 
@@ -10525,9 +10522,7 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
-Fast calls return the child's response inline.
-Managed Matrix calls wait up to 10 seconds; longer work returns an exact job handle and continues in the background.
-OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
+Both return the child's response inline.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
 
@@ -10539,7 +10534,7 @@ continue_subagent(subagent_id: str, message: str) -> str
 ```
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
 Fresh execution still uses the target agent's configured workspace, memory, requester scope, model, and tool policy.
-When the child finishes within the foreground wait, the caller receives its answer, stable `Subagent ID`, and an audit reference.
+The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
 Omitting `agent_name` or passing `None` selects the caller itself, subject to the same allowlist.
@@ -10555,53 +10550,10 @@ Use `continue_subagent` after the child returns to retain its own conversation h
 The stable ID remains usable across parent turns and restarts, within the same caller, requester, and originating conversation.
 Follow-ups preserve the child session and nesting depth, recheck current permissions, and require the original storage scope.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
-Calls do not queue messages into a running child or one awaiting approval.
+Calls wait for a result and do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
 After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
-
-### Background jobs
-
-Every model-invoked application tool uses a shared managed job owner when a conversation runtime is present.
-Original tool names and argument schemas stay unchanged.
-Fast calls return their original results; a call that outlasts its foreground wait returns a `job_id` while the accepted work continues.
-The automatically added `job(action, job_id=None, limit=20, offset=0)` function manages both ordinary tools and native delegation.
-The management function never backgrounds itself.
-
-| Action | Behavior |
-| --- | --- |
-| `list` | Discover accessible jobs, active first, with bounded pagination and retained terminal outcomes. |
-| `inspect` | Read an exact job's status and saved summary without consuming it. |
-| `wait` | Wait up to ten seconds and retrieve the original result, including supported structured data and media. |
-| `resume` | Release a cooperative human hold; never grant approval. |
-| `cancel` | Cancel the exact job and wait for owned execution and cleanup to settle. |
-
-Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
-
-For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
-Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
-Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
-A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
-Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
-Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
-Remote service availability alone does not revoke access to a saved result.
-
-A queued human follow-up releases the foreground wait and holds the next cooperative application-tool boundary.
-An external operation already in progress may finish.
-Provider-hosted internal tools cannot be individually detached or interrupted by the application-tool boundary.
-Native child approval reached during the original foreground wait remains inline in the parent run, with the paused parent-child continuation retained durably.
-After delegation detaches, the exact reserved `job(action="wait", job_id=...)` call presents pending approval through that persisted continuation.
-Resuming a human hold never approves a tool, and current execution authority is rechecked before the next retained callable runs.
-Nested work remains owned by its accepted outer job.
-Unmanaged detached API execution keeps its existing synchronous lifetime and approval restrictions.
-
-Completed background jobs notify the original Matrix conversation and exact agent or team.
-Notifications enter normal conversation ordering; the response checks the immutable delivery claim and current outcome after acquiring the conversation lock.
-A result is consumed only after exact persisted parent tool-result evidence is verified.
-Inspecting, listing, or merely sending a notification does not consume it.
-Stale and consumed notifications settle without another model response.
-Failed sends retry the same frozen payload and Matrix transaction ID; an account mismatch blocks that delivery while preserving authorized result access.
-Completed outcomes survive restart; abandoned work becomes interrupted and is never restarted automatically.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
@@ -10663,9 +10615,9 @@ continue_subagent(
 
 - `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
 - Recursive delegation is supported, but only up to a maximum depth of 3.
-- Native Matrix delegation handles foreground waits sequentially; children that continue in the background can overlap with later delegated jobs.
+- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel.
 - Use `continue_subagent` for another answer from an existing child; use [matrix_message](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) for a conversation visible in Matrix.
-- Use [`delegate`] for a specialist task that returns its answer inline or through a managed background job.
+- Use [`delegate`] when you need a synchronous specialist answer inside the current run.
 
 ## [`dynamic_workflow`]
 
@@ -18632,28 +18584,14 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 `run_subagent` starts a separate child conversation; `continue_subagent` starts another turn in that same conversation.
 The child uses the normal agent response envelope, so its history, tools, and model behavior follow the existing runtime.
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
-Managed application calls and native delegation share a durable tool-job owner that retains execution after the foreground wait ends.
-Job IDs identify exact tool calls or delegation turns, while subagent IDs retain child conversations.
-Completion events carry the original requester and exact recipient into normal durable Matrix ingress and conversation ordering.
-Notification claims freeze content and transaction IDs before sending; foreground consumption is acknowledged only after durable parent-result readback, and stale completion events are suppressed under the response lifecycle lock.
-Config reload retains active jobs while every control or delivery checks current authorization.
-Shutdown cancels owned work; recovery retains terminal outcomes and marks abandoned execution interrupted without replay.
 
-Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and approval semantics stay in `src/mindroom/delegation/`.
+The runtime lives in the `src/mindroom/delegation/` package, with explicit imports between its modules.
 
 | Module | Owns |
 | --- | --- |
 | `custom_tools/delegate.py` | Agent-facing tool schemas and direct invocation |
 | `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
 | `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
-| `delegation/background.py` | Native child adapter for the shared job owner |
-| `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, wait and immutable delivery claims |
-| `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |
-| `tool_jobs/resources.py` | Shared connection and cleanup lifetime across foreground handoff |
-| `custom_tools/job.py` | One reserved management schema and exact native wait projection |
-| `tool_jobs/completion.py` | Current claim admission under the response lifecycle lock |
-| `tool_jobs/control.py` | Human-follow-up signals and cooperative tool checkpoints |
-| `orchestration/tool_job_runtime.py` | Job service lifecycle and durable Matrix completion sends |
 | `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
 | `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
 | `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |
@@ -19138,8 +19076,6 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
-| Application tools lack a public accepted-execution owner and per-call native wait projection. | Add ownership around approved FunctionCalls and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
-| Agent and Team cleanup closes connectable resources when detached work still owns them. | Add shared resource leases with task-affine async teardown. | `tool_jobs/agno_compat_resources.py`; physical connections close after the final execution owner releases them. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
@@ -19178,7 +19114,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
-| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, prompt caching, and participation decisions remain in their owning modules; `tool_jobs/agno_compat_execution.py` owns managed job checkpoints before agent primary and fallback provider requests. |
+| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |

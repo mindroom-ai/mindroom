@@ -31,7 +31,6 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
-from mindroom.tool_jobs.runtime import JobAccessError
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
@@ -113,10 +112,7 @@ class DelegateTools(Toolkit):
         super().__init__(
             name="delegate",
             instructions=self._build_instructions(),
-            tools=[
-                self.run_subagent,
-                self.continue_subagent,
-            ],
+            tools=[self.run_subagent, self.continue_subagent],
         )
         delegate_function = self.async_functions["run_subagent"]
         delegate_function.description = self._build_run_subagent_description()
@@ -145,8 +141,7 @@ class DelegateTools(Toolkit):
             "the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\n"
             "Selecting your own name starts a fresh copy of yourself, if listed. "
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
-            "Managed Matrix calls wait up to 10 seconds, then return a Job ID while work continues. "
-            "A human follow-up releases the wait and pauses the child before its next tool. "
+            "The caller waits; this does not create a Matrix thread. "
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session.\n"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
             "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."
@@ -217,7 +212,7 @@ class DelegateTools(Toolkit):
                 runtime_paths=self._runtime_paths,
                 depth=self._delegation_depth,
             )
-        except (SubagentSessionError, JobAccessError) as error:
+        except SubagentSessionError as error:
             return str(error)
         return await self._run_child(child.child_agent_name, message, continuation=child)
 
@@ -260,7 +255,7 @@ class DelegateTools(Toolkit):
             await liveness.enter_async_context(subagent_liveness(child, self._runtime_paths))
             try:
                 await reserve_child_turn(child, owner=owner, runtime_paths=self._runtime_paths)
-            except (SubagentSessionError, JobAccessError) as error:
+            except SubagentSessionError as error:
                 return str(error)
             await start_child_turn(
                 child,

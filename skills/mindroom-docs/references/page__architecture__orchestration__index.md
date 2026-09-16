@@ -159,28 +159,14 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 `run_subagent` starts a separate child conversation; `continue_subagent` starts another turn in that same conversation.
 The child uses the normal agent response envelope, so its history, tools, and model behavior follow the existing runtime.
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
-Managed application calls and native delegation share a durable tool-job owner that retains execution after the foreground wait ends.
-Job IDs identify exact tool calls or delegation turns, while subagent IDs retain child conversations.
-Completion events carry the original requester and exact recipient into normal durable Matrix ingress and conversation ordering.
-Notification claims freeze content and transaction IDs before sending; foreground consumption is acknowledged only after durable parent-result readback, and stale completion events are suppressed under the response lifecycle lock.
-Config reload retains active jobs while every control or delivery checks current authorization.
-Shutdown cancels owned work; recovery retains terminal outcomes and marks abandoned execution interrupted without replay.
 
-Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and approval semantics stay in `src/mindroom/delegation/`.
+The runtime lives in the `src/mindroom/delegation/` package, with explicit imports between its modules.
 
 | Module | Owns |
 | --- | --- |
 | `custom_tools/delegate.py` | Agent-facing tool schemas and direct invocation |
 | `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
 | `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
-| `delegation/background.py` | Native child adapter for the shared job owner |
-| `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, wait and immutable delivery claims |
-| `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |
-| `tool_jobs/resources.py` | Shared connection and cleanup lifetime across foreground handoff |
-| `custom_tools/job.py` | One reserved management schema and exact native wait projection |
-| `tool_jobs/completion.py` | Current claim admission under the response lifecycle lock |
-| `tool_jobs/control.py` | Human-follow-up signals and cooperative tool checkpoints |
-| `orchestration/tool_job_runtime.py` | Job service lifecycle and durable Matrix completion sends |
 | `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
 | `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
 | `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |

@@ -16,7 +16,6 @@ from agno.agent import Agent as AgnoAgent
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.message import Message
-from agno.models.openai import OpenAIChat
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent as AgentRunContentEvent
 from agno.run.agent import RunOutput
@@ -4460,7 +4459,7 @@ def test_materialized_private_ad_hoc_team_uses_opened_scope_id() -> None:
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=OpenAIChat(id="gpt-6-astra")),
+        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
     ):
         assert scope_context is not None
         team = build_materialized_team_instance(
@@ -4508,7 +4507,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             execution_identity=identity,
             create_session_if_missing=True,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=OpenAIChat(id="gpt-6-astra")),
+        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
     ):
         assert scope_context is not None
         assert scope_context.session is not None
@@ -4548,7 +4547,7 @@ async def test_private_ad_hoc_team_second_turn_replays_first_scoped_run() -> Non
             config=config,
             execution_identity=identity,
         ) as scope_context,
-        patch("mindroom.model_loading.get_model_instance", return_value=OpenAIChat(id="gpt-6-astra")),
+        patch("mindroom.model_loading.get_model_instance", return_value=_TEST_MODEL),
     ):
         assert scope_context is not None
         second_team = build_materialized_team_instance(
