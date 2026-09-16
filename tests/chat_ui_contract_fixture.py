@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args, get_type_hints
 
 import nio
 
@@ -39,15 +39,6 @@ REQUESTER_ID = "@alice:example.org"
 CONTRACT_ROOM_ID = "!room:localhost"
 CONTRACT_REQUESTER_ID = "@alice:localhost"
 CONTRACT_THREAD_ID = "$thread"
-CONTRACT_SETTINGS_SECTIONS = (
-    "general",
-    "account",
-    "notifications",
-    "devices",
-    "emojis-stickers",
-    "developer",
-    "about",
-)
 
 
 def make_chat_ui_context(
@@ -124,10 +115,21 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
         _ContractCase("show_computer", "", "show_computer"),
         *(
             _ContractCase(f"open_settings/{section}", "", "open_settings", section)
-            for section in CONTRACT_SETTINGS_SECTIONS
+            for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])
         ),
-        _ContractCase("open_panel/members", "", "open_panel", "members"),
+        *(
+            _ContractCase(f"open_panel/{panel}", "", "open_panel", panel)
+            for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])
+        ),
     )
+    registered_actions = set(ChatUITools().get_async_functions())
+    exported_actions = {case.action for case in actions}
+    if registered_actions != exported_actions:
+        msg = (
+            "Chat UI contract action coverage differs from registered tools: "
+            f"registered={sorted(registered_actions)}, exported={sorted(exported_actions)}"
+        )
+        raise RuntimeError(msg)
     return tuple(
         _ContractCase(case.case_id, scope, case.action, case.argument)
         for scope in ("thread", "room")

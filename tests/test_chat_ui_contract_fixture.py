@@ -3,25 +3,15 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args, get_type_hints
 
 import pytest
 
+from mindroom.custom_tools.chat_ui import ChatUITools
 from tests.chat_ui_contract_fixture import build_chat_ui_contract, serialize_chat_ui_contract
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-SETTINGS_SECTIONS = (
-    "general",
-    "account",
-    "notifications",
-    "devices",
-    "emojis-stickers",
-    "developer",
-    "about",
-)
 
 
 @pytest.mark.asyncio
@@ -34,8 +24,8 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         for scope in ("thread", "room")
         for case in (
             "show_computer",
-            *(f"open_settings/{section}" for section in SETTINGS_SECTIONS),
-            "open_panel/members",
+            *(f"open_settings/{section}" for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])),
+            *(f"open_panel/{panel}" for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])),
         )
     }
 
@@ -43,7 +33,7 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
     assert contract["viewer_id"] == "@alice:localhost"
     assert contract["room_id"] == "!room:localhost"
     assert {case["id"] for case in cases} == expected_case_ids
-    assert len(cases) == 18
+    assert len(cases) == len(expected_case_ids)
     assert all(case["event"]["sender"] == "@mindroom_researcher:localhost" for case in cases)
 
     for case in cases:
@@ -56,6 +46,21 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         else:
             assert metadata["thread_id"] is None
             assert "m.relates_to" not in content
+
+
+@pytest.mark.asyncio
+async def test_contract_rejects_unmapped_registered_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adding a public tool must require a corresponding client contract case."""
+    original_init = ChatUITools.__init__
+
+    def init_with_new_action(self: ChatUITools) -> None:
+        original_init(self)
+        self.register(self.show_computer, name="new_action")
+
+    monkeypatch.setattr(ChatUITools, "__init__", init_with_new_action)
+
+    with pytest.raises(RuntimeError, match="new_action"):
+        await build_chat_ui_contract(tmp_path)
 
 
 @pytest.mark.asyncio
