@@ -177,3 +177,135 @@ async def test_async_acquisitions_balance_within_one_owner(*, detached_child: bo
         await child.release()
     assert not alive
     assert closes == 1
+
+
+class MCPTools(Toolkit):
+    """Test transport following the SDK's MRO admission contract, without MCP I/O."""
+
+    def __init__(self, name: str) -> None:
+        self.initialized = False
+        self.connects = 0
+        self.closes = 0
+        self.connect_started = asyncio.Event()
+        self.allow_connect = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.allow_close = asyncio.Event()
+        self.allow_connect.set()
+        self.allow_close.set()
+        super().__init__(name=name)
+
+    async def connect(self) -> None:  # ty: ignore[invalid-method-override] - SDK MCPTools uses async Toolkit overrides.
+        """Expose a deterministic barrier after acquisition but before readiness."""
+        self.connect_started.set()
+        await self.allow_connect.wait()
+        self.connects += 1
+        self.initialized = True
+
+    async def close(self) -> None:  # ty: ignore[invalid-method-override] - SDK MCPTools uses async Toolkit overrides.
+        """Expose a deterministic retirement barrier and count physical closes."""
+        assert self.initialized
+        self.close_started.set()
+        await self.allow_close.wait()
+        self.closes += 1
+        self.initialized = False
+
+
+async def _connect_mcp_actor(actor: Agent | Team) -> None:
+    if isinstance(actor, Team):
+        await team_init._connect_mcp_tools(actor)
+    else:
+        await agent_init.connect_mcp_tools(actor)
+
+
+async def _disconnect_mcp_actor(actor: Agent | Team) -> None:
+    if isinstance(actor, Team):
+        await team_init._disconnect_mcp_tools(actor)
+    else:
+        await agent_init.disconnect_mcp_tools(actor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("teams", [False, True])
+async def test_cancelled_retirement_admission_keeps_sdk_cleanup_balanced(*, teams: bool) -> None:
+    """Cancellation cannot record a phantom acquisition or break later admission."""
+    install_execution_resource_bindings()
+    toolkit, independent = MCPTools("retiring"), MCPTools("independent")
+    toolkit.allow_close.clear()
+    attempted = asyncio.Event()
+    first = Team(id="first", members=[], tools=[toolkit]) if teams else Agent(id="first", tools=[toolkit])
+    second_tools = [independent]
+    second = Team(id="second", members=[], tools=second_tools) if teams else Agent(id="second", tools=second_tools)
+
+    async def retire() -> None:
+        async with execution_resources():
+            await _connect_mcp_actor(first)
+            await _disconnect_mcp_actor(first)
+
+    async def cancelled_actor() -> None:
+        async with execution_resources():
+            try:
+                await _connect_mcp_actor(second)
+                second.tools = [independent, toolkit]
+                attempted.set()
+                await _connect_mcp_actor(second)
+            finally:
+                await _disconnect_mcp_actor(second)
+
+    first_task = asyncio.create_task(retire())
+    second_task: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(toolkit.close_started.wait(), 2)
+        second_task = asyncio.create_task(cancelled_actor())
+        await asyncio.wait_for(attempted.wait(), 2)
+        second_task.cancel()
+        toolkit.allow_close.set()
+        await asyncio.wait_for(first_task, 2)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(second_task, 2)
+        assert second._mcp_tools_initialized_on_run == []
+        assert not independent.initialized
+        assert independent.connects == independent.closes == 1
+        assert not toolkit.initialized
+        assert toolkit.closes == toolkit.connects
+        completed_generations = toolkit.connects
+        async with execution_resources():
+            await _connect_mcp_actor(first)
+            assert toolkit.initialized
+            assert toolkit.connects == completed_generations + 1
+            await _disconnect_mcp_actor(first)
+        assert not toolkit.initialized
+        assert toolkit.closes == toolkit.connects
+    finally:
+        toolkit.allow_close.set()
+        await asyncio.gather(first_task, *([second_task] if second_task is not None else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("teams", [False, True])
+async def test_cancelled_acquired_connection_still_releases_sdk_reference(*, teams: bool) -> None:
+    """Cancellation during connect completion retains the acquired cleanup obligation."""
+    install_execution_resource_bindings()
+    toolkit = MCPTools("connecting")
+    toolkit.allow_connect.clear()
+    actor = Team(id="actor", members=[], tools=[toolkit]) if teams else Agent(id="actor", tools=[toolkit])
+
+    async def run() -> None:
+        async with execution_resources():
+            try:
+                await _connect_mcp_actor(actor)
+            finally:
+                await _disconnect_mcp_actor(actor)
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(toolkit.connect_started.wait(), 2)
+        task.cancel()
+        toolkit.allow_connect.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert actor._mcp_tools_initialized_on_run == []
+        assert not toolkit.initialized
+        assert toolkit.connects == toolkit.closes == 1
+    finally:
+        toolkit.allow_connect.set()
+        await asyncio.gather(task, return_exceptions=True)

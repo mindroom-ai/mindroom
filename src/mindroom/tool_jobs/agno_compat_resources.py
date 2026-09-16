@@ -9,6 +9,7 @@ from agno.agent import _init as agent_init
 from agno.team import _init as team_init
 from agno.tools import Toolkit
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.tool_jobs.resources import (
     connect_async_execution_resource,
     connect_execution_resource,
@@ -71,6 +72,19 @@ def _async_bindings[Actor: _Actor](
     connect: _AsyncConnect[Actor],
     disconnect: _AsyncConnect[Actor],
 ) -> tuple[_AsyncConnect[Actor], _AsyncConnect[Actor]]:
+    async def admit_tool(actor: Actor, toolkit: Toolkit) -> None:
+        initialized = actor._mcp_tools_initialized_on_run or []
+        captured = copy(actor)
+        captured.tools = [toolkit]
+        captured._mcp_tools_initialized_on_run = []
+        await connect_async_execution_resource(
+            toolkit,
+            lambda: connect(captured),
+            lambda: disconnect(captured),
+        )
+        initialized.append(toolkit)
+        actor._mcp_tools_initialized_on_run = initialized
+
     async def open_tools(actor: Actor) -> None:
         if current_execution_resources() is None:
             await connect(actor)
@@ -80,19 +94,11 @@ def _async_bindings[Actor: _Actor](
                 base.__name__ == "MCPTools" for base in type(toolkit).__mro__
             ):
                 continue
-            initialized = actor._mcp_tools_initialized_on_run or []
-            if toolkit in initialized:
+            if toolkit in (actor._mcp_tools_initialized_on_run or []):
                 continue
-            captured = copy(actor)
-            captured.tools = [toolkit]
-            captured._mcp_tools_initialized_on_run = []
-            initialized.append(toolkit)
-            actor._mcp_tools_initialized_on_run = initialized
-            await connect_async_execution_resource(
-                toolkit,
-                lambda captured=captured: connect(captured),
-                lambda captured=captured: disconnect(captured),
-            )
+            # Publish the SDK cleanup obligation in the same drained transaction
+            # that acquires the reference, including any previous generation wait.
+            await run_coroutine_until_complete(admit_tool(actor, toolkit))
 
     async def close_tools(actor: Actor) -> None:
         if current_execution_resources() is None:
