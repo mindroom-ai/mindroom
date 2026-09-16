@@ -85,8 +85,13 @@ class UsageStatsTools(Toolkit):
             )
         return resolved, config
 
-    async def get_my_usage(self) -> str:
-        """Return retained usage for the current agent and canonical requester."""
+    async def get_my_usage(self, include_daily: bool = False) -> str:
+        """Return retained usage for the current agent and canonical requester.
+
+        Args:
+            include_daily: Include token totals, per-model breakdowns, and run counts by UTC date.
+
+        """
         resolved = self._context_or_error()
         if isinstance(resolved, str):
             return resolved
@@ -113,11 +118,17 @@ class UsageStatsTools(Toolkit):
             config=config,
             runtime_paths=context.runtime_paths,
             execution_identity=execution_identity,
+            include_daily=include_daily,
         )
         return self._payload("ok", **report.to_dict())
 
-    async def get_all_usage(self) -> str:
-        """Return retained usage for all sources when both admin gates grant access."""
+    async def get_all_usage(self, include_daily: bool = False) -> str:
+        """Return retained usage for all sources when both admin gates grant access.
+
+        Args:
+            include_daily: Include token totals, per-model breakdowns, and run counts by UTC date.
+
+        """
         resolved = self._admin_context_or_error()
         if isinstance(resolved, str):
             return resolved
@@ -126,5 +137,6 @@ class UsageStatsTools(Toolkit):
             collect_admin_usage,
             config=config,
             runtime_paths=context.runtime_paths,
+            include_daily=include_daily,
         )
         return self._payload("ok", **report.to_dict())

@@ -137,9 +137,26 @@ agents:
           admin_scope: true
 ```
 
-Both functions are intentionally parameter-free.
+Both functions accept an optional `include_daily` boolean, which defaults to `false`.
 `get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
 `get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
+
+### Daily Token Usage
+
+Call `get_my_usage(include_daily=True)` or `get_all_usage(include_daily=True)` to include token usage per day.
+The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
+Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
+The daily breakdown follows the same requester and administrator access rules as the rest of the report.
+Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
+The report's overall totals and overall `model_breakdown` expose the same counters.
+For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includes a `daily_breakdown` with the same daily totals, run counts, and per-model rows.
+Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
+
+`daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
+Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
+Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
+Both daily fields are omitted unless `include_daily=True`.
 
 ### Response And Coverage
 
@@ -151,13 +168,20 @@ The admin response groups session aggregates by configured agent or team ID.
 The self-response omits only the entity breakdown because its scope is already one agent and requester; it still includes `model_breakdown` and `model_coverage`.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
 Both responses group retained top-level runs by provider and model in `model_breakdown`.
+When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
+Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.
+Malformed model details or details that do not account for the run's token totals put the run's tokens under `unknown` and mark model and daily coverage as partially unavailable.
 Model rows include token totals and run counts and are sorted by total tokens.
+Each model counts a run once, while daily and user run counts count that run once across all its models.
 Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
 Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
 Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
+Agno 2.x session run blobs, including double-encoded JSON, and Agno 3 run tables are supported, including partly migrated databases.
+Missing counters are reported as zero, so zero does not prove that an older provider recorded that token category.
+These counters support cost estimates, but do not guarantee exact billing: provider-specific charging rules and calls outside retained session storage are not captured.
 
 Errors use the same envelope with a stable code.
 Common codes are `authorization_error` and `context_unavailable`.

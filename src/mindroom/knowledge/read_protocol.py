@@ -15,7 +15,7 @@ MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ReadRequest:
-    """Read one exact published collection; no provider credentials cross IPC."""
+    """Read an exact collection or its compatible current publication; no credentials cross IPC."""
 
     path: str
     collection: str
@@ -23,6 +23,7 @@ class ReadRequest:
     embedding: list[float] | None = None
     limit: int = 5
     filters: dict[str, Any] | None = None
+    published_settings: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)

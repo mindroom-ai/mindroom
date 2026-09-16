@@ -3,11 +3,20 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+import pytest
+from agno.metrics import ModelMetrics, RunMetrics
+from agno.run.agent import RunOutput
+from agno.session.agent import AgentSession
+
+from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -21,11 +30,10 @@ from mindroom.usage_stats_storage import (
     UsageStorageDiagnostic,
     UsageStorageSource,
 )
+from tests.conftest import create_agno_2_sessions_db, seed_session
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
-
-    import pytest
 
 
 def _config() -> Config:
@@ -89,6 +97,7 @@ def _run(
     total_tokens: int = 10,
     model_provider: str | None = "openai",
     model: str | None = "gpt-6-astra",
+    created_at: float | None = None,
 ) -> UsageRunNode:
     return UsageRunNode(
         team_id=None,
@@ -97,6 +106,7 @@ def _run(
         model_provider=model_provider,
         model=model,
         metrics=_metrics(total_tokens),
+        created_at=created_at,
     )
 
 
@@ -145,13 +155,17 @@ def _wire(
     monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
 
 
+@pytest.mark.parametrize("include_daily", [False, True])
 def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    include_daily: bool,
 ) -> None:
     source = _source()
+    first_day = datetime(2026, 9, 14, 23, 59, 59, tzinfo=UTC).timestamp()
+    second_day = datetime(2026, 9, 15, tzinfo=UTC).timestamp()
     cached = replace(
-        _run(run_id="cached"),
+        _run(run_id="cached", created_at=first_day),
         metrics=MappingProxyType({**_metrics(10), "cache_read_tokens": 6, "cache_write_tokens": 1}),
     )
     _wire(
@@ -168,16 +182,21 @@ def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs
                         run_id="alias",
                         total_tokens=20,
                         model="other-model",
+                        created_at=second_day,
                     ),
-                    _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15),
-                    _run(requester_id=None, run_id="unattributed", total_tokens=5),
+                    _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15, created_at=first_day),
+                    _run(requester_id=None, run_id="unattributed", total_tokens=5, created_at=first_day),
                     session_metrics=_metrics(100),
                 ),
             ),
         },
     )
 
-    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+    payload = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        include_daily=include_daily,
+    ).to_dict()
 
     users = payload["user_breakdown"]
     assert [row["user_id"] for row in users] == ["@alice:example.test", "@bob:example.test", None]
@@ -192,6 +211,415 @@ def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs
     assert payload["totals"]["total_tokens"] == 100
     assert "retained top-level runs" in payload["user_coverage"]["note"]
     assert "null" in payload["user_coverage"]["note"]
+    if include_daily:
+        alice_days = users[0]["daily_breakdown"]
+        assert [(day["date"], day["run_count"], day["totals"]["total_tokens"]) for day in alice_days] == [
+            ("2026-09-14", 1, 10),
+            ("2026-09-15", 1, 20),
+        ]
+        assert alice_days[0]["totals"]["input_tokens"] == 7
+        assert alice_days[0]["totals"]["output_tokens"] == 3
+        assert alice_days[0]["totals"]["cache_read_tokens"] == 6
+        assert alice_days[0]["totals"]["cache_write_tokens"] == 1
+        assert alice_days[0]["model_breakdown"] == [users[0]["model_breakdown"][1]]
+        assert alice_days[1]["model_breakdown"] == [users[0]["model_breakdown"][0]]
+        assert [(day["date"], day["totals"]["total_tokens"]) for day in users[1]["daily_breakdown"]] == [
+            ("2026-09-14", 15),
+        ]
+        assert [(day["date"], day["totals"]["total_tokens"]) for day in users[2]["daily_breakdown"]] == [
+            ("2026-09-14", 5),
+        ]
+        assert [
+            (day["date"], day["run_count"], day["totals"]["total_tokens"]) for day in payload["daily_breakdown"]
+        ] == [
+            ("2026-09-14", 3, 30),
+            ("2026-09-15", 1, 20),
+        ]
+    else:
+        assert all("daily_breakdown" not in user for user in users)
+
+
+def test_daily_usage_groups_utc_dates_and_deduplicates_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _source()
+    team = _source(scope="team", agent_name=None)
+    before_midnight = replace(
+        _run(created_at=datetime(2026, 9, 14, 23, 59, 59, tzinfo=UTC).timestamp()),
+        metrics=MappingProxyType({**_metrics(), "cache_read_tokens": 4, "reasoning_tokens": 2}),
+    )
+    after_midnight = _run(
+        run_id="later",
+        total_tokens=20,
+        created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp(),
+    )
+    _wire(
+        monkeypatch,
+        (source, team),
+        {
+            source.path_label: (
+                _row(source, after_midnight, before_midnight, before_midnight, session_metrics=_metrics(100)),
+                _row(source, before_midnight, row_key="session-2", session_metrics=_metrics(70)),
+            ),
+            team.path_label: (_row(team, after_midnight, session_metrics=_metrics(100)),),
+        },
+    )
+    config = _config()
+    config.timezone = "America/Los_Angeles"
+
+    payload = collect_admin_usage(config=config, runtime_paths=_paths(tmp_path), include_daily=True).to_dict()
+
+    assert [(row["date"], row["totals"]["total_tokens"], row["run_count"]) for row in payload["daily_breakdown"]] == [
+        ("2026-09-14", 20, 2),
+        ("2026-09-15", 40, 2),
+    ]
+    assert payload["daily_breakdown"][0]["totals"] == {
+        "input_tokens": 14,
+        "output_tokens": 6,
+        "total_tokens": 20,
+        "cache_read_tokens": 8,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 4,
+        "audio_input_tokens": 0,
+        "audio_output_tokens": 0,
+        "audio_total_tokens": 0,
+    }
+    assert payload["totals"]["total_tokens"] == 270
+    assert payload["daily_coverage"]["scanned_sources"] == 2
+    assert payload["daily_coverage"]["unavailable_sources"] == 0
+    assert "UTC" in payload["daily_coverage"]["note"]
+    assert "retained top-level runs" in payload["daily_coverage"]["note"]
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_daily_self_usage_keeps_requester_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    private: bool,
+) -> None:
+    source = _source(scope="private_agent" if private else "shared_agent", requester_isolated=private)
+    timestamp = datetime(2026, 9, 15, tzinfo=UTC).timestamp()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(requester_id="@telegram-alice:example.test", created_at=timestamp),
+                    _run(requester_id=None if private else "@bob:example.test", run_id="other", created_at=timestamp),
+                    session_metrics=_metrics(100),
+                ),
+            ),
+        },
+    )
+
+    payload = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        include_daily=True,
+    ).to_dict()
+
+    assert len(payload["daily_breakdown"]) == 1
+    assert payload["daily_breakdown"][0]["totals"]["total_tokens"] == (20 if private else 10)
+    assert payload["daily_breakdown"][0]["run_count"] == (2 if private else 1)
+    assert payload["totals"]["total_tokens"] == (100 if private else 10)
+    assert payload["daily_coverage"]["unavailable_sources"] == 0
+    assert "user_breakdown" not in payload
+    assert "@bob" not in str(payload)
+
+
+@pytest.mark.parametrize("created_at", [None, float("nan"), float("inf"), 10**100])
+def test_daily_usage_skips_undatable_runs_without_losing_other_totals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    created_at: float | None,
+) -> None:
+    source = _source()
+    unavailable = UsageStorageDiagnostic(path_label="unreadable.db", status="corrupt", detail="database corrupt")
+    _wire(
+        monkeypatch,
+        (source, unavailable),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="dated", created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
+                    _run(run_id="undated", requester_id="@bob:example.test", created_at=created_at),
+                    session_metrics=_metrics(100),
+                ),
+            ),
+        },
+    )
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path), include_daily=True).to_dict()
+
+    assert payload["daily_breakdown"][0]["totals"]["total_tokens"] == 10
+    assert payload["daily_breakdown"][0]["run_count"] == 1
+    assert payload["daily_coverage"]["unavailable_sources"] == 2
+    assert payload["model_coverage"]["unavailable_sources"] == 1
+    assert payload["model_breakdown"][0]["totals"]["total_tokens"] == 20
+    assert payload["totals"]["total_tokens"] == 100
+    users = {user["user_id"]: user for user in payload["user_breakdown"]}
+    assert users["@alice:example.test"]["daily_breakdown"] == payload["daily_breakdown"]
+    assert users["@bob:example.test"]["daily_breakdown"] == []
+    assert users["@bob:example.test"]["totals"]["total_tokens"] == 10
+
+
+def test_daily_usage_returns_empty_breakdown_without_retained_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, session_metrics=_metrics(100)),)})
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path), include_daily=True).to_dict()
+
+    assert payload["daily_breakdown"] == []
+    assert payload["daily_coverage"]["scanned_sources"] == 1
+    assert payload["totals"]["total_tokens"] == 100
+
+
+@pytest.mark.parametrize("admin", [False, True])
+def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool) -> None:
+    paths = _paths(tmp_path)
+    config = Config(agents={"code": AgentConfig(display_name="Code")})
+    storage = create_state_storage(
+        "code",
+        paths.storage_root / "agents" / "code",
+        subdir="sessions",
+        session_table="code_sessions",
+    )
+    first_day = int(datetime(2026, 9, 14, tzinfo=UTC).timestamp())
+    metrics = RunMetrics(
+        input_tokens=17,
+        output_tokens=7,
+        total_tokens=24,
+        cache_read_tokens=10,
+        cache_write_tokens=3,
+        details={
+            "model": [
+                ModelMetrics(
+                    id="model-a",
+                    provider="provider-a",
+                    input_tokens=10,
+                    output_tokens=4,
+                    total_tokens=14,
+                    cache_read_tokens=6,
+                    cache_write_tokens=2,
+                ),
+            ],
+            "reasoning_model": [
+                ModelMetrics(
+                    id="model-a",
+                    provider="provider-a",
+                    input_tokens=2,
+                    output_tokens=1,
+                    total_tokens=3,
+                    cache_read_tokens=1,
+                ),
+            ],
+            "output_model": [
+                ModelMetrics(
+                    id="model-b",
+                    provider="provider-b",
+                    input_tokens=5,
+                    output_tokens=2,
+                    total_tokens=7,
+                    cache_read_tokens=3,
+                    cache_write_tokens=1,
+                ),
+            ],
+        },
+    )
+    totals = {
+        "input_tokens": 41,
+        "output_tokens": 11,
+        "total_tokens": 52,
+        "cache_read_tokens": 24,
+        "cache_write_tokens": 7,
+    }
+    try:
+        seed_session(
+            storage,
+            AgentSession(
+                session_id="session-1",
+                agent_id="code",
+                user_id="@alice:example.test",
+                session_data={"session_metrics": totals},
+                runs=[
+                    RunOutput(
+                        run_id="mixed",
+                        model_provider="provider-a",
+                        model="model-a",
+                        created_at=first_day,
+                        metrics=metrics,
+                    ),
+                    RunOutput(
+                        run_id="other-provider",
+                        model_provider="other-provider",
+                        model="model-a",
+                        created_at=first_day,
+                        metrics=RunMetrics(
+                            input_tokens=20,
+                            output_tokens=3,
+                            total_tokens=23,
+                            cache_read_tokens=12,
+                            cache_write_tokens=4,
+                        ),
+                    ),
+                    RunOutput(
+                        run_id="next-day",
+                        model_provider="provider-a",
+                        model="model-a",
+                        created_at=first_day + 86400,
+                        metrics=RunMetrics(input_tokens=4, output_tokens=1, total_tokens=5, cache_read_tokens=2),
+                    ),
+                ],
+            ),
+        )
+    finally:
+        storage.close()
+
+    report = (
+        collect_admin_usage(config=config, runtime_paths=paths, include_daily=True)
+        if admin
+        else collect_self_usage(
+            agent_name="code",
+            requester_id="@alice:example.test",
+            config=config,
+            runtime_paths=paths,
+            execution_identity=_identity(),
+            include_daily=True,
+        )
+    ).to_dict()
+
+    assert {key: report["totals"][key] for key in totals} == totals
+    daily = report["daily_breakdown"]
+    assert [(row["date"], row["run_count"]) for row in daily] == [("2026-09-14", 2), ("2026-09-15", 1)]
+    assert [
+        (row["provider"], row["model"], row["run_count"], row["totals"]["total_tokens"])
+        for row in daily[0]["model_breakdown"]
+    ] == [
+        ("other-provider", "model-a", 1, 23),
+        ("provider-a", "model-a", 1, 17),
+        ("provider-b", "model-b", 1, 7),
+    ]
+    assert {key: daily[0]["totals"][key] for key in totals} == {
+        "input_tokens": 37,
+        "output_tokens": 10,
+        "total_tokens": 47,
+        "cache_read_tokens": 22,
+        "cache_write_tokens": 7,
+    }
+    assert {key: daily[0]["model_breakdown"][1]["totals"][key] for key in totals} == {
+        "input_tokens": 12,
+        "output_tokens": 5,
+        "total_tokens": 17,
+        "cache_read_tokens": 7,
+        "cache_write_tokens": 2,
+    }
+    assert [
+        (row["provider"], row["model"], row["run_count"], row["totals"]["total_tokens"])
+        for row in report["model_breakdown"]
+    ] == [
+        ("other-provider", "model-a", 1, 23),
+        ("provider-a", "model-a", 2, 22),
+        ("provider-b", "model-b", 1, 7),
+    ]
+    assert report["daily_coverage"]["unavailable_sources"] == 0
+    if admin:
+        assert report["user_breakdown"][0]["run_count"] == 3
+        assert report["user_breakdown"][0]["totals"]["total_tokens"] == 52
+        assert report["user_breakdown"][0]["model_breakdown"] == report["model_breakdown"]
+        assert report["user_breakdown"][0]["daily_breakdown"] == report["daily_breakdown"]
+
+
+@pytest.mark.parametrize("double_encoded", [False, True])
+def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: bool) -> None:
+    paths = _paths(tmp_path)
+    database = create_agno_2_sessions_db(paths.storage_root / "agents" / "code" / "sessions" / "code.db")
+    if not double_encoded:
+        with sqlite3.connect(database) as connection:
+            runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
+            connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=paths,
+        execution_identity=_identity(),
+        include_daily=True,
+    ).to_dict()
+
+    assert report["totals"]["total_tokens"] == 12
+    assert len(report["daily_breakdown"]) == 1
+    day = report["daily_breakdown"][0]
+    assert day["date"] == "2023-11-14"
+    assert day["run_count"] == 3
+    assert day["totals"]["input_tokens"] == 6
+    assert day["totals"]["output_tokens"] == 6
+    assert day["totals"]["cache_read_tokens"] == 0
+    assert day["model_breakdown"] == report["model_breakdown"]
+    assert day["model_breakdown"][0]["provider"] == "unknown"
+    assert day["model_breakdown"][0]["model"] == "unknown"
+    assert day["model_breakdown"][0]["totals"]["total_tokens"] == 12
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        "invalid",
+        {},
+        {"model": []},
+        {"model": ["invalid"]},
+        {"model": [{"id": "model-a", "provider": "provider-a", "total_tokens": -1}]},
+        {"model": [{"id": "model-a", "provider": "provider-a", "total_tokens": 5}]},
+    ],
+)
+def test_unusable_model_details_preserve_daily_totals(tmp_path: Path, details: object) -> None:
+    paths = _paths(tmp_path)
+    config = Config(agents={"code": AgentConfig(display_name="Code")})
+    storage = create_state_storage(
+        "code",
+        paths.storage_root / "agents" / "code",
+        subdir="sessions",
+        session_table="code_sessions",
+    )
+    try:
+        storage.upsert_session(AgentSession(session_id="session-1", agent_id="code", user_id="@alice:example.test"))
+        storage.upsert_run(
+            {
+                "run_id": "run-1",
+                "model_provider": "provider-a",
+                "model": "model-a",
+                "created_at": 1_700_000_000,
+                "metrics": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20, "details": details},
+            },
+            session_id="session-1",
+        )
+    finally:
+        storage.close()
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=config,
+        runtime_paths=paths,
+        execution_identity=_identity(),
+        include_daily=True,
+    ).to_dict()
+
+    assert report["totals"]["total_tokens"] == 20
+    day = report["daily_breakdown"][0]
+    assert day["totals"]["total_tokens"] == 20
+    assert day["model_breakdown"][0]["provider"] == "unknown"
+    assert day["model_breakdown"][0]["model"] == "unknown"
+    assert day["model_breakdown"][0]["totals"]["total_tokens"] == 20
+    assert report["model_coverage"]["unavailable_sources"] == 1
+    assert report["daily_coverage"]["unavailable_sources"] == 1
 
 
 def test_admin_resolves_repeated_requesters_once_per_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
