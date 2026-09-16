@@ -7,7 +7,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -114,6 +114,19 @@ class _ApprovalCase:
                 ai_response=AsyncMock(side_effect=ResponsePausedForApproval(pause)),
             ),
             patch("mindroom.approval_response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))),
+            # Inspect the durable checkpoint before the test claims resumed execution.
+            patch.object(
+                self.runner,
+                "deps",
+                replace(
+                    self.runner.deps,
+                    approval_store=MagicMock(
+                        spec=type(self.principal),
+                        wraps=self.principal,
+                        claim_approval_continuation=AsyncMock(return_value=None),
+                    ),
+                ),
+            ),
         ):
             assert await self.controller.handle_text_event(self.room, event) is TurnDispatchOutcome.DEFERRED
         newer = await self.principal.approval_continuation_for_source("$newer-edit")
@@ -369,6 +382,19 @@ async def _paused_case(  # noqa: PLR0915
                 ai_response=model,
             ),
             patch("mindroom.approval_response.evaluate_tool_approval", approval_evaluation),
+            # Inspect the durable checkpoint before the test claims resumed execution.
+            patch.object(
+                runner,
+                "deps",
+                replace(
+                    runner.deps,
+                    approval_store=MagicMock(
+                        spec=type(principal),
+                        wraps=principal,
+                        claim_approval_continuation=AsyncMock(return_value=None),
+                    ),
+                ),
+            ),
         ):
             if ordinary_pause:
                 original_request = replace(

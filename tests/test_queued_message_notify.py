@@ -16,6 +16,7 @@ from agno.agent import Agent as AgnoAgent
 from agno.db.base import BaseDb, SessionType
 from agno.media import Image
 from agno.models.message import Message
+from agno.models.response import ModelResponse
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -469,7 +470,17 @@ class _FakeStorage:
         self.closed = True
 
 
-class _FakeModel:
+class _FakeResponseModel:
+    async def aresponse(self, messages: list[Message], **_kwargs: object) -> ModelResponse:
+        del messages
+        return ModelResponse(content="ok")
+
+    async def aresponse_stream(self, messages: list[Message], **_kwargs: object) -> AsyncIterator[ModelResponse]:
+        del messages
+        yield ModelResponse(content="ok")
+
+
+class _FakeModel(_FakeResponseModel):
     def format_function_call_results(
         self,
         messages: list[Message],
@@ -491,7 +502,7 @@ class _FakeModel:
             messages.append(Message(role="user", content="Take note of the following content"))
 
 
-class _FakeModelWithoutFunctionCallMedia:
+class _FakeModelWithoutFunctionCallMedia(_FakeResponseModel):
     def format_function_call_results(
         self,
         messages: list[Message],

@@ -2522,43 +2522,59 @@ class ResponseRunner:
         early_placeholder: _EarlyPlaceholderState,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
-        """Dispatch journal-owned approval work through normal turn serialization."""
+        """Keep executable approval generations inside their response's lifecycle."""
         owned = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )
         if owned is None:
-            return await locked_operation(target, early_placeholder)
-        self.deps.logger.info(
-            "response_source_owned_by_approval_continuation",
-            source_event_id=request.response_envelope.source_event_id,
-            approval_id=owned.approval_id,
-            approval_state=owned.state,
-        )
-        recovered, event_id = await self._recover_nonready_approval(owned, target=target)
-        if recovered:
-            return event_id
-        if not is_sender_allowed_for_entity_replies_in_room(
-            owned.requester_id,
-            _reply_authorization_entity_names(
+            event_id = await locked_operation(target, early_placeholder)
+            owned = await self.deps.approval_store.approval_continuation_for_source(
+                request.response_envelope.source_event_id,
+            )
+            if owned is None or owned.state != "ready":
+                return event_id
+        while True:
+            self.deps.logger.info(
+                "response_source_owned_by_approval_continuation",
+                source_event_id=request.response_envelope.source_event_id,
+                approval_id=owned.approval_id,
+                approval_state=owned.state,
+            )
+            recovered, event_id = await self._recover_nonready_approval(owned, target=target)
+            if recovered:
+                return event_id
+            if not is_sender_allowed_for_entity_replies_in_room(
+                owned.requester_id,
+                _reply_authorization_entity_names(
+                    self.deps.runtime.config,
+                    owned.entity_name,
+                    owned.team_member_names,
+                ),
                 self.deps.runtime.config,
-                owned.entity_name,
-                owned.team_member_names,
-            ),
-            self.deps.runtime.config,
-            owned.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
-        ):
-            return await self._settle_unauthorized_approval_continuation(owned)
-        claimed = await self.deps.approval_store.claim_approval_continuation(
-            owned.approval_id,
-            runtime_generation=self.deps.approval_runtime_generation,
-            legacy_show_tool_calls=self._show_tool_calls(owned.entity_name),
-        )
-        if claimed is None:
-            return None
-        return await self._run_owned_approval_continuation(claimed, target=target)
+                owned.room_id,
+                self.deps.runtime_paths,
+                self.deps.runtime.agent_reply_memberships,
+                require_resolved_membership=True,
+            ):
+                return await self._settle_unauthorized_approval_continuation(owned)
+            claimed = await self.deps.approval_store.claim_approval_continuation(
+                owned.approval_id,
+                runtime_generation=self.deps.approval_runtime_generation,
+                legacy_show_tool_calls=self._show_tool_calls(owned.entity_name),
+            )
+            if claimed is None:
+                return None
+            event_id = await self._run_owned_approval_continuation(claimed, target=target)
+            owned = await self.deps.approval_store.approval_continuation_for_source(
+                request.response_envelope.source_event_id,
+            )
+            if (
+                owned is None
+                or owned.approval_id != claimed.approval_id
+                or owned.state != "ready"
+                or owned.generation <= claimed.generation
+            ):
+                return event_id
 
     async def _settle_unauthorized_approval_continuation(
         self,

@@ -238,36 +238,41 @@ class StopManager:
         delay: float = 5.0,
     ) -> None:
         """Clear tracking for a specific message and optionally remove stop button."""
+        tracked = self.tracked_messages.get(message_id)
+        if tracked is None:
+            logger.debug("Message not tracked, skipping cleanup", message_id=message_id)
+            return
+        reaction_event_id = tracked.reaction_event_id
 
         async def delayed_clear() -> None:
             """Clear the message and remove stop button after a delay."""
-            if remove_button and message_id in self.tracked_messages:
-                tracked = self.tracked_messages[message_id]
-                if tracked.reaction_event_id:
-                    reaction_event_id = tracked.reaction_event_id
-                    logger.info(
-                        "Removing stop button in cleanup",
+            if remove_button and reaction_event_id:
+                logger.info(
+                    "Removing stop button in cleanup",
+                    message_id=message_id,
+                    **self._log_target(tracked.target),
+                )
+                try:
+                    await client.room_redact(
+                        room_id=tracked.target.room_id,
+                        event_id=reaction_event_id,
+                        reason="Response completed",
+                    )
+                    if (
+                        self.tracked_messages.get(message_id) is tracked
+                        and tracked.reaction_event_id == reaction_event_id
+                    ):
+                        tracked.reaction_event_id = None
+                except Exception as e:
+                    logger.warning(
+                        "stop_button_cleanup_failed",
                         message_id=message_id,
+                        error=str(e),
                         **self._log_target(tracked.target),
                     )
-                    try:
-                        await client.room_redact(
-                            room_id=tracked.target.room_id,
-                            event_id=reaction_event_id,
-                            reason="Response completed",
-                        )
-                        tracked.reaction_event_id = None
-                    except Exception as e:
-                        logger.warning(
-                            "stop_button_cleanup_failed",
-                            message_id=message_id,
-                            error=str(e),
-                            **self._log_target(tracked.target),
-                        )
 
             await asyncio.sleep(delay)
-            if message_id in self.tracked_messages:
-                tracked = self.tracked_messages[message_id]
+            if self.tracked_messages.get(message_id) is tracked:
                 logger.info(
                     "Clearing tracked message after delay",
                     message_id=message_id,
@@ -276,18 +281,14 @@ class StopManager:
                 )
                 del self.tracked_messages[message_id]
 
-        if message_id in self.tracked_messages:
-            tracked = self.tracked_messages[message_id]
-            logger.info(
-                "Scheduling message cleanup",
-                message_id=message_id,
-                delay=delay,
-                remove_button=remove_button,
-                **self._log_target(tracked.target),
-            )
-            self._track_cleanup_task(asyncio.create_task(delayed_clear()))
-        else:
-            logger.debug("Message not tracked, skipping cleanup", message_id=message_id)
+        logger.info(
+            "Scheduling message cleanup",
+            message_id=message_id,
+            delay=delay,
+            remove_button=remove_button,
+            **self._log_target(tracked.target),
+        )
+        self._track_cleanup_task(asyncio.create_task(delayed_clear()))
 
     def discard_message(self, message_id: str) -> None:
         """Drop process-local tracking without scheduling Matrix cleanup."""

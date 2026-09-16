@@ -6,16 +6,18 @@ them to the Agno methods that currently expose the required lifecycle stages.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 
     from agno.exceptions import ModelProviderError
     from agno.models.base import Model
     from agno.models.message import Message
     from agno.models.response import ModelResponse
+    from agno.run.agent import RunOutputEvent
+    from agno.run.team import TeamRunOutputEvent
 
 type _AsyncInvoke = Callable[..., Coroutine[object, object, ModelResponse]]
 type _AsyncStream = Callable[..., AsyncIterator[ModelResponse]]
@@ -93,18 +95,22 @@ def install_message_projection(
 # AGNO_COMPAT: Post-tool callbacks lack mutable messages and results.
 # Reason: after_tool_results exists in Agno 3.0.9 but lacks the mutable messages
 # and results and is not exposed as an owner callback through Agent/Team runs.
+# Approved continuations append results directly before entering aresponse or
+# aresponse_stream, bypassing both formatting and media callbacks.
 # Upstream issue: No matching public post-tool message callback issue identified.
 # Upstream PR: None identified; existing checkpoint callbacks are only a partial API.
 # Remove when: Public callbacks expose messages/results after formatting and media
-# insertion; retain the owner's notice deduplication and stop-after policy.
-# Coverage: tests/test_queued_message_notify.py.
+# insertion, including resumed batches; retain the owner's notice deduplication
+# and stop-after policy.
+# Coverage: tests/test_queued_message_notify.py; tests/test_approval_queued_notice.py.
 def install_tool_result_callback(
     model: Model,
     *,
     marker: str,
     callback: Callable[[list[Message], list[Message]], None],
+    before_response: Callable[[list[Message]], None],
 ) -> None:
-    """Observe both Agno stages that append messages after a tool batch."""
+    """Observe tool-result stages and response entry after approved batches."""
     try:
         original_format = model.format_function_call_results
         model_dict = vars(model)
@@ -113,6 +119,28 @@ def install_tool_result_callback(
     if model_dict.get(marker) is True:
         return
     model_dict[marker] = True
+    original_response = cast("Callable[..., Awaitable[ModelResponse]]", model.aresponse)
+    original_stream = cast(
+        "Callable[..., AsyncGenerator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]]",
+        model.aresponse_stream,
+    )
+
+    async def response(messages: list[Message], *args: object, **kwargs: object) -> ModelResponse:
+        before_response(messages)
+        return await original_response(messages, *args, **kwargs)
+
+    async def response_stream(
+        messages: list[Message],
+        *args: object,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
+        before_response(messages)
+        async with aclosing(original_stream(messages, *args, **kwargs)) as stream:
+            async for event in stream:
+                yield event
+
+    model_dict["aresponse"] = response
+    model_dict["aresponse_stream"] = response_stream
 
     def format_results(
         messages: list[Message],
