@@ -132,6 +132,8 @@ class ToolMetadata:
 
     ``requires_room_context`` marks toolkits that need the live Matrix room
     runtime, including its client, requester, and conversation context.
+    ``requires_primary_runtime`` marks toolkits that cannot execute through a
+    sandbox worker even when worker routing is requested.
     """
 
     name: str
@@ -143,6 +145,7 @@ class ToolMetadata:
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
     consumes_workspace_paths: bool = False
     requires_room_context: bool = False
+    requires_primary_runtime: bool = False
     icon: str | None = None
     icon_color: str | None = None
     config_fields: list[ConfigField] | None = None

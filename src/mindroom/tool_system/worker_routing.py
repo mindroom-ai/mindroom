@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.declarations import ToolMetadata
 
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
@@ -493,9 +494,9 @@ def unsupported_shared_only_integration_names(
     return [name for name in names if _requires_shared_only_integration_scope(name)]
 
 
-def tool_stays_local(name: str) -> bool:
+def tool_stays_local(name: str, *, metadata: ToolMetadata | None = None) -> bool:
     """Return whether one tool always stays in the primary runtime."""
-    return name in _LOCAL_ONLY_TOOL_NAMES
+    return name in _LOCAL_ONLY_TOOL_NAMES or (metadata is not None and metadata.requires_primary_runtime)
 
 
 def unsupported_shared_only_integration_message(

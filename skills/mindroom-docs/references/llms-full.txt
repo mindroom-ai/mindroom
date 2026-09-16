@@ -13107,6 +13107,70 @@ Use `allowed_email_domains` to restrict verified email claims by domain.
 Use `allowed_hosted_domains` when the provider supplies a verified hosted-domain claim.
 If a configured restriction cannot be checked from verified claims, MindRoom fails the callback closed and does not save credentials.
 
+### Additional Google workspaces
+
+Use `GoogleWorkspaceConfig` to expose another Google account alongside the built-in tools.
+Each workspace gets separate OAuth providers, stored connections, and function names while reusing the existing Google tool implementations and Connections page.
+Existing tools and saved logins remain unchanged; no credential migration is needed.
+
+For example, a plugin can use one module for both registrations:
+
+```json
+{
+  "name": "google-workspaces",
+  "tools_module": "workspaces.py",
+  "oauth_module": "workspaces.py"
+}
+```
+
+```python
+# workspaces.py
+from mindroom.tool_system.google_workspaces import (
+    GoogleWorkspaceConfig,
+    google_workspace_oauth_providers,
+    register_google_workspace_tools,
+)
+
+WORKSPACES = (
+    GoogleWorkspaceConfig(
+        name="secondary",
+        display_name="Secondary",
+        client_config_service="secondary_google_oauth_client",
+        allowed_hosted_domains=("secondary.example",),
+        services=("gmail",),
+    ),
+)
+
+for workspace in WORKSPACES:
+    register_google_workspace_tools(workspace)
+
+
+def register_oauth_providers(settings, runtime_paths):
+    return tuple(
+        provider
+        for workspace in WORKSPACES
+        for provider in google_workspace_oauth_providers(workspace)
+    )
+```
+
+Enable the plugin and add `secondary_gmail` beside `gmail` in the agent's tools.
+The additional Connections card is labeled **Secondary Gmail**.
+When it needs a login, the tool returns its own chat authorization link.
+Google must verify a hosted domain from `allowed_hosted_domains`; choosing a personal account or another organization's account fails without saving credentials.
+
+Provision the workspace's OAuth client through a [shared credential seed](https://docs.mindroom.chat/configuration/#credential-seeds) with `client_id` and `client_secret` under `secondary_google_oauth_client`.
+Enable the Gmail API and register the exact callback `https://your-host/api/oauth/secondary_google_gmail/callback` on that client before exposing the tool.
+Workspace tools require their own OAuth connection and never fall back to the default Google client or a global service account.
+Like the built-in Google tools, they always execute in the primary runtime, where their OAuth credentials are managed.
+
+Function names are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`.
+Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
+
+Add more workspace definitions with distinct names and client services as needed.
+Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, and `google_sheets`.
+Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
+Keep workspace names stable because they identify stored connections.
+
 ### Minimal example
 
 ```python
@@ -13188,7 +13252,8 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `helper_text` | string | `None` | Markdown help text shown in the dashboard setup panel |
 | `auth_provider` | string | `None` | OAuth provider identifier when using OAuth-based setup |
 | `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
-| `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | `PRIMARY` or `WORKER` — controls whether the tool runs on the primary agent or a sandbox worker |
+| `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
+| `requires_primary_runtime` | bool | `false` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
 
 ### Dependencies
 

@@ -459,6 +459,9 @@ def load_plugin_module(
     """Load a plugin module from a configured plugin root."""
     if module_path is None:
         return None
+    # Built-in decorators must run before any plugin registration owner is active.
+    import mindroom.tools  # noqa: F401, PLC0415
+
     try:
         mtime = module_path.stat().st_mtime
     except OSError as exc:
@@ -471,9 +474,7 @@ def load_plugin_module(
     if cached is not None and cached.mtime == mtime and cached.module_name == module_name:
         return cached.module
 
-    previous_registrations_by_module_name = (
-        _prepare_plugin_tool_module_reload(module_name, cached) if kind == "tools" else {}
-    )
+    previous_registrations_by_module_name = _prepare_plugin_tool_module_reload(module_name, cached)
 
     if cached is not None and cached.module_name != module_name:
         sys.modules.pop(cached.module_name, None)
@@ -486,26 +487,17 @@ def load_plugin_module(
     module, _, previous_packages = prepared_module
 
     try:
-        if kind == "tools":
-            with scoped_plugin_registration_owner(module_name):
-                _exec_plugin_source(module_path, module)
-        else:
+        # A module may provide several capabilities and be discovered through any
+        # of them first. Registrations always belong to that plugin module.
+        with scoped_plugin_registration_owner(module_name):
             _exec_plugin_source(module_path, module)
     except BaseException as exc:
-        if kind == "tools":
-            _restore_failed_plugin_tool_module_reload(
-                module_path,
-                module_name,
-                cached,
-                previous_registrations_by_module_name,
-            )
-        else:
-            sys.modules.pop(module_name, None)
-            if cached is not None:
-                plugin_imports._MODULE_IMPORT_CACHE[module_path] = cached
-                sys.modules[cached.module_name] = cached.module
-            else:
-                plugin_imports._MODULE_IMPORT_CACHE.pop(module_path, None)
+        _restore_failed_plugin_tool_module_reload(
+            module_path,
+            module_name,
+            cached,
+            previous_registrations_by_module_name,
+        )
         plugin_imports._restore_plugin_package_chain(previous_packages)
         _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
