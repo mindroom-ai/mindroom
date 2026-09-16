@@ -197,3 +197,21 @@ async def test_acceptance_reconciles_config_before_browser_continuity(
         assert second.endpoint == first.endpoint
         assert container.status == "running"
         assert len(client.containers.created_containers) == 1
+
+
+@pytest.mark.parametrize("query", ["", "?after-chat=1"])
+def test_native_fixture_tab_matching_keeps_exact_origin_and_path(
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+) -> None:
+    """Continuity navigation keeps the fixture discoverable among unrelated tabs."""
+    module = _driver(monkeypatch)
+    tabs = [
+        {"index": 0, "url": "https://127.0.0.1:8767/"},
+        {"index": 1, "url": "http://localhost:8767/"},
+        {"index": 2, "url": "http://127.0.0.1:8768/"},
+        {"index": 3, "url": "http://127.0.0.1:8767/other"},
+        {"index": 4, "url": "chrome://newtab/"},
+        {"index": 5, "url": "http://127.0.0.1:8767/" + query},
+    ]
+    assert module.fixture_tab_index(tabs) == 5

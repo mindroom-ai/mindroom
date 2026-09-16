@@ -518,6 +518,11 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
         return app
 
 
+def fixture_tab_index(tabs: list[dict[str, Any]]) -> int:
+    """Find the fixture page after native tab controls change its index."""
+    return next(tab["index"] for tab in tabs if tab["url"].split("?", 1)[0] == "http://127.0.0.1:8767/")
+
+
 async def connect(page: Page, session: dict[str, Any]) -> None:
     """Wait for a real connected noVNC stream."""
     await connect_viewer(page, session)
@@ -721,7 +726,7 @@ with sync_playwright() as playwright:
                 current_session = await client.get(path, headers=headers)
                 assert current_session.status_code == 200
                 assert current_session.json()["session_id"] == before_session_id
-                await page.wait_for_function(FRAMEBUFFER)
+                await page.wait_for_function(framebuffer)
                 assert await page.evaluate("window.probe.connected && !window.probe.disconnected")
                 result["chat_update_container_id"] = after_container
                 result["chat_updates_visible_in_worker"] = True
@@ -782,9 +787,7 @@ with sync_playwright() as playwright:
                     native_tabs = await fixture.browser(action="tabs")
                     assert any(tab["title"] == "New Tab" for tab in native_tabs["tabs"]), native_tabs
                     if fixture.args.provider == "browser_mcp":
-                        opened["targetId"] = next(
-                            tab["index"] for tab in native_tabs["tabs"] if tab["url"] == "http://127.0.0.1:8767/"
-                        )
+                        opened["targetId"] = fixture_tab_index(native_tabs["tabs"])
                     selected = await fixture.browser(
                         action=action,
                         targetId=opened["targetId"],
