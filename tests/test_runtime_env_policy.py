@@ -551,6 +551,7 @@ def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_ide
     flag = runtime_env_policy.WORKER_COMPUTER_ENABLED_ENV
     env = {
         "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
         "MINDROOM_KUBERNETES_WORKER_IMAGE": "worker:test",
         "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "storage",
     }

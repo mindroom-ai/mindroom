@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import stat
 from typing import TYPE_CHECKING
 
 from mcp import StdioServerParameters
@@ -88,12 +89,13 @@ class WorkerBrowserMCP:
         if function_name not in browser_mcp_catalog():
             msg = "Unsupported native browser MCP function."
             raise ValueError(msg)
+        output = self._output_path(self._output, directory=True)
         arguments = self._file_arguments(function_name, arguments)
         try:
             if not self._ready:
                 self._workspace.mkdir(parents=True, exist_ok=True)
                 self._profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-                self._output.mkdir(parents=True, exist_ok=True)
+                output.mkdir(parents=True, exist_ok=True)
                 await self._verifier.start()
                 await self._proxy.start()
                 self._session = PlaywrightMCPSession(self._server_parameters())
@@ -110,7 +112,14 @@ class WorkerBrowserMCP:
         return tool_result_from_call_result("browser_mcp", result)
 
     def _file_arguments(self, function_name: str, arguments: dict[str, object]) -> dict[str, object]:
-        """Confine upload/drop files before startup; retain native cancellation/data-only calls."""
+        """Confine native files before startup; retain cancellation and default outputs."""
+        schema = browser_mcp_catalog()[function_name]["inputSchema"]
+        if "filename" in schema["properties"] and "filename" in arguments:
+            filename = arguments["filename"]
+            if not isinstance(filename, str) or not filename:
+                msg = "Native browser filename must be a non-empty file path."
+                raise ValueError(msg)
+            arguments = {**arguments, "filename": str(self._output_path(self._workspace / filename))}
         if function_name not in {"browser_file_upload", "browser_drop"} or "paths" not in arguments:
             return arguments
         paths = arguments["paths"]
@@ -132,6 +141,25 @@ class WorkerBrowserMCP:
                 raise ValueError(msg)
             canonical_paths.append(str(path))
         return {**arguments, "paths": canonical_paths}
+
+    def _output_path(self, path: Path, *, directory: bool = False) -> Path:
+        """Resolve existing links and missing descendants within the workspace."""
+        msg = "Native browser output must stay within the worker workspace and have the expected file type."
+        try:
+            canonical = path.resolve()
+            # stat still reports symlink loops and invalid parents on Python
+            # versions where non-strict resolve suppresses those errors.
+            try:
+                mode = canonical.stat().st_mode
+            except FileNotFoundError:
+                mode = None
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(msg) from exc
+        if not canonical.is_relative_to(self._workspace):
+            raise ValueError(msg)
+        if mode is not None and not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+            raise ValueError(msg)
+        return canonical
 
     async def close(self) -> None:
         """Reap MCP/browser and callback resources while keeping profile and output files."""
