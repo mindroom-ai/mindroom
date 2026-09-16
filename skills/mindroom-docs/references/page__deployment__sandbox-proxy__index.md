@@ -298,7 +298,8 @@ In a live validation, separate `code` and `research` requests produced separate 
 
 [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) adds a persistent headed Chromium browser and a Chat viewer to dedicated Docker and Kubernetes workers.
 For Docker, first select `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer` on the primary runtime.
-Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true`, use `worker_scope: user_agent`, and include `browser` in the agent's `worker_tools`.
+Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true`, use `worker_scope: user_agent`, and select exactly one worker-routed browser provider: `browser` or `browser_mcp`.
+If the agent sets `worker_tools`, include the selected provider; `browser_mcp` routes to workers by default when that override is absent.
 Set `MINDROOM_COMPUTER_ALLOWED_ORIGINS` to an explicit JSON list of trusted Chat origins and route the public computer HTTP/WebSocket gateway to the actual runtime API.
 The shared static-runner Compose sidecar does not support interactive computers.
 

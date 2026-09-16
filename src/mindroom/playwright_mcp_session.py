@@ -109,16 +109,22 @@ class PlaywrightMCPSession:
         try:
             async with asyncio.timeout(self._timeout):
                 return await future
-        except (TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError) as error:
             future.cancel()
-            await self.close()
+            try:
+                await self.close()
+            except asyncio.CancelledError:
+                if isinstance(error, asyncio.CancelledError):
+                    raise error from None
+                raise
             raise
 
     async def close(self) -> None:
         """Permanently retire all requests and wait for owned process cleanup.
 
         Repeated close is safe. Cancellation of the waiter cannot interrupt
-        context exit or the SDK's bounded process termination/reaping.
+        context exit or the SDK's bounded process termination/reaping, but is
+        propagated once cleanup has finished.
         """
         self._closed = True
         if self._work_scope is not None:
@@ -127,12 +133,15 @@ class PlaywrightMCPSession:
         if task is not None:
             # The actor exits its work scope before closing MCP contexts, so anyio
             # cancellation cannot interrupt stdio's bounded TERM/KILL cleanup.
+            cancellation: asyncio.CancelledError | None = None
             while not task.done():
                 try:
                     await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    continue
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
             await task
+            if cancellation is not None:
+                raise cancellation
 
     async def _run_actor(self) -> None:  # noqa: C901, PLR0912, PLR0915 - one task owns all MCP contexts
         active: _QueuedCall | None = None

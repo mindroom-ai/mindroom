@@ -1,14 +1,113 @@
 """Authenticated loopback URL verifier behavior."""
 
 import asyncio
+import inspect
+import json
 import shutil
+import threading
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 
 from mindroom.worker_computer import browser_guard
 from mindroom.worker_computer.browser_guard import BrowserURLVerifier
+
+
+def _verification_reader(verifier: BrowserURLVerifier) -> asyncio.StreamReader:
+    """Supply one authenticated request entirely in memory."""
+    body = json.dumps({"url": "https://fixture.example/"}).encode()
+    reader = asyncio.StreamReader()
+    reader.feed_data(
+        (
+            "POST /verify HTTP/1.1\r\n"
+            f"Authorization: Bearer {verifier.token}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n"
+        ).encode()
+        + body,
+    )
+    return reader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_error", [False, True])
+async def test_cancelled_request_retains_validation_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    late_error: bool,
+) -> None:
+    """A timed-out waiter cannot free capacity while its validation still runs."""
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    calls = 0
+
+    def validate(url: str, *, allow_private_networks: bool) -> str:
+        nonlocal calls
+        assert not allow_private_networks
+        calls += 1
+        if calls == 1:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+            if late_error:
+                msg = "fixture validation failed after waiter cancellation"
+                raise RuntimeError(msg)
+        return url
+
+    monkeypatch.setattr(browser_guard, "validate_browser_fetch_url", validate)
+    monkeypatch.setattr(browser_guard, "_MAX_CONNECTIONS", 1)
+    verifier = BrowserURLVerifier()
+    request = asyncio.create_task(verifier._verify_request(_verification_reader(verifier)))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await verifier.close()
+        assert await verifier._verify_request(_verification_reader(verifier)) == (503, False)
+        assert calls == 1
+    finally:
+        release.set()
+        request.cancel()
+        await asyncio.gather(request, *getattr(verifier, "_validations", ()), return_exceptions=True)
+        await verifier.close()
+    assert await verifier._verify_request(_verification_reader(verifier)) == (200, True)
+
+
+@pytest.mark.asyncio
+async def test_verifier_bounds_connections_at_accept_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Excess clients are closed before a handler can queue validation work."""
+    server = Mock(spec=asyncio.Server)
+    server.sockets = [SimpleNamespace(getsockname=lambda: ("127.0.0.1", 12345))]
+    server.wait_closed = AsyncMock()
+    listener = AsyncMock(return_value=server)
+    monkeypatch.setattr(asyncio, "start_server", listener)
+    monkeypatch.setattr(browser_guard, "_MAX_CONNECTIONS", 2, raising=False)
+    verifier = BrowserURLVerifier()
+    await verifier.start()
+    accept = listener.call_args.args[0]
+    writers = [Mock(spec=asyncio.StreamWriter) for _ in range(3)]
+    scheduled = []
+    try:
+        for writer in writers:
+            writer.wait_closed = AsyncMock()
+            writer.transport = Mock()
+            callback = accept(asyncio.StreamReader(), writer)
+            if inspect.isawaitable(callback):
+                scheduled.append(asyncio.create_task(callback))
+        assert [writer.close.called for writer in writers] == [False, False, True]
+    finally:
+        for task in scheduled:
+            task.cancel()
+        await asyncio.gather(*scheduled, return_exceptions=True)
+        await verifier.close()
+    assert all(writer.transport.abort.called for writer in writers[:2])
+    late_writer = Mock(spec=asyncio.StreamWriter)
+    accept(asyncio.StreamReader(), late_writer)
+    late_writer.close.assert_called_once()
 
 
 @pytest.mark.asyncio

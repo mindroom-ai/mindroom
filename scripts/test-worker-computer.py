@@ -46,6 +46,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.worker_computer.mcp_results import decode_browser_mcp_result
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
+from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import shutdown_primary_worker_manager
 
@@ -155,6 +156,11 @@ class Fixture:
                 "MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS": "90",
             },
         )
+        worker_user = DockerWorkerBackendConfig.from_runtime(self.paths).user
+        self.worker_uid = int((worker_user or "0").split(":", 1)[0])
+        if self.worker_uid == 0:
+            message = "The acceptance fixture requires a non-root Docker worker user."
+            raise ValueError(message)
 
     def identity(self, user: str) -> ToolExecutionIdentity:
         """Use the same requester/agent scope as normal browser and shell routing."""
@@ -573,21 +579,21 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
             [
                 "sh",
                 "-c",
-                "id; for p in /proc/[0-9]*; do "
+                "id -u; id; for p in /proc/[0-9]*; do "
                 "[ -r \"$p/cmdline\" ] || continue; c=$(tr '\\0' ' ' < \"$p/cmdline\"); "
                 'case "$c" in *chromium*|*chrome*|*sandbox_runner*) printf \'%s %s\\n\' "$p" "$c"; '
                 "sed -n '/^Uid:/p;/^CapEff:/p;/^CapBnd:/p;/^NoNewPrivs:/p;/^Seccomp:/p' \"$p/status\";; esac; done",
             ],
         )
         (fixture.args.output / "worker-process-security.txt").write_text(process_security)
-        assert "uid=1000" in process_security
+        assert process_security.splitlines()[0] == str(fixture.worker_uid)
         process_check = await fixture.shell(
             [
                 "node",
                 "-e",
                 r"""
 const fs=require('fs');let count=0;
-if(process.getuid()!==1000)throw Error('worker uid');
+if(process.getuid()!==Number(process.argv[1])||process.getuid()===0)throw Error('worker uid');
 for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){
  let cmd,status;try{cmd=fs.readFileSync('/proc/'+pid+'/cmdline','utf8');
  status=fs.readFileSync('/proc/'+pid+'/status','utf8')}catch{continue}
@@ -597,6 +603,7 @@ for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){
 }
 if(count<2)throw Error('browser subprocesses absent');console.log('SECURITY_VERIFIED');
 """,
+                str(fixture.worker_uid),
             ],
         )
         assert "SECURITY_VERIFIED" in process_check, process_check

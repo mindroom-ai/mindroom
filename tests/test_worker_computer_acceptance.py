@@ -106,6 +106,33 @@ def _driver(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
+@pytest.mark.parametrize("host_uid", [501, 1000, 1001])
+def test_fixture_security_uses_host_worker_uid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_uid: int,
+) -> None:
+    """Non-root hosts retain bind-mount ownership without assuming UID 1000."""
+    module = _driver(monkeypatch)
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: host_uid)
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getgid", lambda: 100)
+    args = SimpleNamespace(output=tmp_path, provider="browser", matrix_fixture=None, chat_origin=None, image="fixture")
+
+    fixture = module.Fixture(args, "http://127.0.0.1:8765")
+
+    assert fixture.worker_uid == host_uid
+
+
+def test_fixture_security_rejects_root_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The acceptance fixture must not silently drop its non-root requirement."""
+    module = _driver(monkeypatch)
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: 0)
+    args = SimpleNamespace(output=tmp_path, provider="browser", matrix_fixture=None, chat_origin=None, image="fixture")
+
+    with pytest.raises(ValueError, match="non-root"):
+        module.Fixture(args, "http://127.0.0.1:8765")
+
+
 @pytest.mark.asyncio
 async def test_context_readback_uses_shared_agent_workspace_not_worker_scratch(
     tmp_path: Path,

@@ -15,6 +15,7 @@ import pytest
 from mcp import StdioServerParameters
 from mcp.types import CallToolResult, ListToolsResult, TextContent
 
+from mindroom import playwright_mcp_session
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
 
 
@@ -130,6 +131,80 @@ async def test_retirement_settles_active_and_queued_calls_without_queued_dispatc
     finally:
         await actor.close()
         await asyncio.gather(active, *([queued] if queued is not None else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["close", "timeout", "cancel"])
+@pytest.mark.parametrize("cleanup_failure", [False, True])
+async def test_cancellation_during_close_propagates_after_cleanup_and_settlement(  # noqa: PLR0915
+    transport: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    *,
+    cleanup_failure: bool,
+) -> None:
+    """Cancelling a cleanup waiter must not report success or the earlier timeout."""
+    cleanup_started = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    original_stdio = playwright_mcp_session.stdio_client
+
+    @asynccontextmanager
+    async def paused_stdio(parameters: StdioServerParameters) -> AsyncIterator[tuple[object, object]]:
+        async with original_stdio(parameters) as streams:
+            try:
+                yield streams
+            finally:
+                cleanup_started.set()
+                await finish_cleanup.wait()
+        if cleanup_failure:
+            msg = "transport cleanup failed"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(playwright_mcp_session, "stdio_client", paused_stdio)
+    actor = PlaywrightMCPSession(
+        StdioServerParameters(command="unused"),
+        call_timeout_seconds=0.05 if operation == "timeout" else 5,
+    )
+    active = asyncio.create_task(actor.call_tool("stuck", {}))
+    queued: asyncio.Task[CallToolResult] | None = None
+    closing: asyncio.Task[object] | None = None
+    try:
+        async with asyncio.timeout(1):
+            while "stuck" not in transport:  # noqa: ASYNC110 - observe fake collaborator dispatch
+                await asyncio.sleep(0)
+        actor._timeout = 5
+        queued = asyncio.create_task(actor.call_tool("queued_mutation", {}))
+        await asyncio.sleep(0)
+        closing = asyncio.create_task(actor.close()) if operation == "close" else active
+        if operation == "cancel":
+            active.cancel("request cancellation")
+        await asyncio.wait_for(cleanup_started.wait(), 1)
+        closing.cancel("first cancellation")
+        await asyncio.sleep(0)
+        closing.cancel("repeated cancellation")
+        await asyncio.sleep(0)
+        assert not closing.done()
+        assert not queued.done()
+        finish_cleanup.set()
+        expected_cancellation = "request cancellation" if operation == "cancel" else "first cancellation"
+        with pytest.raises(asyncio.CancelledError, match=expected_cancellation):
+            await asyncio.wait_for(closing, 1)
+        results = await asyncio.gather(active, queued, return_exceptions=True)
+        assert isinstance(results[0], RuntimeError if operation == "close" else asyncio.CancelledError)
+        assert isinstance(results[1], RuntimeError)
+        assert "queued_mutation" not in transport
+        assert not actor.running
+        await actor.close()
+        assert transport.count("reaped") == 1
+    finally:
+        finish_cleanup.set()
+        await actor.close()
+        await asyncio.gather(
+            active,
+            *([queued] if queued is not None else []),
+            *([closing] if closing is not None else []),
+            return_exceptions=True,
+        )
 
 
 @pytest.mark.asyncio
