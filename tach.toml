@@ -6239,7 +6239,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
-depends_on = ["mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
+depends_on = ["mindroom.browser_profile", "mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
 
 [[modules]]
 path = "mindroom.custom_tools.browser_mcp"
@@ -6412,3 +6412,12 @@ visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker"
 path = "mindroom.worker_computer.browser_bundle"
 depends_on = []
 visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_provider"]
+
+[[modules]]
+path = "mindroom.browser_profile"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_provider"]
+
+[[interfaces]]
+from = ["mindroom.browser_profile"]
+expose = ["clear_stale_singleton_locks"]

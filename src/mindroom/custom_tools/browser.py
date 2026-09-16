@@ -26,6 +26,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
+from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
@@ -308,30 +309,6 @@ def _persistent_launch_kwargs(
     if executable:
         launch_kwargs["executable_path"] = executable
     return launch_kwargs
-
-
-def _clear_stale_singleton_locks(_profile_dir: Path) -> None:
-    """Best-effort cleanup for stale Chromium singleton lock symlinks."""
-    for entry_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-        entry = _profile_dir / entry_name
-        try:
-            if not entry.is_symlink():
-                continue
-            target = entry.readlink()
-            match = re.fullmatch(r".+-(\d+)", target.name)
-            if match is None:
-                continue
-            pid = int(match.group(1))
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                entry.unlink()
-        except OSError as exc:
-            logger.warning(
-                "Failed to clean Chromium singleton lock",
-                entry=str(entry),
-                error=str(exc),
-            )
 
 
 def _browser_help_payload(action: str) -> dict[str, Any]:
@@ -1619,7 +1596,7 @@ class BrowserTools(Toolkit):
                     launch_kwargs["viewport"] = {"width": 1280, "height": 800}
                     launch_kwargs["downloads_path"] = str(self._resolve_output_dir())
                 user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
-                _clear_stale_singleton_locks(user_data_dir)
+                clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(
                     "**/*",

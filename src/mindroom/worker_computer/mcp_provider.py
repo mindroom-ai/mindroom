@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from mcp import StdioServerParameters
 from mcp.client.stdio import get_default_environment
 
+from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.browser_bundle import (
@@ -96,6 +97,7 @@ class WorkerBrowserMCP:
             if not self._ready:
                 self._workspace.mkdir(parents=True, exist_ok=True)
                 self._profile.mkdir(parents=True, exist_ok=True, mode=0o700)
+                clear_stale_singleton_locks(self._profile)
                 output.mkdir(parents=True, exist_ok=True)
                 await self._verifier.start()
                 await self._proxy.start()

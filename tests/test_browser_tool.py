@@ -21,7 +21,6 @@ from mindroom.custom_tools.browser import (
     _BrowserProfileState,
     _BrowserTabState,
     _clean_str,
-    _clear_stale_singleton_locks,
     _persistent_launch_kwargs,
     _profile_dir,
 )
@@ -103,41 +102,6 @@ def test_profile_dir_clamps_existing_dir_to_0700(tmp_path: Path) -> None:
 
     assert result == target.resolve()
     assert stat.S_IMODE(target.stat().st_mode) == 0o700
-
-
-def test_clear_stale_singleton_locks_unlinks_stale_symlink(tmp_path: Path) -> None:
-    """Stale Chromium singleton lock symlinks should be removed."""
-    _profile_dir = tmp_path / "profile"
-    _profile_dir.mkdir()
-    lock = _profile_dir / "SingletonLock"
-    lock.symlink_to("mindroom-999999999")
-
-    _clear_stale_singleton_locks(_profile_dir)
-
-    assert not lock.is_symlink()
-
-
-def test_clear_stale_singleton_locks_keeps_live_pid_symlink(tmp_path: Path) -> None:
-    """Live Chromium singleton lock symlinks should be left in place."""
-    _profile_dir = tmp_path / "profile"
-    _profile_dir.mkdir()
-    lock = _profile_dir / "SingletonLock"
-    lock.symlink_to(f"mindroom-{os.getpid()}")
-
-    _clear_stale_singleton_locks(_profile_dir)
-
-    assert lock.is_symlink()
-
-
-def test_clear_stale_singleton_locks_is_idempotent_for_empty_dir(tmp_path: Path) -> None:
-    """The exported singleton-lock cleanup helper should be safe for empty profiles."""
-    _profile_dir = tmp_path / "profile"
-    _profile_dir.mkdir()
-
-    _clear_stale_singleton_locks(_profile_dir)
-    _clear_stale_singleton_locks(_profile_dir)
-
-    assert list(_profile_dir.iterdir()) == []
 
 
 def test_persistent_launch_kwargs_runtime_env_wins_over_shell(
@@ -1047,6 +1011,38 @@ def _install_fake_persistent_playwright(
 
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FakePlaywrightStarter())
     return launch_kwargs, playwright
+
+
+@pytest.mark.asyncio
+async def test_ensure_profile_clears_dead_lock_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The action browser retains conservative recovery at its launch boundary."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    profile = runtime_paths.storage_root / "browser-profiles" / "mindroom"
+    profile.mkdir(parents=True)
+    lock = profile / "SingletonLock"
+    lock.symlink_to("old-worker-999999999")
+    cookies = profile / "Cookies"
+    cookies.write_bytes(b"saved-login")
+    context = _FakeContext(pages=[])
+    _launch_kwargs, playwright = _install_fake_persistent_playwright(monkeypatch, context=context)
+
+    async def launch(**kwargs: object) -> _FakeContext:
+        assert kwargs["user_data_dir"] == str(profile)
+        assert not lock.is_symlink()
+        assert cookies.read_bytes() == b"saved-login"
+        return context
+
+    monkeypatch.setattr(playwright.chromium, "launch_persistent_context", launch)
+    tool = BrowserTools(runtime_paths)
+    await tool._ensure_profile("mindroom")
+    assert cookies.read_bytes() == b"saved-login"
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -270,6 +271,59 @@ async def test_worker_bootstraps_guard_and_closes_on_drift(
         assert provider._proxy._server is None
         assert not provider._proxy._connections
     assert calls[-2:] == [("browser_close", {}), "closed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["dead", "live", "unparseable"])
+async def test_worker_recovers_profile_only_before_session_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+) -> None:
+    """Native startup removes only proven dead locks before MCP can open the profile."""
+    profile = tmp_path / "storage" / "browser-profiles" / "native-mcp"
+    profile.mkdir(parents=True)
+    cookies = profile / "Default" / "Cookies"
+    cookies.parent.mkdir()
+    cookies.write_bytes(b"saved-login")
+    lock = profile / "SingletonLock"
+    target = {"dead": "old-worker-999999999", "live": f"worker-{os.getpid()}", "unparseable": "unknown-owner"}[owner]
+    lock.symlink_to(target)
+    socket = profile / "SingletonSocket"
+    socket.symlink_to("/missing/chromium/SingletonSocket")
+    cookie = profile / "SingletonCookie"
+    cookie.symlink_to("123456789")
+
+    class Session:
+        running = True
+
+        def __init__(self, _parameters: object) -> None:
+            assert lock.is_symlink() is (owner != "dead")
+            assert cookies.read_bytes() == b"saved-login"
+            assert socket.readlink() == Path("/missing/chromium/SingletonSocket")
+            assert cookie.readlink() == Path("123456789")
+
+        async def list_tools(self) -> tuple[Tool, ...]:
+            return tuple(Tool.model_validate(tool) for tool in browser_mcp_catalog().values())
+
+        async def call_tool(self, name: str, _arguments: dict[str, object]) -> CallToolResult:
+            return CallToolResult(content=[TextContent(type="text", text=name)])
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("mindroom.worker_computer.mcp_provider.PlaywrightMCPSession", Session)
+    provider = WorkerBrowserMCP(display=":77", workspace=tmp_path / "workspace", storage_root=tmp_path / "storage")
+    try:
+        assert (await provider.execute("browser_snapshot", {})).content == "browser_snapshot"
+        if owner == "dead":
+            # A ready session must not inspect or remove locks on subsequent calls.
+            lock.symlink_to(target)
+        assert (await provider.execute("browser_snapshot", {})).content == "browser_snapshot"
+        assert lock.readlink() == Path(target)
+        assert cookies.read_bytes() == b"saved-login"
+    finally:
+        await provider.close()
 
 
 def test_codec_bounds_before_image_decode(monkeypatch: pytest.MonkeyPatch) -> None:
