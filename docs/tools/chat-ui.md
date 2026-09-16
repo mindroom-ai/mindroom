@@ -41,15 +41,30 @@ The Matrix event sender must equal the metadata's agent identity, or the request
 
 ## What the user sees
 
-MindRoom Chat automatically acts only for the addressed user when that exact room and thread are active, the client is visible and focused, and the request arrived as a current live event.
+MindRoom Chat automatically acts only for the addressed user when that exact room and thread are active, the client is visible and focused, the request arrived as a current live event, and the deployment explicitly trusts the agent's homeserver for automatic opening.
 When the conversation is inactive, the event is historical, or automatic opening is otherwise unavailable, the notice remains in the conversation with a button the addressed user can choose later.
 A dismissed request stays dismissed, while a new event can request the action again.
 
 Other Matrix clients display the notice's fallback text, such as “Open Settings (general) in MindRoom Chat.”
 Receiving or sending the notice is not evidence that a client opened anything.
 
-MindRoom Chat recognizes agent senders through the existing joined, same-homeserver `mindroom_` identity convention.
-Operators of custom homeservers must reserve and control that namespace, as `mindroom.chat` does.
+The Chat deployment controls automatic opening through its runtime `config.json`:
+
+```json
+{
+  "mindroom": {
+    "uiActions": {
+      "autoOpenFromHomeservers": ["mindroom.chat"]
+    }
+  }
+}
+```
+
+The shipped MindRoom Chat configuration lists `mindroom.chat`.
+An absent or empty list keeps requests passive with explicit buttons.
+Entries match the exact server name in the agent's Matrix ID, including any port; URLs, wildcards, and implicit subdomain matching are unsupported.
+The existing joined, same-homeserver `mindroom_` identity checks still apply.
+Operators must reserve and control the agent username namespace on any homeserver they allow, as `mindroom.chat` does.
 UI requests reveal only the bounded Chat surfaces described above; worker computer access remains independently authorized by the configured computer gateway.
 
 ## Worker computer requirements
