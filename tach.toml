@@ -6234,7 +6234,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
-depends_on = ["mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
+depends_on = ["mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
 
 [[modules]]
 path = "mindroom.custom_tools.browser_mcp"
@@ -6402,3 +6402,8 @@ expose = ["AgnoGoogleAuthBindingMixin"]
 path = "mindroom.knowledge.collection_lifetime"
 depends_on = ["mindroom.file_locks", "mindroom.knowledge.index_metadata", "mindroom.knowledge.indexing_config"]
 visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker", "mindroom.knowledge.read_proxy"]
+
+[[modules]]
+path = "mindroom.worker_computer.browser_bundle"
+depends_on = []
+visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_provider"]

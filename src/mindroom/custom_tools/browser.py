@@ -39,6 +39,7 @@ from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
+from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 
 if TYPE_CHECKING:
     from playwright.async_api import Download
@@ -1603,7 +1604,7 @@ class BrowserTools(Toolkit):
                     profile_name,
                     headless=self._worker_display is None,
                     executable_override=(
-                        self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or "/opt/mindroom-browser-mcp/chromium"
+                        self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
                         if self._worker_display is not None
                         else None
                     ),

@@ -11,6 +11,11 @@ from mcp.client.stdio import get_default_environment
 
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.worker_computer.browser_bundle import (
+    COMPUTER_BROWSER_EXECUTABLE,
+    COMPUTER_BROWSER_GUARD,
+    COMPUTER_BROWSER_MCP_SERVER,
+)
 from mindroom.worker_computer.browser_guard import BrowserURLVerifier
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
@@ -19,9 +24,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.tools.function import ToolResult
-
-_SERVER = "/opt/mindroom-browser-mcp/node_modules/@playwright/mcp/cli.js"
-_BROWSER = "/opt/mindroom-browser-mcp/chromium"
 
 
 class WorkerBrowserMCP:
@@ -57,7 +59,7 @@ class WorkerBrowserMCP:
         return StdioServerParameters(
             command="node",
             args=[
-                _SERVER,
+                COMPUTER_BROWSER_MCP_SERVER,
                 "--caps",
                 "vision,pdf",
                 "--sandbox",
@@ -67,7 +69,7 @@ class WorkerBrowserMCP:
                 "--proxy-bypass",
                 "<-loopback>",
                 "--executable-path",
-                _BROWSER,
+                COMPUTER_BROWSER_EXECUTABLE,
                 "--user-data-dir",
                 str(self._profile),
                 "--output-dir",
@@ -75,7 +77,7 @@ class WorkerBrowserMCP:
                 "--output-mode",
                 "stdout",
                 "--init-page",
-                "/opt/mindroom-browser-mcp/browser_guard.cjs",
+                COMPUTER_BROWSER_GUARD,
             ],
             env=env,
             cwd=str(self._workspace),

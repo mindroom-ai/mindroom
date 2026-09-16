@@ -34,7 +34,6 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     SHARED_CREDENTIALS_PATH_ENV,
-    WORKER_COMPUTER_ENABLED_ENV,
 )
 from mindroom.tool_system.dependencies import ensure_optional_deps
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope, worker_dir_name, worker_key_agent_name
@@ -456,6 +455,7 @@ class DockerWorkerBackend:
         if config.host_config_path is not None:
             base_runtime_paths = runtime_paths_with_config_path(base_runtime_paths, config.host_config_path)
         self._runtime_paths = runtime_paths_with_storage_root(base_runtime_paths, self._storage_path)
+        config.validate_runtime_security(self._runtime_paths)
         self._tool_validation_snapshot = tool_validation_snapshot
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks: dict[str, threading.Lock] = {}
@@ -897,7 +897,7 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
-        if self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV) and not self._container_runtime_security_matches(
+        if self.config.security_policy == "computer" and not self._container_runtime_security_matches(
             container,
         ):
             return False
@@ -979,7 +979,7 @@ class DockerWorkerBackend:
             self._prepare_nested_storage_mount_targets(paths, volumes)
             security_kwargs = (
                 {"cap_drop": ["ALL"], "security_opt": docker_worker_security_options()}
-                if self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV)
+                if self.config.security_policy == "computer"
                 else {}
             )
             container = self._client.containers.run(
@@ -1337,7 +1337,7 @@ class DockerWorkerBackend:
             "user": self.config.user or "",
             "worker_port": self.config.worker_port,
         }
-        if self._runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
+        if self.config.security_policy == "computer":
             config_payload["runtime_security"] = docker_worker_security_policy_signature()
         normalized = json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

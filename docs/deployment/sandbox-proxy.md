@@ -301,12 +301,14 @@ In a live validation, separate `code` and `research` requests produced separate 
 ### Interactive worker computers
 
 [Worker Computer](../tools/worker-computer.md) adds a persistent headed Chromium browser and a Chat viewer to dedicated Docker and Kubernetes workers.
-Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true` on the primary runtime, use `worker_scope: user_agent`, and include `browser` in the agent's `worker_tools`.
+For Docker, first select `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer` on the primary runtime.
+Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true`, use `worker_scope: user_agent`, and include `browser` in the agent's `worker_tools`.
 Set `MINDROOM_COMPUTER_ALLOWED_ORIGINS` to an explicit JSON list of trusted Chat origins and route the public computer HTTP/WebSocket gateway to the actual runtime API.
 The shared static-runner Compose sidecar does not support interactive computers.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MINDROOM_DOCKER_WORKER_SECURITY_POLICY` | Docker pool policy: `runtime_default` or `computer`; Computer requires `computer` | `runtime_default` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the dedicated worker's persistent browser/display | `false` |
 | `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | Explicit allowed Chat origins for computer HTTP and WebSocket requests | `[]` |
 
@@ -555,9 +557,10 @@ Each lease is consumed on use and expires after the configured TTL.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
   `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block
   Chromium's namespace sandbox is documented in [Worker Computer](../tools/worker-computer.md#browser-and-container-sandboxing).
-- With `MINDROOM_WORKER_COMPUTER_ENABLED=true`, dedicated Docker workers drop all capabilities, set `no-new-privileges`, and use the packaged Chromium-compatible seccomp profile.
-  This is a runtime-wide worker-pool opt-in, regardless of which tools an agent selects.
-  With the flag absent or false, ordinary Docker workers retain their prior launch settings and compatible identities.
+- With `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, dedicated Docker workers drop all capabilities, set `no-new-privileges`, and use the packaged Chromium-compatible seccomp profile.
+  This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
+  Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
+  With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.

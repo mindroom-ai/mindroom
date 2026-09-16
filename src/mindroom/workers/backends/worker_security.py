@@ -23,10 +23,10 @@ def _worker_computer_seccomp_profile_json() -> str:
 
 
 def docker_worker_security_options() -> list[str]:
-    """Return Docker security options for a Computer-enabled worker pool."""
+    """Return Docker security options for the explicitly selected Computer pool policy."""
     return ["no-new-privileges:true", f"seccomp={_worker_computer_seccomp_profile_json()}"]
 
 
 def docker_worker_security_policy_signature() -> tuple[str, str]:
-    """Return the stable identity of Computer-enabled Docker host security settings."""
+    """Return the stable identity of the reviewed Computer Docker host security settings."""
     return (_DOCKER_WORKER_SECURITY_POLICY_VERSION, _WORKER_COMPUTER_SECCOMP_PROFILE_SHA256)

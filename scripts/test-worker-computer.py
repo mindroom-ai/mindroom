@@ -144,6 +144,7 @@ class Fixture:
                 "MATRIX_HOMESERVER": self.matrix["homeserver"] if self.matrix else origin,
                 "MATRIX_SERVER_NAME": self.server_name,
                 "MINDROOM_WORKER_COMPUTER_ENABLED": "1",
+                "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
                 "MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(
                     [origin, *([args.chat_origin] if args.chat_origin else [])],
                 ),

@@ -203,8 +203,9 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
             assert (tmp_path / receipt["path"]).read_text() == "native text"
 
 
-def test_worker_launch_has_fixed_sandbox_and_workspace(tmp_path: Path) -> None:
+def test_worker_launch_has_fixed_sandbox_and_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Launch cannot expand capabilities or disable Chromium's sandbox."""
+    monkeypatch.setenv("BROWSER_EXECUTABLE_PATH", "/untrusted/browser")
     provider = WorkerBrowserMCP(display=":77", workspace=tmp_path / "workspace", storage_root=tmp_path / "storage")
     parameters = provider._server_parameters()
     assert parameters.args[0] == "/opt/mindroom-browser-mcp/node_modules/@playwright/mcp/cli.js"

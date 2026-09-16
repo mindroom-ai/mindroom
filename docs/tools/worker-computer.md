@@ -19,6 +19,7 @@ Set these values on the **primary MindRoom runtime**:
 ```dotenv
 MINDROOM_WORKER_BACKEND=docker
 MINDROOM_DOCKER_WORKER_IMAGE=mindroom:dev
+MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer
 MINDROOM_WORKER_COMPUTER_ENABLED=true
 MINDROOM_COMPUTER_ALLOWED_ORIGINS=["https://chat.example.org"]
 MATRIX_HOMESERVER=https://matrix.example.org
@@ -142,26 +143,35 @@ Persistent workspace files remain intentionally shared with the agent's other wo
 Worker computers launch Chromium with its Linux process sandbox enabled.
 A startup failure is returned to the caller; MindRoom does not retry with Chromium's sandbox disabled.
 
-With `MINDROOM_WORKER_COMPUTER_ENABLED=true`, Docker workers drop all Linux capabilities, set `no-new-privileges`, and use the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
-This existing flag opts the runtime's entire Docker worker pool into the Computer policy, including workers whose agents do not select a browser tool.
-It is not a per-agent or per-tool setting.
-With the flag absent or false, ordinary Docker workers retain their previous launch settings and compatible configuration identities; upgrading alone does not replace them for this policy.
-That profile is based on Moby's maintained default policy and adds only the namespace and `chroot` operations used by the Chromium sandbox.
-Computer-enabled Docker worker containers are replaced if these host security settings are missing.
-Changing the flag reconciles workers to the new configuration; ordinary image, authentication, configuration and mount changes still trigger their existing reconciliation.
+Select `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer` explicitly on the primary runtime before enabling Computer.
+The Docker pool policy accepts only `runtime_default` (the default) or `computer`.
+Enabling `MINDROOM_WORKER_COMPUTER_ENABLED=true` with `runtime_default` fails configuration; there is no weaker fallback.
+The `computer` policy drops all Linux capabilities, sets `no-new-privileges`, and uses the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
+It applies to the entire Docker worker pool, even with Computer disabled or agents that do not select a browser tool.
+Computer availability controls lazy browser/display startup separately from the pool's security policy.
+With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their previous launch settings and compatible configuration identities; upgrading alone does not replace them for this policy.
+The reviewed profile is based on Moby's maintained default policy and adds only the namespace and `chroot` operations used by the Chromium sandbox.
+Workers under the `computer` policy are replaced if their actual host security settings differ from the required policy.
+Changing the selected policy reconciles workers to the new configuration; ordinary image, authentication, configuration and mount changes still trigger their existing reconciliation.
 
 Kubernetes workers keep the pod-level `RuntimeDefault` seccomp policy.
 If that policy supports unprivileged user namespaces, no extra setting is needed.
 Runtimes that block Chromium's namespace sandbox need the packaged profile installed on every eligible node at:
 
 ```text
-/var/lib/kubelet/seccomp/profiles/worker-computer.json
+/var/lib/kubelet/seccomp/profiles/worker-computer-578ef2b662d8e9a8.json
 ```
+
+Use immutable, versioned filenames for node profiles; this example uses the reviewed profile's SHA-256 prefix.
+Verify the installed bytes on every eligible node against the packaged profile's SHA-256:
+`578ef2b662d8e9a886132148a0b75f0388efff92ed902b16d7be2777ae3788fa`.
+A `localhostProfile` path only names a node file; MindRoom cannot verify its contents through that string.
+On profile changes, install verified bytes at a new versioned path on all eligible nodes before changing the selected path.
 
 Then select it for the main worker container:
 
 ```dotenv
-MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON={"type":"Localhost","localhostProfile":"profiles/worker-computer.json"}
+MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON={"type":"Localhost","localhostProfile":"profiles/worker-computer-578ef2b662d8e9a8.json"}
 ```
 
 The runtime chart accepts the same object at `workers.kubernetes.seccompProfile`; the instance chart uses `kubernetesWorkerSeccompProfile`.
@@ -172,7 +182,7 @@ workers:
   kubernetes:
     seccompProfile:
       type: Localhost
-      localhostProfile: profiles/worker-computer.json
+      localhostProfile: profiles/worker-computer-578ef2b662d8e9a8.json
 ```
 
 Kubernetes applies this override only to the main worker container.
