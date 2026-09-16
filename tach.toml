@@ -3785,9 +3785,19 @@ depends_on = [
     "mindroom.agno_compat_model_hooks",
     "mindroom.error_handling",
     "mindroom.logging_config",
+    "mindroom.model_stream_output",
     "mindroom.redaction",
     "mindroom.tool_system.context_bound_streams",
 ]
+
+[[modules]]
+path = "mindroom.model_stream_output"
+depends_on = []
+visibility = ["mindroom.claude_stream_retry", "mindroom.provider_media_fallback"]
+
+[[interfaces]]
+from = ["mindroom.model_stream_output"]
+expose = ["has_meaningful_stream_output"]
 
 [[modules]]
 path = "mindroom.tool_system.metadata"

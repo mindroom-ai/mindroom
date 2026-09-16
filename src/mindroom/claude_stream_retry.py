@@ -31,6 +31,7 @@ from mindroom.agno_compat_model_hooks import install_stream_invocation_hooks
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, ModelSafeguardRefusalError
 from mindroom.logging_config import get_logger
+from mindroom.model_stream_output import has_meaningful_stream_output
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
@@ -54,34 +55,6 @@ def _is_transient_model_error(error: BaseException) -> bool:
     if isinstance(error, (ContextWindowExceededError, ModelSafeguardRefusalError)):
         return False
     return isinstance(error, ModelProviderError) and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
-
-
-def _has_meaningful_output(response: ModelResponse) -> bool:
-    """Return whether one streamed delta already reached downstream consumers.
-
-    Anything beyond role/event bookkeeping counts: downstream consumers
-    accumulate these fields (Agno extends provider-data lists, MindRoom's
-    collector appends content), so replaying an attempt that set any of them
-    would duplicate state.
-    """
-    return bool(
-        response.content
-        or response.parsed
-        or response.audio
-        or response.images
-        or response.videos
-        or response.audios
-        or response.files
-        or response.tool_calls
-        or response.tool_executions
-        or response.provider_data
-        or response.reasoning_content
-        or response.redacted_reasoning_content
-        or response.citations
-        or response.response_usage
-        or response.extra
-        or response.updated_session_state,
-    )
 
 
 def _should_reraise(error: ModelProviderError, *, yielded_meaningful_output: bool, attempt: int) -> bool:
@@ -119,7 +92,7 @@ def _invoke_stream_with_retry(
         stream = original_invoke_stream(*args, **kwargs)
         try:
             for response in stream:
-                yielded_meaningful_output = yielded_meaningful_output or _has_meaningful_output(response)
+                yielded_meaningful_output = yielded_meaningful_output or has_meaningful_stream_output(response)
                 yield response
         except ModelProviderError as error:
             if _should_reraise(error, yielded_meaningful_output=yielded_meaningful_output, attempt=attempt):
@@ -147,7 +120,7 @@ async def _ainvoke_stream_with_retry(
         stream = original_ainvoke_stream(*args, **kwargs)
         try:
             async for response in stream:
-                yielded_meaningful_output = yielded_meaningful_output or _has_meaningful_output(response)
+                yielded_meaningful_output = yielded_meaningful_output or has_meaningful_stream_output(response)
                 yield response
         except ModelProviderError as error:
             if _should_reraise(error, yielded_meaningful_output=yielded_meaningful_output, attempt=attempt):
