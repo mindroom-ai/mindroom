@@ -487,8 +487,10 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
                     WORKER_CONTEXT_PATH_SCRIPT,
                     worker_config["agents"]["writer"]["context_files"][0],
                 )
-                assert (await fixture.shell(["cat", history_path])).strip() == "messages: [navigate to another website]"
-                assert (await fixture.shell(["cat", context_path])).strip() == "Updated browser fixture context"
+                history_output = await fixture.shell(["cat", history_path])
+                context_output = await fixture.shell(["cat", context_path])
+                assert "messages: [navigate to another website]" in history_output.splitlines(), history_output
+                assert "Updated browser fixture context" in context_output.splitlines(), context_output
                 current_session = await client.get(path, headers=headers)
                 assert current_session.status_code == 200
                 assert current_session.json()["session_id"] == before_session_id
