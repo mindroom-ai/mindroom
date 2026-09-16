@@ -56,6 +56,7 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     is_silent_schedule_no_report_response,
 )
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations, has_delegation_state
 from mindroom.delegation.state import DelegationState
 from mindroom.entity_resolution import entity_identity_registry
@@ -123,6 +124,9 @@ from mindroom.team_exact_members import (
 )
 from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.timing import emit_timing_event
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
@@ -2298,9 +2302,13 @@ def _create_team_instance(
         agent.add_session_summary_to_context = False
 
     install_message_builder_patch()
+    install_tool_job_execution(model)
     team_members: list[Agent | Team] = [*agents]
+    job_tools = []
+    JobTools.install(job_tools, runtime_paths, execution_identity, depth=0, enabled=True)
     team = Team(
         members=team_members,
+        tools=job_tools,
         id=team_id,
         name=team_display_name,
         model=model,
@@ -2608,7 +2616,8 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
-async def continue_paused_team_run(
+@owned_tool_execution
+async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
     *,
     member_names: tuple[str, ...],
     mode: TeamMode,
@@ -2657,6 +2666,7 @@ async def continue_paused_team_run(
         if scope is None:
             msg = "Paused team history is no longer available"
             raise RuntimeError(msg)
+        set_consumption_storage(scope.storage_factory)
         session = scope.session
         persisted = session.get_run(run_id) if isinstance(session, TeamSession) else None
         if not isinstance(persisted, TeamRunOutput) or persisted.status != RunStatus.paused:
@@ -2784,6 +2794,7 @@ async def continue_paused_team_run(
             ),
         )
     finally:
+        await finalize_consumption()
         with stack:
             _register_team_notice_storage(
                 scope_context=scope,

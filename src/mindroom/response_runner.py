@@ -124,6 +124,9 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.tool_jobs.completion import admit_job_completion
+from mindroom.tool_jobs.control import HumanMessageSignal
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
@@ -821,6 +824,7 @@ class ResponseRunner:
 
     def __post_init__(self) -> None:
         """Bind response-side approval collaborators to the event journal."""
+        self._lifecycle_coordinator.human_signal_provider = self._human_signal_for_target
         self._approval_responses = ApprovalResponseCoordinator(
             config=lambda: self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
@@ -836,6 +840,13 @@ class ResponseRunner:
             knowledge_access=self.deps.knowledge_access,
             refresh_scheduler=self._knowledge_refresh_scheduler,
         )
+
+    def _human_signal_for_target(self, target: MessageTarget) -> HumanMessageSignal:
+        """Keep child pause signals attached to the transport across bot replacements."""
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is None:
+            return HumanMessageSignal()
+        return runtime.human_signal_for(self.deps.agent_name, target.room_id, target.resolved_thread_id)
 
     def _knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
         """Return the current orchestrator scheduler when this runner is managed."""
@@ -2527,6 +2538,19 @@ class ResponseRunner:
             request.response_envelope.source_event_id,
         )
         if owned is None:
+            if not await admit_job_completion(
+                request.response_envelope,
+                target=target,
+                runtime_paths=self.deps.runtime_paths,
+            ):
+                if request.on_no_response_handled is not None:
+
+                    async def settle() -> None:
+                        assert request.on_no_response_handled is not None
+                        await request.on_no_response_handled()
+
+                    await run_coroutine_until_complete(settle())
+                return None
             return await locked_operation(target, early_placeholder)
         self.deps.logger.info(
             "response_source_owned_by_approval_continuation",

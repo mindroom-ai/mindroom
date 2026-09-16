@@ -8,8 +8,10 @@ import json
 import threading
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 
 import pytest
+from agno.db.base import BaseDb
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
@@ -17,6 +19,8 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.types import HistoryScope
 from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
@@ -42,8 +46,6 @@ from mindroom.tool_system.events import ToolTraceEntry
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
-
-    from mindroom.history.session_context import ScopeSessionContext
 
 
 @dataclass
@@ -198,8 +200,8 @@ class _AdapterLog:
 
 def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager[ScopeSessionContext]]:
     def _open() -> AbstractContextManager[ScopeSessionContext]:
-        log.scope = object()
-        return contextlib.nullcontext(cast("ScopeSessionContext", log.scope))
+        log.scope = ScopeSessionContext(HistoryScope(kind="agent", scope_id="helper"), MagicMock(spec=BaseDb), None)
+        return contextlib.nullcontext(log.scope)
 
     return _open
 
