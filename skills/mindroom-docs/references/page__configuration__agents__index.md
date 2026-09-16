@@ -682,8 +682,10 @@ The model-facing tools are `run_subagent(task: str, agent_name: str | None = Non
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
 The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
-The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
-Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
+Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
+Managed Matrix calls wait up to 10 seconds before returning an exact job handle while the child continues in the background.
+Use `inspect_subagent`, `wait_subagent`, `resume_subagent`, and `cancel_subagent` with that job ID to manage the current turn; see [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
+Use `continue_subagent` with the reusable subagent ID for a follow-up in the same child session after its previous turn returns.
 The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
 Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
 The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.

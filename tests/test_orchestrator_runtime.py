@@ -43,6 +43,7 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.delegation.background import BackgroundSubagentRuntime, get_background_runtime
 from mindroom.event_journal_open import record_opened_event_journal
 from mindroom.hooks import (
     ConfigReloadedContext,
@@ -232,6 +233,8 @@ def test_repeated_reply_membership_invalidation_schedules_one_revocation_wave(
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+
+    from mindroom.bot import AgentBot, TeamBot
 
 
 @pytest.fixture(autouse=True)
@@ -3287,6 +3290,12 @@ class TestMultiAgentOrchestrator:
         orchestrator.config = MagicMock(source_fingerprint=None)
         responder_started = False
         runtime_support_bound = False
+        runtimes_before_sync: list[BackgroundSubagentRuntime | None] = []
+        start_sync = orchestrator._start_sync_task
+
+        def record_runtime_before_sync(entity_name: str, bot: AgentBot | TeamBot) -> None:
+            runtimes_before_sync.append(get_background_runtime(orchestrator.runtime_paths))
+            start_sync(entity_name, bot)
 
         router_bot = MagicMock()
         router_bot.agent_name = ROUTER_AGENT_NAME
@@ -3325,11 +3334,14 @@ class TestMultiAgentOrchestrator:
             patch.object(orchestrator, "_setup_rooms_and_memberships", new=AsyncMock()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
             patch.object(orchestrator, "_bind_started_runtime_support_services", side_effect=bind_runtime_support),
+            patch.object(orchestrator, "_start_sync_task", side_effect=record_runtime_before_sync),
             patch("mindroom.orchestrator.sync_forever_with_restart", new=AsyncMock()),
         ):
             await _run_orchestrator_start_until_ready(orchestrator)
 
         router_bot.recover_pending_turn_journal_events.assert_not_awaited()
+        assert runtimes_before_sync
+        assert all(runtime is not None for runtime in runtimes_before_sync)
 
     @pytest.mark.asyncio
     async def test_router_turn_recovery_delegates_unready_responder_filtering(

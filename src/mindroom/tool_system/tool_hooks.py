@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 from weakref import WeakKeyDictionary
 
+from mindroom.delegation.control import subagent_tool_checkpoint
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -679,6 +680,7 @@ async def _execute_bridge(
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     started_at = time.perf_counter()
+    await subagent_tool_checkpoint()
     timing = _ToolBridgeTiming(started_at=started_at)
     effective_dispatch_context = _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context()
     bridge_context = _ToolHookBridgeContext(
@@ -748,6 +750,7 @@ async def _execute_bridge(
     error: BaseException | None = None
     tool_body_started_at = time.perf_counter()
     try:
+        await subagent_tool_checkpoint()
         result = await _call_tool(
             func,
             args,

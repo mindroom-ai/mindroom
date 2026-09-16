@@ -159,6 +159,12 @@ Agent and team materialization is handled by dedicated top-level modules (not in
 `run_subagent` starts a separate child conversation; `continue_subagent` starts another turn in that same conversation.
 The child uses the normal agent response envelope, so its history, tools, and model behavior follow the existing runtime.
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
+Managed top-level Matrix delegation transfers execution ownership to a durable background job when its foreground wait ends.
+Job IDs identify exact delegation turns, while subagent IDs retain child conversations.
+Completion events carry the original requester and exact recipient into normal durable Matrix ingress and conversation ordering.
+Notification claims freeze content and transaction IDs before sending; foreground waits and asynchronous delivery share one outcome claim.
+Config reload retains active jobs while every control or delivery checks current authorization.
+Shutdown cancels owned work; recovery retains terminal outcomes and marks abandoned execution interrupted without replay.
 
 The runtime lives in the `src/mindroom/delegation/` package, with explicit imports between its modules.
 
@@ -167,6 +173,9 @@ The runtime lives in the `src/mindroom/delegation/` package, with explicit impor
 | `custom_tools/delegate.py` | Agent-facing tool schemas and direct invocation |
 | `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
 | `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
+| `delegation/background.py` | Managed tasks, persisted job outcomes, waits, and notification claims |
+| `delegation/control.py` | Human-follow-up signals and cooperative tool checkpoints |
+| `orchestration/subagent_runtime.py` | Job service lifecycle and durable Matrix completion sends |
 | `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
 | `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
 | `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |

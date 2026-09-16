@@ -508,18 +508,25 @@ DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured
 {agent_descriptions}
 
 Use run_subagent(task, agent_name=None) for a bounded subtask whose result you need before continuing.
-The caller waits for the child to finish; this is not background work.
+Managed Matrix calls wait up to 10 seconds; longer work returns a Job ID and continues in the background.
+A human follow-up releases the wait and pauses the child before its next application tool; already-running external work may finish.
+Use inspect_subagent(job_id) for status and results, wait_subagent(job_id) to wait again for the same work, resume_subagent(job_id) to release a human pause, and cancel_subagent(job_id) to stop it.
+Waiting never restarts the child, and resuming never grants tool approval.
+To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
+Direct API calls and nested delegation retain synchronous waits.
 The child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.
 It retains its configured tools, workspace, and memory.
 Omit agent_name or pass null to run a fresh copy of yourself, if your own name is listed in Allowed subagents.
 Delegation is limited to three nested child levels.
 For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.
 It uses the current conversation; set new_thread=True to start a separate thread.
-In Matrix, child tools that require approval pause both runs until the user approves or denies them.
+In Matrix, child tools that require approval pause until the user approves or denies them.
+If a background child needs approval, call wait_subagent with its Job ID to present its exact pending approvals.
 Other runtimes retain their approval restrictions.
 The result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.
 Use continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.
 Keep the returned ID: it stays valid across turns and restarts for this caller, requester, and originating conversation.
+The Job ID identifies one exact turn; the Subagent ID identifies its reusable conversation.
 Each follow-up has its own audit record and does not add nesting depth.
 A running child or one awaiting approval must finish its current turn before accepting a follow-up.
 Child records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json, events.jsonl, and transcript.md.

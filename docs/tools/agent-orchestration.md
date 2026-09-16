@@ -180,7 +180,9 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
-Both return the child's response inline.
+Fast calls return the child's response inline.
+Managed Matrix calls wait up to 10 seconds; longer work returns an exact job handle and continues in the background.
+OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
 
@@ -192,7 +194,7 @@ continue_subagent(subagent_id: str, message: str) -> str
 ```
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
 Fresh execution still uses the target agent's configured workspace, memory, requester scope, model, and tool policy.
-The caller waits for the child to finish and receives its answer, stable `Subagent ID`, and an audit reference.
+When the child finishes within the foreground wait, the caller receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
 Omitting `agent_name` or passing `None` selects the caller itself, subject to the same allowlist.
@@ -208,10 +210,29 @@ Use `continue_subagent` after the child returns to retain its own conversation h
 The stable ID remains usable across parent turns and restarts, within the same caller, requester, and originating conversation.
 Follow-ups preserve the child session and nesting depth, recheck current permissions, and require the original storage scope.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
-Calls wait for a result and do not queue messages into a running child or one awaiting approval.
+Calls do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
 After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is marked interrupted without replaying its tools, while a saved approval remains pending.
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
+
+### Background jobs
+
+`job_id` identifies one exact delegation turn; `subagent_id` identifies the reusable child conversation.
+Use `inspect_subagent(job_id)` to read status and saved results, `wait_subagent(job_id)` to reattach, `resume_subagent(job_id)` to release a human pause, and `cancel_subagent(job_id)` to stop work.
+Waiting never starts another child or replays its tools.
+These controls require the original requester, caller, transport, conversation, and current delegation permissions.
+Nested delegation remains owned by the top-level job.
+
+A queued human follow-up releases the foreground wait and pauses the child before its next tool call.
+An external operation already in progress may finish.
+Resuming a human pause does not grant tool approval.
+Background approval requests notify the owning conversation to call `wait_subagent`, which presents the exact native approval requirements.
+
+Completed background jobs send a notification to the original Matrix conversation and exact parent agent or team.
+Notifications enter normal conversation ordering and do not start a parallel parent response.
+A live waiter suppresses the notification; once notification delivery is claimed, another wait reports that delivery is queued.
+Failed sends retry the same saved payload and Matrix transaction ID.
+Completed outcomes survive restart; abandoned work becomes interrupted and is never restarted automatically.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
@@ -273,9 +294,9 @@ continue_subagent(
 
 - `Config.validate_delegate_to()` accepts explicit self-delegation and rejects unknown target agents at config-load time.
 - Recursive delegation is supported, but only up to a maximum depth of 3.
-- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel.
+- Native Matrix delegation handles foreground waits sequentially; children that continue in the background can overlap with later delegated jobs.
 - Use `continue_subagent` for another answer from an existing child; use [matrix_message](matrix-message.md#agent-conversations) for a conversation visible in Matrix.
-- Use [`delegate`] when you need a synchronous specialist answer inside the current run.
+- Use [`delegate`] for a specialist task that returns its answer inline or through a managed background job.
 
 ## [`dynamic_workflow`]
 

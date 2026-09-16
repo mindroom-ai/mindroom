@@ -14,6 +14,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 
 from mindroom.agent_storage import create_session_storage
+from mindroom.delegation.background import get_background_runtime
 from mindroom.delegation.hooks import after_delegation
 from mindroom.delegation.lifecycle import child_execution_identity, finish_child_turn, settle_child_response
 from mindroom.delegation.sessions import load_retained_subagent_turn, load_subagent, subagent_recovery_lock
@@ -156,8 +157,11 @@ async def _cancel_delegations(
 ) -> None:
     """Cancel retained descendants without running any of their pending tools."""
     state = DelegationState.from_metadata(response.metadata)
+    background = get_background_runtime(runtime_paths)
     for child in state.children:
         if child.status not in {"completed", "failed", "cancelled", "denied"}:
+            if background is not None and await background.cancel_retained(child):
+                continue
             await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=reason)
     for requirement_id, hook_state in state.hooks.items():
         child = next((item for item in state.children if item.parent_requirement_id == requirement_id), None)
