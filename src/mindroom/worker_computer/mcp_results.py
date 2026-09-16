@@ -79,6 +79,8 @@ def decode_browser_mcp_result(payload: object) -> object:  # noqa: C901, PLR0912
         raise _invalid()
     if not isinstance(entries, list) or len(entries) > _MAX_IMAGES:
         raise _invalid()
+    # Each independent Base64 value can add a padded quartet.
+    max_total_encoded = 4 * ((_MAX_TOTAL_BYTES + 2) // 3) + 4 * (_MAX_IMAGES - 1)
     total_encoded = 0
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != {"mime_type", "data_base64"}:
@@ -88,7 +90,7 @@ def decode_browser_mcp_result(payload: object) -> object:  # noqa: C901, PLR0912
         if not isinstance(mime, str) or mime not in _MIME_TYPES or not isinstance(encoded, str):
             raise _invalid()
         total_encoded += len(encoded)
-        if not encoded or len(encoded) > _MAX_ENCODED_BYTES or total_encoded > 4 * ((_MAX_TOTAL_BYTES + 2) // 3):
+        if not encoded or len(encoded) > _MAX_ENCODED_BYTES or total_encoded > max_total_encoded:
             raise _invalid()
     images = []
     total = 0

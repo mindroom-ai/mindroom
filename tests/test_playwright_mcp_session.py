@@ -93,7 +93,13 @@ async def test_stuck_call_releases_transport(transport: list[str], operation: st
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["timeout", "cancel", "crash", "startup", "close"])
 @pytest.mark.parametrize("detached", [False, True])
-async def test_real_stdio_child_tree_is_reaped(tmp_path: Path, operation: str, detached: bool) -> None:
+@pytest.mark.parametrize("birth_delay_ms", [0, 500])
+async def test_real_stdio_child_tree_is_reaped(
+    tmp_path: Path,
+    operation: str,
+    detached: bool,
+    birth_delay_ms: int,
+) -> None:
     """A real Node child cannot outlive timeout, cancellation, or server crash."""
     node = shutil.which("node")
     if node is None or sys.platform != "linux":
@@ -102,39 +108,69 @@ async def test_real_stdio_child_tree_is_reaped(tmp_path: Path, operation: str, d
     pidfile = tmp_path / "child.pid"
     script.write_text("""
 const fs = require('fs');
+setTimeout(() => {
 const child = require('child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio:'ignore', detached:process.argv[3] === 'true'});
 fs.writeFileSync(process.argv[2], String(child.pid));
 require('readline').createInterface({input:process.stdin}).on('line', line => {
   const request = JSON.parse(line);
   if (request.method === 'initialize' && process.argv[4] !== 'startup') {
     setTimeout(() => console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result:{protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}}})), process.argv[4] === 'close' ? 50 : 0);
-  } else if (request.method === 'tools/call' && request.params.name === 'crash') process.exit(1);
+  } else if (request.method === 'tools/call') {
+    fs.writeFileSync(process.argv[2] + '.called', request.params.name);
+    if (request.params.name === 'crash') process.exit(1);
+  }
 });
 setInterval(()=>{},1000);
+}, Number(process.argv[5]));
 """)
     session = PlaywrightMCPSession(
-        StdioServerParameters(command=node, args=[str(script), str(pidfile), str(detached).lower(), operation]),
+        StdioServerParameters(
+            command=node,
+            args=[str(script), str(pidfile), str(detached).lower(), operation, str(birth_delay_ms)],
+        ),
         call_timeout_seconds=0.3,
     )
-    call = asyncio.create_task(session.call_tool("crash" if operation == "crash" else "stuck", {}))
-    async with asyncio.timeout(2):
-        while not pidfile.exists():  # noqa: ASYNC110 - external child readiness file
-            await asyncio.sleep(0.01)
-    pid = int(pidfile.read_text())
-    if operation == "cancel":
-        call.cancel()
-    elif operation == "close":
-        await asyncio.wait_for(session.close(), 6)
+    call: asyncio.Task[CallToolResult] | None = None
+    pid: int | None = None
+    # Start the real actor before arming a request deadline: process birth is
+    # fixture setup, while "startup" still stalls inside MCP initialize.
+    session._actor_task = asyncio.create_task(session._run_actor())
     try:
-        with pytest.raises((TimeoutError, asyncio.CancelledError, ExceptionGroup, RuntimeError)):
+        async with asyncio.timeout(5):
+            while not pidfile.exists():
+                assert not session._actor_task.done(), "Fixture actor exited before child readiness"
+                await asyncio.sleep(0.01)
+        pid = int(pidfile.read_text())
+        call = asyncio.create_task(session.call_tool("crash" if operation == "crash" else "stuck", {}))
+        if operation in {"timeout", "cancel", "crash"}:
+            async with asyncio.timeout(2):
+                while not pidfile.with_suffix(".pid.called").exists():  # noqa: ASYNC110 - real tool dispatch
+                    await asyncio.sleep(0.01)
+        if operation == "cancel":
+            call.cancel()
+        elif operation == "close":
+            await asyncio.wait_for(session.close(), 6)
+        expected_error = (
+            TimeoutError
+            if operation in {"timeout", "startup"}
+            else (asyncio.CancelledError, ExceptionGroup, RuntimeError)
+        )
+        with pytest.raises(expected_error):
             await asyncio.wait_for(call, 6)
         await asyncio.wait_for(session.close(), 6)
         stat = Path(f"/proc/{pid}/stat")
         assert not stat.exists() or stat.read_text().split()[2] == "Z"
     finally:
-        # Clean only the child created by this fixture when RED exposes a leak.
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, 9)
+        try:
+            await asyncio.wait_for(session.close(), 6)
+        finally:
+            if call is not None:
+                call.cancel()
+                await asyncio.gather(call, return_exceptions=True)
+            # Clean only the child created by this fixture when RED exposes a leak.
+            if pid is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, 9)
 
 
 @pytest.mark.asyncio

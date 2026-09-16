@@ -352,7 +352,7 @@ class Fixture:
         assert image.images[0].mime_type == "image/png"
         data = image.images[0].content
         assert isinstance(data, bytes)
-        assert data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
+        assert data.startswith(b"\x89PNG\r\n\x1a\n")
         text = await self.primary_native("browser_snapshot")
         assert isinstance(text, ToolResult)
         assert "Remote text" in text.content

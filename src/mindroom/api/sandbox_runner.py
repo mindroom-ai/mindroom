@@ -1657,7 +1657,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     )
 
 
-async def _execute_computer_browser(  # noqa: C901 - exact provider dispatch and ownership checks
+async def _execute_computer_browser(  # noqa: C901, PLR0915 - exact provider dispatch and ownership checks
     computer: WorkerComputerRuntime,
     payload: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -1682,6 +1682,8 @@ async def _execute_computer_browser(  # noqa: C901 - exact provider dispatch and
     agent_name = payload.routing_agent_name or (
         payload.execution_identity.get("agent_name") if payload.execution_identity else None
     )
+    if agent_name is not None and not isinstance(agent_name, str):
+        raise HTTPException(status_code=400, detail="Computer agent_name must be a string.")
     if agent_name in config.agents and all(
         config.agent_has_tool_at_execution_scope(agent_name, provider, "user_agent")
         for provider in ("browser", "browser_mcp")

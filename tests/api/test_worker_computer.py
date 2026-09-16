@@ -387,3 +387,42 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
         assert "built-in browser factory" in replaced.json()["detail"]
         assert len(calls) == 3
         client.portal.call(computer.close)
+
+
+@pytest.mark.parametrize(
+    ("provider", "function"),
+    [("browser", "browser_control"), ("browser_mcp", "browser_snapshot")],
+)
+@pytest.mark.parametrize("agent_name", [[], {}, ["writer"], {"name": "writer"}, 7, True])
+def test_computer_execute_rejects_malformed_agent_name(
+    tmp_path: Path,
+    provider: str,
+    function: str,
+    agent_name: object,
+) -> None:
+    """Arbitrary identity values return a client error before provider dispatch."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    app = FastAPI()
+    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
+    app.state.worker_computer = WorkerComputerRuntime(FakeDisplay())
+    app.include_router(sandbox_runner.router)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers={"X-Mindroom-Sandbox-Token": RUNNER_TOKEN},
+            json={
+                "tool_name": provider,
+                "function_name": function,
+                "execution_identity": {
+                    "channel": "matrix",
+                    "agent_name": agent_name,
+                    "requester_id": "@alice:example.org",
+                    "room_id": "!room:example.org",
+                    "thread_id": None,
+                    "resolved_thread_id": None,
+                    "session_id": "session",
+                },
+            },
+        )
+    assert response.status_code == 400, response.text
+    assert "agent_name" in response.json()["detail"]

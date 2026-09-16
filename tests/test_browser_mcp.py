@@ -1,6 +1,7 @@
 """Native browser catalog and transport contracts."""
 
 import asyncio
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -283,3 +284,48 @@ def test_codec_bounds_before_image_decode(monkeypatch: pytest.MonkeyPatch) -> No
     }
     with pytest.raises(ValueError, match="browser MCP result"):
         decode_browser_mcp_result(payload)
+
+
+@pytest.fixture
+def small_image_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise padding and byte limits with tiny independent image payloads."""
+    monkeypatch.setattr(mcp_results, "_MAX_IMAGE_BYTES", 4)
+    monkeypatch.setattr(mcp_results, "_MAX_TOTAL_BYTES", 8)
+    monkeypatch.setattr(mcp_results, "_MAX_ENCODED_BYTES", 8)
+
+
+@pytest.mark.usefixtures("small_image_limits")
+@pytest.mark.parametrize("contents", [[b"abcd", b"efgh"], [b"x"] * 8, [b"abc", b"def", b"gh"]])
+def test_independently_padded_images_roundtrip_at_aggregate_limit(contents: list[bytes]) -> None:
+    """All eight allowed raw bytes survive transport despite independent padding."""
+    result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
+    decoded = decode_browser_mcp_result(json.loads(json.dumps(encode_browser_mcp_result(result))))
+    assert isinstance(decoded, ToolResult)
+    assert decoded.content == "screens"
+    assert [image.content for image in decoded.images] == contents
+    assert all(image.mime_type == "image/png" for image in decoded.images)
+
+
+@pytest.mark.usefixtures("small_image_limits")
+@pytest.mark.parametrize("contents", [[b"abcd", b"efgh", b"i"], [b"abcde"], [b"x"] * 9, [b""]])
+@pytest.mark.parametrize("operation", ["encode", "decode"])
+def test_image_limits_reject_oversized_or_empty_images(contents: list[bytes], operation: str) -> None:
+    """Padding allowance never widens raw aggregate, per-image or count limits."""
+    result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
+    if operation == "encode":
+        with pytest.raises(ValueError, match="browser MCP result"):
+            encode_browser_mcp_result(result)
+    else:
+        payload = {
+            "mindroom_browser_mcp_result": {
+                "version": 1,
+                "kind": "tool_result",
+                "content": "screens",
+                "images": [
+                    {"mime_type": "image/png", "data_base64": base64.b64encode(data).decode("ascii")}
+                    for data in contents
+                ],
+            },
+        }
+        with pytest.raises(ValueError, match="browser MCP result"):
+            decode_browser_mcp_result(payload)
