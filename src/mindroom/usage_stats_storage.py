@@ -100,7 +100,7 @@ class UsageRunNode:
     model: str | None
     metrics: Mapping[str, _MetricValue]
     created_at: int | float | None = None
-    # Empty means no detailed attribution was stored; None means it was malformed.
+    # Empty means no detailed attribution was stored; None means it was unusable.
     model_metrics: tuple[UsageModelMetrics, ...] | None = ()
 
 
@@ -636,7 +636,7 @@ def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | N
                 )
     except (TypeError, ValueError):
         return None
-    return tuple(models)
+    return tuple(models) if models else None
 
 
 def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]:

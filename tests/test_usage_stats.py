@@ -532,6 +532,8 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
     "details",
     [
         "invalid",
+        {},
+        {"model": []},
         {"model": ["invalid"]},
         {"model": [{"id": "model-a", "provider": "provider-a", "total_tokens": -1}]},
         {"model": [{"id": "model-a", "provider": "provider-a", "total_tokens": 5}]},
