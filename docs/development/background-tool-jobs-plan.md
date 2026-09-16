@@ -57,7 +57,7 @@ Stored job outcomes provide recovery and discovery without replaying interrupted
 - [x] Task 2: expose the shared timeout at the SDK and delegation boundaries and remove generic resume.
 - [x] Task 3: replace Matrix completion notices with serialized internal completion handling and automatic joining.
 - [x] Task 4: verify real tool behavior, fix confirmed compatibility/lifecycle defects, and update documentation.
-- [ ] Task 5: run complete checks, review the final diff, update the PR, and address valid review findings.
+- [x] Task 5: run complete checks, review the final diff, update the PR, and address valid review findings.
 
 ## Task 1: execution lifetime and waiter lifetime
 
@@ -175,7 +175,7 @@ tool starts -> caller detaches -> assistant streams -> job stores result
 | Revised full suite | Passed after final authorization fixes | 21,420 passed, 12 skipped, 41 warnings in 335 seconds |
 | Revised pre-commit and Tach | Passed | All-files hooks and dependency/interface checks passed after formatting and generated-reference updates |
 | Final whole-branch review | Approved after one fix wave | Null exclusions and empty implicit inclusion filters match real toolkit construction; native MCP conventions retained |
-| Final PR review | Pending | Validate comments against the pushed code |
+| Final PR review | Passed on implementation commit `844293f70` | Greptile reported no outstanding findings; all inline threads resolved; CodeRabbit confirmed result-limit/cancellation fixes and withdrew obsolete findings |
 
 ## Open findings and live fixes
 
@@ -226,5 +226,17 @@ tool starts -> caller detaches -> assistant streams -> job stores result
 - [x] Run `uv run pre-commit run --all-files` and `uv run tach check --dependencies --interfaces`.
 - [x] Review the complete feature diff and the revision diff against the restored baseline separately.
 - [x] Resolve verified review findings, preserve evidence for rejected claims, and recheck fixes.
-- [ ] Update PR #2113 with the actual UX, measured diff, validation results, and any unresolved limitation.
-- [ ] Confirm the pushed branch matches the reviewed local head and the worktree has no unintended changes.
+- [x] Update PR #2113 with the actual UX, measured diff, validation results, and any unresolved limitation.
+- [x] Confirm the pushed branch matches the reviewed local head and the worktree has no unintended changes.
+
+## Publication
+
+Implementation commit `844293f70` is pushed to PR #2113, which remains open and unmerged.
+The complete production diff against integrated main is 49 files, +4,388/−92 lines, or net +4,296.
+That is 653 net production lines beyond the original feature.
+The simpler waiter/execution contract removes automatic pause machinery, while durable completion, recovery, compatibility, and verified fixes retain a substantial implementation.
+
+The final external review covered the implementation commit and found no outstanding issue.
+Other review services were limited by temporary review capacity, subscription status, or diff size; these are not additional approvals.
+Hosted CI was still running at publication, with no failures reported at that checkpoint.
+The completed local full suite, hooks, task reviews, whole-branch review, and live evidence are recorded above.
