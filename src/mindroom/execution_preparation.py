@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
@@ -11,6 +12,7 @@ from agno.models.message import Message
 
 from mindroom import ai_runtime
 from mindroom.attachments import attachment_records_for_visible_message, format_attachment_annotation
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
     ORIGINAL_SENDER_KEY,
@@ -749,18 +751,23 @@ def _prepared_history_with_scheduled_limit(
 
 
 @timed("system_prompt_assembly.history_prepare.finalize")
-def _finalize_prepared_history(
+async def _finalize_prepared_history(
     *,
     prepared_scope_history: PreparedScopeHistory,
     config: Config,
     static_prompt_tokens: int,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> PreparedHistoryState:
-    return finalize_history_preparation(
-        prepared_scope_history=prepared_scope_history,
-        config=config,
-        static_prompt_tokens=static_prompt_tokens,
-        pipeline_timing=pipeline_timing,
+    # Planning may disable native replay on a caller-owned reusable model.
+    # Drain the worker before cancellation releases that caller's ownership.
+    return await run_coroutine_until_complete(
+        asyncio.to_thread(
+            finalize_history_preparation,
+            prepared_scope_history=prepared_scope_history,
+            config=config,
+            static_prompt_tokens=static_prompt_tokens,
+            pipeline_timing=pipeline_timing,
+        ),
     )
 
 
@@ -860,7 +867,7 @@ async def _prepare_execution_context_common(
         unseen_event_ids = []
 
     final_static_tokens = estimate_static_tokens_fn(render_messages_text_fn(final_messages))
-    prepared_history = _finalize_prepared_history(
+    prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
         static_prompt_tokens=final_static_tokens,

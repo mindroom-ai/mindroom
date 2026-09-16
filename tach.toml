@@ -1654,6 +1654,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.attachment_media",
     "mindroom.attachments",
+    "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.history.policy",
