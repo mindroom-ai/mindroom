@@ -171,6 +171,7 @@ def test_google_providers_request_minimum_functionality_preserving_scopes() -> N
     )
 
 
+@pytest.mark.parametrize("scope_field", ["scopes", "scope"])
 @pytest.mark.parametrize(
     ("requested_scope", "response_scope", "expected_scope"),
     [
@@ -194,6 +195,7 @@ def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
     requested_scope: str | None,
     response_scope: str | None,
     expected_scope: str | None,
+    scope_field: str,
 ) -> None:
     """Refreshing an older broad grant must not request newly configured scopes."""
     runtime_paths = resolve_runtime_paths(
@@ -230,7 +232,7 @@ def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
                 "refresh_token": "refresh-token",
                 "client_id": "client-id",
                 "expires_at": 1.0,
-                "scopes": granted_scopes,
+                scope_field: granted_scopes if scope_field == "scopes" else " ".join(granted_scopes),
                 "_oauth_claims": {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
                 "_oauth_claims_verified": True,
             },
@@ -249,6 +251,45 @@ def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
     assert refreshed is not None
     assert refreshed["refresh_token"] == "refresh-token"  # noqa: S105
     assert refreshed["scopes"] == (granted_scopes if expected_scope is None else expected_scope.split())
+
+
+def test_google_exchange_defaults_to_requested_scopes_when_response_omits_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initial authorization retains configured scopes when Google omits scope."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "google_oauth_client",
+        {"client_id": "client-id", "client_secret": PROVISIONED_CLIENT_SECRET},
+    )
+    provider = google_calendar_oauth_provider()
+
+    def client_factory(**kwargs: object) -> AsyncOAuth2Client:
+        assert kwargs["scope"] == provider.scopes
+        return AsyncOAuth2Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json={"access_token": "access-token", "id_token": "identity-token"},
+                ),
+            ),
+            **kwargs,
+        )
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    monkeypatch.setattr(
+        "mindroom.oauth.google.google_id_token.verify_oauth2_token",
+        lambda *_args: {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
+    )
+
+    result = asyncio.run(provider.exchange_code("auth-code", runtime_paths, code_verifier="pkce-verifier"))
+
+    assert result.token_data["scopes"] == list(provider.scopes)
 
 
 @pytest.mark.parametrize(

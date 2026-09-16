@@ -346,21 +346,18 @@ def _default_token_parser(
         msg = "OAuth provider did not return an access token"
         raise OAuthProviderError(msg)
 
-    scopes = provider.scopes
-    response_scope = token_response.get("scope")
-    if isinstance(response_scope, str) and response_scope.strip():
-        scopes = tuple(response_scope.split())
-
     token_data: dict[str, Any] = {
         "token": access_token,
         "token_uri": token_response.get("_mindroom_token_url")
         if isinstance(token_response.get("_mindroom_token_url"), str)
         else provider.token_url,
         "client_id": client_config.client_id,
-        "scopes": list(scopes),
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
+    response_scope = token_response.get("scope")
+    if isinstance(response_scope, str) and response_scope.strip():
+        token_data["scopes"] = response_scope.split()
     refresh_token = token_response.get("refresh_token")
     if isinstance(refresh_token, str) and refresh_token:
         token_data["refresh_token"] = refresh_token
@@ -385,6 +382,7 @@ def _token_result_with_core_metadata(
     result: OAuthTokenResult,
     *,
     client_id: str | None = None,
+    fallback_scopes: Sequence[str] | None = None,
 ) -> OAuthTokenResult:
     token_data = dict(result.token_data)
     if client_id is not None:
@@ -392,12 +390,28 @@ def _token_result_with_core_metadata(
     token_data["_source"] = "oauth"
     token_data["_oauth_provider"] = provider.id
     if not isinstance(token_data.get("scopes"), list):
-        token_data["scopes"] = list(provider.scopes)
+        token_data["scopes"] = list(provider.scopes if fallback_scopes is None else fallback_scopes)
     return OAuthTokenResult(
         token_data=token_data,
         claims=dict(result.claims),
         claims_verified=result.claims_verified,
     )
+
+
+def _refresh_fallback_scopes(
+    token_data: Mapping[str, Any],
+    token_response: Mapping[str, Any],
+    requested_scope: str,
+) -> list[Any]:
+    """Resolve refresh scopes without inferring grants from current configuration."""
+    for scope in (token_response.get("scope"), requested_scope):
+        if isinstance(scope, str) and scope.strip():
+            return scope.split()
+    stored_scopes = token_data.get("scopes")
+    if isinstance(stored_scopes, list):
+        return list(stored_scopes)
+    stored_scope = token_data.get("scope")
+    return stored_scope.split() if isinstance(stored_scope, str) else []
 
 
 def _verified_claims_for_storage(claims: Mapping[str, Any]) -> dict[str, Any]:
@@ -901,15 +915,16 @@ class OAuthProvider:
                 claims=dict(verified_claims),
                 claims_verified=True,
             )
-        result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
-        response_scope = refresh_response.get("scope")
-        if not isinstance(response_scope, str) or not response_scope.strip():
-            # Without response scope, retain the requested scope or original grant.
-            # Current authorization requirements can differ from either one.
-            requested_scope = self.extra_token_params.get("scope", "").strip()
-            granted_scopes = requested_scope.split() if requested_scope else token_data.get("scopes")
-            if isinstance(granted_scopes, list):
-                result.token_data["scopes"] = list(granted_scopes)
+        result = _token_result_with_core_metadata(
+            self,
+            result,
+            client_id=client_config.client_id,
+            fallback_scopes=_refresh_fallback_scopes(
+                token_data,
+                refresh_response,
+                self.extra_token_params.get("scope", ""),
+            ),
+        )
         await asyncio.to_thread(self.validate_claims, result, runtime_paths)
         return self.token_result_with_safe_claims(result).token_data
 
