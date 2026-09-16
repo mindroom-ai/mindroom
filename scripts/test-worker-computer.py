@@ -43,7 +43,18 @@ if TYPE_CHECKING:
 
     from playwright.async_api import Page
 
+    from mindroom.workers.models import WorkerHandle
+
 ASSETS = Path(__file__).resolve().parents[1] / "tests/fixtures/worker_computer"
+WORKER_CONTEXT_PATH_SCRIPT = """import sys
+from mindroom.api.sandbox_exec import runner_storage_root
+from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.worker_routing import resolve_agent_owned_path
+print(resolve_agent_owned_path(
+    sys.argv[1], agent_name='writer',
+    base_storage_path=runner_storage_root(resolve_runtime_paths()),
+))
+"""
 FRAMEBUFFER = """() => {
     const c = document.querySelector('canvas');
     if (!c || c.width !== 1280 || c.height !== 800) return false;
@@ -168,6 +179,16 @@ class Fixture:
                 if requester not in joined or agent not in joined:
                     raise ComputerError(403, "Fixture membership denied.")
         return self.target(requester)
+
+    async def reconcile_worker(self) -> WorkerHandle:
+        """Exercise primary worker reconciliation before the next tool dispatch."""
+        return await asyncio.to_thread(
+            computers._resolve_worker,
+            self.config,
+            self.paths,
+            self.target(self.viewer),
+            start=True,
+        )
 
     async def execute(
         self,
@@ -419,17 +440,61 @@ async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - seque
                 headers = {"Authorization": "Bearer " + session["session_token"]}
                 # A real reply rewrites thread exports before its browser call.
                 # The running worker and noVNC stream must survive that update.
+                before_worker = await asyncio.to_thread(
+                    computers._resolve_worker,
+                    fixture.config,
+                    fixture.paths,
+                    fixture.target(fixture.viewer),
+                    start=False,
+                )
+                before_container = await command("docker", "inspect", "--format", "{{.Id}}", before_worker.worker_id)
+                before_tabs = await fixture.browser(action="tabs")
+                before_target = before_tabs["activeTargetId"]
+                assert before_target == opened["targetId"]
+                before_session = await client.get(path, headers=headers)
+                assert before_session.status_code == 200
+                before_session_id = before_session.json()["session_id"]
+                assert before_session_id == session["session_id"]
                 fixture.history.write_text("messages: [navigate to another website]\n")
                 (fixture.history.parent.parent / "AGENTS.md").write_text("Updated browser fixture context\n")
+                after_worker = await fixture.reconcile_worker()
                 navigated = await fixture.browser(
                     action="navigate",
                     targetId=opened["targetId"],
                     targetUrl="http://127.0.0.1:8767/?after-chat=1",
                 )
-                assert navigated["targetId"] == opened["targetId"]
-                assert (await client.get(path, headers=headers)).status_code == 200
+                assert navigated["targetId"] == before_target
+                after_container = await command("docker", "inspect", "--format", "{{.Id}}", after_worker.worker_id)
+                assert after_container == before_container
+                worker_config = yaml.safe_load(
+                    await command("docker", "exec", after_container, "sh", "-c", 'cat "$MINDROOM_CONFIG_PATH"'),
+                )
+                history_path = worker_config["knowledge_bases"]["threads"]["path"] + "/thread.yaml"
+                # Context paths resolve from canonical agent state, whereas the
+                # fixture's shell intentionally keeps its worker scratch cwd.
+                context_path = await command(
+                    "docker",
+                    "exec",
+                    after_container,
+                    "uv",
+                    "run",
+                    "--project",
+                    "/app",
+                    "--no-sync",
+                    "python",
+                    "-c",
+                    WORKER_CONTEXT_PATH_SCRIPT,
+                    worker_config["agents"]["writer"]["context_files"][0],
+                )
+                assert (await fixture.shell(["cat", history_path])).strip() == "messages: [navigate to another website]"
+                assert (await fixture.shell(["cat", context_path])).strip() == "Updated browser fixture context"
+                current_session = await client.get(path, headers=headers)
+                assert current_session.status_code == 200
+                assert current_session.json()["session_id"] == before_session_id
                 await page.wait_for_function(FRAMEBUFFER)
                 assert await page.evaluate("window.probe.connected && !window.probe.disconnected")
+                result["chat_update_container_id"] = after_container
+                result["chat_updates_visible_in_worker"] = True
                 await fixture.evaluate("()=>document.querySelector('#shared-input').focus()")
                 result["chat_updates_preserve_connection"] = True
 
