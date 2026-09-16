@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -1465,8 +1466,8 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     _assert_projected_config_snapshot(projection_root, tmp_path)
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
-    assert run_call["cap_drop"] == ["ALL"]
-    assert run_call["security_opt"] == ["no-new-privileges:true"]
+    assert "cap_drop" not in run_call
+    assert "security_opt" not in run_call
 
     labels = run_call["labels"]
     assert isinstance(labels, dict)
@@ -1495,6 +1496,7 @@ def test_docker_computer_worker_uses_argument_filtered_browser_seccomp_profile(
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
+    assert fake_client.containers.run_calls[0]["cap_drop"] == ["ALL"]
     security_opt = fake_client.containers.run_calls[0]["security_opt"]
     assert isinstance(security_opt, list)
     assert security_opt[0] == "no-new-privileges:true"
@@ -3305,7 +3307,12 @@ def test_docker_backend_recreates_container_missing_runtime_security_options(
     tmp_path: Path,
 ) -> None:
     """An old matching container must be replaced if its effective host security is stale."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
+    )
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
     first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
     first_container = fake_client.containers.by_name[first_handle.worker_id]
     first_container.attrs["HostConfig"] = {"CapDrop": [], "SecurityOpt": []}
@@ -3317,29 +3324,30 @@ def test_docker_backend_recreates_container_missing_runtime_security_options(
 
 
 @pytest.mark.parametrize(
-    ("computer_enabled", "weakened_setting"),
+    "weakened_setting",
     [
-        (True, "privileged"),
-        (True, "cap_add"),
-        (True, "unconfined"),
-        (True, "normalized_seccomp_marker"),
-        (True, "wrong_profile"),
-        (False, "unconfined"),
-        (False, "wrong_profile"),
+        "privileged",
+        "cap_add",
+        "missing_drop",
+        "missing_nnp",
+        "unconfined",
+        "normalized_seccomp_marker",
+        "wrong_profile",
+        "invalid_profile",
+        "missing_host_config",
     ],
 )
 def test_docker_backend_recreates_container_with_weakened_runtime_security(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
-    computer_enabled: bool,
     weakened_setting: str,
 ) -> None:
     """A matching worker must not be reused when its effective Docker policy is weaker."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "state",
-        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"} if computer_enabled else {},
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
     )
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
     first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
@@ -3351,6 +3359,14 @@ def test_docker_backend_recreates_container_with_weakened_runtime_security(
         host_config["Privileged"] = True
     elif weakened_setting == "cap_add":
         host_config["CapAdd"] = ["SYS_ADMIN"]
+    elif weakened_setting == "missing_drop":
+        host_config["CapDrop"] = []
+    elif weakened_setting == "missing_nnp":
+        host_config["SecurityOpt"] = host_config["SecurityOpt"][1:]
+    elif weakened_setting == "invalid_profile":
+        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp={"]
+    elif weakened_setting == "missing_host_config":
+        first_container.attrs.pop("HostConfig")
     elif weakened_setting == "normalized_seccomp_marker":
         host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp"]
     else:
@@ -4962,3 +4978,106 @@ def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize("flag", [None, "false"])
+@pytest.mark.parametrize("check", ["launch", "signature", "kwargs", "reuse"])
+def test_docker_ordinary_workers_preserve_pre_computer_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flag: str | None,
+    check: str,
+) -> None:
+    """Historical identities and default Docker HostConfig remain reusable without the opt-in."""
+    env = {
+        "MINDROOM_WORKER_BACKEND": "docker",
+        "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
+    }
+    if flag is not None:
+        env[WORKER_COMPUTER_ENABLED_ENV] = flag
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=env,
+    )
+    backend, client, _ = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    # Captured from actual main74bc modules: substitute only the test root, never
+    # reconstruct the production hash payload or require git/history at runtime.
+    baseline = json.loads((Path(__file__).parent / "fixtures/docker_pre_computer_identity.json").read_text())
+    serialized = baseline["launch_payload"].replace("__TEST_ROOT__", str(tmp_path))
+    expected_hash = hashlib.sha256(serialized.encode()).hexdigest()
+    if check == "launch":
+        assert backend._compute_launch_config_hash() == expected_hash
+        return
+    if check == "signature":
+        expected_signature = tuple(
+            part.replace("__TEST_ROOT__", str(tmp_path))
+            for part in baseline["backend_signatures"]["absent" if flag is None else flag]
+        )
+        assert docker_backend_config_signature(runtime_paths, auth_token=_TEST_AUTH_TOKEN) == expected_signature
+        return
+    first = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = client.containers.by_name[first.worker_id]
+    if check == "kwargs":
+        assert "cap_drop" not in client.containers.run_calls[0]
+        assert "security_opt" not in client.containers.run_calls[0]
+        return
+    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata/worker.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["launch_config_hash"] = expected_hash
+    metadata_path.write_text(json.dumps(metadata))
+    container.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"] = expected_hash
+    container.attrs["HostConfig"] = {"Privileged": False, "CapAdd": None, "CapDrop": None, "SecurityOpt": None}
+
+    second = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert second.worker_id == first.worker_id
+    assert container.removed == 0
+    assert len(client.containers.run_calls) == 1
+
+
+@pytest.mark.parametrize("initial_enabled", [False, True])
+def test_docker_computer_opt_in_changes_identity_and_replaces_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    initial_enabled: bool,
+) -> None:
+    """The runtime-wide opt-in replaces the pool's workers in either direction."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        WORKER_COMPUTER_ENABLED_ENV: str(initial_enabled).lower(),
+    }
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    backend, client, _ = _backend(monkeypatch, tmp_path, runtime_paths=paths)
+    first = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = client.containers.by_name[first.worker_id]
+    changed_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={**env, WORKER_COMPUTER_ENABLED_ENV: str(not initial_enabled).lower()},
+    )
+    replacement = DockerWorkerBackend(
+        config=backend.config,
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+        runtime_paths=changed_paths,
+    )
+    monkeypatch.setattr(replacement, "_wait_for_ready", backend._wait_for_ready)
+    assert replacement._compute_launch_config_hash() != backend._compute_launch_config_hash()
+    assert docker_backend_config_signature(paths, auth_token=_TEST_AUTH_TOKEN) != docker_backend_config_signature(
+        changed_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+    )
+
+    replacement.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert container.removed == 1
+    assert len(client.containers.run_calls) == 2
+    latest = client.containers.run_calls[-1]
+    if initial_enabled:
+        assert "cap_drop" not in latest
+        assert "security_opt" not in latest
+    else:
+        assert latest["cap_drop"] == ["ALL"]
+        assert latest["security_opt"][0] == "no-new-privileges:true"

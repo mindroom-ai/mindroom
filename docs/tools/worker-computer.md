@@ -142,10 +142,13 @@ Persistent workspace files remain intentionally shared with the agent's other wo
 Worker computers launch Chromium with its Linux process sandbox enabled.
 A startup failure is returned to the caller; MindRoom does not retry with Chromium's sandbox disabled.
 
-Docker workers automatically drop all Linux capabilities and set `no-new-privileges`.
-When worker computers are enabled, the backend also installs the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
+With `MINDROOM_WORKER_COMPUTER_ENABLED=true`, Docker workers drop all Linux capabilities, set `no-new-privileges`, and use the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
+This existing flag opts the runtime's entire Docker worker pool into the Computer policy, including workers whose agents do not select a browser tool.
+It is not a per-agent or per-tool setting.
+With the flag absent or false, ordinary Docker workers retain their previous launch settings and compatible configuration identities; upgrading alone does not replace them for this policy.
 That profile is based on Moby's maintained default policy and adds only the namespace and `chroot` operations used by the Chromium sandbox.
-Existing Docker worker containers are replaced if these host security settings are missing.
+Computer-enabled Docker worker containers are replaced if these host security settings are missing.
+Changing the flag reconciles workers to the new configuration; ordinary image, authentication, configuration and mount changes still trigger their existing reconciliation.
 
 Kubernetes workers keep the pod-level `RuntimeDefault` seccomp policy.
 If that policy supports unprivileged user namespaces, no extra setting is needed.

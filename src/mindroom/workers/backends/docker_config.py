@@ -291,8 +291,10 @@ def docker_backend_config_signature(
     workers_root = docker_workers_root(effective_runtime_paths.storage_root)
     credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
     runtime_env = runtime_env_values(effective_runtime_paths)
-    security_policy_signature = docker_worker_security_policy_signature(
-        computer_enabled=effective_runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV),
+    security_policy_signature = (
+        docker_worker_security_policy_signature()
+        if effective_runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV)
+        else ()
     )
     return build_backend_config_signature(
         prefix_parts=(

@@ -555,8 +555,9 @@ Each lease is consumed on use and expires after the configured TTL.
 - Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
   `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block
   Chromium's namespace sandbox is documented in [Worker Computer](../tools/worker-computer.md#browser-and-container-sandboxing).
-- Dedicated Docker workers drop all capabilities and set `no-new-privileges`. Computer-enabled workers also use the
-  packaged Chromium-compatible seccomp profile.
+- With `MINDROOM_WORKER_COMPUTER_ENABLED=true`, dedicated Docker workers drop all capabilities, set `no-new-privileges`, and use the packaged Chromium-compatible seccomp profile.
+  This is a runtime-wide worker-pool opt-in, regardless of which tools an agent selects.
+  With the flag absent or false, ordinary Docker workers retain their prior launch settings and compatible identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
