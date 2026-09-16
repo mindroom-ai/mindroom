@@ -35,28 +35,6 @@ _SHARED_ONLY_INTEGRATION_NAMES = frozenset(
         "homeassistant",
     },
 )
-_LOCAL_ONLY_TOOL_NAMES = frozenset(
-    {
-        "approved_egress",
-        "attachments",
-        "callback_manager",
-        "chat_ui",
-        "desktop",
-        "external_trigger_manager",
-        "github",
-        "gmail",
-        "google_calendar",
-        "google_docs",
-        "google_drive",
-        "google_sheets",
-        "homeassistant",
-        "invite_router",
-        "oauth_connections",
-        "script",
-        "todo",
-        "usage_stats",
-    },
-)
 
 
 @dataclass(frozen=True)
@@ -492,11 +470,6 @@ def unsupported_shared_only_integration_names(
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
     return [name for name in names if _requires_shared_only_integration_scope(name)]
-
-
-def tool_stays_local(name: str) -> bool:
-    """Return whether one tool always stays in the primary runtime."""
-    return name in _LOCAL_ONLY_TOOL_NAMES
 
 
 def unsupported_shared_only_integration_message(

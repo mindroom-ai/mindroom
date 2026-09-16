@@ -122,6 +122,7 @@ class ToolValidationInfo:
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     supports_toolkit_filters: bool = False
     requires_room_context: bool = False
+    requires_primary_runtime: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
 
@@ -132,6 +133,9 @@ class ToolMetadata:
 
     ``requires_room_context`` marks toolkits that need the live Matrix room
     runtime, including its client, requester, and conversation context.
+    ``requires_primary_runtime`` prevents worker routing even when an authored
+    ``worker_tools`` override selects the tool. It is independent from the
+    overridable ``default_execution_target``.
     """
 
     name: str
@@ -141,6 +145,7 @@ class ToolMetadata:
     status: ToolStatus = ToolStatus.AVAILABLE
     setup_type: SetupType = SetupType.NONE
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY
+    requires_primary_runtime: bool = False
     consumes_workspace_paths: bool = False
     requires_room_context: bool = False
     icon: str | None = None

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
     requires_room_context=True,
     icon="PanelsTopLeft",
     icon_color="text-violet-500",

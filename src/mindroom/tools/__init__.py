@@ -314,6 +314,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
     dependencies=["httpx"],
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     managed_init_args=(
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
     auth_provider="google_sheets",
     icon="SiGooglesheets",
     icon_color="text-green-600",

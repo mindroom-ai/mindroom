@@ -23,7 +23,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import SetupType
+from mindroom.tool_system.declarations import SetupType, ToolValidationInfo
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
@@ -165,6 +165,26 @@ def test_export_tools_metadata_json() -> None:
 def test_oauth_connections_requires_live_room_context() -> None:
     """OAuth reset must not be advertised without a requester-bound live context."""
     assert TOOL_METADATA["oauth_connections"].requires_room_context is True
+
+
+def test_registration_preserves_primary_runtime_requirement() -> None:
+    """The registration surface must carry the non-overridable routing declaration into the catalog."""
+    snapshot = capture_tool_registry_snapshot()
+    try:
+
+        @register_tool_with_metadata(
+            name="test_primary_runtime_registration",
+            display_name="Primary Runtime Registration",
+            description="Test-only primary-runtime declaration.",
+            category=ToolCategory.DEVELOPMENT,
+            requires_primary_runtime=True,
+        )
+        def _primary_runtime_registration() -> type[Toolkit]:
+            return Toolkit
+
+        assert TOOL_METADATA["test_primary_runtime_registration"].requires_primary_runtime is True
+    finally:
+        restore_tool_registry_snapshot(snapshot)
 
 
 def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
@@ -1035,6 +1055,22 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
     assert restored_snapshot["mcp_demo"].agent_override_fields is not None
 
 
+def test_tool_validation_snapshot_round_trips_primary_runtime_requirement() -> None:
+    """Worker validation caches must retain the catalog's non-overridable runtime boundary."""
+    snapshot = {
+        "host_only": ToolValidationInfo(
+            name="host_only",
+            requires_primary_runtime=True,
+        ),
+    }
+
+    payload = serialize_tool_validation_snapshot(snapshot)
+    restored_snapshot = deserialize_tool_validation_snapshot(payload)
+
+    assert payload["host_only"]["requires_primary_runtime"] is True
+    assert restored_snapshot["host_only"].requires_primary_runtime is True
+
+
 def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadable() -> None:
     """Validation snapshot payloads should type-check runtime_loadable strictly."""
     with pytest.raises(TypeError, match="runtime_loadable to a boolean"):
@@ -1045,6 +1081,22 @@ def test_deserialize_tool_validation_snapshot_rejects_non_boolean_runtime_loadab
                     "agent_override_fields": [],
                     "authored_override_validator": "default",
                     "runtime_loadable": "yes",
+                },
+            },
+        )
+
+
+def test_deserialize_tool_validation_snapshot_rejects_non_boolean_primary_runtime() -> None:
+    """Validation snapshot payloads should type-check primary-runtime requirements strictly."""
+    with pytest.raises(TypeError, match="requires_primary_runtime to a boolean"):
+        deserialize_tool_validation_snapshot(
+            {
+                "host_only": {
+                    "config_fields": [],
+                    "agent_override_fields": [],
+                    "authored_override_validator": "default",
+                    "requires_primary_runtime": "yes",
+                    "runtime_loadable": True,
                 },
             },
         )

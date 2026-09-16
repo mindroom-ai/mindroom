@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     requires_room_context=True,
     default_execution_target=ToolExecutionTarget.PRIMARY,
+    requires_primary_runtime=True,
     icon="FaChartBar",
     icon_color="text-cyan-500",
     dependencies=["agno"],
