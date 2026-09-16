@@ -5116,9 +5116,17 @@ def test_docker_security_policy_changes_identity_and_replaces_worker(
 
 
 @pytest.mark.parametrize("policy", [None, "runtime_default"])
-def test_docker_computer_requires_explicit_security_policy(tmp_path: Path, policy: str | None) -> None:
+@pytest.mark.parametrize(("primary_flag", "worker_flag"), [("true", None), ("false", " YES "), ("true", "false")])
+def test_docker_computer_requires_explicit_security_policy(
+    tmp_path: Path,
+    policy: str | None,
+    primary_flag: str,
+    worker_flag: str | None,
+) -> None:
     """Enabling Computer cannot silently select or bypass the operator security policy."""
-    env = {"MINDROOM_DOCKER_WORKER_IMAGE": "test-image", WORKER_COMPUTER_ENABLED_ENV: "true"}
+    env = {"MINDROOM_DOCKER_WORKER_IMAGE": "test-image", WORKER_COMPUTER_ENABLED_ENV: primary_flag}
+    if worker_flag is not None:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: worker_flag})
     if policy is not None:
         env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
@@ -5151,16 +5159,25 @@ def test_docker_security_policy_rejects_unknown_choice(
             _DockerWorkerBackendConfig.from_runtime(paths)
 
 
+@pytest.mark.parametrize("worker_override", [False, True])
 def test_docker_direct_backend_rejects_incompatible_computer_policy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    worker_override: bool,
 ) -> None:
     """A supplied default config cannot enable Computer even when env claims a compatible policy."""
     backend, _, _ = _backend(monkeypatch, tmp_path)
     paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={WORKER_COMPUTER_ENABLED_ENV: "true", "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer"},
+        process_env={
+            WORKER_COMPUTER_ENABLED_ENV: "false" if worker_override else "true",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        },
+    )
+    config = (
+        replace(backend.config, extra_env={WORKER_COMPUTER_ENABLED_ENV: "true"}) if worker_override else backend.config
     )
 
     def forbidden_client(**_kwargs: object) -> None:
@@ -5168,27 +5185,32 @@ def test_docker_direct_backend_rejects_incompatible_computer_policy(
 
     monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
     with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer"):
-        DockerWorkerBackend(config=backend.config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+        DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
 
 
 @pytest.mark.parametrize(
-    ("computer_enabled", "policy", "expected"),
+    ("computer_enabled", "worker_flag", "policy", "expected"),
     [
-        (False, None, "runtime_default"),
-        (False, "runtime_default", "runtime_default"),
-        (False, "computer", "computer"),
-        (True, "computer", "computer"),
+        (False, None, None, "runtime_default"),
+        (False, None, "runtime_default", "runtime_default"),
+        (False, None, "computer", "computer"),
+        (True, None, "computer", "computer"),
+        (False, "false", None, "runtime_default"),
+        (False, "true", "computer", "computer"),
     ],
 )
 def test_docker_security_policy_resolution(
     tmp_path: Path,
     *,
     computer_enabled: bool,
+    worker_flag: str | None,
     policy: str | None,
     expected: str,
 ) -> None:
     """Availability cannot override the explicit pool policy or its historical default."""
     env = {"MINDROOM_DOCKER_WORKER_IMAGE": "test-image", WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower()}
+    if worker_flag is not None:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: worker_flag})
     if policy is not None:
         env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)

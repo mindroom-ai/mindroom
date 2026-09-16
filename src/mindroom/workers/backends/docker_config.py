@@ -25,6 +25,7 @@ from mindroom.runtime_env_policy import (
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._config_helpers import (
+    read_bool_env,
     read_env,
     read_float_env,
     read_int_env,
@@ -213,7 +214,11 @@ class _DockerWorkerBackendConfig:
 
     def validate_runtime_security(self, runtime_paths: RuntimePaths) -> None:
         """Require the selected compatible pool policy before enabling Computer."""
-        if runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV) and self.security_policy != "computer":
+        computer_enabled = runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV) or read_bool_env(
+            self.extra_env,
+            WORKER_COMPUTER_ENABLED_ENV,
+        )
+        if computer_enabled and self.security_policy != "computer":
             msg = f"{WORKER_COMPUTER_ENABLED_ENV}=true requires {_SECURITY_POLICY_ENV}=computer."
             raise WorkerBackendError(msg)
 
