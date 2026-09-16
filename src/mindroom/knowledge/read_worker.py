@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, override
 from agno.knowledge.embedder.base import Embedder
 
 from mindroom.knowledge.chroma_client import ChromaDb
+from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_protocol import (
     MAX_FRAME_BYTES,
     ReadDocument,
@@ -45,14 +46,17 @@ class _QueryEmbedder(Embedder):
 
 
 def _read(request: ReadRequest) -> ReadResult:
-    with closing(
-        _PublishedChromaDb(
-            collection=request.collection,
-            path=request.path,
-            persistent_client=True,
-            embedder=_QueryEmbedder(vector=request.embedding or []),
-        ),
-    ) as vector_db:
+    with (
+        read_collection(request) as collection_name,
+        closing(
+            _PublishedChromaDb(
+                collection=collection_name,
+                path=request.path,
+                persistent_client=True,
+                embedder=_QueryEmbedder(vector=request.embedding or []),
+            ),
+        ) as vector_db,
+    ):
         if request.query is None:
             return ReadResult(exists=vector_db.exists())
         if request.embedding is None:

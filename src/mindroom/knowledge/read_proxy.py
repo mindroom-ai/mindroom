@@ -11,12 +11,15 @@ from typing import TYPE_CHECKING, Any
 
 from agno.knowledge.document import Document
 
+from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_process import read_chroma, read_chroma_async
 from mindroom.knowledge.read_protocol import ReadRequest
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from agno.knowledge.embedder.base import Embedder
+
+    from mindroom.knowledge.indexing_config import IndexingSettings
 
 logger = get_logger(__name__)
 
@@ -58,15 +61,22 @@ def _dict_filters(filters: dict[str, Any] | list[Any] | None) -> dict[str, Any] 
 
 @dataclass
 class ChromaReadProxy:
-    """A typed read-only descriptor; all native handles belong to the worker."""
+    """A scoped read descriptor; the worker selects and holds its current publication."""
 
     collection_name: str
     path: str
     embedder: Embedder
+    published_settings: IndexingSettings | None = None
 
     def exists(self) -> bool:
-        """Check whether the exact published collection still exists."""
-        return collection_exists(self.path, self.collection_name)
+        """Probe the same compatible publication that a subsequent search resolves."""
+        request = ReadRequest(
+            self.path,
+            self.collection_name,
+            published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
+        )
+        with read_collection(request) as collection_name:
+            return collection_exists(self.path, collection_name)
 
     def create(self) -> None:
         """Never recreate a vanished published collection during Agno initialization."""
@@ -82,7 +92,15 @@ class ChromaReadProxy:
         """Embed under the caller's credentials, then query outside this process."""
         embedding = self.embedder.get_embedding(query)
         result = read_chroma(
-            ReadRequest(self.path, self.collection_name, query, embedding, limit, _dict_filters(filters)),
+            ReadRequest(
+                self.path,
+                self.collection_name,
+                query,
+                embedding,
+                limit,
+                _dict_filters(filters),
+                self.published_settings.to_metadata() if self.published_settings is not None else None,
+            ),
         )
         return [Document(**asdict(document)) for document in result.documents]
 
@@ -99,7 +117,15 @@ class ChromaReadProxy:
                 embedding = await self.embedder.async_get_embedding(query)
             except NotImplementedError:
                 embedding = await asyncio.to_thread(self.embedder.get_embedding, query)
-            return ReadRequest(self.path, self.collection_name, query, embedding, limit, _dict_filters(filters))
+            return ReadRequest(
+                self.path,
+                self.collection_name,
+                query,
+                embedding,
+                limit,
+                _dict_filters(filters),
+                self.published_settings.to_metadata() if self.published_settings is not None else None,
+            )
 
         result = await read_chroma_async(prepare_request)
         return [Document(**asdict(document)) for document in result.documents]

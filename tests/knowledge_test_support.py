@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
     from mindroom.config.knowledge import KnowledgeGitConfig
+    from mindroom.knowledge.indexing_config import IndexingSettings
 
 
 def validate_where_operands(where: dict[str, Any] | None) -> None:
@@ -221,7 +222,15 @@ class _VectorDb:
 
 
 class _ReadProxy(_VectorDb):
-    def __init__(self, *, collection_name: str, path: str, embedder: Embedder) -> None:
+    def __init__(
+        self,
+        *,
+        collection_name: str,
+        path: str,
+        embedder: Embedder,
+        published_settings: IndexingSettings,
+    ) -> None:
+        self.published_settings = published_settings
         super().__init__(collection=collection_name, path=path, embedder=embedder)
 
 

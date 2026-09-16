@@ -24,6 +24,7 @@ from mindroom.knowledge.indexing_config import (
     IndexingSettings,
     chroma_collection_exists,
     indexing_settings_key,
+    published_index_settings_compatible,
     storage_key_for_base,
 )
 from mindroom.logging_config import get_logger
@@ -380,6 +381,7 @@ def _build_published_index_vector_db(
         collection_name=_state_collection_name(state),
         path=str(published_index_storage_path(key)),
         embedder=create_configured_embedder(config, runtime_paths),
+        published_settings=state.settings,
     )
 
 
@@ -389,10 +391,11 @@ def _build_published_index_knowledge(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> Knowledge:
-    return StrictSearchKnowledge(
-        vector_db=_build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths),
-    )
+) -> Knowledge | None:
+    vector_db = _build_published_index_vector_db(key, state, config=config, runtime_paths=runtime_paths)
+    if not vector_db.exists():
+        return None
+    return StrictSearchKnowledge(vector_db=vector_db)
 
 
 def published_index_collection_exists_for_state(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
@@ -409,28 +412,6 @@ def published_index_collection_exists_for_state(key: PublishedIndexKey, state: P
             exc_info=True,
         )
         return False
-
-
-def _indexing_settings_query_compatible(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether current queries can use a collection from published settings."""
-    return published_settings.query_compatibility_key() == current_settings.query_compatibility_key()
-
-
-def published_index_settings_compatible(
-    published_settings: IndexingSettings,
-    current_settings: IndexingSettings,
-) -> bool:
-    """Return whether a published index can be queried under the current config."""
-    return (
-        _indexing_settings_query_compatible(
-            published_settings,
-            current_settings,
-        )
-        and published_settings.corpus_compatibility_key() == current_settings.corpus_compatibility_key()
-    )
 
 
 def _published_index_state_queryable(key: PublishedIndexKey, state: PublishedIndexState) -> bool:
@@ -520,8 +501,6 @@ def _load_queryable_index_from_state(
     runtime_paths: RuntimePaths,
 ) -> Knowledge | None:
     if not _published_index_state_queryable(key, state):
-        return None
-    if not published_index_collection_exists_for_state(key, state):
         return None
     return _build_published_index_knowledge(key, state, config=config, runtime_paths=runtime_paths)
 
