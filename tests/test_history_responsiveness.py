@@ -13,11 +13,13 @@ from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
 from mindroom.agent_storage import get_agent_session
+from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
 from mindroom.execution_preparation import _finalize_prepared_history
-from mindroom.history.compaction import SummaryModel, compact_scope_history
+from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry, compact_scope_history
 from mindroom.history.runtime import PreparedScopeHistory, prepare_scope_history, resolve_agent_preparation_inputs
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import write_scope_state
+from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.token_budget import estimate_compaction_input_tokens
@@ -360,3 +362,54 @@ async def test_cancelled_finalization_finishes_before_agent_reuse(  # noqa: PLR0
         if reuse_task is not None:
             await reuse_task
         storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry", ["none", "fallback", "shrink"])
+async def test_summary_retry_sizing_allows_loop_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    retry: str,
+) -> None:
+    """Every estimate lets queued loop work run, including after a model refusal."""
+    loop = asyncio.get_running_loop()
+    loop_progress: list[bool] = []
+
+    def controlled_estimate(value: str, *, model_id: str | None = None, conservative_fallback: bool = False) -> int:
+        released = threading.Event()
+        loop.call_soon_threadsafe(released.set)
+        loop_progress.append(released.wait(timeout=1))
+        return estimate_compaction_input_tokens(
+            value,
+            model_id=model_id,
+            conservative_fallback=conservative_fallback,
+        )
+
+    monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_estimate)
+    summary = SessionSummary(summary="Greeting received.")
+    responses = [summary]
+    if retry == "fallback":
+        responses.insert(0, ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE))
+    elif retry == "shrink":
+        responses.insert(0, CompactionSummaryOutputLimitError("Output limit reached"))
+    generate = AsyncMock(side_effect=responses)
+    monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
+    run = _completed_run("run", messages=[Message(role="user", content="Hello")])
+    primary = SummaryModel(FakeModel(id="primary", provider="fake"), "primary", 10000)
+    fallback = SummaryModel(FakeModel(id="fallback", provider="fake"), "fallback", 1000)
+    result = await _generate_compaction_summary_with_retry(
+        summary_model=primary,
+        previous_summary=None,
+        compactable_runs=[run],
+        initial_summary_input="Hello " * 8000 if retry == "shrink" else "Hello",
+        initial_included_runs=[run],
+        session_id="session",
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=_ALL_HISTORY_SETTINGS,
+        summary_prompt="Summarize",
+        timeout_seconds=30,
+        fallback_model=fallback if retry == "fallback" else None,
+    )
+    assert result.summary == summary
+    assert generate.await_count == (1 if retry == "none" else 2)
+    assert loop_progress
+    assert all(loop_progress)

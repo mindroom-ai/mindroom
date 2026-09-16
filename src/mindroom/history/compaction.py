@@ -559,14 +559,15 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     budget = summary_model.input_budget_tokens
     token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
-    minimum_progress_input_tokens = minimum_summary_input_tokens(
+    minimum_progress_input_tokens = await asyncio.to_thread(
+        minimum_summary_input_tokens,
         previous_summary=previous_summary,
         first_run=compactable_runs[0],
         token_estimator=token_estimator,
     )
     attempt = 1
     while True:
-        summary_input_estimate = token_estimator(summary_input)
+        summary_input_estimate = await asyncio.to_thread(token_estimator, summary_input)
         effective_timeout_seconds = effective_summary_timeout_seconds(
             summary_model.model,
             timeout_seconds=timeout_seconds,
@@ -612,7 +613,10 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             # third provider call.
             if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
-                if fallback_token_estimator(summary_input) <= fallback_model.input_budget_tokens:
+                if (
+                    await asyncio.to_thread(fallback_token_estimator, summary_input)
+                    <= fallback_model.input_budget_tokens
+                ):
                     rebuilt_input, rebuilt_runs = summary_input, included_runs
                 else:
                     rebuilt_input, rebuilt_runs = await asyncio.to_thread(
@@ -664,7 +668,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                     token_estimator=token_estimator,
                 )
                 if rebuilt_runs:
-                    rebuilt_input_tokens = token_estimator(rebuilt_input)
+                    rebuilt_input_tokens = await asyncio.to_thread(token_estimator, rebuilt_input)
                     if retry_decision.kind == "shrink" and rebuilt_input_tokens >= summary_input_estimate:
                         raise
                     summary_input = rebuilt_input
