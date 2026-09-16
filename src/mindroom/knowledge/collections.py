@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from chromadb.errors import InternalError, NotFoundError
 
 from mindroom.knowledge.chroma_client import ChromaDb
+from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.indexing_config import storage_key_for_base
 from mindroom.logging_config import get_logger
 from mindroom.strict_knowledge import StrictInsertKnowledge as Knowledge
@@ -294,7 +295,7 @@ async def delete_collection(space: CollectionSpace, collection_name: str) -> boo
 def _delete_collection_sync(space: CollectionSpace, collection_name: str) -> bool:
     """Delete one collection, treating an already-absent one as success."""
     vector_db = build_vector_db(space, collection_name)
-    with closing(vector_db):
+    with collection_lifetime_lock(space.storage_path, exclusive=True), closing(vector_db):
         deleted = vector_db.delete()
         if not deleted:
             try:
@@ -385,35 +386,36 @@ def cleanup_superseded_collections(
         )
         return
 
-    unowned: list[str] = []
-    for collection_name in collection_names:
-        if collection_name in preserved:
-            continue
-        is_candidate = collection_name.startswith(candidate_prefix)
-        if not is_candidate and (candidates_only or collection_name != default_collection):
-            # Reclaiming abandoned candidates must never race a legacy
-            # published collection whose metadata predates this layout.
-            if collection_name != default_collection:
-                unowned.append(collection_name)
-            continue
-        try:
-            deletion_db = build_vector_db(space, collection_name)
-            with closing(deletion_db):
-                deletion_db.delete()
-        except Exception:
-            logger.warning(
-                "Failed to clean superseded knowledge collection",
+    with collection_lifetime_lock(space.storage_path, exclusive=True):
+        unowned: list[str] = []
+        for collection_name in collection_names:
+            if collection_name in preserved:
+                continue
+            is_candidate = collection_name.startswith(candidate_prefix)
+            if not is_candidate and (candidates_only or collection_name != default_collection):
+                # Reclaiming abandoned candidates must never race a legacy
+                # published collection whose metadata predates this layout.
+                if collection_name != default_collection:
+                    unowned.append(collection_name)
+                continue
+            try:
+                deletion_db = build_vector_db(space, collection_name)
+                with closing(deletion_db):
+                    deletion_db.delete()
+            except Exception:
+                logger.warning(
+                    "Failed to clean superseded knowledge collection",
+                    base_id=space.base_id,
+                    collection=collection_name,
+                    exc_info=True,
+                )
+        _reclaim_orphaned_segment_directories(space)
+        if unowned:
+            logger.info(
+                "Preserved knowledge collections with unprovable ownership",
                 base_id=space.base_id,
-                collection=collection_name,
-                exc_info=True,
+                collections=sorted(unowned),
             )
-    _reclaim_orphaned_segment_directories(space)
-    if unowned:
-        logger.info(
-            "Preserved knowledge collections with unprovable ownership",
-            base_id=space.base_id,
-            collections=sorted(unowned),
-        )
 
 
 def _listed_collection_names(client: _CollectionListingClient) -> tuple[str, ...]:

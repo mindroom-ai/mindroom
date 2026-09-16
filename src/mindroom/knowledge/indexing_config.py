@@ -187,7 +187,7 @@ class IndexingSettings:
             "require_content_before_publish": self.require_content_before_publish,
         }
 
-    def query_compatibility_key(self) -> _QueryCompatibilityKey:
+    def _query_compatibility_key(self) -> _QueryCompatibilityKey:
         """Return fields that must match for safe vector queries."""
         return _QueryCompatibilityKey(
             base_id=self.base_id,
@@ -200,7 +200,7 @@ class IndexingSettings:
             embedder_dimensions=self.embedder_dimensions,
         )
 
-    def corpus_compatibility_key(self) -> _CorpusCompatibilityKey:
+    def _corpus_compatibility_key(self) -> _CorpusCompatibilityKey:
         """Return fields that must match for safe source-corpus reuse."""
         return _CorpusCompatibilityKey(
             base_id=self.base_id,
@@ -221,6 +221,17 @@ class IndexingSettings:
             skip_hidden=self.skip_hidden,
             require_content_before_publish=self.require_content_before_publish,
         )
+
+
+def published_index_settings_compatible(
+    published_settings: IndexingSettings,
+    current_settings: IndexingSettings,
+) -> bool:
+    """Return whether a published index can be queried under the current config."""
+    return (
+        published_settings._query_compatibility_key() == current_settings._query_compatibility_key()
+        and published_settings._corpus_compatibility_key() == current_settings._corpus_compatibility_key()
+    )
 
 
 def chroma_collection_exists(storage_path: Path, collection_name: str) -> bool:

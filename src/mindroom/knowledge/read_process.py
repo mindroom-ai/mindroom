@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 import sys
 from contextlib import asynccontextmanager, contextmanager
@@ -83,13 +84,18 @@ def read_chroma(request: ReadRequest, *, timeout: float = 30.0) -> ReadResult:
     with _read_slot():
         try:
             completed = subprocess.run(
-                [sys.executable, "-m", "mindroom.knowledge.read_worker"],
+                [sys.executable, "-m", "mindroom.knowledge.read_worker", str(timeout)],
                 input=payload,
                 stdout=subprocess.PIPE,
                 env=_child_environment(),
                 timeout=timeout,
                 check=True,
             )
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != -signal.SIGALRM:
+                raise
+            message = "Knowledge read timed out"
+            raise TimeoutError(message) from exc
         except subprocess.TimeoutExpired as exc:
             message = "Knowledge read timed out"
             raise TimeoutError(message) from exc
@@ -115,10 +121,13 @@ async def read_chroma_async(
     """Overlap child imports with parent preparation under one request deadline."""
     try:
         async with asyncio.timeout(timeout), _read_slot_async():
-            process = await _start_read_process()
+            process = await _start_read_process(timeout=timeout)
             try:
                 request = await prepare_request()
                 output, _ = await process.communicate(_encode_request(request))
+                if process.returncode == -signal.SIGALRM:
+                    message = "Knowledge read timed out"
+                    raise TimeoutError(message)
                 if process.returncode:
                     raise subprocess.CalledProcessError(process.returncode, "knowledge read worker", output=output)
                 return _decode_result(output)
@@ -129,13 +138,14 @@ async def read_chroma_async(
         raise TimeoutError(message) from exc
 
 
-async def _start_read_process() -> asyncio.subprocess.Process:
+async def _start_read_process(*, timeout: float) -> asyncio.subprocess.Process:  # noqa: ASYNC109
     """Keep interrupted startup owned until its child can be killed and reaped."""
     startup = asyncio.create_task(
         asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "mindroom.knowledge.read_worker",
+            str(timeout),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             env=_child_environment(),

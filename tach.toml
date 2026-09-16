@@ -4318,6 +4318,7 @@ visibility = [
     "mindroom.knowledge.manager",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
+    "mindroom.knowledge.collection_lifetime",
 ]
 
 [[modules]]
@@ -4343,6 +4344,7 @@ visibility = [
 [[modules]]
 path = "mindroom.knowledge.collections"
 depends_on = [
+    "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.indexing_config",
     "mindroom.logging_config",
@@ -5696,6 +5698,7 @@ depends_on = ["mindroom.knowledge.read_protocol"]
 [[modules]]
 path = "mindroom.knowledge.read_proxy"
 depends_on = [
+    "mindroom.knowledge.collection_lifetime",
     "mindroom.knowledge.read_process",
     "mindroom.knowledge.read_protocol",
     "mindroom.logging_config",
@@ -5704,6 +5707,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.read_worker"
 depends_on = [
+    "mindroom.knowledge.collection_lifetime",
     "mindroom.redaction",
     "mindroom.knowledge.chroma_client",
     "mindroom.knowledge.read_protocol",
@@ -6330,3 +6334,8 @@ visibility = ["mindroom.oauth.client"]
 [[interfaces]]
 from = ["mindroom.oauth.agno_compat_google_auth"]
 expose = ["AgnoGoogleAuthBindingMixin"]
+
+[[modules]]
+path = "mindroom.knowledge.collection_lifetime"
+depends_on = ["mindroom.file_locks", "mindroom.knowledge.index_metadata", "mindroom.knowledge.indexing_config"]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker", "mindroom.knowledge.read_proxy"]

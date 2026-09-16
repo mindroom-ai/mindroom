@@ -157,6 +157,7 @@ Matrix sync callback
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `knowledge/` | Knowledge base / RAG file indexing with watcher |
 | `knowledge/file_listing.py` | Which files belong to a knowledge base: include patterns, traversal, symlink-safe inclusion rules |
+| `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
 | `knowledge/collections.py` | Chroma collection lifecycle for one knowledge base: naming, opening, probing, deleting, reclaiming |
 | `knowledge/git_source.py` | The Git checkout a knowledge base indexes: clone, fetch, force-align, LFS hydration, credential injection |
 | `knowledge/refresh_runner.py` | Dispatches one knowledge refresh: subprocess spawn, cancellation cleanup, publish and reconcile decisions |

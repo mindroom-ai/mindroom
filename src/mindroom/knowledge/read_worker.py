@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import signal
 import sys
 import traceback
 from contextlib import closing
@@ -12,6 +14,7 @@ from typing import TYPE_CHECKING, override
 from agno.knowledge.embedder.base import Embedder
 
 from mindroom.knowledge.chroma_client import ChromaDb
+from mindroom.knowledge.collection_lifetime import read_collection
 from mindroom.knowledge.read_protocol import (
     MAX_FRAME_BYTES,
     ReadDocument,
@@ -45,14 +48,17 @@ class _QueryEmbedder(Embedder):
 
 
 def _read(request: ReadRequest) -> ReadResult:
-    with closing(
-        _PublishedChromaDb(
-            collection=request.collection,
-            path=request.path,
-            persistent_client=True,
-            embedder=_QueryEmbedder(vector=request.embedding or []),
-        ),
-    ) as vector_db:
+    with (
+        read_collection(request) as collection_name,
+        closing(
+            _PublishedChromaDb(
+                collection=collection_name,
+                path=request.path,
+                persistent_client=True,
+                embedder=_QueryEmbedder(vector=request.embedding or []),
+            ),
+        ) as vector_db,
+    ):
         if request.query is None:
             return ReadResult(exists=vector_db.exists())
         if request.embedding is None:
@@ -62,8 +68,14 @@ def _read(request: ReadRequest) -> ReadResult:
         return ReadResult(exists=True, documents=[ReadDocument.from_document(document) for document in documents])
 
 
-def _main() -> None:
+def _main(*, timeout: float = 30.0) -> None:
     """Read one JSON request from stdin and return one JSON result on stdout."""
+    if not math.isfinite(timeout) or timeout <= 0:
+        message = "Knowledge reader deadline must be finite and positive"
+        raise ValueError(message)
+    # The kernel terminates even GIL-blocked native code after the parent dies.
+    signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
     # Redirect the descriptor too: native code and preconfigured log handlers
     # may retain the original stdout object, bypassing redirect_stdout.
     output = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
@@ -86,4 +98,4 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
-    _main()
+    _main(timeout=float(sys.argv[1]) if len(sys.argv) > 1 else 30.0)
