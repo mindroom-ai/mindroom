@@ -121,9 +121,11 @@ def test_usage_endpoint_reads_retained_tokens_and_requires_dashboard_auth(
         assert day["model_breakdown"] == payload["model_breakdown"]
         assert {key: day["totals"][key] for key in metrics} == metrics
         assert "daily_coverage" in payload
+        assert payload["user_breakdown"][0]["daily_breakdown"] == payload["daily_breakdown"]
     else:
         assert "daily_breakdown" not in payload
         assert "daily_coverage" not in payload
+        assert "daily_breakdown" not in payload["user_breakdown"][0]
     assert "private message" not in response.text
     assert "private prompt" not in response.text
     assert str(database) not in response.text

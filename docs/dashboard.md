@@ -292,8 +292,12 @@ Requester aliases are combined; `user_id: null` holds unattributed usage.
 
 Use `GET /api/usage?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
+With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
+User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
 Daily rows are sorted oldest first and use retained run creation timestamps.
 Missing or invalid timestamps exclude the run from daily rows and mark daily coverage as incomplete.
+Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
+The report-level `daily_coverage` applies to both the overall and per-user daily breakdowns.
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
