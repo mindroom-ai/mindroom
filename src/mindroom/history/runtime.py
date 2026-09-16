@@ -487,6 +487,15 @@ async def _run_scope_compaction_with_lifecycle(
         serving_summary_model = event.summary_model
         await lifecycle.progress(replace(event, duration_ms=_elapsed_ms(compaction_start)))
 
+    completed_successfully = False
+
+    async def _complete(outcome: CompactionOutcome) -> CompactionOutcome:
+        nonlocal completed_successfully
+        outcome = replace(outcome, lifecycle_notice_event_id=notice_event_id, duration_ms=_elapsed_ms(compaction_start))
+        await lifecycle.complete_success(outcome)
+        completed_successfully = True
+        return outcome
+
     progress_callback = _progress if lifecycle.enabled else None
     try:
         outcome = await _run_scope_compaction(
@@ -501,10 +510,12 @@ async def _run_scope_compaction_with_lifecycle(
             runtime_paths=runtime_paths,
             lifecycle_notice_event_id=notice_event_id,
             progress_callback=progress_callback,
+            completion_callback=_complete,
             replay_model=replay_model,
         )
     except asyncio.CancelledError as error:
-        await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
+        if not completed_successfully:
+            await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
         raise
     except Exception as error:
         _clear_forced_compaction_after_failure(
@@ -526,17 +537,10 @@ async def _run_scope_compaction_with_lifecycle(
             reply_outcome="timeout" if status == "timeout" else "failed",
         )
 
-    duration_ms = _elapsed_ms(compaction_start)
     if outcome is None:
         await lifecycle.complete_failure(_failure_event("failed", "No compactable history remained."))
         return _ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed")
 
-    outcome = replace(
-        outcome,
-        lifecycle_notice_event_id=notice_event_id,
-        duration_ms=duration_ms,
-    )
-    await lifecycle.complete_success(outcome)
     return _ScopeCompactionLifecycleResult(outcome=outcome, reply_outcome="success")
 
 
@@ -553,6 +557,7 @@ async def _run_scope_compaction(
     runtime_paths: RuntimePaths,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
     replay_model: NativeCompactionModel | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
@@ -609,6 +614,7 @@ async def _run_scope_compaction(
         fallback_summary_model=fallback_model,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
+        completion_callback=completion_callback,
     )
 
 

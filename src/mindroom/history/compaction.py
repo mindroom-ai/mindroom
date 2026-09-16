@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from agno.session.summary import SessionSummary
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
@@ -174,6 +175,7 @@ async def compact_scope_history(
     fallback_summary_model: SummaryModel | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
     replay_model: NativeCompactionModel | None = None,
     before_tokens: int | None = None,
 ) -> CompactionOutcome | None:
@@ -284,40 +286,46 @@ async def compact_scope_history(
         model=_model_identifier(rewrite_result.served_by.model),
     )
 
-    after_visible_runs = scope_visible_runs(session, scope)
-    after_tokens = await asyncio.to_thread(
-        estimate_prompt_visible_history_tokens,
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-        replay_model=replay_model,
-    )
-    outcome = CompactionOutcome(
-        mode="manual" if state.force_compact_before_next_run else "auto",
-        session_id=session.session_id,
-        scope=scope.key,
-        summary=rewrite_result.summary_text,
-        summary_model=rewrite_result.served_by.name,
-        before_tokens=before_tokens,
-        after_tokens=after_tokens,
-        window_tokens=replay_window_tokens or 0,
-        threshold_tokens=threshold_tokens or 0,
-        runs_before=before_run_count,
-        runs_after=len(after_visible_runs),
-        compacted_run_count=rewrite_result.compacted_run_count,
-        compacted_at=compacted_at,
-        history_budget_tokens=available_history_budget,
-    )
-    await _emit_compaction_hook(
-        event_name=EVENT_COMPACTION_AFTER,
-        scope=scope,
-        messages=rewrite_result.compacted_messages,
-        session_id=session.session_id,
-        token_count_before=before_tokens,
-        token_count_after=after_tokens,
-        compaction_summary=rewrite_result.summary_text,
-    )
-    return outcome
+    async def complete_committed_compaction() -> CompactionOutcome:
+        after_visible_runs = scope_visible_runs(session, scope)
+        after_tokens = await asyncio.to_thread(
+            estimate_prompt_visible_history_tokens,
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+            replay_model=replay_model,
+        )
+        outcome = CompactionOutcome(
+            mode="manual" if state.force_compact_before_next_run else "auto",
+            session_id=session.session_id,
+            scope=scope.key,
+            summary=rewrite_result.summary_text,
+            summary_model=rewrite_result.served_by.name,
+            before_tokens=before_tokens,
+            after_tokens=after_tokens,
+            window_tokens=replay_window_tokens or 0,
+            threshold_tokens=threshold_tokens or 0,
+            runs_before=before_run_count,
+            runs_after=len(after_visible_runs),
+            compacted_run_count=rewrite_result.compacted_run_count,
+            compacted_at=compacted_at,
+            history_budget_tokens=available_history_budget,
+        )
+        await _emit_compaction_hook(
+            event_name=EVENT_COMPACTION_AFTER,
+            scope=scope,
+            messages=rewrite_result.compacted_messages,
+            session_id=session.session_id,
+            token_count_before=before_tokens,
+            token_count_after=after_tokens,
+            compaction_summary=rewrite_result.summary_text,
+        )
+        if completion_callback is not None:
+            outcome = await completion_callback(outcome)
+        return outcome
+
+    # Persistence has committed; finish reporting before releasing this request owner.
+    return await run_coroutine_until_complete(complete_committed_compaction())
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
