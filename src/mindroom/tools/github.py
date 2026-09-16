@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
     auth_provider="github",
     icon="SiGithub",
     icon_color="text-gray-800",  # GitHub black

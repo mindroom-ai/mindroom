@@ -121,6 +121,7 @@ callback_manager = []
 cartesia = [
   "cartesia",
 ]
+chat_ui = []
 claude_agent = [
   "claude-agent-sdk>=0.1.35",
 ]

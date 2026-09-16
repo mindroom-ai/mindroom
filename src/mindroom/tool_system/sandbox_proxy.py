@@ -41,7 +41,6 @@ from mindroom.tool_system.worker_proxy_client import (
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     resolve_unscoped_worker_key,
-    tool_stays_local,
 )
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.runtime import (
@@ -726,7 +725,8 @@ def sandbox_proxy_enabled_for_tool(
     means "route nothing through the proxy for this agent".
     """
     proxy_config = sandbox_proxy_config(runtime_paths)
-    if proxy_config.runner_mode or tool_stays_local(tool_name, metadata=TOOL_METADATA.get(tool_name)):
+    metadata = TOOL_METADATA.get(tool_name)
+    if proxy_config.runner_mode or (metadata is not None and metadata.requires_primary_runtime):
         return False
 
     if not _sandbox_proxy_requested_for_tool(

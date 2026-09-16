@@ -12,7 +12,6 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
-from mindroom.tool_system.worker_routing import tool_stays_local
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -88,7 +87,6 @@ def test_workspace_tools_stay_in_primary_runtime(
     with isolated_plugin_runtime(config, paths):
         metadata = TOOL_METADATA[tool_name]
         assert metadata.requires_primary_runtime is True
-        assert tool_stays_local(tool_name, metadata=metadata) is True
         assert (
             sandbox_proxy_enabled_for_tool(
                 tool_name,

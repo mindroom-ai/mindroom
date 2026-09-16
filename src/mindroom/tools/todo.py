@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
     icon="ListTodo",
     icon_color="text-blue-500",
     requires_room_context=True,

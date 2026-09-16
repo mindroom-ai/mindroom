@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
     auth_provider="google_calendar",
     icon="SiGooglecalendar",
     icon_color="text-blue-600",  # Google Calendar blue

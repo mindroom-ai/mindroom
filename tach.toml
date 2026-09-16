@@ -1515,6 +1515,17 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.custom_tools.chat_ui"
+depends_on = [
+    "mindroom.custom_tools.tool_payloads",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.identity",
+    "mindroom.matrix.message_builder",
+    "mindroom.tool_system.runtime_context",
+]
+
+[[modules]]
 path = "mindroom.custom_tools.matrix_helpers"
 depends_on = []
 visibility = [
@@ -2665,6 +2676,7 @@ visibility = [
     "mindroom.commands.config_confirmation",
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.chat_ui",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.matrix_voice_message",
     "mindroom.delivery_gateway",
@@ -5232,7 +5244,6 @@ expose = [
     "serialize_tool_execution_identity",
     "stream_with_tool_execution_identity",
     "supports_tool_name_for_worker_scope",
-    "tool_stays_local",
     "tool_execution_identity",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",

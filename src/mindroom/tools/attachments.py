@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
     requires_room_context=True,
     icon="Paperclip",
     icon_color="text-teal-500",

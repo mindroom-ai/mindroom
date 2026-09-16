@@ -1107,6 +1107,7 @@ def _tool_validation_snapshot_from_state(
             authored_override_validator=metadata.authored_override_validator,
             supports_toolkit_filters=metadata.supports_toolkit_filters,
             requires_room_context=metadata.requires_room_context,
+            requires_primary_runtime=metadata.requires_primary_runtime,
             runtime_loadable=tool_name in tool_registry,
             unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
         )
@@ -1251,6 +1252,7 @@ def serialize_tool_validation_snapshot(
             "authored_override_validator": info.authored_override_validator.value,
             "supports_toolkit_filters": info.supports_toolkit_filters,
             "requires_room_context": info.requires_room_context,
+            "requires_primary_runtime": info.requires_primary_runtime,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
         }
@@ -1272,6 +1274,21 @@ def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) 
             raise TypeError(msg)
         fields.append(ConfigField(**cast("dict[str, Any]", raw_field)))
     return tuple(fields)
+
+
+def _deserialize_tool_validation_bool(
+    raw_info: Mapping[str, object],
+    *,
+    tool_name: str,
+    field_name: str,
+    default: bool,
+) -> bool:
+    """Read one strictly typed boolean from serialized tool validation metadata."""
+    value = raw_info.get(field_name, default)
+    if not isinstance(value, bool):
+        msg = f"Tool validation snapshot entry for '{tool_name}' must set {field_name} to a boolean."
+        raise TypeError(msg)
+    return value
 
 
 def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValidationInfo]:
@@ -1302,25 +1319,36 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 f"authored_override_validator '{raw_validator}'."
             )
             raise TypeError(msg) from exc
-        raw_runtime_loadable = raw_info_mapping.get("runtime_loadable", True)
-        if not isinstance(raw_runtime_loadable, bool):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must set runtime_loadable to a boolean."
-            raise TypeError(msg)
-        raw_unavailable_due_to_plugin_load_error = raw_info_mapping.get("unavailable_due_to_plugin_load_error", False)
-        if not isinstance(raw_unavailable_due_to_plugin_load_error, bool):
-            msg = (
-                f"Tool validation snapshot entry for '{tool_name}' must set "
-                "unavailable_due_to_plugin_load_error to a boolean."
-            )
-            raise TypeError(msg)
-        raw_requires_room_context = raw_info_mapping.get("requires_room_context", False)
-        if not isinstance(raw_requires_room_context, bool):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must set requires_room_context to a boolean."
-            raise TypeError(msg)
-        raw_supports_toolkit_filters = raw_info_mapping.get("supports_toolkit_filters", False)
-        if not isinstance(raw_supports_toolkit_filters, bool):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must set supports_toolkit_filters to a boolean."
-            raise TypeError(msg)
+        raw_runtime_loadable = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="runtime_loadable",
+            default=True,
+        )
+        raw_unavailable_due_to_plugin_load_error = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="unavailable_due_to_plugin_load_error",
+            default=False,
+        )
+        raw_requires_room_context = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="requires_room_context",
+            default=False,
+        )
+        raw_requires_primary_runtime = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="requires_primary_runtime",
+            default=False,
+        )
+        raw_supports_toolkit_filters = _deserialize_tool_validation_bool(
+            raw_info_mapping,
+            tool_name=tool_name,
+            field_name="supports_toolkit_filters",
+            default=False,
+        )
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1334,6 +1362,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
             authored_override_validator=authored_override_validator,
             supports_toolkit_filters=raw_supports_toolkit_filters,
             requires_room_context=raw_requires_room_context,
+            requires_primary_runtime=raw_requires_primary_runtime,
             runtime_loadable=raw_runtime_loadable,
             unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
         )

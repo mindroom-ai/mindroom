@@ -358,6 +358,7 @@ class _ApprovedEgressTools(Toolkit):
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     requires_room_context=True,
     icon="FiShield",
     icon_color="text-emerald-600",
