@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from agno.session.summary import SessionSummary
 
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import as_anthropic_claude
 from mindroom.error_handling import is_model_safeguard_refusal
 from mindroom.history.claude_replay_compat import strip_stale_anthropic_replay_fields
@@ -174,27 +175,30 @@ async def compact_scope_history(
     fallback_summary_model: SummaryModel | None = None,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
     replay_model: NativeCompactionModel | None = None,
+    before_tokens: int | None = None,
 ) -> CompactionOutcome | None:
     """Compact one scope by rewriting session.summary and session.runs."""
     visible_runs = scope_visible_runs(session, scope)
-    compactable_runs = _select_compaction_candidates(
-        visible_runs=visible_runs,
-        session=session,
-        scope=scope,
-        state=state,
-        history_settings=history_settings,
-        available_history_budget=available_history_budget,
-        replay_model=replay_model,
-    )
-    if not compactable_runs:
-        _persist_cleared_force_state_if_needed(
-            storage=storage,
+    if not visible_runs or (available_history_budget is None and not state.force_compact_before_next_run):
+        _persist_cleared_force_state_if_needed(storage=storage, session=session, scope=scope, state=state)
+        return None
+    if before_tokens is None:
+        before_tokens = await asyncio.to_thread(
+            estimate_prompt_visible_history_tokens,
             session=session,
             scope=scope,
-            state=state,
+            history_settings=history_settings,
+            replay_model=replay_model,
         )
+    if (
+        not state.force_compact_before_next_run
+        and available_history_budget is not None
+        and before_tokens <= available_history_budget
+    ):
         return None
+    compactable_runs = visible_runs
     selected_run_ids = _stable_compaction_run_ids(
         compactable_runs,
         session_id=session.session_id,
@@ -209,12 +213,6 @@ async def compact_scope_history(
         )
         return None
 
-    before_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-        replay_model=replay_model,
-    )
     before_run_count = len(visible_runs)
     working_session = deepcopy(session)
     collect_compaction_hook_messages = _should_collect_compaction_hook_messages()
@@ -288,39 +286,46 @@ async def compact_scope_history(
         model=_model_identifier(rewrite_result.served_by.model),
     )
 
-    after_visible_runs = scope_visible_runs(session, scope)
-    after_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-        replay_model=replay_model,
-    )
-    outcome = CompactionOutcome(
-        mode="manual" if state.force_compact_before_next_run else "auto",
-        session_id=session.session_id,
-        scope=scope.key,
-        summary=rewrite_result.summary_text,
-        summary_model=rewrite_result.served_by.name,
-        before_tokens=before_tokens,
-        after_tokens=after_tokens,
-        window_tokens=replay_window_tokens or 0,
-        threshold_tokens=threshold_tokens or 0,
-        runs_before=before_run_count,
-        runs_after=len(after_visible_runs),
-        compacted_run_count=rewrite_result.compacted_run_count,
-        compacted_at=compacted_at,
-        history_budget_tokens=available_history_budget,
-    )
-    await _emit_compaction_hook(
-        event_name=EVENT_COMPACTION_AFTER,
-        scope=scope,
-        messages=rewrite_result.compacted_messages,
-        session_id=session.session_id,
-        token_count_before=before_tokens,
-        token_count_after=after_tokens,
-        compaction_summary=rewrite_result.summary_text,
-    )
-    return outcome
+    async def complete_committed_compaction() -> CompactionOutcome:
+        after_visible_runs = scope_visible_runs(session, scope)
+        after_tokens = await asyncio.to_thread(
+            estimate_prompt_visible_history_tokens,
+            session=session,
+            scope=scope,
+            history_settings=history_settings,
+            replay_model=replay_model,
+        )
+        outcome = CompactionOutcome(
+            mode="manual" if state.force_compact_before_next_run else "auto",
+            session_id=session.session_id,
+            scope=scope.key,
+            summary=rewrite_result.summary_text,
+            summary_model=rewrite_result.served_by.name,
+            before_tokens=before_tokens,
+            after_tokens=after_tokens,
+            window_tokens=replay_window_tokens or 0,
+            threshold_tokens=threshold_tokens or 0,
+            runs_before=before_run_count,
+            runs_after=len(after_visible_runs),
+            compacted_run_count=rewrite_result.compacted_run_count,
+            compacted_at=compacted_at,
+            history_budget_tokens=available_history_budget,
+        )
+        await _emit_compaction_hook(
+            event_name=EVENT_COMPACTION_AFTER,
+            scope=scope,
+            messages=rewrite_result.compacted_messages,
+            session_id=session.session_id,
+            token_count_before=before_tokens,
+            token_count_after=after_tokens,
+            compaction_summary=rewrite_result.summary_text,
+        )
+        if completion_callback is not None:
+            outcome = await completion_callback(outcome)
+        return outcome
+
+    # Persistence has committed; finish reporting before releasing this request owner.
+    return await run_coroutine_until_complete(complete_committed_compaction())
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
@@ -366,7 +371,8 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
         if not compactable_runs:
             break
 
-        summary_input, included_runs = build_summary_input(
+        summary_input, included_runs = await asyncio.to_thread(
+            build_summary_input,
             previous_summary=current_summary_text(working_session),
             compacted_runs=compactable_runs,
             history_settings=history_settings,
@@ -497,7 +503,8 @@ async def _emit_lifecycle_progress_after_persist(
     remaining_runs = scope_visible_runs(working_session, scope)
     if progress_callback is None or not remaining_runs:
         return
-    after_tokens = estimate_prompt_visible_history_tokens(
+    after_tokens = await asyncio.to_thread(
+        estimate_prompt_visible_history_tokens,
         session=working_session,
         scope=scope,
         history_settings=history_settings,
@@ -560,14 +567,15 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     budget = summary_model.input_budget_tokens
     token_estimator, estimate_kind = _compaction_sizing(summary_model.model)
     retry_policy = DEFAULT_SUMMARY_RETRY_POLICY
-    minimum_progress_input_tokens = minimum_summary_input_tokens(
+    minimum_progress_input_tokens = await asyncio.to_thread(
+        minimum_summary_input_tokens,
         previous_summary=previous_summary,
         first_run=compactable_runs[0],
         token_estimator=token_estimator,
     )
     attempt = 1
     while True:
-        summary_input_estimate = token_estimator(summary_input)
+        summary_input_estimate = await asyncio.to_thread(token_estimator, summary_input)
         effective_timeout_seconds = effective_summary_timeout_seconds(
             summary_model.model,
             timeout_seconds=timeout_seconds,
@@ -613,10 +621,14 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             # third provider call.
             if fallback_model is not None and attempt < retry_policy.max_attempts and is_model_safeguard_refusal(exc):
                 fallback_token_estimator, fallback_estimate_kind = _compaction_sizing(fallback_model.model)
-                if fallback_token_estimator(summary_input) <= fallback_model.input_budget_tokens:
+                if (
+                    await asyncio.to_thread(fallback_token_estimator, summary_input)
+                    <= fallback_model.input_budget_tokens
+                ):
                     rebuilt_input, rebuilt_runs = summary_input, included_runs
                 else:
-                    rebuilt_input, rebuilt_runs = build_summary_input(
+                    rebuilt_input, rebuilt_runs = await asyncio.to_thread(
+                        build_summary_input,
                         previous_summary=previous_summary,
                         compacted_runs=compactable_runs,
                         history_settings=history_settings,
@@ -655,7 +667,8 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                     await asyncio.sleep(retry_policy.same_input_retry_delay_seconds)
                     attempt += 1
                     continue
-                rebuilt_input, rebuilt_runs = build_summary_input(
+                rebuilt_input, rebuilt_runs = await asyncio.to_thread(
+                    build_summary_input,
                     previous_summary=previous_summary,
                     compacted_runs=compactable_runs,
                     history_settings=history_settings,
@@ -663,7 +676,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                     token_estimator=token_estimator,
                 )
                 if rebuilt_runs:
-                    rebuilt_input_tokens = token_estimator(rebuilt_input)
+                    rebuilt_input_tokens = await asyncio.to_thread(token_estimator, rebuilt_input)
                     if retry_decision.kind == "shrink" and rebuilt_input_tokens >= summary_input_estimate:
                         raise
                     summary_input = rebuilt_input
@@ -691,31 +704,6 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
             included_runs=included_runs,
             served_by=replace(summary_model, input_budget_tokens=budget),
         )
-
-
-def _select_compaction_candidates(
-    *,
-    visible_runs: list[RunOutput | TeamRunOutput],
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-    history_settings: ResolvedHistorySettings,
-    available_history_budget: int | None,
-    replay_model: NativeCompactionModel | None = None,
-) -> list[RunOutput | TeamRunOutput]:
-    if not visible_runs:
-        return []
-    if state.force_compact_before_next_run:
-        return visible_runs
-    if available_history_budget is None:
-        return []
-    current_tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=scope,
-        history_settings=history_settings,
-        replay_model=replay_model,
-    )
-    return visible_runs if current_tokens > available_history_budget else []
 
 
 def _stable_compaction_run_ids(

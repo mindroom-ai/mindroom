@@ -334,11 +334,14 @@ async def prepare_scope_history(
         native_model.configure_native_compaction(threshold=None)
     compaction_outcomes: list[CompactionOutcome] = []
     compaction_reply_outcome: CompactionReplyOutcome = "none"
-    current_history_tokens = estimate_prompt_visible_history_tokens(
+    native_route = native_history_route(native_model)
+    # Large provider projections spend seconds in tokenizers that release the GIL.
+    current_history_tokens = await asyncio.to_thread(
+        estimate_prompt_visible_history_tokens,
         session=session,
         scope=scope_context.scope,
         history_settings=resolved_inputs.history_settings,
-        native_route=native_history_route(native_model),
+        native_route=native_route,
         replay_model=native_model,
     )
     visible_runs = scope_visible_runs(session, scope_context.scope)
@@ -375,14 +378,16 @@ async def prepare_scope_history(
 
     if compaction_decision.mode == "required":
         # The portable text owner always receives canonical history and counts.
-        if native_model is not None:
+        if native_route is not None:
+            assert native_model is not None
             native_model.configure_native_compaction(threshold=None)
-        current_history_tokens = estimate_prompt_visible_history_tokens(
-            session=session,
-            scope=scope_context.scope,
-            history_settings=resolved_inputs.history_settings,
-            replay_model=native_model,
-        )
+            current_history_tokens = await asyncio.to_thread(
+                estimate_prompt_visible_history_tokens,
+                session=session,
+                scope=scope_context.scope,
+                history_settings=resolved_inputs.history_settings,
+                replay_model=native_model,
+            )
         if pipeline_timing is not None:
             pipeline_timing.mark("required_compaction_start")
         compaction_result = await _run_scope_compaction_with_lifecycle(
@@ -482,6 +487,15 @@ async def _run_scope_compaction_with_lifecycle(
         serving_summary_model = event.summary_model
         await lifecycle.progress(replace(event, duration_ms=_elapsed_ms(compaction_start)))
 
+    completed_successfully = False
+
+    async def _complete(outcome: CompactionOutcome) -> CompactionOutcome:
+        nonlocal completed_successfully
+        outcome = replace(outcome, lifecycle_notice_event_id=notice_event_id, duration_ms=_elapsed_ms(compaction_start))
+        await lifecycle.complete_success(outcome)
+        completed_successfully = True
+        return outcome
+
     progress_callback = _progress if lifecycle.enabled else None
     try:
         outcome = await _run_scope_compaction(
@@ -491,14 +505,17 @@ async def _run_scope_compaction_with_lifecycle(
             state=state,
             resolved_inputs=resolved_inputs,
             history_budget=history_budget,
+            before_tokens=current_history_tokens,
             config=config,
             runtime_paths=runtime_paths,
             lifecycle_notice_event_id=notice_event_id,
             progress_callback=progress_callback,
+            completion_callback=_complete,
             replay_model=replay_model,
         )
     except asyncio.CancelledError as error:
-        await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
+        if not completed_successfully:
+            await lifecycle.complete_failure(_failure_event("failed", str(error) or type(error).__name__))
         raise
     except Exception as error:
         _clear_forced_compaction_after_failure(
@@ -520,17 +537,10 @@ async def _run_scope_compaction_with_lifecycle(
             reply_outcome="timeout" if status == "timeout" else "failed",
         )
 
-    duration_ms = _elapsed_ms(compaction_start)
     if outcome is None:
         await lifecycle.complete_failure(_failure_event("failed", "No compactable history remained."))
         return _ScopeCompactionLifecycleResult(outcome=None, reply_outcome="failed")
 
-    outcome = replace(
-        outcome,
-        lifecycle_notice_event_id=notice_event_id,
-        duration_ms=duration_ms,
-    )
-    await lifecycle.complete_success(outcome)
     return _ScopeCompactionLifecycleResult(outcome=outcome, reply_outcome="success")
 
 
@@ -542,10 +552,12 @@ async def _run_scope_compaction(
     state: HistoryScopeState,
     resolved_inputs: _HistoryPreparationInputs,
     history_budget: int | None,
+    before_tokens: int,
     config: Config,
     runtime_paths: RuntimePaths,
     lifecycle_notice_event_id: str | None = None,
     progress_callback: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None = None,
+    completion_callback: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]] | None = None,
     replay_model: NativeCompactionModel | None = None,
 ) -> CompactionOutcome | None:
     execution_plan = resolved_inputs.execution_plan
@@ -593,6 +605,7 @@ async def _run_scope_compaction(
         state=state,
         history_settings=resolved_inputs.history_settings,
         available_history_budget=history_budget,
+        before_tokens=before_tokens,
         summary_model=summary_model,
         replay_window_tokens=execution_plan.replay_window_tokens,
         threshold_tokens=execution_plan.trigger_threshold_tokens,
@@ -601,6 +614,7 @@ async def _run_scope_compaction(
         fallback_summary_model=fallback_model,
         lifecycle_notice_event_id=lifecycle_notice_event_id,
         progress_callback=progress_callback,
+        completion_callback=completion_callback,
     )
 
 
