@@ -361,6 +361,7 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
 
 async def connect(page: Page, session: dict[str, Any]) -> None:
     """Wait for a real connected noVNC stream."""
+    await page.wait_for_function("typeof window.connectComputer === 'function'")
     await page.evaluate("session=>window.connectComputer(session)", session)
     await page.wait_for_function("window.probe.connected || window.probe.disconnected")
     assert await page.evaluate("window.probe.connected && !window.probe.disconnected")

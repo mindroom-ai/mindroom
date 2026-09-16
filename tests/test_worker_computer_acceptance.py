@@ -6,7 +6,7 @@ import importlib.util
 import sys
 from contextlib import nullcontext
 from pathlib import Path
-from types import ModuleType
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -14,6 +14,9 @@ import yaml
 from mindroom.api import computers
 from mindroom.config.main import Config
 from tests.test_docker_worker_backend import _backend
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
 def _driver(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
