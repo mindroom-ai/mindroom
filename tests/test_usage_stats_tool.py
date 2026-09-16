@@ -155,9 +155,13 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
         assert model["totals"]["cache_read_tokens"] == 9
         assert model["totals"]["cache_write_tokens"] == 2
         assert payload["daily_coverage"]["unavailable_sources"] == 0
+        if admin:
+            assert payload["user_breakdown"][0]["daily_breakdown"] == payload["daily_breakdown"]
     else:
         assert "daily_breakdown" not in payload
         assert "daily_coverage" not in payload
+        if admin:
+            assert "daily_breakdown" not in payload["user_breakdown"][0]
 
 
 @pytest.mark.asyncio

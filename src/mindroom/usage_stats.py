@@ -173,15 +173,19 @@ class UsageUserBreakdownRow:
     totals: TokenTotals
     run_count: int
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
+    daily_breakdown: tuple[UsageDailyBreakdownRow, ...] | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the administrator-only user breakdown."""
-        return {
+        payload: dict[str, object] = {
             "user_id": self.user_id,
             "totals": self.totals.to_dict(),
             "run_count": self.run_count,
             "model_breakdown": [row.to_dict() for row in self.model_breakdown],
         }
+        if self.daily_breakdown is not None:
+            payload["daily_breakdown"] = [row.to_dict() for row in self.daily_breakdown]
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +320,18 @@ class _DailyUsageAccumulator:
         self.buckets.setdefault(date, _Aggregate()).add(totals)
         _add_model_totals(self.model_buckets.setdefault(date, {}), models)
 
+    def rows(self) -> tuple[UsageDailyBreakdownRow, ...]:
+        """Build the same sorted daily rows for overall and per-user usage."""
+        return tuple(
+            UsageDailyBreakdownRow(
+                date=date,
+                totals=aggregate.totals,
+                run_count=aggregate.count,
+                model_breakdown=_model_breakdown(self.model_buckets[date]),
+            )
+            for date, aggregate in sorted(self.buckets.items())
+        )
+
 
 @dataclass(slots=True)
 class _ModelUsageAccumulator:
@@ -325,6 +341,7 @@ class _ModelUsageAccumulator:
     seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
     daily_usage: _DailyUsageAccumulator | None = None
+    user_daily_usage: dict[str | None, _DailyUsageAccumulator] = dataclass_field(default_factory=dict)
 
     def add_row(
         self,
@@ -363,6 +380,13 @@ class _ModelUsageAccumulator:
                 _add_model_totals(self.user_buckets.setdefault(run.requester_id, {}), models)
             if self.daily_usage is not None:
                 self.daily_usage.add_run(run, totals, models, source_path=row.source.path_label)
+                if scope == "admin":
+                    self.user_daily_usage.setdefault(run.requester_id, _DailyUsageAccumulator()).add_run(
+                        run,
+                        totals,
+                        models,
+                        source_path=row.source.path_label,
+                    )
 
 
 def collect_self_usage(
@@ -486,18 +510,12 @@ def _collect_usage(
         ),
         model_breakdown=model_breakdown,
         model_coverage=model_coverage,
-        user_breakdown=_user_breakdown(model_usage.user_buckets, model_usage.user_totals),
-        daily_breakdown=tuple(
-            UsageDailyBreakdownRow(
-                date=date,
-                totals=aggregate.totals,
-                run_count=aggregate.count,
-                model_breakdown=_model_breakdown(daily_usage.model_buckets[date]),
-            )
-            for date, aggregate in sorted(daily_usage.buckets.items())
-        )
-        if daily_usage is not None
-        else (),
+        user_breakdown=_user_breakdown(
+            model_usage.user_buckets,
+            model_usage.user_totals,
+            model_usage.user_daily_usage if include_daily else None,
+        ),
+        daily_breakdown=daily_usage.rows() if daily_usage is not None else (),
         daily_coverage=UsageCoverage(
             scanned_sources=len(scanned_sources),
             unavailable_sources=len(model_usage.unavailable_sources | daily_usage.unavailable_sources),
@@ -511,11 +529,20 @@ def _collect_usage(
 def _user_breakdown(
     buckets: Mapping[str | None, dict[tuple[str, str], _Aggregate]],
     user_totals: Mapping[str | None, _Aggregate],
+    user_daily_usage: Mapping[str | None, _DailyUsageAccumulator] | None,
 ) -> tuple[UsageUserBreakdownRow, ...]:
     rows: list[UsageUserBreakdownRow] = []
     for user_id, models in buckets.items():
         aggregate = user_totals[user_id]
-        rows.append(UsageUserBreakdownRow(user_id, aggregate.totals, aggregate.count, _model_breakdown(models)))
+        rows.append(
+            UsageUserBreakdownRow(
+                user_id,
+                aggregate.totals,
+                aggregate.count,
+                _model_breakdown(models),
+                user_daily_usage[user_id].rows() if user_daily_usage is not None else None,
+            ),
+        )
     return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.user_id or "")))
 
 
