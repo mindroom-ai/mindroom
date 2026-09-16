@@ -58,7 +58,7 @@ from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, get_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -636,15 +636,6 @@ async def _background_child_outcome(
     return BackgroundOutcome(status=status, result=f"{result}\n\n{receipt}")
 
 
-def _background_handle(job_id: str, child: DelegationChild, status: str, *, delivery_queued: bool = False) -> str:
-    """Return distinct turn and conversation handles without resolving the child."""
-    delivery = "\nOutcome delivery is queued for this conversation." if delivery_queued else ""
-    return (
-        f"Job ID: {job_id}\nSubagent ID: {child.subagent_id}\nStatus: {status}{delivery}\n"
-        'Use job(action="list"), or job(action="inspect"/"wait"/"resume"/"cancel", job_id=...) with the Job ID.'
-    )
-
-
 async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
     entity: Agent | Team,
     response: RunOutput | TeamRunOutput,
@@ -1014,10 +1005,9 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 background_job.result
                                 if waited.token is not None and not waited.delivery_queued
                                 else None
-                            ) or _background_handle(
-                                child.delegation_id,
-                                child,
-                                background_job.status,
+                            ) or format_job_handle(
+                                background_job,
+                                subagent_id=child.subagent_id,
                                 delivery_queued=waited.delivery_queued,
                             )
                             result = resolve_result(result)

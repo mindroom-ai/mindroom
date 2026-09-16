@@ -119,6 +119,21 @@ class BackgroundJob:
         return next((item for item in self.deliveries if item.generation == self.generation), None)
 
 
+def format_job_handle(
+    job: BackgroundJob,
+    *,
+    subagent_id: str | None = None,
+    delivery_queued: bool = False,
+) -> str:
+    """Return a stable machine-readable handle without resolving the job."""
+    handle: dict[str, Any] = {"job_id": job.job_id, "tool": job.tool_name, "status": job.status}
+    if subagent_id is not None:
+        handle["subagent_id"] = subagent_id
+    if delivery_queued:
+        handle["delivery_queued"] = True
+    return json.dumps(handle)
+
+
 @dataclass(frozen=True)
 class _BackgroundWait:
     """A result lease acknowledged only after the parent persists its tool result."""

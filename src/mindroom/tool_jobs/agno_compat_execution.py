@@ -4,17 +4,43 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.agno_compat_model_hooks import install_async_invocation_hooks
 from mindroom.custom_tools.job import project_native_job_wait
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
 from mindroom.tool_jobs.agno_execution import wrap_tool_execution
+from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Coroutine
 
     from agno.models.base import Model
     from agno.models.fallback import FallbackConfig
+    from agno.models.response import ModelResponse
     from agno.tools.function import FunctionCall
+
+
+type _Invoke = Callable[..., Coroutine[object, object, ModelResponse]]
+type _Stream = Callable[..., AsyncIterator[ModelResponse]]
+
+
+def _wrap_checkpoint_invoke(original: _Invoke) -> _Invoke:
+    async def invoke(*args: object, **kwargs: object) -> ModelResponse:
+        await job_checkpoint()
+        return await original(*args, **kwargs)
+
+    return invoke
+
+
+def _wrap_checkpoint_stream(original: _Stream) -> _Stream:
+    async def stream(*args: object, **kwargs: object) -> AsyncIterator[ModelResponse]:
+        await job_checkpoint()
+        events = original(*args, **kwargs)
+        async with closing_async_stream(events):
+            async for event in events:
+                yield event
+
+    return stream
 
 
 # AGNO_COMPAT: Bind after the SDK driver has admitted approvals and external calls.
@@ -23,7 +49,13 @@ if TYPE_CHECKING:
 # Upstream PR: None identified.
 # Remove when: SDK exposes public approved-call execution ownership.
 # Coverage: tests/test_tool_job_execution.py.
-def install_tool_job_execution(model: Model, fallback_config: FallbackConfig | None = None, *, depth: int = 0) -> None:
+def install_tool_job_execution(
+    model: Model,
+    fallback_config: FallbackConfig | None = None,
+    *,
+    depth: int = 0,
+    checkpoint: bool = False,
+) -> None:
     """Bind the approved-call owner to primary and concrete fallback models."""
     install_execution_resource_bindings()
     models = [model]
@@ -38,6 +70,13 @@ def install_tool_job_execution(model: Model, fallback_config: FallbackConfig | N
             if not isinstance(item, str)
         )
     for candidate in models:
+        if checkpoint:
+            install_async_invocation_hooks(
+                candidate,
+                marker="_mindroom_job_checkpoint_installed",
+                wrap_invoke=_wrap_checkpoint_invoke,
+                wrap_stream=_wrap_checkpoint_stream,
+            )
         namespace = vars(candidate)
         if namespace.get("_mindroom_tool_jobs"):
             continue

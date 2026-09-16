@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
+from agno.models.fallback import FallbackConfig
 from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
 from agno.tools.function import Function
@@ -23,7 +25,6 @@ from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import drive_delegations
-from mindroom.delegation.model_control import install_subagent_model_control
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
@@ -281,9 +282,13 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             child = children[0]
             if not approval or detach:
                 first = next(message.content for message in result.messages if message.tool_call_id == "first")
-                assert f"Subagent ID: {child.subagent_id}" in first
             if detach:
-                assert f"Job ID: {child.delegation_id}" in first
+                handle = json.loads(first)
+                assert set(handle) == {"job_id", "subagent_id", "status", "tool"}
+                assert handle["job_id"] == child.delegation_id
+                assert handle["subagent_id"] == child.subagent_id
+                assert handle["tool"] == "delegate"
+                assert handle["status"] in ({"running", "paused_for_human"} if human else {"running"})
                 assert not completed.is_set()
                 assert DelegationState.from_metadata(result.metadata).children == []
                 if human:
@@ -305,6 +310,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert len(children) == 1
             elif not approval:
                 assert "Exact child result" in first
+                assert child.subagent_id in first
             if approval:
                 assert result.status == RunStatus.paused
                 assert side_effects == []
@@ -355,12 +361,17 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-async def test_human_pause_stops_next_provider_invocation_without_cancelling_active_request(stream: bool) -> None:
+async def test_human_pause_stops_next_provider_invocation_without_cancelling_active_request(
+    fallback: bool,
+    stream: bool,
+) -> None:
     """Provider-native tools cannot start in a fresh request while the owning job is paused."""
     entered = asyncio.Event()
     release = asyncio.Event()
     called = asyncio.Event()
+    closed = asyncio.Event()
 
     class ProviderModel(DelegationModel):
         async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
@@ -369,19 +380,29 @@ async def test_human_pause_stops_next_provider_invocation_without_cancelling_act
             return ModelResponse(content="Provider finished")
 
         async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-            entered.set()
-            await release.wait()
-            yield ModelResponse(content="Provider finished")
+            try:
+                entered.set()
+                await release.wait()
+                yield ModelResponse(content="Provider finished")
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
 
-    model = ProviderModel(id="test")
-    install_subagent_model_control(model, None)
+    primary = ProviderModel(id="primary")
+    fallback_model = ProviderModel(id="fallback")
+    fallback_config = FallbackConfig(on_error=[fallback_model]) if fallback else None
+    install_tool_job_execution(primary, fallback_config, checkpoint=True)
+    model = fallback_model if fallback else primary
     control = JobControl()
 
     async def invoke() -> str:
         called.set()
         if stream:
-            chunks = [chunk async for chunk in model.ainvoke_stream()]
-            return str(chunks[0].content)
+            events = model.ainvoke_stream()
+            try:
+                return str((await anext(events)).content)
+            finally:
+                await events.aclose()
         return str((await model.ainvoke()).content)
 
     with job_control_context(control):
@@ -390,6 +411,7 @@ async def test_human_pause_stops_next_provider_invocation_without_cancelling_act
         control.pause()
         release.set()
         assert await asyncio.wait_for(first, 1) == "Provider finished"
+        assert not stream or closed.is_set()
         entered.clear()
         called.clear()
         second = asyncio.create_task(invoke())

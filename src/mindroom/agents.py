@@ -21,7 +21,6 @@ from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.model_control import install_subagent_model_control
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.hooks import HookRegistry
@@ -1976,8 +1975,7 @@ def create_agent(
     )
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
-    install_subagent_model_control(model, agent.fallback_config)
-    install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
+    install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth, checkpoint=True)
 
     logger.info(
         "Created agent",

@@ -31,7 +31,12 @@ from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_c
 from mindroom.tool_jobs.provenance import callable_origin, function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    BackgroundOutcome,
+    JobSpec,
+    format_job_handle,
+    get_background_runtime,
+)
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
@@ -291,7 +296,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
             timer.start()
             timer.stop()
             if waited.token is None:
-                call.result = json.dumps({"job_id": job_id, "tool": call.function.name, "status": waited.job.status})
+                call.result = format_job_handle(waited.job)
                 return True, timer, call, FunctionExecutionResult(status="success", result=call.result)
             response = await _consume_result(runtime, waited.job, waited.token, call, timer)
             retained = True

@@ -468,7 +468,6 @@ visibility = [
 path = "mindroom.agents"
 depends_on = [
     "mindroom.tool_system.construction",
-    "mindroom.delegation.model_control",
     "mindroom.agent_descriptions",
     "mindroom.agent_knowledge_descriptions",
     "mindroom.agent_storage",
@@ -3797,7 +3796,6 @@ depends_on = [
 path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
-    "mindroom.delegation.model_control",
     "mindroom.provider_media_fallback",
     "mindroom.delegation.execution",
     "mindroom.ai",
@@ -6239,7 +6237,7 @@ expose = ["append_denied_tool_result", "before_tool_lookup"]
 path = "mindroom.agno_compat_model_hooks"
 depends_on = []
 visibility = [
-    "mindroom.delegation.model_control",
+    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.agno_participation",
     "mindroom.ai_runtime",
     "mindroom.approval_receipt",
@@ -6424,21 +6422,10 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.response_runner",
     "mindroom.tool_jobs.runtime",
-    "mindroom.delegation.model_control",
+    "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.response_lifecycle",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_jobs.agno_execution",
-]
-
-[[modules]]
-path = "mindroom.delegation.model_control"
-depends_on = [
-    "mindroom.agno_compat_model_hooks",
-    "mindroom.tool_jobs.control",
-    "mindroom.tool_system.context_bound_streams",
-]
-visibility = [
-    "mindroom.agents",
 ]
 
 [[modules]]
@@ -6559,8 +6546,10 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.agno_compat_execution"
 depends_on = [
+    "mindroom.agno_compat_model_hooks",
     "mindroom.tool_jobs.agno_compat_resources",
     "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_jobs.control",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.custom_tools.job",
 ]

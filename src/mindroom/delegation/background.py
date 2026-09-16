@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
@@ -18,9 +18,14 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
+@dataclass
+class _RetainedDelegation:
+    child: DelegationChild
+    adapter: dict[str, Any]
+
+
 # Native live objects remain adapter-owned; durable generic records contain only JSON snapshots.
-_children: WeakKeyDictionary[ToolJobRuntime, dict[str, DelegationChild]] = WeakKeyDictionary()
-_adapters: WeakKeyDictionary[ToolJobRuntime, dict[str, dict[str, Any]]] = WeakKeyDictionary()
+_retained: WeakKeyDictionary[ToolJobRuntime, dict[str, _RetainedDelegation]] = WeakKeyDictionary()
 
 
 def delegation_child(job: BackgroundJob) -> DelegationChild:
@@ -31,12 +36,17 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     return DelegationChild(**job.adapter["child"])
 
 
+def _retained_delegation(runtime: ToolJobRuntime, job: BackgroundJob) -> _RetainedDelegation:
+    """Recover or reuse the exact live child and adapter owned by one operation."""
+    retained = _retained.setdefault(runtime, {})
+    if job.job_id not in retained:
+        retained[job.job_id] = _RetainedDelegation(delegation_child(job), job.adapter)
+    return retained[job.job_id]
+
+
 def retained_child(runtime: ToolJobRuntime, job: BackgroundJob) -> DelegationChild:
     """Recover or reuse the exact mutable native object retained by an active operation."""
-    children = _children.setdefault(runtime, {})
-    if job.job_id not in children:
-        children[job.job_id] = delegation_child(job)
-    return children[job.job_id]
+    return _retained_delegation(runtime, job).child
 
 
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
@@ -110,8 +120,7 @@ async def start_delegation(
         )
     finally:
         if runtime.owns_execution(child.delegation_id, adapter):
-            _children.setdefault(runtime, {})[child.delegation_id] = child
-            _adapters.setdefault(runtime, {})[child.delegation_id] = adapter
+            _retained.setdefault(runtime, {})[child.delegation_id] = _RetainedDelegation(child, adapter)
 
 
 async def continue_delegation(
@@ -124,7 +133,9 @@ async def continue_delegation(
 ) -> BackgroundJob:
     """Continue native approval work under the existing generic job and human hold."""
     job = await runtime.lookup(job_id, owner=owner, depth=depth)
-    child = retained_child(runtime, job)
+    retained = _retained_delegation(runtime, job)
+    child = retained.child
+    adapter = retained.adapter
 
     async def run() -> BackgroundOutcome:
         try:
@@ -133,17 +144,16 @@ async def continue_delegation(
             # Continuation metadata is applied atomically with its outcome by the runtime.
             adapter["child"] = asdict(child)
 
-    adapter = _adapters.setdefault(runtime, {}).setdefault(job_id, job.adapter)
     return await runtime.continue_job(job_id, owner=owner, depth=depth, operation=run, adapter=adapter)
 
 
 def owns_delegation(runtime: ToolJobRuntime, child: DelegationChild) -> bool:
     """Recognize cancellation handoff only for the exact admitted live native child."""
-    adapter = _adapters.get(runtime, {}).get(child.delegation_id)
+    retained = _retained.get(runtime, {}).get(child.delegation_id)
     return (
-        adapter is not None
-        and _children.get(runtime, {}).get(child.delegation_id) is child
-        and runtime.owns_execution(child.delegation_id, adapter)
+        retained is not None
+        and retained.child is child
+        and runtime.owns_execution(child.delegation_id, retained.adapter)
     )
 
 
