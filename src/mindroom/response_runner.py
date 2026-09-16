@@ -2534,23 +2534,23 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Dispatch journal-owned approval work through normal turn serialization."""
-        if not await admit_job_completion(
-            request.response_envelope,
-            target=target,
-            runtime_paths=self.deps.runtime_paths,
-        ):
-            if request.on_no_response_handled is not None:
-
-                async def settle() -> None:
-                    assert request.on_no_response_handled is not None
-                    await request.on_no_response_handled()
-
-                await run_coroutine_until_complete(settle())
-            return None
         owned = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )
         if owned is None:
+            if not await admit_job_completion(
+                request.response_envelope,
+                target=target,
+                runtime_paths=self.deps.runtime_paths,
+            ):
+                if request.on_no_response_handled is not None:
+
+                    async def settle() -> None:
+                        assert request.on_no_response_handled is not None
+                        await request.on_no_response_handled()
+
+                    await run_coroutine_until_complete(settle())
+                return None
             return await locked_operation(target, early_placeholder)
         self.deps.logger.info(
             "response_source_owned_by_approval_continuation",
