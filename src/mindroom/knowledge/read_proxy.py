@@ -71,8 +71,8 @@ class ChromaReadProxy:
     def exists(self) -> bool:
         """Probe the same compatible publication that a subsequent search resolves."""
         request = ReadRequest(
-            self.path,
-            self.collection_name,
+            path=self.path,
+            collection=self.collection_name,
             published_settings=self.published_settings.to_metadata() if self.published_settings is not None else None,
         )
         with read_collection(request) as collection_name:
@@ -93,13 +93,15 @@ class ChromaReadProxy:
         embedding = self.embedder.get_embedding(query)
         result = read_chroma(
             ReadRequest(
-                self.path,
-                self.collection_name,
-                query,
-                embedding,
-                limit,
-                _dict_filters(filters),
-                self.published_settings.to_metadata() if self.published_settings is not None else None,
+                path=self.path,
+                collection=self.collection_name,
+                query=query,
+                embedding=embedding,
+                limit=limit,
+                filters=_dict_filters(filters),
+                published_settings=self.published_settings.to_metadata()
+                if self.published_settings is not None
+                else None,
             ),
         )
         return [Document(**asdict(document)) for document in result.documents]
@@ -118,13 +120,15 @@ class ChromaReadProxy:
             except NotImplementedError:
                 embedding = await asyncio.to_thread(self.embedder.get_embedding, query)
             return ReadRequest(
-                self.path,
-                self.collection_name,
-                query,
-                embedding,
-                limit,
-                _dict_filters(filters),
-                self.published_settings.to_metadata() if self.published_settings is not None else None,
+                path=self.path,
+                collection=self.collection_name,
+                query=query,
+                embedding=embedding,
+                limit=limit,
+                filters=_dict_filters(filters),
+                published_settings=self.published_settings.to_metadata()
+                if self.published_settings is not None
+                else None,
             )
 
         result = await read_chroma_async(prepare_request)
