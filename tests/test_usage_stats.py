@@ -155,13 +155,17 @@ def _wire(
     monkeypatch.setattr("mindroom.usage_stats.iter_usage_storage_rows", iter_rows)
 
 
+@pytest.mark.parametrize("include_daily", [False, True])
 def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    include_daily: bool,
 ) -> None:
     source = _source()
+    first_day = datetime(2026, 9, 14, 23, 59, 59, tzinfo=UTC).timestamp()
+    second_day = datetime(2026, 9, 15, tzinfo=UTC).timestamp()
     cached = replace(
-        _run(run_id="cached"),
+        _run(run_id="cached", created_at=first_day),
         metrics=MappingProxyType({**_metrics(10), "cache_read_tokens": 6, "cache_write_tokens": 1}),
     )
     _wire(
@@ -178,16 +182,21 @@ def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs
                         run_id="alias",
                         total_tokens=20,
                         model="other-model",
+                        created_at=second_day,
                     ),
-                    _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15),
-                    _run(requester_id=None, run_id="unattributed", total_tokens=5),
+                    _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15, created_at=first_day),
+                    _run(requester_id=None, run_id="unattributed", total_tokens=5, created_at=first_day),
                     session_metrics=_metrics(100),
                 ),
             ),
         },
     )
 
-    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+    payload = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        include_daily=include_daily,
+    ).to_dict()
 
     users = payload["user_breakdown"]
     assert [row["user_id"] for row in users] == ["@alice:example.test", "@bob:example.test", None]
@@ -202,6 +211,32 @@ def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs
     assert payload["totals"]["total_tokens"] == 100
     assert "retained top-level runs" in payload["user_coverage"]["note"]
     assert "null" in payload["user_coverage"]["note"]
+    if include_daily:
+        alice_days = users[0]["daily_breakdown"]
+        assert [(day["date"], day["run_count"], day["totals"]["total_tokens"]) for day in alice_days] == [
+            ("2026-09-14", 1, 10),
+            ("2026-09-15", 1, 20),
+        ]
+        assert alice_days[0]["totals"]["input_tokens"] == 7
+        assert alice_days[0]["totals"]["output_tokens"] == 3
+        assert alice_days[0]["totals"]["cache_read_tokens"] == 6
+        assert alice_days[0]["totals"]["cache_write_tokens"] == 1
+        assert alice_days[0]["model_breakdown"] == [users[0]["model_breakdown"][1]]
+        assert alice_days[1]["model_breakdown"] == [users[0]["model_breakdown"][0]]
+        assert [(day["date"], day["totals"]["total_tokens"]) for day in users[1]["daily_breakdown"]] == [
+            ("2026-09-14", 15),
+        ]
+        assert [(day["date"], day["totals"]["total_tokens"]) for day in users[2]["daily_breakdown"]] == [
+            ("2026-09-14", 5),
+        ]
+        assert [
+            (day["date"], day["run_count"], day["totals"]["total_tokens"]) for day in payload["daily_breakdown"]
+        ] == [
+            ("2026-09-14", 3, 30),
+            ("2026-09-15", 1, 20),
+        ]
+    else:
+        assert all("daily_breakdown" not in user for user in users)
 
 
 def test_daily_usage_groups_utc_dates_and_deduplicates_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,7 +346,7 @@ def test_daily_usage_skips_undatable_runs_without_losing_other_totals(
                 _row(
                     source,
                     _run(run_id="dated", created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
-                    _run(run_id="undated", created_at=created_at),
+                    _run(run_id="undated", requester_id="@bob:example.test", created_at=created_at),
                     session_metrics=_metrics(100),
                 ),
             ),
@@ -326,6 +361,10 @@ def test_daily_usage_skips_undatable_runs_without_losing_other_totals(
     assert payload["model_coverage"]["unavailable_sources"] == 1
     assert payload["model_breakdown"][0]["totals"]["total_tokens"] == 20
     assert payload["totals"]["total_tokens"] == 100
+    users = {user["user_id"]: user for user in payload["user_breakdown"]}
+    assert users["@alice:example.test"]["daily_breakdown"] == payload["daily_breakdown"]
+    assert users["@bob:example.test"]["daily_breakdown"] == []
+    assert users["@bob:example.test"]["totals"]["total_tokens"] == 10
 
 
 def test_daily_usage_returns_empty_breakdown_without_retained_runs(
@@ -494,6 +533,7 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
         assert report["user_breakdown"][0]["run_count"] == 3
         assert report["user_breakdown"][0]["totals"]["total_tokens"] == 52
         assert report["user_breakdown"][0]["model_breakdown"] == report["model_breakdown"]
+        assert report["user_breakdown"][0]["daily_breakdown"] == report["daily_breakdown"]
 
 
 @pytest.mark.parametrize("double_encoded", [False, True])
@@ -682,6 +722,8 @@ def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: p
     assert "window" not in payload
     assert "run_count" not in payload
     assert "first_observed_at" not in payload
+    assert "private_agent_breakdown" not in payload
+    assert "private_agent_coverage" not in payload
 
 
 def test_shared_self_reads_each_source_once_for_totals_and_models(
@@ -751,6 +793,9 @@ def test_private_self_usage_uses_compaction_safe_session_metrics(
     assert report.session_count == 1
     assert report.model_breakdown[0].totals.total_tokens == 10
     assert report.model_breakdown[0].run_count == 1
+    payload = report.to_dict()
+    assert "private_agent_breakdown" not in payload
+    assert "private_agent_coverage" not in payload
 
 
 def test_self_usage_marks_missing_shared_requester_incomplete(

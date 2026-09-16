@@ -148,6 +148,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("thread_model", "list_models"),
         ("thread_summary", "set_thread_summary"),
         ("usage_stats", "get_my_usage"),
+        ("usage_stats", "get_my_private_usage"),
     ],
 )
 async def test_room_runtime_tools_are_hidden_and_cannot_be_selected(

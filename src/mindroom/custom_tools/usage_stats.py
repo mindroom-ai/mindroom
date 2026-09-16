@@ -16,7 +16,7 @@ from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
-from mindroom.usage_stats import collect_admin_usage, collect_self_usage
+from mindroom.usage_stats import collect_admin_usage, collect_private_usage, collect_self_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -30,7 +30,7 @@ class UsageStatsTools(Toolkit):
     def __init__(self, *, agent_name: str | None = None, admin_scope: bool = False) -> None:
         self._agent_name = agent_name
         self._admin_scope = admin_scope
-        functions: list[Callable[..., Awaitable[str]]] = [self.get_my_usage]
+        functions: list[Callable[..., Awaitable[str]]] = [self.get_my_usage, self.get_my_private_usage]
         if admin_scope:
             functions.append(self.get_all_usage)
         super().__init__(name="usage_stats", tools=functions)
@@ -118,6 +118,25 @@ class UsageStatsTools(Toolkit):
             config=config,
             runtime_paths=context.runtime_paths,
             execution_identity=execution_identity,
+            include_daily=include_daily,
+        )
+        return self._payload("ok", **report.to_dict())
+
+    async def get_my_private_usage(self, include_daily: bool = False) -> str:
+        """Return usage for all of the current requester's private agents.
+
+        Args:
+            include_daily: Include retained token totals and per-model breakdowns by UTC date.
+
+        """
+        context = self._context_or_error()
+        if isinstance(context, str):
+            return context
+        report = await asyncio.to_thread(
+            collect_private_usage,
+            requester_id=context.requester_id,
+            config=context.current_config,
+            runtime_paths=context.runtime_paths,
             include_daily=include_daily,
         )
         return self._payload("ok", **report.to_dict())

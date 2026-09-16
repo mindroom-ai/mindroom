@@ -863,8 +863,12 @@ Requester aliases are combined; `user_id: null` holds unattributed usage.
 
 Use `GET /api/usage?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
+With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
+User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
 Daily rows are sorted oldest first and use retained run creation timestamps.
 Missing or invalid timestamps exclude the run from daily rows and mark daily coverage as incomplete.
+Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
+The report-level `daily_coverage` applies to both the overall and per-user daily breakdowns.
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
@@ -874,6 +878,25 @@ Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
 This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
+
+The administrator response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
+Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
+They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
+Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
+Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
+Compacted history can contribute to session totals without recoverable model or daily detail.
+
+#### Personal Private-Agent Usage
+
+`GET /api/usage/me/private-agents?include_daily=true` returns the authenticated requester's usage across their configured private agents.
+It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an administrator `user_breakdown`.
+Known requester aliases share one history; other users' databases and shared-agent databases are excluded.
+The optional `include_daily` parameter defaults to `false`.
+
+This endpoint requires trusted upstream authentication with signed JWTs and a verified Matrix identity, using the same identity checks as the personal Connections API.
+An instance API key alone cannot select a personal user.
+The requester comes only from authenticated identity; user, agent, and storage-path query overrides are rejected.
+Ordinary authenticated users can access this personal endpoint; `/api/usage` retains its existing dashboard administrator access rules.
 
 ### Health & Readiness
 
@@ -10459,13 +10482,15 @@ For implementation details and lifecycle guarantees, see [OAuth Credential Lifec
 All operations are local and read-only.
 `get_my_usage()` always scopes the result to the current agent and the canonical current requester.
 For a private agent, `get_my_usage()` remains inside the current user's exact private instance.
+`get_my_private_usage()` reports all configured private agents belonging to the current requester, including retained stores under known requester aliases.
+It resolves only that requester's databases and does not scan other users' private instances.
 Shared-agent self reports cover retained Agno runs, while private self reports use the isolated Agno session aggregate.
 The result excludes the in-flight tool call, and shared-agent self reports can be incomplete after compaction.
 Provider billing, embedding usage, and speech-to-text usage are outside version one.
 
 ### Self-Service Configuration
 
-Configure a normal agent with `usage_stats` to make only `get_my_usage()` available.
+Configure a normal agent with `usage_stats` to make `get_my_usage()` and `get_my_private_usage()` available.
 
 ```yaml
 agents:
@@ -10494,32 +10519,35 @@ agents:
           admin_scope: true
 ```
 
-Both functions accept an optional `include_daily` boolean, which defaults to `false`.
+All three functions accept an optional `include_daily` boolean, which defaults to `false`.
 `get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
 `get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
 
 ### Daily Token Usage
 
-Call `get_my_usage(include_daily=True)` or `get_all_usage(include_daily=True)` to include token usage per day.
+Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
 Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
 The report's overall totals and overall `model_breakdown` expose the same counters.
+For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includes a `daily_breakdown` with the same daily totals, run counts, and per-model rows.
+Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
 
 `daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
 Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
 Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
 Both daily fields are omitted unless `include_daily=True`.
 
 ### Response And Coverage
 
-Both functions return a JSON custom-tool envelope with `status` and `tool` fields.
+All three functions return a JSON custom-tool envelope with `status` and `tool` fields.
 A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
 The admin response groups session aggregates by configured agent or team ID.
-The self-response omits only the entity breakdown because its scope is already one agent and requester; it still includes `model_breakdown` and `model_coverage`.
+Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
 Both responses group retained top-level runs by provider and model in `model_breakdown`.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
@@ -10531,6 +10559,22 @@ Coverage reports scanned sources, unavailable or partially unreadable sources, a
 Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
+
+### Private-Agent Accounting
+
+`private_agent_breakdown` separates usage by `agent_name` and, for admin reports, canonical `user_id`.
+Personal reports omit user identifiers and contain only the requester's own private agents.
+`get_my_private_usage()` combines those agents in the overall totals; `get_all_usage()` includes private rows alongside the instance-wide report.
+
+Each private row contains session `totals` and `session_count`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
+With `include_daily=True`, it also contains `daily_breakdown` using the same UTC dates and model/token counters as the other daily views.
+Session totals can include compacted history that no longer has retained model or daily detail; the two totals are intentionally separate.
+
+For admin reports, session ownership comes from a validated private-instance identity record, falling back to the session's recorded requester.
+Retained runs keep their recorded requester, with the validated owner as fallback when requester metadata is missing.
+Known aliases are combined; missing ownership remains `user_id: null`.
+`private_agent_coverage` describes unavailable attribution or metrics.
+All views share the same storage reader, run deduplication, token normalization, and daily grouping.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
 Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
 Agno 2.x session run blobs, including double-encoded JSON, and Agno 3 run tables are supported, including partly migrated databases.
@@ -13142,6 +13186,70 @@ Use `allowed_email_domains` to restrict verified email claims by domain.
 Use `allowed_hosted_domains` when the provider supplies a verified hosted-domain claim.
 If a configured restriction cannot be checked from verified claims, MindRoom fails the callback closed and does not save credentials.
 
+### Additional Google workspaces
+
+Use `GoogleWorkspaceConfig` to expose another Google account alongside the built-in tools.
+Each workspace gets separate OAuth providers, stored connections, and function names while reusing the existing Google tool implementations and Connections page.
+Existing tools and saved logins remain unchanged; no credential migration is needed.
+
+For example, a plugin can use one module for both registrations:
+
+```json
+{
+  "name": "google-workspaces",
+  "tools_module": "workspaces.py",
+  "oauth_module": "workspaces.py"
+}
+```
+
+```python
+# workspaces.py
+from mindroom.tool_system.google_workspaces import (
+    GoogleWorkspaceConfig,
+    google_workspace_oauth_providers,
+    register_google_workspace_tools,
+)
+
+WORKSPACES = (
+    GoogleWorkspaceConfig(
+        name="secondary",
+        display_name="Secondary",
+        client_config_service="secondary_google_oauth_client",
+        allowed_hosted_domains=("secondary.example",),
+        services=("gmail",),
+    ),
+)
+
+for workspace in WORKSPACES:
+    register_google_workspace_tools(workspace)
+
+
+def register_oauth_providers(settings, runtime_paths):
+    return tuple(
+        provider
+        for workspace in WORKSPACES
+        for provider in google_workspace_oauth_providers(workspace)
+    )
+```
+
+Enable the plugin and add `secondary_gmail` beside `gmail` in the agent's tools.
+The additional Connections card is labeled **Secondary Gmail**.
+When it needs a login, the tool returns its own chat authorization link.
+Google must verify a hosted domain from `allowed_hosted_domains`; choosing a personal account or another organization's account fails without saving credentials.
+
+Provision the workspace's OAuth client through a [shared credential seed](https://docs.mindroom.chat/configuration/#credential-seeds) with `client_id` and `client_secret` under `secondary_google_oauth_client`.
+Enable the Gmail API and register the exact callback `https://your-host/api/oauth/secondary_google_gmail/callback` on that client before exposing the tool.
+Workspace tools require their own OAuth connection and never fall back to the default Google client or a global service account.
+Like the built-in Google tools, they always execute in the primary runtime, where their OAuth credentials are managed.
+
+Function names are prefixed, such as `secondary_get_latest_emails` and `secondary_send_email`.
+Update approval rules, script-tool allowlists, and function filters to use those names; existing rules for `send_email` do not match `secondary_send_email`.
+
+Add more workspace definitions with distinct names and client services as needed.
+Supported services are `gmail`, `google_calendar`, `google_drive`, `google_docs`, and `google_sheets`.
+Specify only provisioned services; each needs its corresponding API enabled and its own prefixed callback registered.
+Keep workspace names stable because they identify stored connections.
+
 ### Minimal example
 
 ```python
@@ -13223,8 +13331,8 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `helper_text` | string | `None` | Markdown help text shown in the dashboard setup panel |
 | `auth_provider` | string | `None` | OAuth provider identifier when using OAuth-based setup |
 | `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
-| `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | `PRIMARY` or `WORKER` — controls whether the tool runs on the primary agent or a sandbox worker |
-| `requires_primary_runtime` | boolean | `False` | Prevents worker routing even when `worker_tools` explicitly selects the tool |
+| `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
+| `requires_primary_runtime` | boolean | `False` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
 
 ### Dependencies
 
@@ -17897,6 +18005,7 @@ MindRoom's architecture consists of several key components working together.
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
+| `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
 | `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |

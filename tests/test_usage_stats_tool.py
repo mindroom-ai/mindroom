@@ -46,7 +46,7 @@ class _Report:
 
 def test_usage_endpoints_only_accept_optional_daily_breakdown() -> None:
     """Callers can request daily detail without redirecting the report's scope."""
-    for method in (UsageStatsTools.get_my_usage, UsageStatsTools.get_all_usage):
+    for method in (UsageStatsTools.get_my_usage, UsageStatsTools.get_my_private_usage, UsageStatsTools.get_all_usage):
         parameters = inspect.signature(method).parameters
         assert tuple(parameters) == ("self", "include_daily")
         assert parameters["include_daily"].default is False
@@ -155,9 +155,13 @@ async def test_usage_tool_optionally_returns_daily_tokens_from_storage(
         assert model["totals"]["cache_read_tokens"] == 9
         assert model["totals"]["cache_write_tokens"] == 2
         assert payload["daily_coverage"]["unavailable_sources"] == 0
+        if admin:
+            assert payload["user_breakdown"][0]["daily_breakdown"] == payload["daily_breakdown"]
     else:
         assert "daily_breakdown" not in payload
         assert "daily_coverage" not in payload
+        if admin:
+            assert "daily_breakdown" not in payload["user_breakdown"][0]
 
 
 @pytest.mark.asyncio
@@ -190,9 +194,10 @@ async def test_get_my_usage_uses_bound_agent_and_canonical_requester(
 
 def test_admin_function_is_registered_only_when_configured() -> None:
     """The admin endpoint is absent unless the authored override enables it."""
-    assert _function_names(UsageStatsTools(agent_name="usage")) == {"get_my_usage"}
+    assert _function_names(UsageStatsTools(agent_name="usage")) == {"get_my_usage", "get_my_private_usage"}
     assert _function_names(UsageStatsTools(agent_name="usage", admin_scope=True)) == {
         "get_my_usage",
+        "get_my_private_usage",
         "get_all_usage",
     }
 
@@ -201,7 +206,7 @@ def test_registration_keeps_usage_stats_local_and_configurable() -> None:
     """Tool metadata preserves the local primary execution boundary."""
     metadata = TOOL_METADATA["usage_stats"]
 
-    assert metadata.function_names == ("get_my_usage", "get_all_usage")
+    assert metadata.function_names == ("get_my_usage", "get_my_private_usage", "get_all_usage")
     assert metadata.default_execution_target.value == "primary"
     assert metadata.config_fields is None
     assert [field.name for field in metadata.agent_override_fields or []] == ["admin_scope"]
@@ -226,8 +231,8 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
         worker_target=None,
     )
 
-    assert _function_names(ordinary_toolkit) == {"get_my_usage"}
-    assert _function_names(admin_toolkit) == {"get_my_usage", "get_all_usage"}
+    assert _function_names(ordinary_toolkit) == {"get_my_usage", "get_my_private_usage"}
+    assert _function_names(admin_toolkit) == {"get_my_usage", "get_my_private_usage", "get_all_usage"}
 
 
 def test_admin_scope_is_rejected_from_default_tools(tmp_path: Path) -> None:

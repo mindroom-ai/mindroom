@@ -189,6 +189,50 @@ def test_active_stream_authorization_transport_failure_revokes_control(
     assert client.get(path, headers=headers).status_code == 401
 
 
+@pytest.mark.parametrize("protocol_format", ["split", "combined", "combined_whitespace"])
+@pytest.mark.parametrize("duplicate_ticket", [False, True])
+def test_stream_ticket_from_asgi_subprotocols(
+    gateway: Gateway,
+    protocol_format: str,
+    *,
+    duplicate_ticket: bool,
+) -> None:
+    """Accept SansIO header values while rejecting duplicate and replayed tickets."""
+    client, _peer, app = gateway
+    session = create(client).json()
+    path = "/api/computers/sessions/" + session["session_id"]
+    headers = {"Authorization": "Bearer " + session["session_token"]}
+    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
+    protocols = ["binary", "mindroom-ticket." + ticket]
+    if duplicate_ticket:
+        protocols.append("mindroom-ticket." + ticket)
+    if protocol_format == "combined":
+        protocols = [", ".join(protocols)]
+    elif protocol_format == "combined_whitespace":
+        protocols = [" " + " ,\t ".join(protocols) + " "]
+    # TestClient splits the header itself, masking Uvicorn SansIO's raw scope.
+    websocket = WebSocket(
+        {
+            "type": "websocket",
+            "app": app,
+            "headers": [(b"origin", b"https://chat.example.org")],
+            "subprotocols": protocols,
+        },
+        receive=AsyncMock(),
+        send=AsyncMock(),
+    )
+    if duplicate_ticket:
+        with pytest.raises(ComputerError, match="A computer stream ticket is required") as denied:
+            computers._stream_session(websocket, session["session_id"])
+        assert denied.value.status_code == 401
+        return
+    accepted = computers._stream_session(websocket, session["session_id"])
+    assert accepted.session_id == session["session_id"]
+    with pytest.raises(ComputerError) as replayed:
+        computers._stream_session(websocket, session["session_id"])
+    assert replayed.value.status_code == 401
+
+
 def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway) -> None:
     """Stream watch take release reconnect and stop."""
     client, _peer, _app = gateway

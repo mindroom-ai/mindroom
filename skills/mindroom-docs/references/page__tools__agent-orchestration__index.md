@@ -102,13 +102,15 @@ For implementation details and lifecycle guarantees, see [OAuth Credential Lifec
 All operations are local and read-only.
 `get_my_usage()` always scopes the result to the current agent and the canonical current requester.
 For a private agent, `get_my_usage()` remains inside the current user's exact private instance.
+`get_my_private_usage()` reports all configured private agents belonging to the current requester, including retained stores under known requester aliases.
+It resolves only that requester's databases and does not scan other users' private instances.
 Shared-agent self reports cover retained Agno runs, while private self reports use the isolated Agno session aggregate.
 The result excludes the in-flight tool call, and shared-agent self reports can be incomplete after compaction.
 Provider billing, embedding usage, and speech-to-text usage are outside version one.
 
 ### Self-Service Configuration
 
-Configure a normal agent with `usage_stats` to make only `get_my_usage()` available.
+Configure a normal agent with `usage_stats` to make `get_my_usage()` and `get_my_private_usage()` available.
 
 ```yaml
 agents:
@@ -137,32 +139,35 @@ agents:
           admin_scope: true
 ```
 
-Both functions accept an optional `include_daily` boolean, which defaults to `false`.
+All three functions accept an optional `include_daily` boolean, which defaults to `false`.
 `get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
 `get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
 
 ### Daily Token Usage
 
-Call `get_my_usage(include_daily=True)` or `get_all_usage(include_daily=True)` to include token usage per day.
+Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
 Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
 The report's overall totals and overall `model_breakdown` expose the same counters.
+For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includes a `daily_breakdown` with the same daily totals, run counts, and per-model rows.
+Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
 
 `daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
 Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
 Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
 Both daily fields are omitted unless `include_daily=True`.
 
 ### Response And Coverage
 
-Both functions return a JSON custom-tool envelope with `status` and `tool` fields.
+All three functions return a JSON custom-tool envelope with `status` and `tool` fields.
 A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
 The admin response groups session aggregates by configured agent or team ID.
-The self-response omits only the entity breakdown because its scope is already one agent and requester; it still includes `model_breakdown` and `model_coverage`.
+Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
 Both responses group retained top-level runs by provider and model in `model_breakdown`.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
@@ -174,6 +179,22 @@ Coverage reports scanned sources, unavailable or partially unreadable sources, a
 Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
+
+### Private-Agent Accounting
+
+`private_agent_breakdown` separates usage by `agent_name` and, for admin reports, canonical `user_id`.
+Personal reports omit user identifiers and contain only the requester's own private agents.
+`get_my_private_usage()` combines those agents in the overall totals; `get_all_usage()` includes private rows alongside the instance-wide report.
+
+Each private row contains session `totals` and `session_count`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
+With `include_daily=True`, it also contains `daily_breakdown` using the same UTC dates and model/token counters as the other daily views.
+Session totals can include compacted history that no longer has retained model or daily detail; the two totals are intentionally separate.
+
+For admin reports, session ownership comes from a validated private-instance identity record, falling back to the session's recorded requester.
+Retained runs keep their recorded requester, with the validated owner as fallback when requester metadata is missing.
+Known aliases are combined; missing ownership remains `user_id: null`.
+`private_agent_coverage` describes unavailable attribution or metrics.
+All views share the same storage reader, run deduplication, token normalization, and daily grouping.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
 Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
 Agno 2.x session run blobs, including double-encoded JSON, and Agno 3 run tables are supported, including partly migrated databases.

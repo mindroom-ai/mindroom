@@ -1394,6 +1394,8 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
             tool_dict["oauth_fallback_fields"] = list(metadata.oauth_fallback_fields)
         else:
             tool_dict.pop("oauth_fallback_fields", None)
+        if not metadata.requires_primary_runtime:
+            tool_dict.pop("requires_primary_runtime", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("supports_toolkit_filters", None)

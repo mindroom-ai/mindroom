@@ -339,7 +339,8 @@ def _stream_session(websocket: WebSocket, session_id: str) -> ComputerSession:
     paths = config_lifecycle.require_api_state(websocket.app).snapshot.runtime_paths
     if websocket.headers.get("origin") not in computer_origins(paths):
         raise ComputerError(403, "Computer stream origin is not allowed.")
-    protocols = websocket.scope.get("subprotocols", [])
+    # Uvicorn SansIO can expose comma-separated header values instead of tokens.
+    protocols = [protocol.strip() for value in websocket.scope.get("subprotocols", []) for protocol in value.split(",")]
     tickets = [value.removeprefix("mindroom-ticket.") for value in protocols if value.startswith("mindroom-ticket.")]
     if "binary" not in protocols or len(tickets) != 1:
         raise ComputerError(401, "A computer stream ticket is required.")
