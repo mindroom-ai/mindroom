@@ -44,6 +44,10 @@ A dismissed request stays dismissed, while a new event can request the action ag
 Other Matrix clients display the notice's fallback text, such as “Open Settings (general) in MindRoom Chat.”
 Receiving or sending the notice is not evidence that a client opened anything.
 
+MindRoom Chat recognizes agent senders through the existing joined, same-homeserver `mindroom_` identity convention.
+Operators of custom homeservers must reserve and control that namespace, as `mindroom.chat` does.
+UI requests reveal only the bounded Chat surfaces described above; worker computer access remains independently authorized by the configured computer gateway.
+
 ## Worker computer requirements
 
 `show_computer()` uses the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.

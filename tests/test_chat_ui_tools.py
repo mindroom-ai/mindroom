@@ -134,6 +134,7 @@ async def test_show_computer_sends_exact_wire_metadata_from_canonical_context(tm
     }
     assert content["msgtype"] == "m.notice"
     assert content["body"] == "Open this agent's worker computer in MindRoom Chat."
+    context.conversation_reader.latest_thread_event_id.assert_not_awaited()
     assert result == {
         "action": "show_computer",
         "event_id": "$ui-action",
@@ -208,6 +209,47 @@ async def test_room_level_request_uses_null_thread_without_relation(tmp_path: Pa
     }
     assert "m.relates_to" not in content
     assert result["thread_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_thread_continuation_uses_latest_projected_event_for_fallback(tmp_path: Path) -> None:
+    """A non-reply thread action must fall back to the latest event, not blindly to the root."""
+    context = _context(tmp_path, reply_to_event_id=None)
+    context.conversation_reader.latest_thread_event_id.return_value = "$latest"
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_computer())
+
+    assert result["status"] == "ok"
+    assert _sent_content(context)["m.relates_to"] == {
+        "rel_type": "m.thread",
+        "event_id": THREAD_ID,
+        "is_falling_back": True,
+        "m.in_reply_to": {"event_id": "$latest"},
+    }
+    context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
+        room_id=ROOM_ID,
+        thread_id=THREAD_ID,
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_thread_fallback_is_rejected_without_sending(tmp_path: Path) -> None:
+    """A threaded action must not invent a fallback target when projection cannot resolve one."""
+    context = _context(tmp_path, reply_to_event_id=None)
+
+    with tool_runtime_context(context):
+        result = json.loads(await ChatUITools().show_computer())
+
+    assert result == {
+        "action": "show_computer",
+        "message": "Failed to resolve Matrix thread fallback for UI action request.",
+        "room_id": ROOM_ID,
+        "status": "error",
+        "thread_id": THREAD_ID,
+        "tool": "chat_ui",
+    }
+    context.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

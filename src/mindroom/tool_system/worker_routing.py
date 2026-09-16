@@ -40,6 +40,7 @@ _LOCAL_ONLY_TOOL_NAMES = frozenset(
         "approved_egress",
         "attachments",
         "callback_manager",
+        "chat_ui",
         "desktop",
         "external_trigger_manager",
         "github",

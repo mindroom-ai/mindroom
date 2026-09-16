@@ -5866,6 +5866,7 @@ class TestWorkerToolsOverride:
         "tool_name",
         [
             "callback_manager",
+            "chat_ui",
             "desktop",
             "gmail",
             "google_calendar",
@@ -5908,6 +5909,48 @@ class TestWorkerToolsOverride:
             )
             is False
         )
+
+    def test_get_tool_by_name_keeps_chat_ui_local_when_explicitly_worker_routed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A configured worker_tools entry must retain the live primary-runtime context boundary."""
+
+        class _ForbiddenClient:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                msg = "Sandbox proxy should not be used for local-only tools."
+                raise AssertionError(msg)
+
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox:8765",
+            proxy_token=_TEST_AUTH_TOKEN,
+            execution_mode="all",
+            credential_policy={},
+        )
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+
+        tool = get_tool_by_name(
+            "chat_ui",
+            runtime_paths,
+            worker_tools_override=["chat_ui"],
+            worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
+        )
+        entrypoint = tool.async_functions["show_computer"].entrypoint
+        assert entrypoint is not None
+
+        result = json.loads(asyncio.run(entrypoint()))
+        assert result["status"] == "error"
+        assert "runtime context" in result["message"]
 
     def test_usage_stats_stays_local(self) -> None:
         """Usage scans must not leave the primary runtime."""

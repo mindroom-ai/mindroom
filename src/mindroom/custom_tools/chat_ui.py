@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, get_args
 
 from agno.tools import Toolkit
 
@@ -24,18 +24,8 @@ _SettingsSection = Literal[
 ]
 _SidePanel = Literal["members"]
 
-_SETTINGS_SECTIONS = frozenset(
-    {
-        "general",
-        "account",
-        "notifications",
-        "devices",
-        "emojis-stickers",
-        "developer",
-        "about",
-    },
-)
-_SIDE_PANELS = frozenset({"members"})
+_SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
+_SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
 _UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 
 
@@ -148,6 +138,20 @@ class ChatUITools(Toolkit):
             return validated
         context, requester_id = validated
         thread_id = context.resolved_thread_id
+        latest_thread_event_id = context.reply_to_event_id
+        if thread_id is not None and latest_thread_event_id is None:
+            latest_thread_event_id = await context.conversation_reader.latest_thread_event_id(
+                room_id=context.room_id,
+                thread_id=thread_id,
+            )
+            if latest_thread_event_id is None:
+                return cls._payload(
+                    "error",
+                    action=action,
+                    room_id=context.room_id,
+                    thread_id=thread_id,
+                    message="Failed to resolve Matrix thread fallback for UI action request.",
+                )
         metadata: dict[str, object] = {
             "version": 1,
             "action": action,
@@ -161,7 +165,7 @@ class ChatUITools(Toolkit):
             body,
             thread_event_id=thread_id,
             reply_to_event_id=context.reply_to_event_id if thread_id is not None else None,
-            latest_thread_event_id=(context.reply_to_event_id or thread_id) if thread_id is not None else None,
+            latest_thread_event_id=latest_thread_event_id if thread_id is not None else None,
             extra_content={
                 "msgtype": "m.notice",
                 _UI_ACTION_CONTENT_KEY: metadata,
