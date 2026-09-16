@@ -133,6 +133,67 @@ async def test_retirement_settles_active_and_queued_calls_without_queued_dispatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cancel", "timeout"])
+async def test_cleanup_failure_cannot_strand_queued_calls_or_replace_abandonment(
+    transport: list[str],
+    caplog: pytest.LogCaptureFixture,
+    operation: str,
+) -> None:
+    """Fallible cleanup is logged once after teardown without changing retirement outcomes."""
+    cleanup_error = PermissionError("screenshot unlink failed")
+
+    def cleanup(_name: str, _arguments: dict[str, object]) -> None:
+        transport.append("cleanup")
+        raise cleanup_error
+
+    actor = PlaywrightMCPSession(
+        StdioServerParameters(command="unused"),
+        call_timeout_seconds=0.05 if operation == "timeout" else 5,
+        cancelled_call_cleanup=cleanup,
+    )
+    active = asyncio.create_task(actor.call_tool("stuck", {}))
+    queued: asyncio.Task[CallToolResult] | None = None
+    try:
+        async with asyncio.timeout(1):
+            while "stuck" not in transport:  # noqa: ASYNC110 - observe fake collaborator dispatch
+                await asyncio.sleep(0)
+        # Keep the queued caller's own deadline well beyond the settlement check.
+        actor._timeout = 5
+        queued = asyncio.create_task(actor.call_tool("queued_mutation", {}))
+        await asyncio.sleep(0)
+        assert actor._queue.qsize() == 1
+        if operation == "cancel":
+            active.cancel()
+        _done, pending = await asyncio.wait({active, queued}, timeout=1)
+        assert not pending, "Cleanup failure must not strand an admitted caller"
+        results = await asyncio.gather(active, queued, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError if operation == "cancel" else TimeoutError)
+        assert isinstance(results[1], RuntimeError)
+        assert str(results[1]) == "Playwright MCP session is closed."
+        assert transport == ["session", "initialize", "stuck", "closed", "reaped", "cleanup"]
+        assert not actor.running
+        assert actor._work_scope is None
+        assert actor._queue.empty()
+        with pytest.raises(RuntimeError, match="session is closed"):
+            await actor.call_tool("later_mutation", {})
+        await actor.close()
+        await actor.close()
+        assert transport.count("cleanup") == 1
+        errors = [record for record in caplog.records if record.name == "mindroom.playwright_mcp_session"]
+        assert len(errors) == 1
+        assert errors[0].getMessage() == "Playwright MCP cancelled-call cleanup failed for stuck"
+        assert errors[0].exc_info is not None
+        assert errors[0].exc_info[1] is cleanup_error
+    finally:
+        with contextlib.suppress(PermissionError):
+            await actor.close()
+        for call in (active, queued):
+            if call is not None:
+                call.cancel()
+        await asyncio.gather(active, *([queued] if queued is not None else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["timeout", "cancel", "crash", "startup", "close"])
 @pytest.mark.parametrize("detached", [False, True])
 @pytest.mark.parametrize("birth_delay_ms", [0, 500])

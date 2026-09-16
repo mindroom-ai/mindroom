@@ -88,6 +88,10 @@ class PlaywrightMCPBrowserProvider:
     stop retires that session before a later start creates a fresh one; close
     permanently forbids restart. Screenshot files are removed after the shared
     session settles each call, including cancellation and late process output.
+
+    Callers must serialize execute calls, including stop and observations, as
+    the desktop bridge does. Observation gating and session selection assume
+    that ordering; concurrent execute calls are not supported.
     """
 
     def __init__(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
     from mcp.types import CallToolResult, Tool
 
 PLAYWRIGHT_MCP_PACKAGE = "@playwright/mcp@0.0.78"
+
+logger = logging.getLogger(__name__)
 
 
 async def _drain_closed_session(stream: MemoryObjectReceiveStream[SessionMessage | Exception]) -> None:
@@ -49,8 +52,11 @@ class PlaywrightMCPSession:
     Retirement waits for context exit and bounded process cleanup before
     settling interrupted calls. The optional cleanup callback for cancelled
     active calls runs after process cleanup, when late output can no longer
-    appear. Successful calls leave the transport open. A retired instance
-    cannot reopen; its provider must create a fresh session.
+    appear. Cleanup exceptions are logged with their traceback, without
+    replacing the caller's cancellation/timeout or queued retirement errors.
+    They do not make repeated close fail or rerun cleanup. Successful calls
+    leave the transport open. A retired instance cannot reopen; its provider
+    must create a fresh session.
     """
 
     def __init__(
@@ -174,16 +180,22 @@ class PlaywrightMCPSession:
             if drain is not None:
                 drain.cancel()
                 await asyncio.gather(drain, return_exceptions=True)
-            # The process tree has stopped before removing late screenshot output.
-            if self._cleanup is not None:
-                for call in cancelled:
-                    assert call.tool_name is not None
-                    self._cleanup(call.tool_name, call.arguments)
-            self._closed = True
-            self._work_scope = None
-            if active is not None and not active.future.done():
-                active.future.set_exception(error)
-            while not self._queue.empty():
-                queued = self._queue.get_nowait()
-                if not queued.future.done():
-                    queued.future.set_exception(error)
+            try:
+                # The process tree has stopped before removing late screenshot output.
+                if self._cleanup is not None:
+                    for call in cancelled:
+                        assert call.tool_name is not None
+                        try:
+                            self._cleanup(call.tool_name, call.arguments)
+                        except Exception:
+                            logger.exception("Playwright MCP cancelled-call cleanup failed for %s", call.tool_name)
+            finally:
+                # Fallible caller cleanup must never bypass the owner's settlement.
+                self._closed = True
+                self._work_scope = None
+                if active is not None and not active.future.done():
+                    active.future.set_exception(error)
+                while not self._queue.empty():
+                    queued = self._queue.get_nowait()
+                    if not queued.future.done():
+                        queued.future.set_exception(error)
