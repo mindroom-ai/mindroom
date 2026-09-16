@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import stat
 from typing import TYPE_CHECKING
 
@@ -89,7 +90,7 @@ class WorkerBrowserMCP:
         if function_name not in browser_mcp_catalog():
             msg = "Unsupported native browser MCP function."
             raise ValueError(msg)
-        output = self._output_path(self._output, directory=True)
+        output = self._automatic_output_path()
         arguments = self._file_arguments(function_name, arguments)
         try:
             if not self._ready:
@@ -141,6 +142,20 @@ class WorkerBrowserMCP:
                 raise ValueError(msg)
             canonical_paths.append(str(path))
         return {**arguments, "paths": canonical_paths}
+
+    def _automatic_output_path(self) -> Path:
+        """Admit direct output links without traversing ordinary or linked directories."""
+        output = self._output_path(self._output, directory=True)
+        try:
+            if output.exists():
+                with os.scandir(output) as entries:
+                    for entry in entries:
+                        if entry.is_symlink():
+                            self._output_path(output / entry.name, directory=entry.is_dir())
+        except OSError as exc:
+            msg = "Native browser output directory could not be inspected."
+            raise ValueError(msg) from exc
+        return output
 
     def _output_path(self, path: Path, *, directory: bool = False) -> Path:
         """Resolve existing links and missing descendants within the workspace."""

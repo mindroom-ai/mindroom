@@ -3,7 +3,7 @@
 import os
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from mcp import StdioServerParameters
@@ -189,6 +189,138 @@ async def test_invalid_automatic_output_root_blocks_calls(
         assert list(outside.iterdir()) == [canary]
     finally:
         await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("case", ["outside_file", "outside_directory", "dangling_outside", "loop", "special_file"])
+async def test_invalid_automatic_output_child_blocks_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running: bool,
+    case: str,
+) -> None:
+    """A direct download target link is checked even when the call has no filename."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "browser"
+    output.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    canary = outside / "canary.txt"
+    canary.write_text("outside canary")
+    os.mkfifo(workspace / "fifo")
+    session = AsyncMock(spec=PlaywrightMCPSession)
+    session.list_tools.return_value = tuple(Tool.model_validate(tool) for tool in browser_mcp_catalog().values())
+    session.call_tool.return_value = CallToolResult(content=[])
+    monkeypatch.setattr("mindroom.worker_computer.mcp_provider.PlaywrightMCPSession", lambda _parameters: session)
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    try:
+        if running:
+            await provider.execute("browser_tabs", {"action": "list"})
+            session.reset_mock()
+        link = output / "download.txt"
+        target = {
+            "outside_file": canary,
+            "outside_directory": outside,
+            "dangling_outside": outside / "missing.txt",
+            "loop": link,
+            "special_file": workspace / "fifo",
+        }[case]
+        link.symlink_to(target)
+        start = AsyncMock(side_effect=AssertionError("Invalid download target started browser resources"))
+        monkeypatch.setattr(provider._verifier, "start", start)
+
+        with pytest.raises(ValueError, match=r"output|workspace"):
+            await provider.execute("browser_navigate", {"url": "https://example.org/download"})
+
+        start.assert_not_awaited()
+        session.call_tool.assert_not_awaited()
+        session.close.assert_not_awaited()
+        assert provider._session is (session if running else None)
+        assert provider._ready is running
+        assert canary.read_text() == "outside canary"
+        assert list(outside.iterdir()) == [canary]
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["file_link", "dangling_link", "directory_link", "directory", "missing_root"])
+async def test_safe_automatic_output_children_preserve_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Internal links stay supported, and direct admission never walks child directories."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "browser"
+    inside = workspace / "inside.txt"
+    inside.write_text("inside")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside canary")
+    if case != "missing_root":
+        output.mkdir()
+        child = output / "download.txt"
+        if case == "file_link":
+            child.symlink_to(inside)
+        elif case == "dangling_link":
+            child.symlink_to(workspace / "missing.txt")
+        else:
+            directory = workspace / "reports" if case == "directory_link" else child
+            directory.mkdir()
+            (directory / "nested-link.txt").symlink_to(outside)
+            if case == "directory_link":
+                child.symlink_to(directory, target_is_directory=True)
+    session = AsyncMock(spec=PlaywrightMCPSession)
+    session.list_tools.return_value = tuple(Tool.model_validate(tool) for tool in browser_mcp_catalog().values())
+    session.call_tool.return_value = CallToolResult(content=[])
+    monkeypatch.setattr("mindroom.worker_computer.mcp_provider.PlaywrightMCPSession", lambda _parameters: session)
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    try:
+        for _ in range(2):
+            await provider.execute("browser_navigate", {"url": "https://example.org/download"})
+            session.call_tool.assert_awaited_with("browser_navigate", {"url": "https://example.org/download"})
+        assert output.is_dir()
+        assert provider._ready
+        assert inside.read_text() == "inside"
+        assert outside.read_text() == "outside canary"
+        assert not (workspace / "missing.txt").exists()
+    finally:
+        await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("error", [PermissionError("fixture permission denied"), OSError("fixture enumeration failed")])
+async def test_automatic_output_enumeration_errors_preserve_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running: bool,
+    error: OSError,
+) -> None:
+    """Filesystem admission errors retain the ValueError contract before dispatch."""
+    workspace = tmp_path / "workspace"
+    output = workspace / "browser"
+    output.mkdir(parents=True)
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    session = AsyncMock(spec=PlaywrightMCPSession)
+    if running:
+        provider._session = session
+        provider._ready = True
+    start = AsyncMock(side_effect=AssertionError("Unreadable outputs started browser resources"))
+    monkeypatch.setattr(provider._verifier, "start", start)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "scandir", Mock(side_effect=error))
+        with pytest.raises(ValueError, match=r"output|workspace"):
+            await provider.execute("browser_snapshot", {})
+
+    start.assert_not_awaited()
+    session.call_tool.assert_not_awaited()
+    session.close.assert_not_awaited()
+    assert provider._session is (session if running else None)
+    assert provider._ready is running
 
 
 @pytest.mark.asyncio
