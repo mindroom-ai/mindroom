@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
+from authlib.integrations.httpx_client import AsyncOAuth2Client
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials import get_runtime_credentials_manager
@@ -167,6 +169,86 @@ def test_google_providers_request_minimum_functionality_preserving_scopes() -> N
         *GOOGLE_IDENTITY_SCOPES,
         "https://www.googleapis.com/auth/documents",
     )
+
+
+@pytest.mark.parametrize(
+    ("requested_scope", "response_scope", "expected_scope"),
+    [
+        (None, None, None),
+        (
+            None,
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ),
+        ("openid", None, "openid"),
+        (
+            "openid",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ),
+    ],
+)
+def test_calendar_refresh_preserves_grant_without_requesting_new_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested_scope: str | None,
+    response_scope: str | None,
+    expected_scope: str | None,
+) -> None:
+    """Refreshing an older broad grant must not request newly configured scopes."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "google_oauth_client",
+        {"client_id": "client-id", "client_secret": PROVISIONED_CLIENT_SECRET},
+    )
+    provider = replace(
+        google_calendar_oauth_provider(),
+        extra_token_params={"scope": requested_scope} if requested_scope is not None else {},
+    )
+    granted_scopes = [*GOOGLE_IDENTITY_SCOPES, "https://www.googleapis.com/auth/calendar"]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        response: dict[str, object] = {"access_token": "new-access-token", "expires_in": 3600}
+        if response_scope is not None:
+            response["scope"] = response_scope
+        return httpx.Response(200, json=response)
+
+    def client_factory(**kwargs: object) -> AsyncOAuth2Client:
+        return AsyncOAuth2Client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", client_factory)
+    refreshed = asyncio.run(
+        provider.refresh_token_data(
+            {
+                "token": "old-access-token",
+                "refresh_token": "refresh-token",
+                "client_id": "client-id",
+                "expires_at": 1.0,
+                "scopes": granted_scopes,
+                "_oauth_claims": {"email": "alice@example.test", "email_verified": True, "sub": "subject-1"},
+                "_oauth_claims_verified": True,
+            },
+            runtime_paths,
+        ),
+    )
+
+    assert len(requests) == 1
+    assert requests[0].url == GOOGLE_TOKEN_URL
+    body = parse_qs(requests[0].content.decode(), keep_blank_values=True)
+    assert body["grant_type"] == ["refresh_token"]
+    if requested_scope is None:
+        assert "scope" not in body
+    else:
+        assert body["scope"] == [requested_scope]
+    assert refreshed is not None
+    assert refreshed["refresh_token"] == "refresh-token"  # noqa: S105
+    assert refreshed["scopes"] == (granted_scopes if expected_scope is None else expected_scope.split())
 
 
 @pytest.mark.parametrize(

@@ -849,7 +849,6 @@ class OAuthProvider:
         async with AsyncOAuth2Client(
             client_id=client_config.client_id,
             client_secret=client_config.client_secret,
-            scope=self.scopes,
             token_endpoint_auth_method=self._runtime_token_endpoint_auth_method(endpoints),
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
         ) as client:
@@ -903,6 +902,14 @@ class OAuthProvider:
                 claims_verified=True,
             )
         result = _token_result_with_core_metadata(self, result, client_id=client_config.client_id)
+        response_scope = refresh_response.get("scope")
+        if not isinstance(response_scope, str) or not response_scope.strip():
+            # Without response scope, retain the requested scope or original grant.
+            # Current authorization requirements can differ from either one.
+            requested_scope = self.extra_token_params.get("scope", "").strip()
+            granted_scopes = requested_scope.split() if requested_scope else token_data.get("scopes")
+            if isinstance(granted_scopes, list):
+                result.token_data["scopes"] = list(granted_scopes)
         await asyncio.to_thread(self.validate_claims, result, runtime_paths)
         return self.token_result_with_safe_claims(result).token_data
 

@@ -1519,9 +1519,11 @@ def test_provider_refresh_token_data_preserves_existing_refresh_token_when_respo
     assert refreshed["refresh_token"] == "stored-refresh-token"
 
 
+@pytest.mark.parametrize("granted_scopes", [["scope.read"], ["scope.write"], []])
 def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    granted_scopes: list[str],
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -1577,7 +1579,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
                 "token": "expired-access-token",
                 "refresh_token": "stored-refresh-token",
                 "client_id": "client-id",
-                "scopes": ["scope.read"],
+                "scopes": granted_scopes,
                 "expires_at": 900.0,
             },
             runtime_paths,
@@ -1588,7 +1590,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
     assert refreshed["token"] == "refreshed-access-token"
     assert refreshed["refresh_token"] == "stored-refresh-token"
     assert refreshed["client_id"] == "client-id"
-    assert refreshed["scopes"] == ["scope.read"]
+    assert refreshed["scopes"] == granted_scopes
     assert refreshed["_source"] == "oauth"
     assert refreshed["_oauth_provider"] == provider.id
 
