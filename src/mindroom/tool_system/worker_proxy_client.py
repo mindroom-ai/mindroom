@@ -284,12 +284,7 @@ def execute_worker_proxy_request(
     if data.get("ok") is True:
         if worker_handle is not None:
             worker_manager.touch_worker(worker_handle.worker_key)
-        result = data.get("result")
-        if tool_name == "browser_mcp":
-            from mindroom.worker_computer.mcp_results import decode_browser_mcp_result  # noqa: PLC0415
-
-            return decode_browser_mcp_result(result)
-        return result
+        return data.get("result")
 
     error = data.get("error") or "Sandbox execution failed."
     record_proxy_response_failure_for_worker(

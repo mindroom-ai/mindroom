@@ -1369,6 +1369,17 @@ depends_on = []
 path = "mindroom.api.worker_responses"
 depends_on = []
 
+[[modules]]
+path = "mindroom.api.computer_browser_binding"
+depends_on = [
+    "mindroom.custom_tools.browser_mcp",
+    "mindroom.tools.browser_mcp",
+    "mindroom.worker_computer.mcp_catalog",
+    "mindroom.worker_computer.mcp_results",
+    "mindroom.worker_computer.protocol",
+]
+visibility = ["mindroom.api.sandbox_runner"]
+
 # NOTE (arch-b-7): sandbox modules currently depend on the concrete
 # workers.backends.local backend. Honest definition-site encoding for
 # now; ARCH-B-9 will lift the shared sandbox-relevant types into a
@@ -1376,13 +1387,8 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
-    "mindroom.custom_tools.browser_mcp",
-    "mindroom.tools.browser_mcp",
-    "mindroom.worker_computer.mcp_catalog",
-    "mindroom.worker_computer.mcp_results",
-
+    "mindroom.api.computer_browser_binding",
     "mindroom.worker_computer.runtime",
-    "mindroom.worker_computer.protocol",
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_forkserver",
@@ -3934,6 +3940,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
+    "mindroom.worker_computer.mcp_results",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registry_state",
@@ -3945,8 +3952,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.worker_proxy_client"
 depends_on = [
-    "mindroom.worker_computer.mcp_results",
-
     "mindroom.credentials",
     "mindroom.runtime_env_policy",
     "mindroom.tool_system.runtime_context",

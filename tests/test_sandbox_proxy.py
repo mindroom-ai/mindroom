@@ -6355,8 +6355,8 @@ def test_shell_extra_env_requires_explicit_patterns_for_service_urls() -> None:
 
 
 @pytest.mark.parametrize("tool_name", ["browser_mcp", "shell"])
-def test_worker_client_decodes_only_native_browser_envelopes(tool_name: str) -> None:
-    """Successful native calls restore inline images; other tool dictionaries stay opaque."""
+def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
+    """The HTTP client leaves feature envelopes untouched for every tool."""
     from agno.media import Image  # noqa: PLC0415
     from agno.tools.function import ToolResult  # noqa: PLC0415
 
@@ -6382,9 +6382,55 @@ def test_worker_client_decodes_only_native_browser_envelopes(tool_name: str) -> 
         worker_manager=_TrackingWorkerManager(),
         client_factory=_recording_client_class(responder=lambda _url, _payload: {"ok": True, "result": envelope}),
     )
-    if tool_name == "browser_mcp":
+    assert result == envelope
+
+
+@pytest.mark.parametrize("tool_name", ["browser_mcp", "shell"])
+@pytest.mark.parametrize("valid", [True, False])
+def test_proxy_composition_decodes_only_native_browser_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    valid: bool,
+) -> None:
+    """Composition restores native images and rejects malformed native envelopes."""
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    envelope = {
+        "mindroom_browser_mcp_result": {
+            "version": 1 if valid else 999,
+            "kind": "tool_result",
+            "content": "screen",
+            "images": [{"mime_type": "image/png", "data_base64": "cG5n"}],
+        },
+    }
+    paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={tool_name},
+        credential_policy={},
+    )
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", lambda **_kwargs: envelope)
+
+    def call() -> object:
+        return sandbox_proxy_module._call_proxy_sync(
+            runtime_paths=paths,
+            tool_name=tool_name,
+            function_name="browser_take_screenshot",
+            args=(),
+            kwargs={},
+            credentials_manager=None,
+        )
+
+    if tool_name == "browser_mcp" and not valid:
+        with pytest.raises(ValueError, match="browser MCP result"):
+            call()
+    elif tool_name == "browser_mcp":
+        result = call()
         assert isinstance(result, ToolResult)
+        assert result.content == "screen"
         assert result.images is not None
         assert result.images[0].content == b"png"
     else:
-        assert result == envelope
+        assert call() == envelope

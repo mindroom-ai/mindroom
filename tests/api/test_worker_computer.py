@@ -129,6 +129,11 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
         payload["kwargs"] = {"action": "tabs", "targetId": "target-one"}
         second = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
         assert json.loads(second.json()["result"])["same_target"] is True
+        payload["kwargs"]["mindroom_output_path"] = "tabs.json"
+        saved = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
+        receipt = saved.json()["result"]["mindroom_tool_output"]
+        assert receipt["status"] == "saved_to_file"
+        assert json.loads((root / "workspace" / "tabs.json").read_text())["same_target"] is True
         app.state.worker_computer = None
         assert (
             client.post("/api/sandbox-runner/execute", headers=headers, json=payload).json()["result"] == "subprocess"
@@ -365,6 +370,12 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
             result = decode_browser_mcp_result(response.json()["result"])
             assert result.content == name
         assert [call[1] for call in calls] == ["browser_snapshot", "browser_tabs", "browser_close"]
+        payload["function_name"] = "browser_snapshot"
+        payload["kwargs"] = {"mindroom_output_path": "snapshot.txt"}
+        saved = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
+        receipt = decode_browser_mcp_result(saved.json()["result"])["mindroom_tool_output"]
+        assert receipt["status"] == "saved_to_file"
+        assert (root / "workspace" / "snapshot.txt").read_text() == "browser_snapshot"
         assert len({call[0] for call in calls}) == 1
         generation = computer.status()["generation"]
         client.portal.call(computer.attach_stream, "viewer", generation)
@@ -375,7 +386,7 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
             denied = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
             assert denied.json()["ok"] is False
             assert "under user control" in denied.json()["error"]
-        assert len(calls) == 3
+        assert len(calls) == 4
         payload["function_name"] = "browser_run_code_unsafe"
         payload["kwargs"] = {}
         unsupported = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
@@ -385,7 +396,7 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
         replaced = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
         assert replaced.status_code == 400
         assert "built-in browser factory" in replaced.json()["detail"]
-        assert len(calls) == 3
+        assert len(calls) == 4
         client.portal.call(computer.close)
 
 

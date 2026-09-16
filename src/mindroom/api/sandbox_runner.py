@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from mindroom import constants, shell_supervisor, yaml_io
 from mindroom.api import sandbox_env_assembly, sandbox_exec, sandbox_forkserver, sandbox_protocol, sandbox_worker_prep
+from mindroom.api.computer_browser_binding import select_browser_provider
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
     SandboxWorkerListResponse,
@@ -74,7 +75,6 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
     visible_state_roots_for_worker_key,
 )
-from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
@@ -86,6 +86,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.catalog import ToolValidationInfo
+    from mindroom.worker_computer.protocol import BrowserSession
 
 logger = get_logger(__name__)
 
@@ -1657,7 +1658,7 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     )
 
 
-async def _execute_computer_browser(  # noqa: C901, PLR0915 - exact provider dispatch and ownership checks
+async def _execute_computer_browser(
     computer: WorkerComputerRuntime,
     payload: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -1666,19 +1667,6 @@ async def _execute_computer_browser(  # noqa: C901, PLR0915 - exact provider dis
     runner_token: str | None,
 ) -> SandboxRunnerExecuteResponse:
     """Bind only the validated built-in browser to the persistent ASGI runtime."""
-    # Playwright and browser dependencies stay out of slim runner startup imports.
-    from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
-    from mindroom.custom_tools.browser_mcp import BrowserMCPTools  # noqa: PLC0415
-    from mindroom.tools.browser import browser_tools  # noqa: PLC0415
-    from mindroom.tools.browser_mcp import browser_mcp_tools  # noqa: PLC0415
-    from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog  # noqa: PLC0415
-    from mindroom.worker_computer.mcp_results import encode_browser_mcp_result  # noqa: PLC0415
-
-    native = payload.tool_name == "browser_mcp"
-    expected_factory = browser_mcp_tools if native else browser_tools
-    expected_type = BrowserMCPTools if native else BrowserTools
-    if native and payload.function_name not in browser_mcp_catalog():
-        raise HTTPException(status_code=400, detail="Unsupported native browser MCP function.")
     agent_name = payload.routing_agent_name or (
         payload.execution_identity.get("agent_name") if payload.execution_identity else None
     )
@@ -1702,8 +1690,12 @@ async def _execute_computer_browser(  # noqa: C901, PLR0915 - exact provider dis
             detail="Worker computer requires an unambiguous dedicated user_agent worker.",
         )
     _ensure_registry_loaded_with_config(runtime_paths, config)
-    if TOOL_METADATA[payload.tool_name].factory is not expected_factory:
-        raise HTTPException(status_code=400, detail="Worker computer requires the built-in browser factory.")
+    provider = select_browser_provider(
+        payload.tool_name,
+        payload.function_name,
+        TOOL_METADATA[payload.tool_name].factory,
+        to_json_compatible,
+    )
     prepared_context = _prepare_execute_request(
         payload,
         runtime_paths,
@@ -1718,7 +1710,7 @@ async def _execute_computer_browser(  # noqa: C901, PLR0915 - exact provider dis
     browser_paths = replace(prepared_context.runtime_paths, storage_root=prepared_worker.paths.root)
     identity = _request_execution_identity(payload)
     with tool_execution_identity(identity):
-        toolkit, entrypoint = _resolve_entrypoint(
+        toolkit, _entrypoint = _resolve_entrypoint(
             runtime_paths=browser_paths,
             config=config,
             tool_name=payload.tool_name,
@@ -1733,28 +1725,27 @@ async def _execute_computer_browser(  # noqa: C901, PLR0915 - exact provider dis
             private_agent_names=_freeze_private_agent_names(prepared.private_agent_names),
             tool_output_workspace_root=Path(workspace),
         )
-        if type(toolkit) is not expected_type:
-            raise HTTPException(status_code=400, detail="Worker computer requires the built-in browser tool.")
-        assert isinstance(toolkit, (BrowserTools, BrowserMCPTools))
+        browser_toolkit = provider.validate_toolkit(toolkit)
         try:
-            browser_config_key = toolkit.bind_worker_display(computer.display.display, Path(workspace))
 
-            async def execute(current_function: str, *args: object, **kwargs: object) -> object:
-                # The retained toolkit owns output wrapping. Resolve the current name
-                # on every request, never the first request's captured entrypoint.
-                if native:
-                    if current_function not in browser_mcp_catalog():
-                        msg = "Unsupported native browser MCP function."
-                        raise ValueError(msg)  # noqa: TRY301
-                    current_entrypoint = toolkit.get_async_functions()[current_function].entrypoint
-                    assert current_entrypoint is not None
-                else:
-                    current_entrypoint = entrypoint
+            async def invoke(
+                retained_toolkit: Toolkit,
+                entrypoint: Callable[..., object],
+                args: list[object],
+                kwargs: dict[str, object],
+            ) -> object:
                 async with asyncio.timeout(sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)):
-                    return await _run_toolkit_entrypoint(toolkit, current_entrypoint, list(args), kwargs)
+                    return await _run_toolkit_entrypoint(retained_toolkit, entrypoint, args, kwargs)
+
+            browser_config_key, session = provider.bind(
+                browser_toolkit,
+                computer.display.display,
+                Path(workspace),
+                invoke,
+            )
 
             def factory(_display: str) -> BrowserSession:
-                return BrowserSession(execute=execute, close=toolkit.aclose)
+                return session
 
             binding_key = json.dumps(
                 {
@@ -1773,7 +1764,7 @@ async def _execute_computer_browser(  # noqa: C901, PLR0915 - exact provider dis
                 [payload.function_name, *prepared.args],
                 prepared.kwargs,
             )
-            serialized_result = encode_browser_mcp_result(result) if native else to_json_compatible(result)
+            serialized_result = provider.encode_result(result)
         except Exception as exc:
             return SandboxRunnerExecuteResponse(
                 ok=False,

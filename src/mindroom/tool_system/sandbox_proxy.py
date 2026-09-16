@@ -832,7 +832,7 @@ def _call_proxy_sync(
         )
         if portable_tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
-        return execute_worker_proxy_request(
+        result = execute_worker_proxy_request(
             config=_worker_proxy_client_config(proxy_config),
             payload=payload,
             credentials_manager=credentials_manager,
@@ -843,6 +843,11 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
             client_factory=httpx.Client,
         )
+        if tool_name == "browser_mcp":
+            from mindroom.worker_computer.mcp_results import decode_browser_mcp_result  # noqa: PLC0415
+
+            return decode_browser_mcp_result(result)
+        return result
 
 
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
