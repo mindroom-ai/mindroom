@@ -3628,7 +3628,8 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, and model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, Chat UI actions, low-level Matrix API access, and attachment-aware workflows.
+- [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, or open Members in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
@@ -3650,7 +3651,7 @@ Today `matrix_message` implies both `attachments` and `matrix_room`, so the effe
 When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
 This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
-Tools like `matrix_message`, `matrix_room`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
+Tools like `matrix_message`, `matrix_room`, `chat_ui`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
 `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
@@ -8263,6 +8264,62 @@ A call supports up to eight sections; titles are limited to 120 characters and c
 Sections require a non-empty main message body.
 HTML supports basic fragments only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links permit `http`, `https`, and `mailto`.
 Direct send/edit calls reject interactive prompts; use normal agent response delivery for interactive prompts.
+
+# Agent Chat UI Actions
+
+The `chat_ui` tool lets an agent ask MindRoom Chat to reveal its worker computer, open a Settings section, or open the room's Members panel.
+It sends a normal Matrix notice with a readable fallback and bounded action metadata.
+The tool reports that the request was sent; it cannot know whether a client opened the requested interface.
+
+## Enable the tool
+
+Add `chat_ui` to the agent that should be allowed to request UI actions:
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Research topics with browser and shell tools.
+    model: default
+    tools:
+      - chat_ui
+      - browser
+      - shell
+```
+
+The toolkit is opt-in and requires a live Matrix room context.
+It does not accept a URL, credential, API endpoint, DOM selector, Matrix identity, room ID, or thread ID from the model.
+MindRoom supplies the addressed requester, configured agent sender, current room, and canonical thread from the active turn.
+Delegated transport identities and team contexts are rejected because they cannot identify one Matrix sender and one agent worker safely.
+
+## Actions
+
+- `show_computer()` asks Chat to reveal the requesting agent's worker computer in watch mode.
+- `open_settings(section="general")` opens `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about`.
+- `open_panel(panel="members")` opens the Members side panel. `members` is the only supported panel in this release.
+
+Each call sends an `m.room.message` notice in the current conversation.
+Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
+The Matrix event sender must equal the metadata's agent identity, or the request is rejected before sending.
+
+## What the user sees
+
+MindRoom Chat automatically acts only for the addressed user when that exact room and thread are active, the client is visible and focused, and the request arrived as a current live event.
+When the conversation is inactive, the event is historical, or automatic opening is otherwise unavailable, the notice remains in the conversation with a button the addressed user can choose later.
+A dismissed request stays dismissed, while a new event can request the action again.
+
+Other Matrix clients display the notice's fallback text, such as “Open Settings (general) in MindRoom Chat.”
+Receiving or sending the notice is not evidence that a client opened anything.
+
+## Worker computer requirements
+
+`show_computer()` uses the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.
+The target agent still needs a dedicated Docker or Kubernetes worker, effective `worker_scope: user_agent`, worker-routed browser tools, and an operator-configured Chat computer API origin.
+See [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) for the backend, worker, proxy, and Chat configuration.
+
+If the computer gateway or requesting agent is unavailable, Chat keeps the request visible and shows an unavailable state instead of using an event-provided endpoint.
+When a worker computer is already under human control, an automatic request does not replace that session; the notice remains available for the user to choose.
+Opening the worker from a request starts watch mode, and another request for the same agent preserves the current worker view instead of resetting it.
 
 # Matrix Desktop Bridge
 

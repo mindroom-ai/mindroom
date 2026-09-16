@@ -39,6 +39,7 @@ nav = [
     { "Media & Content" = "tools/media-and-content.md" },
     { "Matrix & Attachments" = "tools/matrix-and-attachments.md" },
     { "Matrix Message Full Semantics" = "tools/matrix-message.md" },
+    { "Agent Chat UI Actions" = "tools/chat-ui.md" },
     { "Matrix Desktop Bridge" = "tools/desktop.md" },
     { "Messaging & Social" = "tools/messaging-and-social.md" },
     { "Project Management" = "tools/project-management.md" },

@@ -4,6 +4,32 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Let an agent request bounded actions in MindRoom Chat",
+      "display_name": "Chat UI",
+      "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
+      "function_names": [
+        "show_computer",
+        "open_settings",
+        "open_panel"
+      ],
+      "helper_text": null,
+      "icon": "PanelsTopLeft",
+      "icon_color": "text-violet-500",
+      "name": "chat_ui",
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
       "config_fields": [
         {
           "authored_override": true,
