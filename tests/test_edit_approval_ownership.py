@@ -114,6 +114,8 @@ class _ApprovalCase:
                 ai_response=AsyncMock(side_effect=ResponsePausedForApproval(pause)),
             ),
             patch("mindroom.approval_response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))),
+            # Inspect the durable checkpoint before the test claims resumed execution.
+            patch.object(type(self.principal), "claim_approval_continuation", AsyncMock(return_value=None)),
         ):
             assert await self.controller.handle_text_event(self.room, event) is TurnDispatchOutcome.DEFERRED
         newer = await self.principal.approval_continuation_for_source("$newer-edit")
@@ -369,6 +371,8 @@ async def _paused_case(  # noqa: PLR0915
                 ai_response=model,
             ),
             patch("mindroom.approval_response.evaluate_tool_approval", approval_evaluation),
+            # Inspect the durable checkpoint before the test claims resumed execution.
+            patch.object(type(principal), "claim_approval_continuation", AsyncMock(return_value=None)),
         ):
             if ordinary_pause:
                 original_request = replace(
