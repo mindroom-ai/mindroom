@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
+from datetime import UTC, datetime
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
@@ -30,6 +31,7 @@ __all__ = [
     "TokenTotals",
     "UsageBreakdownRow",
     "UsageCoverage",
+    "UsageDailyBreakdownRow",
     "UsageModelBreakdownRow",
     "UsageReport",
     "UsageUserBreakdownRow",
@@ -52,6 +54,12 @@ _MODEL_COVERAGE_NOTE = (
 _USER_COVERAGE_NOTE = (
     "User breakdown uses requester-attributed retained top-level runs, grouped by canonical user identity. "
     "A null user_id means requester identity is unavailable. "
+    "It does not necessarily sum to report totals, which may include compacted history "
+    "and nested team-member usage. Deleted sessions are unavailable."
+)
+_DAILY_COVERAGE_NOTE = (
+    "Daily breakdown uses retained top-level runs with usable token metrics and creation timestamps, "
+    "grouped by UTC date. Runs without usable timestamps are excluded. "
     "It does not necessarily sum to report totals, which may include compacted history "
     "and nested team-member usage. Deleted sessions are unavailable."
 )
@@ -174,6 +182,23 @@ class UsageUserBreakdownRow:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageDailyBreakdownRow:
+    """Retained top-level usage for one UTC calendar date."""
+
+    date: str
+    totals: TokenTotals
+    run_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the public daily breakdown row."""
+        return {
+            "date": self.date,
+            "totals": self.totals.to_dict(),
+            "run_count": self.run_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class UsageReport:
     """Aggregate-only retained token usage."""
 
@@ -185,6 +210,8 @@ class UsageReport:
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
     model_coverage: UsageCoverage
     user_breakdown: tuple[UsageUserBreakdownRow, ...] = ()
+    daily_breakdown: tuple[UsageDailyBreakdownRow, ...] = ()
+    daily_coverage: UsageCoverage | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable custom-tool payload fields."""
@@ -200,6 +227,9 @@ class UsageReport:
         if self.scope == "admin":
             payload["user_breakdown"] = [row.to_dict() for row in self.user_breakdown]
             payload["user_coverage"] = replace(self.model_coverage, note=_USER_COVERAGE_NOTE).to_dict()
+        if self.daily_coverage is not None:
+            payload["daily_breakdown"] = [row.to_dict() for row in self.daily_breakdown]
+            payload["daily_coverage"] = self.daily_coverage.to_dict()
         return payload
 
 
@@ -257,11 +287,29 @@ class _UsageAccumulator:
 
 
 @dataclass(slots=True)
+class _DailyUsageAccumulator:
+    buckets: dict[str, _Aggregate] = dataclass_field(default_factory=dict)
+    unavailable_sources: set[str] = dataclass_field(default_factory=set)
+
+    def add_run(self, run: UsageRunNode, totals: TokenTotals, *, source_path: str) -> None:
+        if run.created_at is None:
+            self.unavailable_sources.add(source_path)
+            return
+        try:
+            date = datetime.fromtimestamp(run.created_at, tz=UTC).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            self.unavailable_sources.add(source_path)
+            return
+        self.buckets.setdefault(date, _Aggregate()).add(totals)
+
+
+@dataclass(slots=True)
 class _ModelUsageAccumulator:
     buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
     user_buckets: dict[str | None, dict[tuple[str, str], _Aggregate]] = dataclass_field(default_factory=dict)
     seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
+    daily_usage: _DailyUsageAccumulator | None = None
 
     def add_row(
         self,
@@ -291,6 +339,7 @@ class _ModelUsageAccumulator:
             buckets=self.buckets,
             seen_runs=self.seen_runs,
             user_buckets=self.user_buckets if scope == "admin" else None,
+            daily_usage=self.daily_usage,
         )
 
 
@@ -301,6 +350,7 @@ def collect_self_usage(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity,
+    include_daily: bool = False,
 ) -> UsageReport:
     """Collect all retained direct usage for this requester and agent."""
     return _collect_usage(
@@ -315,10 +365,11 @@ def collect_self_usage(
         scope="self",
         expected_agent=agent_name,
         expected_requester=resolve_human_requester_alias(requester_id, config, runtime_paths),
+        include_daily=include_daily,
     )
 
 
-def collect_admin_usage(*, config: Config, runtime_paths: RuntimePaths) -> UsageReport:
+def collect_admin_usage(*, config: Config, runtime_paths: RuntimePaths, include_daily: bool = False) -> UsageReport:
     """Collect all retained session aggregates across configured entities."""
     return _collect_usage(
         sources=discover_admin_usage_sources(config=config, runtime_paths=runtime_paths),
@@ -327,6 +378,7 @@ def collect_admin_usage(*, config: Config, runtime_paths: RuntimePaths) -> Usage
         scope="admin",
         expected_agent=None,
         expected_requester=None,
+        include_daily=include_daily,
     )
 
 
@@ -338,13 +390,15 @@ def _collect_usage(
     scope: _Scope,
     expected_agent: str | None,
     expected_requester: str | None,
+    include_daily: bool,
 ) -> UsageReport:
     @cache
     def canonical_requester(requester_id: str) -> str:
         return resolve_human_requester_alias(requester_id, config, runtime_paths)
 
     usage = _UsageAccumulator()
-    model_usage = _ModelUsageAccumulator()
+    daily_usage = _DailyUsageAccumulator() if include_daily else None
+    model_usage = _ModelUsageAccumulator(daily_usage=daily_usage)
     scanned_sources: set[str] = set()
     for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
@@ -411,6 +465,19 @@ def _collect_usage(
         model_breakdown=model_breakdown,
         model_coverage=model_coverage,
         user_breakdown=_user_breakdown(model_usage.user_buckets),
+        daily_breakdown=tuple(
+            UsageDailyBreakdownRow(date=date, totals=aggregate.totals, run_count=aggregate.count)
+            for date, aggregate in sorted(daily_usage.buckets.items())
+        )
+        if daily_usage is not None
+        else (),
+        daily_coverage=UsageCoverage(
+            scanned_sources=len(scanned_sources),
+            unavailable_sources=len(model_usage.unavailable_sources | daily_usage.unavailable_sources),
+            note=_DAILY_COVERAGE_NOTE,
+        )
+        if daily_usage is not None
+        else None,
     )
 
 
@@ -453,9 +520,10 @@ def _add_model_entries(
     buckets: dict[tuple[str, str], _Aggregate],
     seen_runs: set[tuple[str, str, str]],
     user_buckets: dict[str | None, dict[tuple[str, str], _Aggregate]] | None = None,
+    daily_usage: _DailyUsageAccumulator | None = None,
 ) -> None:
     row_seen_runs: set[tuple[str, str, str]] = set()
-    accepted_entries: list[tuple[str | None, tuple[str, str], TokenTotals]] = []
+    accepted_entries: list[tuple[UsageRunNode, tuple[str, str], TokenTotals]] = []
     for run, totals in entries:
         if run.run_id is not None:
             identity = (source_path, row_key, run.run_id)
@@ -463,12 +531,14 @@ def _add_model_entries(
                 continue
             row_seen_runs.add(identity)
         key = (run.model_provider or "unknown", run.model or "unknown")
-        accepted_entries.append((run.requester_id, key, totals))
+        accepted_entries.append((run, key, totals))
     seen_runs.update(row_seen_runs)
-    for requester_id, key, totals in accepted_entries:
+    for run, key, totals in accepted_entries:
         buckets.setdefault(key, _Aggregate()).add(totals)
         if user_buckets is not None:
-            user_buckets.setdefault(requester_id, {}).setdefault(key, _Aggregate()).add(totals)
+            user_buckets.setdefault(run.requester_id, {}).setdefault(key, _Aggregate()).add(totals)
+        if daily_usage is not None:
+            daily_usage.add_run(run, totals, source_path=source_path)
 
 
 def _model_entries_for_row(

@@ -207,6 +207,7 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert row.runs[0].requester_id == "@alice:example.test"
     assert row.runs[0].model_provider == "openai"
     assert row.runs[0].model == "gpt-6-astra"
+    assert row.runs[0].created_at == 1_723_837_600
     assert row.runs_available is True
     assert row.session_metrics_available is False
     assert row.payload_bytes > 0
@@ -258,6 +259,22 @@ def test_reader_extracts_runs_written_by_mindroom_agno_storage(tmp_path: Path) -
     assert row.runs[0].metrics == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
     assert row.runs[0].model_provider == "openai"
     assert row.runs[0].model == "gpt-6-astra"
+    assert row.runs[0].created_at == 1_723_837_600
+
+
+@pytest.mark.parametrize("created_at", [None, True, "invalid", [], float("nan"), float("inf")])
+def test_reader_keeps_usage_when_run_timestamp_is_unusable(tmp_path: Path, created_at: object) -> None:
+    """Malformed or absent timestamps must not discard usable token metrics."""
+    database = tmp_path / "code.db"
+    _create_database(database, runs=[{**_run(), "created_at": created_at}])
+
+    result = list(iter_usage_storage_rows(_source(database)))
+
+    assert len(result) == 1
+    row = result[0]
+    assert isinstance(row, UsageSessionRow)
+    assert row.runs[0].created_at is None
+    assert row.runs[0].metrics["total_tokens"] == 20
 
 
 @pytest.mark.parametrize("legacy_encoding", [False, True])

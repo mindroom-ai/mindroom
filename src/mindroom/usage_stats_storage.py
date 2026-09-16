@@ -89,6 +89,7 @@ class UsageRunNode:
     model_provider: str | None
     model: str | None
     metrics: Mapping[str, _MetricValue]
+    created_at: int | float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -566,6 +567,13 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
     if not isinstance(metrics, dict):
         raise TypeError
     selected_metrics = _select_metrics(cast("dict[str, object]", metrics))
+    created_at = run.get("created_at")
+    if (
+        isinstance(created_at, bool)
+        or not isinstance(created_at, (int, float))
+        or (isinstance(created_at, float) and not math.isfinite(created_at))
+    ):
+        created_at = None
     return UsageRunNode(
         team_id=_optional_string(run.get("team_id")),
         requester_id=metadata_requester or _optional_string(run.get("user_id")) or row_requester,
@@ -573,6 +581,7 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         model_provider=_optional_string(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
+        created_at=created_at,
     )
 
 

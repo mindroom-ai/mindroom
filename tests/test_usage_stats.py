@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
+
+import pytest
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -24,8 +27,6 @@ from mindroom.usage_stats_storage import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
-
-    import pytest
 
 
 def _config() -> Config:
@@ -89,6 +90,7 @@ def _run(
     total_tokens: int = 10,
     model_provider: str | None = "openai",
     model: str | None = "gpt-6-astra",
+    created_at: float | None = None,
 ) -> UsageRunNode:
     return UsageRunNode(
         team_id=None,
@@ -97,6 +99,7 @@ def _run(
         model_provider=model_provider,
         model=model,
         metrics=_metrics(total_tokens),
+        created_at=created_at,
     )
 
 
@@ -192,6 +195,144 @@ def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs
     assert payload["totals"]["total_tokens"] == 100
     assert "retained top-level runs" in payload["user_coverage"]["note"]
     assert "null" in payload["user_coverage"]["note"]
+
+
+def test_daily_usage_groups_utc_dates_and_deduplicates_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _source()
+    team = _source(scope="team", agent_name=None)
+    before_midnight = replace(
+        _run(created_at=datetime(2026, 9, 14, 23, 59, 59, tzinfo=UTC).timestamp()),
+        metrics=MappingProxyType({**_metrics(), "cache_read_tokens": 4, "reasoning_tokens": 2}),
+    )
+    after_midnight = _run(
+        run_id="later",
+        total_tokens=20,
+        created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp(),
+    )
+    _wire(
+        monkeypatch,
+        (source, team),
+        {
+            source.path_label: (
+                _row(source, after_midnight, before_midnight, before_midnight, session_metrics=_metrics(100)),
+                _row(source, before_midnight, row_key="session-2", session_metrics=_metrics(70)),
+            ),
+            team.path_label: (_row(team, after_midnight, session_metrics=_metrics(100)),),
+        },
+    )
+    config = _config()
+    config.timezone = "America/Los_Angeles"
+
+    payload = collect_admin_usage(config=config, runtime_paths=_paths(tmp_path), include_daily=True).to_dict()
+
+    assert [(row["date"], row["totals"]["total_tokens"], row["run_count"]) for row in payload["daily_breakdown"]] == [
+        ("2026-09-14", 20, 2),
+        ("2026-09-15", 40, 2),
+    ]
+    assert payload["daily_breakdown"][0]["totals"] == {
+        "input_tokens": 14,
+        "output_tokens": 6,
+        "total_tokens": 20,
+        "cache_read_tokens": 8,
+        "cache_write_tokens": 0,
+        "reasoning_tokens": 4,
+        "audio_input_tokens": 0,
+        "audio_output_tokens": 0,
+        "audio_total_tokens": 0,
+    }
+    assert payload["totals"]["total_tokens"] == 270
+    assert payload["daily_coverage"]["scanned_sources"] == 2
+    assert payload["daily_coverage"]["unavailable_sources"] == 0
+    assert "UTC" in payload["daily_coverage"]["note"]
+    assert "retained top-level runs" in payload["daily_coverage"]["note"]
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_daily_self_usage_keeps_requester_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    private: bool,
+) -> None:
+    source = _source(scope="private_agent" if private else "shared_agent", requester_isolated=private)
+    timestamp = datetime(2026, 9, 15, tzinfo=UTC).timestamp()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(requester_id="@telegram-alice:example.test", created_at=timestamp),
+                    _run(requester_id=None if private else "@bob:example.test", run_id="other", created_at=timestamp),
+                    session_metrics=_metrics(100),
+                ),
+            ),
+        },
+    )
+
+    payload = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        include_daily=True,
+    ).to_dict()
+
+    assert len(payload["daily_breakdown"]) == 1
+    assert payload["daily_breakdown"][0]["totals"]["total_tokens"] == (20 if private else 10)
+    assert payload["daily_breakdown"][0]["run_count"] == (2 if private else 1)
+    assert payload["totals"]["total_tokens"] == (100 if private else 10)
+    assert payload["daily_coverage"]["unavailable_sources"] == 0
+    assert "user_breakdown" not in payload
+    assert "@bob" not in str(payload)
+
+
+@pytest.mark.parametrize("created_at", [None, float("nan"), float("inf"), 10**100])
+def test_daily_usage_skips_undatable_runs_without_losing_other_totals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    created_at: float | None,
+) -> None:
+    source = _source()
+    unavailable = UsageStorageDiagnostic(path_label="unreadable.db", status="corrupt", detail="database corrupt")
+    _wire(
+        monkeypatch,
+        (source, unavailable),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="dated", created_at=datetime(2026, 9, 15, tzinfo=UTC).timestamp()),
+                    _run(run_id="undated", created_at=created_at),
+                    session_metrics=_metrics(100),
+                ),
+            ),
+        },
+    )
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path), include_daily=True).to_dict()
+
+    assert payload["daily_breakdown"][0]["totals"]["total_tokens"] == 10
+    assert payload["daily_breakdown"][0]["run_count"] == 1
+    assert payload["daily_coverage"]["unavailable_sources"] == 2
+    assert payload["model_coverage"]["unavailable_sources"] == 1
+    assert payload["model_breakdown"][0]["totals"]["total_tokens"] == 20
+    assert payload["totals"]["total_tokens"] == 100
+
+
+def test_daily_usage_returns_empty_breakdown_without_retained_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, session_metrics=_metrics(100)),)})
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path), include_daily=True).to_dict()
+
+    assert payload["daily_breakdown"] == []
+    assert payload["daily_coverage"]["scanned_sources"] == 1
+    assert payload["totals"]["total_tokens"] == 100
 
 
 def test_admin_resolves_repeated_requesters_once_per_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

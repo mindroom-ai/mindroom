@@ -10409,9 +10409,22 @@ agents:
           admin_scope: true
 ```
 
-Both functions are intentionally parameter-free.
+Both functions accept an optional `include_daily` boolean, which defaults to `false`.
 `get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
 `get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
+
+### Daily Token Usage
+
+Call `get_my_usage(include_daily=True)` or `get_all_usage(include_daily=True)` to include token usage per day.
+The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, and `run_count`.
+Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
+The daily breakdown follows the same requester and administrator access rules as the rest of the report.
+It includes the same token counters as the other breakdowns, including cache, reasoning, and audio tokens.
+
+`daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
+Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
+Both daily fields are omitted unless `include_daily=True`.
 
 ### Response And Coverage
 
