@@ -242,13 +242,11 @@ class StopManager:
         if tracked is None:
             logger.debug("Message not tracked, skipping cleanup", message_id=message_id)
             return
+        reaction_event_id = tracked.reaction_event_id
 
         async def delayed_clear() -> None:
             """Clear the message and remove stop button after a delay."""
-            if self.tracked_messages.get(message_id) is not tracked:
-                return
-            if remove_button and tracked.reaction_event_id:
-                reaction_event_id = tracked.reaction_event_id
+            if remove_button and reaction_event_id:
                 logger.info(
                     "Removing stop button in cleanup",
                     message_id=message_id,
@@ -260,7 +258,11 @@ class StopManager:
                         event_id=reaction_event_id,
                         reason="Response completed",
                     )
-                    tracked.reaction_event_id = None
+                    if (
+                        self.tracked_messages.get(message_id) is tracked
+                        and tracked.reaction_event_id == reaction_event_id
+                    ):
+                        tracked.reaction_event_id = None
                 except Exception as e:
                     logger.warning(
                         "stop_button_cleanup_failed",

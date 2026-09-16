@@ -74,7 +74,7 @@ async def test_clear_scheduled_before_replacement_never_redacts_new_stop_button(
         manager.set_current("$response", target, new_task, reaction_event_id="$new-stop")
         await asyncio.gather(*tuple(manager.cleanup_tasks))
 
-        assert "$new-stop" not in redacted
+        assert redacted == ["$old-stop"]
         assert manager.tracked_messages["$response"].reaction_event_id == "$new-stop"
         assert manager.can_handle_stop_reaction("$response")
     finally:

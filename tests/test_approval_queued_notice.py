@@ -157,7 +157,8 @@ async def test_approved_batch_notifies_next_real_model_request(
 
 @pytest.mark.parametrize("stream", [False, True], ids=["response", "stream"])
 @pytest.mark.parametrize(
-    "boundary", ["resolved", "system", "developer", "unresolved", "stop", "newer-input", "no-queue"]
+    "boundary",
+    ["resolved", "system", "developer", "unresolved", "stop", "newer-input", "no-queue"],
 )
 @pytest.mark.asyncio
 async def test_response_entry_only_notifies_a_resolved_current_batch(boundary: str, *, stream: bool) -> None:
