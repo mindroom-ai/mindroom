@@ -21,6 +21,7 @@ from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.sensitivity import is_sensitive_config_key, is_sensitive_header_key, normalize_config_key
 from mindroom.tool_system.worker_routing import (
+    agent_workspace_root_path,
     normalize_worker_key_part,
     resolve_agent_owned_path,
     resolved_worker_key_scope,
@@ -36,7 +37,7 @@ from mindroom.workspaces import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
@@ -280,6 +281,7 @@ class DockerProjectionManager:
         *,
         worker_key: str | None = None,
         materialize_projection: bool = True,
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> tuple[list[tuple[Path, str, bool]], _DockerProjectedConfig | None]:
         """Return projected config mount specs plus the selected projection, if any."""
         if self.config.host_config_path is None:
@@ -289,6 +291,7 @@ class DockerProjectionManager:
             paths,
             worker_key=worker_key,
             materialize=materialize_projection,
+            storage_mounts=storage_mounts,
         )
         config_dir = PurePosixPath(_container_config_dir(self.config.config_path))
         return [(projection.root, str(config_dir), True)], projection
@@ -299,6 +302,7 @@ class DockerProjectionManager:
         *,
         worker_key: str | None = None,
         materialize: bool = True,
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> _DockerProjectedConfig:
         """Return the projected config snapshot for one worker root."""
         host_config_path = self.config.host_config_path
@@ -329,6 +333,7 @@ class DockerProjectionManager:
             asset_paths_by_host=asset_paths_by_host,
             host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
             assets=assets,
+            storage_mounts=storage_mounts,
         )
         self._sanitize_projected_config_data(
             config_data,
@@ -503,6 +508,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         self._rewrite_projected_plugin_paths(
             config_data,
@@ -516,6 +522,7 @@ class DockerProjectionManager:
             asset_paths_by_host,
             host_paths_by_relative_asset_path,
             assets,
+            storage_mounts=storage_mounts,
         )
         self._rewrite_projected_agent_paths(
             config_data,
@@ -523,6 +530,7 @@ class DockerProjectionManager:
             asset_paths_by_host,
             host_paths_by_relative_asset_path,
             assets,
+            storage_mounts=storage_mounts,
         )
         self._rewrite_projected_memory_paths(config_data, paths)
         if worker_key is not None:
@@ -726,6 +734,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         raw_knowledge_bases = config_data.get("knowledge_bases")
         if not isinstance(raw_knowledge_bases, dict):
@@ -748,6 +757,7 @@ class DockerProjectionManager:
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
+                storage_mounts=storage_mounts,
             )
 
     def _rewrite_projected_agent_paths(
@@ -757,6 +767,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         raw_agents = config_data.get("agents")
         if not isinstance(raw_agents, dict):
@@ -778,6 +789,7 @@ class DockerProjectionManager:
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
+                storage_mounts=storage_mounts,
             )
             self._rewrite_projected_private_template_dir(
                 agent,
@@ -796,6 +808,7 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> None:
         raw_context_files = raw_agent.get("context_files")
         if not isinstance(raw_context_files, list):
@@ -810,7 +823,7 @@ class DockerProjectionManager:
                 agent_name=agent_name,
                 base_storage_path=self._runtime_paths.storage_root,
             )
-            context_files[index] = self._projected_path_value(
+            projected_path = self._projected_path_value(
                 host_path,
                 agent_dir
                 / "context_files"
@@ -818,7 +831,15 @@ class DockerProjectionManager:
                 asset_paths_by_host=asset_paths_by_host,
                 host_paths_by_relative_asset_path=host_paths_by_relative_asset_path,
                 assets=assets,
+                storage_mounts=storage_mounts,
             )
+            # Context config remains workspace-relative when its canonical files
+            # are already available through the worker's agent storage mount.
+            if PurePosixPath(projected_path).is_absolute():
+                workspace = agent_workspace_root_path(self._runtime_paths.storage_root, agent_name).resolve()
+                context_files[index] = host_path.relative_to(workspace).as_posix()
+            else:
+                context_files[index] = projected_path
 
     def _rewrite_projected_private_template_dir(
         self,
@@ -894,7 +915,17 @@ class DockerProjectionManager:
         asset_paths_by_host: dict[Path, PurePosixPath],
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path],
         assets: list[_DockerProjectedConfigAsset],
+        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> str:
+        # Mutable agent data already mounted into the worker must not enter the
+        # immutable asset hash: each chat export would otherwise replace it.
+        resolved_host_path = (
+            _validated_asset_host_path(host_path) if host_path.exists() else host_path.expanduser().resolve()
+        )
+        for local_root, worker_root, _read_only in storage_mounts:
+            if resolved_host_path.is_relative_to(local_root.resolve()):
+                relative = resolved_host_path.relative_to(local_root.resolve())
+                return str(PurePosixPath(worker_root).joinpath(*relative.parts))
         relative_path = self._projected_asset_path(
             host_path,
             suggested_relative_path,

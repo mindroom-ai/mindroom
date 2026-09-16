@@ -568,12 +568,9 @@ def _assert_projected_config_snapshot(projection_root: Path, tmp_path: Path) -> 
     assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-my-plugin" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
     assert f"path: /app/worker/{_WORKER_CONFIG_STATE_DIRNAME}/memory/file" in projected_config
-    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
+    assert "- context.md" in projected_config
 
-    projected_context_path = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    )
-    assert projected_context_path.read_text(encoding="utf-8") == "# Context\n"
+    assert (tmp_path / "agents/code/workspace/context.md").read_text(encoding="utf-8") == "# Context\n"
     projected_plugin_path = projection_root / ".mindroom-worker-assets" / "plugins" / "00-my-plugin" / "plugin.py"
     assert projected_plugin_path.read_text(encoding="utf-8") == "PLUGIN_VERSION = 'v1'\n"
     projected_knowledge_path = projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md"
@@ -1666,16 +1663,15 @@ models:
 
     assert "plugins:\n- ./.mindroom-worker-assets/plugins/00-runtime-plugin" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/docs" in projected_config
-    assert "- ./.mindroom-worker-assets/agents/code/context_files/00-context.md" in projected_config
+    assert "- context.md" in projected_config
     assert (projection_root / ".mindroom-worker-assets" / "plugins" / "00-runtime-plugin" / "plugin.py").read_text(
         encoding="utf-8",
     ) == "PLUGIN_VERSION = 'runtime'\n"
     assert (projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs" / "guide.md").read_text(
         encoding="utf-8",
     ) == "# Runtime Guide\n"
-    assert (
-        projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    ).read_text(encoding="utf-8") == "# Runtime Context\n"
+    assert volumes[str(runtime_storage / "agents/code")]["bind"] == "/app/worker/agents/code"
+    assert context_file.read_text(encoding="utf-8") == "# Runtime Context\n"
 
 
 def test_docker_backend_rejects_symlinked_projected_directory_assets(
@@ -3474,12 +3470,96 @@ def test_docker_backend_recreates_container_when_host_config_contents_change(
     assert len(fake_client.containers.run_calls) == 2
 
 
+@pytest.mark.parametrize("worker_scope", ["shared", "user_agent"])
+@pytest.mark.parametrize("changed_asset", ["history", "context"])
+def test_docker_worker_keeps_running_when_mounted_agent_data_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    worker_scope: str,
+    changed_asset: str,
+) -> None:
+    """A chat export or context edit must not replace a live browser worker."""
+    workspace = tmp_path / "agents" / "alpha" / "workspace"
+    history = workspace / "thread_exports" / "thread.yaml"
+    history.parent.mkdir(parents=True)
+    history.write_text("messages: []\n")
+    context = workspace / "AGENTS.md"
+    context.write_text("Initial context\n")
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=f"""
+agents:
+  alpha:
+    worker_scope: {worker_scope}
+    knowledge_bases: [threads]
+    context_files: [AGENTS.md]
+knowledge_bases:
+  threads:
+    path: ./agents/alpha/workspace/thread_exports
+""",
+    )
+    key = "v1:default:shared:alpha" if worker_scope == "shared" else "v1:default:user_agent:@alice:example.org:alpha"
+    spec = WorkerSpec(key, private_agent_names=frozenset())
+    first = backend.ensure_worker(spec, now=10.0)
+    container = fake_client.containers.created_containers[0]
+    (history if changed_asset == "history" else context).write_text("Updated conversation content\n")
+    second = backend.ensure_worker(spec, now=20.0)
+    assert container.status == "running"
+    assert second.endpoint == first.endpoint
+    assert len(fake_client.containers.created_containers) == 1
+    projection = next(Path(m["Source"]) for m in container.attrs["Mounts"] if m["Destination"] == "/app/config-host")
+    projected = yaml.safe_load((projection / "config.yaml").read_text())
+    assert projected["knowledge_bases"]["threads"]["path"] == "/app/worker/agents/alpha/workspace/thread_exports"
+    assert projected["agents"]["alpha"]["context_files"] == ["AGENTS.md"]
+
+
+def test_docker_mounted_context_resolves_absolute_workspace_symlinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Valid host workspace links must also load inside the mounted worker view."""
+    workspace = tmp_path / "agents/alpha/workspace"
+    workspace.mkdir(parents=True)
+    persona = workspace / "persona.md"
+    persona.write_text("Canonical persona\n")
+    (workspace / "AGENTS.md").symlink_to(persona)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text="agents:\n  alpha:\n    worker_scope: shared\n    context_files: [AGENTS.md]\n",
+    )
+    backend.ensure_worker(WorkerSpec("v1:default:shared:alpha"), now=10.0)
+    volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
+    projection = _projection_root(volumes)
+    projected = yaml.safe_load((projection / "config.yaml").read_text())
+    # Docker preserves the link text, but its host-absolute target is outside
+    # the worker workspace. A relative reference to persona.md remains valid.
+    worker_storage = tmp_path / "worker-view"
+    worker_workspace = worker_storage / "agents/alpha/workspace"
+    worker_workspace.mkdir(parents=True)
+    (worker_workspace / "persona.md").write_text("Canonical persona\n")
+    (worker_workspace / "AGENTS.md").symlink_to(persona)
+    runtime_paths = resolve_runtime_paths(config_path=projection / "config.yaml", storage_path=worker_storage)
+    loaded = _load_context_files(
+        projected["agents"]["alpha"]["context_files"],
+        runtime_paths,
+        agent_name="alpha",
+        storage_path=worker_storage,
+    )
+    assert [chunk.body for chunk in loaded] == ["Canonical persona"]
+
+
 def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Changing a projected single-file asset should rotate the worker."""
     config_text, projected_paths = _projected_config_fixture(tmp_path)
+    config_data = yaml.safe_load(config_text)
+    config_data["knowledge_bases"]["docs"]["path"] = "./knowledge_docs/guide.md"
+    config_text = yaml.safe_dump(config_data)
+    external_file = projected_paths["knowledge_root"] / "guide.md"
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
 
     handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
@@ -3488,9 +3568,9 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     assert isinstance(first_volumes, dict)
     first_projection_root = _projection_root(first_volumes)
 
-    updated_context_file = projected_paths["context_file"].with_suffix(".updated.md")
-    updated_context_file.write_text("# Updated Context\n", encoding="utf-8")
-    updated_context_file.replace(projected_paths["context_file"])
+    updated_file = external_file.with_suffix(".updated.md")
+    updated_file.write_text("# Updated Guide\n", encoding="utf-8")
+    updated_file.replace(external_file)
 
     backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -3503,10 +3583,8 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     assert isinstance(second_volumes, dict)
     second_projection_root = _projection_root(second_volumes)
     assert second_projection_root != first_projection_root
-    projected_context_path = (
-        second_projection_root / ".mindroom-worker-assets" / "agents" / "code" / "context_files" / "00-context.md"
-    )
-    assert projected_context_path.read_text(encoding="utf-8") == "# Updated Context\n"
+    projected_file = second_projection_root / ".mindroom-worker-assets" / "knowledge_bases" / "docs"
+    assert projected_file.read_text(encoding="utf-8") == "# Updated Guide\n"
 
 
 def test_docker_backend_recreates_container_when_projected_directory_asset_changes(
@@ -3576,16 +3654,15 @@ def test_docker_backend_projects_only_agent_specific_assets_for_shared_worker(
     projected_config = (projection_root / "config.yaml").read_text(encoding="utf-8")
     projected_config_data = yaml.safe_load(projected_config)
 
-    assert "- ./.mindroom-worker-assets/agents/alpha/context_files/00-alpha.md" in projected_config
+    assert "- alpha.md" in projected_config
     assert ".mindroom-worker-assets/agents/beta/context_files/00-beta.md" not in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/a" in projected_config
     assert "path: ./.mindroom-worker-assets/knowledge_bases/b" not in projected_config
     assert set(projected_config_data["agents"]) == {"alpha"}
     assert set(projected_config_data["knowledge_bases"]) == {"a"}
 
-    projected_alpha_context = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
-    )
+    projected_alpha_context = tmp_path / "agents/alpha/workspace/alpha.md"
+    assert volumes[str((tmp_path / "agents/alpha").resolve())]["bind"] == "/app/worker/agents/alpha"
     assert projected_alpha_context.read_text(encoding="utf-8") == "# Alpha\n"
     assert not (
         projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
@@ -3634,11 +3711,10 @@ models:
     volumes = _volumes_by_source(fake_client.containers.run_calls[0]["volumes"])
     assert isinstance(volumes, dict)
     projection_root = _projection_root(volumes)
-    projected_readme = (
-        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-README.md"
-    )
-
-    assert projected_readme.read_text(encoding="utf-8") == "AGENT WORKSPACE FILE\n"
+    projected = yaml.safe_load((projection_root / "config.yaml").read_text())
+    assert projected["agents"]["alpha"]["context_files"] == ["README.md"]
+    assert volumes[str(workspace_readme.parents[1])]["bind"] == "/app/worker/agents/alpha"
+    assert workspace_readme.read_text(encoding="utf-8") == "AGENT WORKSPACE FILE\n"
 
 
 def test_docker_backend_projects_only_private_user_agent_assets_for_private_agent(
@@ -4098,14 +4174,13 @@ models:
     projection_root = _projection_root(volumes)
     projected_config_data = yaml.safe_load((projection_root / "config.yaml").read_text(encoding="utf-8"))
 
+    assert volumes[str((tmp_path / "agents").resolve())]["bind"] == "/app/worker/agents"
     assert set(projected_config_data["agents"]) == {"alpha", "delta"}
     assert set(projected_config_data["knowledge_bases"]) == {"a", "d"}
-    assert (
-        projection_root / ".mindroom-worker-assets" / "agents" / "alpha" / "context_files" / "00-alpha.md"
-    ).read_text(encoding="utf-8") == "# Alpha\n"
-    assert (
-        projection_root / ".mindroom-worker-assets" / "agents" / "delta" / "context_files" / "00-delta.md"
-    ).read_text(encoding="utf-8") == "# Delta\n"
+    assert projected_config_data["agents"]["alpha"]["context_files"] == ["alpha.md"]
+    assert (tmp_path / "agents/alpha/workspace/alpha.md").read_text(encoding="utf-8") == "# Alpha\n"
+    assert projected_config_data["agents"]["delta"]["context_files"] == ["delta.md"]
+    assert (tmp_path / "agents/delta/workspace/delta.md").read_text(encoding="utf-8") == "# Delta\n"
     assert not (
         projection_root / ".mindroom-worker-assets" / "agents" / "beta" / "context_files" / "00-beta.md"
     ).exists()

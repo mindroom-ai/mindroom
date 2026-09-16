@@ -869,10 +869,16 @@ class DockerWorkerBackend:
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
 
+        storage_mounts = self._scoped_storage_mount_specs(
+            metadata.worker_key,
+            private_agent_names=private_agent_names,
+            state_scope_worker_key=state_scope_worker_key,
+        )
         config_mount_specs, projection = self._projection_manager.config_mount_specs(
             paths,
             worker_key=metadata.worker_key,
             materialize_projection=False,
+            storage_mounts=storage_mounts,
         )
         if projection is not None and not projection.ready:
             return False
@@ -886,13 +892,7 @@ class DockerWorkerBackend:
         mount_checks = [
             (paths.root, self.config.storage_mount_path, False),
         ]
-        mount_checks.extend(
-            self._scoped_storage_mount_specs(
-                metadata.worker_key,
-                private_agent_names=private_agent_names,
-                state_scope_worker_key=state_scope_worker_key,
-            ),
-        )
+        mount_checks.extend(storage_mounts)
         mount_checks.extend(config_mount_specs)
         return self._container_mount_layout_matches(container, expected_mounts=mount_checks)
 
@@ -1175,16 +1175,19 @@ class DockerWorkerBackend:
         state_scope_worker_key: str | None = None,
     ) -> list[str]:
         volumes = [f"{paths.root}:{self.config.storage_mount_path}:rw"]
+        storage_mounts = []
         if worker_key is not None:
-            for host_path, container_path, read_only in self._scoped_storage_mount_specs(
+            storage_mounts = self._scoped_storage_mount_specs(
                 worker_key,
                 private_agent_names=private_agent_names,
                 state_scope_worker_key=state_scope_worker_key,
-            ):
+            )
+            for host_path, container_path, read_only in storage_mounts:
                 volumes.append(f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}")
         mount_specs, _projection = self._projection_manager.config_mount_specs(
             paths,
             worker_key=worker_key,
+            storage_mounts=storage_mounts,
         )
         for host_path, container_path, read_only in mount_specs:
             volumes.append(f"{host_path}:{container_path}:{'ro' if read_only else 'rw'}")
