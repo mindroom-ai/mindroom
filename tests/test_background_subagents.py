@@ -142,11 +142,13 @@ async def test_human_pause_blocks_next_tool_until_explicit_resume(tmp_path: Path
     """Already executing work may finish; the next tool waits for parent control."""
     runtime = ToolJobRuntime(tmp_path)
     human = HumanMessageSignal()
-    started, next_tool, allow_checkpoint = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    started, checkpoint_entered = asyncio.Event(), asyncio.Event()
+    next_tool, allow_checkpoint = asyncio.Event(), asyncio.Event()
 
     async def operation() -> BackgroundOutcome:
         started.set()
         await allow_checkpoint.wait()
+        checkpoint_entered.set()
         await job_checkpoint()
         next_tool.set()
         return BackgroundOutcome("completed", "finished")
@@ -154,10 +156,11 @@ async def test_human_pause_blocks_next_tool_until_explicit_resume(tmp_path: Path
     job = await start_delegation(runtime, _child(), owner=_owner(), operation=operation, human_signal=human)
     await started.wait()
     human.notify()
-    paused = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    assert paused.job.status == "running"
-    assert paused.job.human_paused
     allow_checkpoint.set()
+    await checkpoint_entered.wait()
+    paused = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
+    assert paused.status == "paused_for_human"
+    assert paused.human_paused
     assert not next_tool.is_set()
     await runtime.resume(job.job_id, owner=_owner(), depth=0)
     result = await runtime.wait(job.job_id, owner=_owner(), depth=0)

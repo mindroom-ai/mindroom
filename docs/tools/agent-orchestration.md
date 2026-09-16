@@ -268,7 +268,8 @@ Remote service availability alone does not revoke access to a saved result.
 A queued human follow-up releases the foreground wait and holds the next cooperative application-tool boundary.
 An external operation already in progress may finish.
 Provider-hosted internal tools cannot be individually detached or interrupted by the application-tool boundary.
-Native child approval requirements are presented only through the exact reserved `job(action="wait", job_id=...)` call and the persisted approval continuation.
+Native child approval reached during the original foreground wait remains inline in the parent run, with the paused parent-child continuation retained durably.
+After delegation detaches, the exact reserved `job(action="wait", job_id=...)` call presents pending approval through that persisted continuation.
 Resuming a human hold never approves a tool, and current execution authority is rechecked before the next retained callable runs.
 Nested work remains owned by its accepted outer job.
 Unmanaged detached API execution keeps its existing synchronous lifetime and approval restrictions.

@@ -688,7 +688,8 @@ When configured, a delegation tool is automatically added to the agent, so you d
 The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
 Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
 Managed Matrix calls wait up to 10 seconds before returning an exact job handle while the child continues in the background.
-Use `job(action="list")` to rediscover jobs and `job(action="inspect"|"wait"|"resume"|"cancel", job_id=...)` to manage a turn; see [Background jobs](../tools/agent-orchestration.md#background-jobs).
+Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](../tools/agent-orchestration.md#background-jobs).
+The accepted `action` values are `list`, `inspect`, `wait`, `resume`, and `cancel`; every action except `list` requires `job_id`.
 Use `continue_subagent` with the reusable subagent ID for a follow-up in the same child session after its previous turn returns.
 The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
 Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
