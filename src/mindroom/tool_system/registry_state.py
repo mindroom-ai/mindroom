@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import sys
 import threading
 from contextlib import contextmanager
@@ -254,12 +253,3 @@ def restore_tool_registry_snapshot(snapshot: _ToolRegistrySnapshot) -> None:
         if module_name.startswith(PLUGIN_MODULE_PREFIX) and module_name not in snapshot.plugin_modules:
             sys.modules.pop(module_name, None)
     sys.modules.update(snapshot.plugin_modules)
-
-
-def tool_registry_origins() -> dict[str, list[str]]:
-    """Project stable registered callable provenance without importing or constructing tools."""
-    return {
-        name: [factory.__module__, factory.__qualname__]
-        for name, factory in TOOL_REGISTRY.items()
-        if inspect.isfunction(factory)
-    }

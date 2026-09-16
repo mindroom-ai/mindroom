@@ -45,24 +45,11 @@ class _ChildRunObservation:
     """Exact terminal evidence collected while one child response envelope runs."""
 
     child: DelegationChild
-    parent: _ChildRunObservation | None = None
     response: RunOutput | None = None
     terminal: tuple[str, _ChildTerminalStatus, str] | None = None
 
 
 _CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
-
-
-def active_delegation_edges(owner: ToolExecutionIdentity) -> tuple[tuple[str, str], ...]:
-    """Return the exact active native ancestry for a retained leaf execution owner."""
-    observation = _CHILD_RUN.get()
-    if observation is None or child_execution_identity(observation.child) != owner:
-        return ()
-    edges = []
-    while observation is not None:
-        edges.append((observation.child.caller_agent_name, observation.child.child_agent_name))
-        observation = observation.parent
-    return tuple(reversed(edges))
 
 
 def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
@@ -197,7 +184,7 @@ async def child_run_context(
     runtime_paths: RuntimePaths,
 ) -> AsyncIterator[_ChildRunObservation]:
     """Observe one child attempt and settle it independently of audit event capture."""
-    observation = _ChildRunObservation(child, parent=_CHILD_RUN.get())
+    observation = _ChildRunObservation(child)
     token = _CHILD_RUN.set(observation)
     try:
         async with child_audit_context(child, config=config, runtime_paths=runtime_paths):

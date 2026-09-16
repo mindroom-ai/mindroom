@@ -45,8 +45,6 @@ from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
-from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
-from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -890,7 +888,6 @@ async def _open_scope_off_event_loop(
         await run_blocking_until_complete(manager.__exit__, None, None, None)
 
 
-@owned_tool_execution
 async def run_blocking_response_turn(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -903,13 +900,11 @@ async def run_blocking_response_turn(
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
-            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
                 try:
                     resolution = await adapter.run_attempt(run, continuation)
-                    await finalize_consumption()
                     settled = _settle_blocking_attempt(
                         ctx,
                         adapter,
@@ -922,7 +917,6 @@ async def run_blocking_response_turn(
                 finally:
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
-                    await finalize_consumption()
                 if isinstance(settled, str):
                     return settled
                 continuation = settled
@@ -1196,7 +1190,6 @@ def _settle_completed_attempt(
     )
 
 
-@owned_tool_execution
 async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],
@@ -1209,7 +1202,6 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     try:
         async with _open_scope_off_event_loop(adapter.open_scope) as scope_context:
             run.scope_context = scope_context
-            set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
@@ -1226,7 +1218,6 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                 resolution = item.resolution
                                 continue
                             yield item
-                    await finalize_consumption()
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
                     if isinstance(resolution, SkippedAttempt):
@@ -1296,7 +1287,6 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                 finally:
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)
-                    await finalize_consumption()
                 if not keep_going:
                     return
             _raise_continuation_budget_exhausted()

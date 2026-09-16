@@ -35,7 +35,7 @@ from mindroom.delegation.execution import drive_delegation_stream, has_delegatio
 from mindroom.delegation.state import DelegationState
 from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import close_agent_runtime_state_dbs, close_execution_storage
+from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -43,8 +43,6 @@ from mindroom.response_turn import (
     apply_local_approval_decisions,
     paused_attempt_from_response,
 )
-from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
-from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -200,8 +198,7 @@ class AgentApprovalExecution:
     knowledge_access: KnowledgeAccessSupport
     refresh_scheduler: Callable[[], KnowledgeRefreshScheduler | None]
 
-    @owned_tool_execution
-    async def continue_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
+    async def continue_run(
         self,
         continuation: ApprovalContinuation,
         *,
@@ -229,14 +226,6 @@ class AgentApprovalExecution:
             config,
             self.runtime_paths,
             execution_identity,
-        )
-        set_consumption_storage(
-            lambda: create_session_storage(
-                continuation.entity_name,
-                config,
-                self.runtime_paths,
-                execution_identity=execution_identity,
-            ),
         )
         try:
             session = await asyncio.to_thread(
@@ -322,7 +311,6 @@ class AgentApprovalExecution:
                         ),
                     )
         finally:
-            await finalize_consumption()
             try:
                 ai_runtime.register_queued_notice_storage(
                     storage_factory=lambda: create_session_storage(
@@ -339,7 +327,7 @@ class AgentApprovalExecution:
                 try:
                     close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
                 finally:
-                    close_execution_storage(history_storage)
+                    history_storage.close()
         paused = paused_attempt_from_response(
             response,
             fallback_session_id=continuation.session_id,

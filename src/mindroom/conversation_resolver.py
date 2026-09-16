@@ -50,7 +50,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.thread_utils import check_agent_mentioned
-from mindroom.tool_job_completion import parse_tool_job_completion
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 
 if TYPE_CHECKING:
@@ -524,11 +523,6 @@ class ConversationResolver:
             mentioned_agents=self._mentioned_agent_names(context.mentioned_agents),
             agent_name=agent_name or self.deps.agent_name,
             hook_source=hook_source,
-            tool_job_completion=(
-                parse_tool_job_completion(event.source)
-                if hook_source == "tool_job_completion" and self._sender_is_managed_entity(event.sender)
-                else None
-            ),
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
             origin=self._turn_origin_for_event(
@@ -576,11 +570,6 @@ class ConversationResolver:
             mentioned_agents=self._mentioned_agent_names(mentioned_agents),
             agent_name=agent_name or self.deps.agent_name,
             hook_source=hook_source,
-            tool_job_completion=(
-                parse_tool_job_completion(event.source)
-                if hook_source == "tool_job_completion" and self._sender_is_managed_entity(event.sender)
-                else None
-            ),
             message_received_depth=message_received_depth,
             dispatch_policy_source_kind=dispatch_policy_source_kind,
             origin=self._turn_origin_for_event(

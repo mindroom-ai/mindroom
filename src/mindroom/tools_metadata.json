@@ -7874,7 +7874,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Start allowed subagents, continue conversations, and inspect or control background jobs",
+      "description": "Start allowed subagents, continue their conversations, and return their results",
       "display_name": "Subagents",
       "docs_url": null,
       "function_names": [

@@ -48,7 +48,6 @@ _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
     "src/mindroom/tool_system/worker_routing.py",
 }
 _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
-    "src/mindroom/tool_jobs/agno_execution.py",  # Accepted application-call ownership boundary.
     "src/mindroom/api/openai_compat.py",
     "src/mindroom/api/sandbox_runner.py",
     "src/mindroom/bot.py",
