@@ -153,7 +153,12 @@ def _configured_tool_allowed(
         return False
     server_id = mcp_server_id_from_tool_name(entry.name)
     filtered_name = tool_name
-    filters: list[dict[str, Any]] = [dict(entry.tool_config_overrides)]
+    authored_filter: dict[str, Any] = dict(entry.tool_config_overrides)
+    if server_id is None:
+        return (
+            authored_filter.get("include_tools") is None or filtered_name in authored_filter["include_tools"]
+        ) and filtered_name not in (authored_filter.get("exclude_tools") or [])
+    filters: list[dict[str, Any]] = [authored_filter]
     if server_id is not None:
         server = config.mcp_servers.get(server_id)
         if server is None or not server.enabled or origin.get("mcp_server_id") != server_id:
@@ -164,6 +169,6 @@ def _configured_tool_allowed(
         filters.append({"include_tools": server.include_tools, "exclude_tools": server.exclude_tools})
     return all(
         (not item.get("include_tools") or filtered_name in item["include_tools"])
-        and filtered_name not in item.get("exclude_tools", [])
+        and filtered_name not in (item.get("exclude_tools") or [])
         for item in filters
     )

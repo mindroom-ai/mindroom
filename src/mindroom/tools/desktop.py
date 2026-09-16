@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     requires_room_context=True,
     icon="MonitorUp",
     icon_color="text-cyan-500",

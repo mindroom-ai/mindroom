@@ -148,6 +148,7 @@ from .scheduling import (
 )
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
+from .tool_jobs.completion import completion_event
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -177,6 +178,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.runtime_protocols import OrchestratorRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob
 
 
 class _ProcessShutdownMatrixClient(Protocol):
@@ -681,6 +683,7 @@ class AgentBot:
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
                 on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
+                on_tool_job_completion=lambda event: self._response_runner.handoff_tool_job_completion(event),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)
@@ -2706,6 +2709,12 @@ class AgentBot:
         receipt_time = time.monotonic()
         self._log_matrix_event_callback_started(room, event, callback_name="media")
         return await self._turn_controller.handle_media_event(room, event, receipt_time=receipt_time)
+
+    async def wake_tool_job_completion(self, job: BackgroundJob) -> None:
+        """Admit a private runtime source and wake its existing journal worker."""
+        event = completion_event(job, sender_id=self.matrix_id.full_id)
+        await self._journal_store.principal(self._journal_principal_id).admit(event)
+        self._journal_dispatcher.wake()
 
     async def _run_regenerated_response(self, request: ResponseRequest) -> str | None:
         """Run one edit-regenerated turn through this bot's response path."""

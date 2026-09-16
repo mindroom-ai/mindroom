@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     default_execution_target=ToolExecutionTarget.PRIMARY,
+    requires_primary_runtime=True,
     icon="FileCode2",
     icon_color="text-cyan-500",
     config_fields=[

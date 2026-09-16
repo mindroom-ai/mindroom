@@ -219,7 +219,8 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
 Fast calls return the child's response inline.
-Managed Matrix calls wait up to 10 seconds; longer work returns an exact job handle and continues in the background.
+Managed Matrix calls wait until completion or a human follow-up by default.
+Set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
 OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
@@ -255,21 +256,33 @@ Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions
 
 ### Background jobs
 
-Every model-invoked application tool uses a shared managed job owner when a conversation runtime is present.
-Original tool names and argument schemas stay unchanged.
-Fast calls return their original results; a call that outlasts its foreground wait returns a `job_id` while the accepted work continues.
-The automatically added `job(action, job_id=None, limit=20, offset=0)` function manages both ordinary tools and native delegation.
+Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
+Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
+This waiting budget is separate from a tool's own execution or network timeout.
+
+| `wait_timeout` | Behavior |
+| --- | --- |
+| Omitted or `null` | Wait until completion or a human follow-up. |
+| `0` | Return a job handle immediately while execution continues. |
+| Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
+
+Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
+A human follow-up releases the foreground wait without pausing or cancelling the accepted work.
+The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
+
+The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None)` function manages ordinary tools and native delegation.
 The management function never backgrounds itself.
 
 | Action | Behavior |
 | --- | --- |
 | `list` | Discover accessible jobs, active first, with bounded pagination and retained terminal outcomes. |
 | `inspect` | Read an exact job's status and saved summary without consuming it. |
-| `wait` | Wait up to ten seconds and retrieve the original result, including supported structured data and media. |
-| `resume` | Release a cooperative human hold; never grant approval. |
-| `cancel` | Cancel the exact job and wait for owned execution and cleanup to settle. |
+| `wait` | Retrieve the original result, including supported structured data and media, using the same optional waiting budget. |
+| `cancel` | Request cancellation and wait for owned execution and cleanup to settle. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
+A cleanup failure is retained as a failure instead of claiming successful cancellation.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
@@ -279,22 +292,32 @@ Still-authorized deferred tools remain discoverable without loading them or conn
 Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
 Remote service availability alone does not revoke access to a saved result.
 
-A queued human follow-up releases the foreground wait and holds the next cooperative application-tool boundary.
-An external operation already in progress may finish.
-Provider-hosted internal tools cannot be individually detached or interrupted by the application-tool boundary.
-Native child approval reached during the original foreground wait remains inline in the parent run, with the paused parent-child continuation retained durably.
-After delegation detaches, the exact reserved `job(action="wait", job_id=...)` call presents pending approval through that persisted continuation.
-Resuming a human hold never approves a tool, and current execution authority is rechecked before the next retained callable runs.
-Nested work remains owned by its accepted outer job.
-Unmanaged detached API execution keeps its existing synchronous lifetime and approval restrictions.
+Native child approvals retain the existing persisted parent-child continuation and approval cards.
+After delegation detaches, `job(action="wait", job_id=...)` presents a pending approval through that same continuation.
+Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
+Nested tools remain part of their accepted outer job rather than starting independent jobs.
+Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
+Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
+Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
 
-Completed background jobs notify the original Matrix conversation and exact agent or team.
-Notifications enter normal conversation ordering; the response checks the immutable delivery claim and current outcome after acquiring the conversation lock.
+After the agent finishes independent work, the runtime waits for outstanding jobs without repeated model polling.
+Streaming and non-streaming responses show waiting progress, and a human message can release the wait immediately.
+Resuming an approved tool follows the same waiting behavior.
+Ready outcomes or approval boundaries cause one internal continuation using the native result-retrieval tool.
+A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
+Idle completion work uses an internal event-journal source and the existing serialized conversation runner, without sending a synthetic completion message to Matrix.
+Runtime updates retain requester authorization but are identified separately from human input.
+
 A result is consumed only after exact persisted parent tool-result evidence is verified.
-Inspecting, listing, or merely sending a notification does not consume it.
-Stale and consumed notifications settle without another model response.
-Failed sends retry the same frozen payload and Matrix transaction ID; an account mismatch blocks that delivery while preserving authorized result access.
-Completed outcomes survive restart; abandoned work becomes interrupted and is never restarted automatically.
+Inspecting, listing, or scheduling internal completion work does not consume it.
+Consumed results, errors, and acknowledged cancellation do not cause another completion response.
+If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
+Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
+
+Each durable result envelope has a 64 MiB encoded JSON limit, including base64 expansion, its artifacts, and structural overhead.
+A job record can contain several envelopes for its result, state updates, events, and replay data, so this is not a limit on total job storage.
+A result that exceeds this limit becomes a failed job with a size-limit error.
+Artifact files are read within the remaining budget; the configured large-output policy can save eligible text to a file before result encoding.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.

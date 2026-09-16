@@ -27,6 +27,7 @@ class TurnIntent(StrEnum):
     """Semantic intent of one inbound turn after trusted metadata is normalized."""
 
     USER_MESSAGE = "user_message"
+    TOOL_JOB_COMPLETION = "tool_job_completion"
     MANAGED_MESSAGE = "managed_message"
     ROUTER_HANDOFF = "router_handoff"
     ROUTER_NOTICE = "router_notice"

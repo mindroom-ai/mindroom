@@ -508,12 +508,13 @@ DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured
 {agent_descriptions}
 
 Use run_subagent(task, agent_name=None) for a bounded subtask whose result you need before continuing.
-Managed Matrix calls wait up to 10 seconds; longer work returns a Job ID and continues in the background.
-A human follow-up releases the wait and pauses the child before its next application tool; already-running external work may finish.
-Use job(action="list") to rediscover work, job(action="inspect", job_id=...) for status, job(action="wait", job_id=...) to retrieve results, job(action="resume", job_id=...) to release a human pause, and job(action="cancel", job_id=...) to stop it.
-Waiting never restarts the child, and resuming never grants tool approval.
+Managed foreground Matrix calls accept wait_timeout: omitted or null waits until completion or human input, zero returns a Job ID immediately, and a positive number bounds waiting without cancelling work.
+Tools already executing within an outer job stay with that job; nested application calls do not accept a separate wait budget.
+A human follow-up releases the wait while the child continues working.
+Use job(action="list") to rediscover work, job(action="inspect", job_id=...) for status, job(action="wait", job_id=...) to retrieve results, job(action="cancel", job_id=...) to stop it.
+Waiting neither restarts the child nor grants tool approval.
 To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
-Direct API calls and nested delegation retain synchronous waits.
+Direct API calls and nested delegation wait within their existing execution owner.
 The child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.
 It retains its configured tools, workspace, and memory.
 Omit agent_name or pass null to run a fresh copy of yourself, if your own name is listed in Allowed subagents.

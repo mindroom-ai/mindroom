@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agno.agent import Agent
@@ -125,9 +126,11 @@ from mindroom.team_exact_members import (
 from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.timing import emit_timing_event
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.completion import join_approval_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.events import (
+    BackgroundWaitChunk,
     StreamingToolTracker,
     StructuredStreamChunk,
     ToolTraceEntry,
@@ -196,7 +199,7 @@ def _team_request_log_context(
 # Message length limits for team context and logging
 _MAX_CONTEXT_MESSAGE_LENGTH = 200  # Maximum length for messages to include in thread context
 _MAX_LOG_MESSAGE_LENGTH = 500  # Maximum length for messages in team response logs
-_TeamStreamChunk = str | StructuredStreamChunk
+_TeamStreamChunk = str | StructuredStreamChunk | BackgroundWaitChunk
 _NO_AGENTS_RESPONSE = "Sorry, no agents available for team collaboration."
 _MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS = ThreadHistoryRenderLimits(
     max_messages=30,
@@ -2616,6 +2619,45 @@ def _approval_history_scope(
     return HistoryScope(kind="team", scope_id=scope_id) if scope_id is not None else None
 
 
+async def _retrieve_team_job_results(
+    previous: TeamRunOutput,
+    prompt: str,
+    *,
+    team: Team,
+    presentation: _TeamStreamPresentation,
+    session_id: str,
+    user_id: str,
+    configured_team_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    members: ResolvedExactTeamMembers,
+) -> TeamRunOutput:
+    """Retrieve ready results through the reconstructed team's ordinary native stream."""
+    events = drive_delegation_stream(
+        team,
+        team.arun(
+            prompt,
+            session_id=session_id,
+            user_id=user_id,
+            metadata=deepcopy(previous.metadata),
+            session_state={},
+            stream=True,
+            stream_events=True,
+            yield_run_output=True,
+        ),
+        run_child=run_delegated_child_response,
+        agent_name=configured_team_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        member_config_names=_delegation_member_names(members),
+    )
+    return await _collect_team_continuation(events, presentation)
+
+
 @owned_tool_execution
 async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
     *,
@@ -2763,6 +2805,25 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             continuation_stream,
             presentation,
         )
+
+        continued = await join_approval_jobs(
+            continued,
+            is_complete=lambda result: result.status == RunStatus.completed,
+            continue_response=partial(
+                _retrieve_team_job_results,
+                team=team,
+                presentation=presentation,
+                session_id=session_id,
+                user_id=user_id,
+                configured_team_name=configured_team_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=execution_identity,
+                refresh_scheduler=refresh_scheduler,
+                members=members,
+            ),
+            response_text=presentation.render_body,
+        )
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,
@@ -2794,18 +2855,20 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
             ),
         )
     finally:
-        await finalize_consumption()
-        with stack:
-            _register_team_notice_storage(
-                scope_context=scope,
-                session_id=session_id,
-                entity_name=configured_team_name,
-            )
-            close_team_runtime_state_dbs(
-                agents=members.agents if members is not None else [],
-                team_db=cast("BaseDb | None", team.db) if team is not None else None,
-                shared_scope_storage=scope.storage if scope is not None else None,
-            )
+        try:
+            await finalize_consumption()
+        finally:
+            with stack:
+                _register_team_notice_storage(
+                    scope_context=scope,
+                    session_id=session_id,
+                    entity_name=configured_team_name,
+                )
+                close_team_runtime_state_dbs(
+                    agents=members.agents if members is not None else [],
+                    team_db=cast("BaseDb | None", team.db) if team is not None else None,
+                    shared_scope_storage=scope.storage if scope is not None else None,
+                )
 
 
 async def prepare_materialized_team_execution(
@@ -3086,6 +3149,7 @@ async def team_response(  # noqa: C901, PLR0915
                     run_id=current_run_id,
                     user_id=user_id,
                     metadata=run_metadata,
+                    session_state={},
                 )
 
         attempt_run_id = continuation_state.active_run_id
@@ -3350,6 +3414,7 @@ async def _team_response_stream_raw(
             run_id=run_id,
             user_id=user_id,
             metadata=metadata,
+            session_state={},
         )
     except Exception as e:
         logger.exception("team_streaming_failed", agents=team_members.display_names)

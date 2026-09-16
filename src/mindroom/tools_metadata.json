@@ -4,6 +4,33 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "communication",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": [
+        "agno"
+      ],
+      "description": "Let an agent request bounded actions in MindRoom Chat",
+      "display_name": "Chat UI",
+      "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
+      "function_names": [
+        "show_computer",
+        "open_settings",
+        "open_panel"
+      ],
+      "helper_text": null,
+      "icon": "PanelsTopLeft",
+      "icon_color": "text-violet-500",
+      "name": "chat_ui",
+      "requires_primary_runtime": true,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "communication",
       "config_fields": [
         {
           "authored_override": true,
@@ -136,6 +163,7 @@
       "icon": null,
       "icon_color": null,
       "name": "invite_router",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -3826,6 +3854,7 @@
       "oauth_fallback_fields": [
         "access_token"
       ],
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
@@ -4179,6 +4208,7 @@
       "icon": "SiGooglesheets",
       "icon_color": "text-green-600",
       "name": "google_sheets",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
@@ -5946,6 +5976,7 @@
       "icon": "FileCode2",
       "icon_color": "text-cyan-500",
       "name": "script",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -6789,6 +6820,7 @@
       "icon": "SiGmail",
       "icon_color": "text-red-500",
       "name": "gmail",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
@@ -7102,6 +7134,7 @@
       "icon": "FaChartBar",
       "icon_color": "text-cyan-500",
       "name": "usage_stats",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -7233,6 +7266,7 @@
       "icon": "FiShield",
       "icon_color": "text-emerald-600",
       "name": "approved_egress",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "special",
       "status": "available"
@@ -7503,6 +7537,7 @@
       "icon": "Unplug",
       "icon_color": "text-amber-500",
       "name": "oauth_connections",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -7613,6 +7648,7 @@
       "icon": "Paperclip",
       "icon_color": "text-teal-500",
       "name": "attachments",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -7637,6 +7673,7 @@
       "icon": "Webhook",
       "icon_color": "text-amber-500",
       "name": "callback_manager",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -7874,7 +7911,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": [],
-      "description": "Start allowed subagents, continue conversations, and inspect or control background jobs",
+      "description": "Start allowed subagents and continue conversations",
       "display_name": "Subagents",
       "docs_url": null,
       "function_names": [
@@ -7920,6 +7957,7 @@
       "icon": "MonitorUp",
       "icon_color": "text-cyan-500",
       "name": "desktop",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "special",
       "status": "requires_config"
@@ -8087,6 +8125,7 @@
       "icon": "Webhook",
       "icon_color": "text-emerald-500",
       "name": "external_trigger_manager",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -8152,6 +8191,7 @@
       "icon": "SiGooglecalendar",
       "icon_color": "text-blue-600",
       "name": "google_calendar",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
@@ -8219,6 +8259,7 @@
       "icon": "SiGoogledocs",
       "icon_color": "text-blue-600",
       "name": "google_docs",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
@@ -8327,6 +8368,7 @@
       "icon": "SiGoogledrive",
       "icon_color": "text-green-600",
       "name": "google_drive",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "oauth",
       "status": "requires_config"
@@ -9088,6 +9130,7 @@
       "icon": "ListTodo",
       "icon_color": "text-blue-500",
       "name": "todo",
+      "requires_primary_runtime": true,
       "requires_room_context": true,
       "setup_type": "none",
       "status": "available"
@@ -13165,6 +13208,7 @@
       "icon": "Home",
       "icon_color": "text-blue-500",
       "name": "homeassistant",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"

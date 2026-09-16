@@ -98,7 +98,9 @@ MindRoom's architecture consists of several key components working together.
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
+| `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |

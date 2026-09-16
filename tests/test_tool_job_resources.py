@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import anyio
 import pytest
@@ -12,12 +13,59 @@ from agno.team import Team
 from agno.team import _init as team_init
 from agno.tools import Toolkit
 
+from mindroom.tool_jobs import agno_compat_resources
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
 from mindroom.tool_jobs.resources import (
     connect_async_execution_resource,
     disconnect_async_execution_resource,
     execution_resources,
 )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_compatibility_installation_wraps_sdk_bindings_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent actor construction cannot capture and wrap a partially installed binding."""
+    first_entered = threading.Event()
+    concurrent_entered = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def bindings(connect: object, disconnect: object) -> tuple[object, object]:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        elif call_number == 2:
+            concurrent_entered.set()
+        return connect, disconnect
+
+    def install(*, started: threading.Event | None = None) -> None:
+        if started is not None:
+            started.set()
+        agno_compat_resources.install_execution_resource_bindings()
+
+    monkeypatch.setattr(agno_compat_resources, "_INSTALLED", False)
+    monkeypatch.setattr(agno_compat_resources, "_sync_bindings", bindings)
+    monkeypatch.setattr(agno_compat_resources, "_async_bindings", bindings)
+    first = asyncio.create_task(asyncio.to_thread(install))
+    second: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(first_entered.wait, 2)
+        second = asyncio.create_task(asyncio.to_thread(install, started=second_started))
+        assert await asyncio.to_thread(second_started.wait, 2)
+        assert not await asyncio.to_thread(concurrent_entered.wait, 0.1)
+    finally:
+        release_first.set()
+        await asyncio.gather(first, *([second] if second is not None else []), return_exceptions=True)
+
+    assert calls == 4
 
 
 @pytest.mark.asyncio

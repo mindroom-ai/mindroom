@@ -88,6 +88,7 @@ class JournalCallbacks:
     source_has_live_owner: Callable[[str], bool]
     turn_has_live_claim: Callable[[str], bool]
     on_rtc: _RtcCallback | None = None
+    on_tool_job_completion: Callable[[JournalEvent], Awaitable[bool]] | None = None
 
 
 @dataclass
@@ -232,6 +233,9 @@ class JournalDispatcher:
             # routing policy, either duplicating side effects or settling the
             # source before the continuation can resume.
             return approval_settled
+        if event.kind is EventKind.TOOL_JOB_COMPLETION:
+            callback = self.callbacks.on_tool_job_completion
+            return await callback(event) if callback is not None else False
         try:
             matrix_event = parse_journal_event(event)
         except JournalCorruptionError:

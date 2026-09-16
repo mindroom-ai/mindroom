@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     category=ToolCategory.EMAIL,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
+    requires_primary_runtime=True,
     auth_provider="google_gmail",
     icon="SiGmail",
     icon_color="text-red-500",

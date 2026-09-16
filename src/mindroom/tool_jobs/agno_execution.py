@@ -37,6 +37,7 @@ from mindroom.tool_jobs.runtime import (
     format_job_handle,
     get_background_runtime,
 )
+from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
@@ -57,7 +58,8 @@ type _Execute = Callable[[FunctionCall], Coroutine[object, object, _CallResult]]
 _EVENT_TYPES = {**RUN_EVENT_TYPE_REGISTRY, **TEAM_RUN_EVENT_TYPE_REGISTRY, **WORKFLOW_RUN_EVENT_TYPE_REGISTRY}
 
 
-def _framework_function(function: Function) -> bool:
+def is_framework_function(function: Function) -> bool:
+    """Recognize SDK orchestration calls that retain their existing execution owner."""
     origin = callable_origin(function)
     return (
         origin["module"] == "agno.team._default_tools"
@@ -103,7 +105,7 @@ class _CollectedResult:
         elif isinstance(item, ToolResult):
             self.has_rich = True
             self.chunks.append(item.content)
-            self.replay.append({"text": item.content})
+            self.replay.append({"result": item})
             self.rich.images = (self.rich.images or []) + (item.images or [])
             self.rich.audios = (self.rich.audios or []) + (item.audios or [])
             self.rich.videos = (self.rich.videos or []) + (item.videos or [])
@@ -230,7 +232,11 @@ async def _consume_result(
     replay = decode_tool_result(payload["replay"]) if payload.get("replay") else []
     if replay:
         call.result = iter(
-            _EVENT_TYPES[item["event"]["event"]].from_dict(item["event"]) if "event" in item else item["text"]
+            _EVENT_TYPES[item["event"]["event"]].from_dict(item["event"])
+            if "event" in item
+            else item["result"].content
+            if "result" in item
+            else item["text"]
             for item in replay
         )
         if isinstance(value, ToolResult):
@@ -243,6 +249,17 @@ async def _consume_result(
     return success, timer, call, result
 
 
+async def _execute_inline(original: _Execute, call: FunctionCall) -> _CallResult:
+    inline_call = (
+        call
+        if is_job_function(call.function)
+        else call.model_copy(update={"arguments": application_arguments(call.arguments)})
+    )
+    success, timer, _, result = await original(inline_call)
+    call.result, call.error = inline_call.result, inline_call.error
+    return success, timer, call, result
+
+
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
     """Wrap one approved SDK executor with admission and exact consumption."""
 
@@ -250,8 +267,12 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()
-        if runtime is None or context is None or resources is None or _framework_function(call.function):
+        if runtime is None or context is None or resources is None or is_framework_function(call.function):
             return await original(call)
+        wait_timeout = read_wait_timeout(
+            call.arguments,
+            owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
+        )
         owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
         actor = call.function._agent or call.function._team
         if actor is not None and actor.id:
@@ -260,7 +281,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
         with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
             check_current_execution_authority()
             if job_owns_execution() or is_job_function(call.function) or call.function.external_execution:
-                return await original(call)
+                return await _execute_inline(original, call)
         run_context = call.function._run_context
         if run_context is None or not run_context.run_id or not call.call_id:
             msg = "Managed tool execution requires an exact run and tool-call identity"
@@ -268,6 +289,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
         identity = {"owner": asdict(owner), "run_id": run_context.run_id, "tool_call_id": call.call_id}
         job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         adapter = {
+            "source_event_id": context.membership_turn_id,
             "run_id": run_context.run_id,
             "tool_call_id": call.call_id,
             "arguments": encode_tool_result(call.arguments),
@@ -276,6 +298,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
         }
         spec = JobSpec(job_id, call.function.name, depth, toolkit_name=call.function.owning_toolkit, adapter=adapter)
         owned_call = _copy_call(call)
+        owned_call.arguments = application_arguments(owned_call.arguments)
         baseline = deepcopy(run_context.session_state or {})
         reference = resources.acquire()
         token = uuid4().hex
@@ -291,7 +314,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
             )
             if not runtime.owns_execution(job_id, adapter):
                 await reference.release()
-            waited = await runtime.wait(job_id, owner=owner, depth=depth, reserved_token=token)
+            waited = await runtime.wait(job_id, owner=owner, depth=depth, timeout=wait_timeout, reserved_token=token)
             timer = Timer()
             timer.start()
             timer.stop()

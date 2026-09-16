@@ -274,6 +274,33 @@ def _append_queued_notice_if_needed(
         )
 
 
+def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice_text: str) -> None:
+    """Notify at response entry only after a complete trailing tool batch."""
+    notice_context = _queued_message_notice_context.get()
+    if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
+        return
+    results: list[Message] = []
+    for message in reversed(messages):
+        if _is_queued_notice_message(message, response_turn_id=notice_context.response_turn_id):
+            continue
+        # Provider projections can insert trusted context between calls and results.
+        if message.role in {"system", "developer"}:
+            continue
+        if message.role == "tool":
+            results.append(message)
+            continue
+        if message.role == "assistant" and message.tool_calls:
+            call_ids = {call.get("id") for call in message.tool_calls}
+            result_ids = {result.tool_call_id for result in results}
+            if None not in call_ids and call_ids <= result_ids:
+                _append_queued_notice_if_needed(
+                    messages=messages,
+                    function_call_results=results,
+                    notice_text=notice_text,
+                )
+        return
+
+
 def _strip_response_turn_notice_from_run_output(
     run_output: RunOutput | TeamRunOutput,
     *,
@@ -738,6 +765,7 @@ def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> Non
             function_call_results=results,
             notice_text=notice_text,
         ),
+        before_response=lambda messages: _append_queued_notice_after_resumed_tools(messages, notice_text=notice_text),
     )
 
 

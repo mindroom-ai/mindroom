@@ -943,7 +943,8 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert log.released == 1
     assert log.finalized == 2
     # The continuation reset synced empty partial state carrying the prior tools.
-    assert recorder.synced_calls[-1]["completed_tools"] == [first_trace]
+    assert recorder.synced_calls[0]["completed_tools"] == [first_trace]
+    assert recorder.synced_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
     # The final recording carries the first attempt's tools plus the second's.
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
 

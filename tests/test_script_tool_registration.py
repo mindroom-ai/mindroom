@@ -3,7 +3,6 @@
 import mindroom.tools  # noqa: F401
 from mindroom.tool_system.declarations import ToolExecutionTarget
 from mindroom.tool_system.registry_state import TOOL_METADATA
-from mindroom.tool_system.worker_routing import tool_stays_local
 
 
 def test_script_tool_metadata_declares_primary_room_controls_and_limits() -> None:
@@ -29,4 +28,4 @@ def test_script_tool_metadata_declares_primary_room_controls_and_limits() -> Non
 
 def test_script_control_tool_always_stays_in_primary_runtime() -> None:
     """Only the launched process routes to a worker; its control plane remains primary-owned."""
-    assert tool_stays_local("script") is True
+    assert TOOL_METADATA["script"].requires_primary_runtime is True

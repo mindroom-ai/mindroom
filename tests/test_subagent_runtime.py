@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from copy import deepcopy
 from dataclasses import asdict, fields, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -24,25 +23,21 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry
-from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.delegation.state import DelegationChild
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator, _build_completion_content
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
-from mindroom.tool_job_completion import parse_tool_job_completion
 from mindroom.tool_jobs.authorization import (
     AUTHORITY_METADATA_KEY,
     authority_snapshot,
     bind_toolkit_authority,
     function_authority,
 )
-from mindroom.tool_jobs.completion import admit_job_completion
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import (
     authorized_tool_call,
@@ -122,23 +117,6 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def test_completion_preserves_owner_and_targets_only_team(tmp_path: Path) -> None:
-    """Incidental result mentions cannot dispatch a second responder."""
-    content = _build_completion_content(
-        _job(),
-        "@mindroom_team:localhost",
-        _config(tmp_path),
-        test_runtime_paths(tmp_path),
-    )
-    assert content[ORIGINAL_SENDER_KEY] == "@human:localhost"
-    assert content[SOURCE_KIND_KEY] == "hook_dispatch"
-    assert content[HOOK_SOURCE_KEY] == "tool_job_completion"
-    assert content["m.mentions"] == {"user_ids": ["@mindroom_team:localhost"]}
-    assert content["m.relates_to"]["event_id"] == "$thread"
-    assert "job_123" in content["body"]
-    assert 'job(action="wait"' in content["body"]
-
-
 def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: Path) -> None:
     """A config reload cannot leave completion delivery holding old authority."""
     config = _config(tmp_path)
@@ -204,180 +182,18 @@ async def _finish_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transition", ["cancel", "continue"])
-async def test_delivery_rejects_generation_changed_during_room_lookup(  # noqa: PLR0915
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    transition: str,
-) -> None:
-    """A stale scan cannot consume the next outcome with an inadmissible notification."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
-    runtime = coordinator.runtime
-    target = MessageTarget.resolve("!room:localhost", "$thread", "$human")
-    fixture = _job()
-    fixture.owner = replace(fixture.owner, session_id=target.session_id)
-    lookup_started, release_lookup = asyncio.Event(), asyncio.Event()
-    sent: list[tuple[dict[str, Any], str]] = []
-
-    async def approval() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
-
-    async def completed() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "Approved answer")
-
-    async def cancel(child: DelegationChild) -> None:
-        child.status = "cancelled"
-        child.result = "Cancelled"
-
-    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
-        lookup_started.set()
-        await release_lookup.wait()
-        return ["!room:localhost"]
-
-    async def send(
-        _client: nio.AsyncClient,
-        _room_id: str,
-        content: dict[str, Any],
-        *,
-        transaction_id: str,
-    ) -> DeliveredMatrixEvent:
-        sent.append((deepcopy(content), transaction_id))
-        return DeliveredMatrixEvent("$notice", content)
-
-    monkeypatch.setattr(runtime_module, "get_joined_rooms", joined_rooms)
-    monkeypatch.setattr(runtime_module, "send_message_result", send)
-    register_background_runtime(coordinator.runtime_paths, runtime)
-    delivery_task = None
-    try:
-        job = await start_delegation(
-            runtime,
-            delegation_child(fixture),
-            owner=fixture.owner,
-            operation=approval,
-            cancel=cancel,
-        )
-        waiting = await runtime.wait(job.job_id, owner=job.owner, depth=0)
-        await runtime.release_wait(job.job_id, waiting.token)
-        delivery_task = asyncio.create_task(coordinator.deliver_pending())
-        await lookup_started.wait()
-        if transition == "cancel":
-            await runtime.cancel(job.job_id, owner=job.owner, depth=0, await_completion=True)
-        else:
-            await runtime.continue_job(job.job_id, owner=job.owner, depth=0, operation=completed)
-            resumed = await runtime.wait(job.job_id, owner=job.owner, depth=0)
-            await runtime.release_wait(job.job_id, resumed.token)
-        current = await runtime.lookup(job.job_id, owner=job.owner, depth=0)
-        assert current.generation > waiting.job.generation
-        release_lookup.set()
-        await delivery_task
-        assert sent == []
-        assert (await runtime.lookup(job.job_id, owner=job.owner, depth=0)).delivery is None
-        assert [pending.generation for pending in await runtime.pending_deliveries()] == [current.generation]
-
-        await coordinator.deliver_pending()
-        assert len(sent) == 1
-        content, transaction_id = sent[0]
-        reference = parse_tool_job_completion({"content": content})
-        assert reference is not None
-        assert reference.generation == current.generation
-        assert reference.transaction_id == transaction_id == f"tool_job_{job.job_id}_{current.generation}"
-        delivered = await runtime.lookup(job.job_id, owner=job.owner, depth=0)
-        assert delivered.delivery is not None
-        assert delivered.delivery.acknowledged
-        assert delivered.delivery.event_id == "$notice"
-        assert await runtime.pending_deliveries() == []
-        envelope = replace(
-            _envelope(
-                target=target,
-                source_event_id="$notice",
-                source_kind="hook_dispatch",
-                sender_id="@mindroom_team:localhost",
-                requester_id="@human:localhost",
-            ),
-            agent_name="team",
-            hook_source="tool_job_completion",
-            tool_job_completion=reference,
-        )
-        assert await admit_job_completion(envelope, target=target, runtime_paths=coordinator.runtime_paths)
-        assert not await admit_job_completion(
-            replace(envelope, tool_job_completion=replace(reference, generation=waiting.job.generation)),
-            target=target,
-            runtime_paths=coordinator.runtime_paths,
-        )
-    finally:
-        release_lookup.set()
-        if delivery_task is not None:
-            await delivery_task
-        register_background_runtime(coordinator.runtime_paths, None)
-        await coordinator.stop()
-
-
-@pytest.mark.asyncio
-async def test_failed_delivery_restarts_with_same_frozen_content_and_transaction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A crash after an ambiguous send retries the same durable Matrix event."""
-    config = _config(tmp_path)
-    coordinator = _delivery_coordinator(tmp_path, config)
-    await _finish_job(coordinator)
-    sent: list[tuple[dict[str, Any], str]] = []
-
-    async def send(
-        client: nio.AsyncClient,
-        room_id: str,
-        content: dict[str, Any],
-        *,
-        transaction_id: str,
-    ) -> DeliveredMatrixEvent | None:
-        assert client is not None
-        assert room_id == "!room:localhost"
-        sent.append((deepcopy(content), transaction_id))
-        if len(sent) == 1:
-            raise TimeoutError
-        return DeliveredMatrixEvent("$delivered", content)
-
-    monkeypatch.setattr(runtime_module, "send_message_result", send)
-    await coordinator.deliver_pending()
-    assert len(await coordinator.runtime.pending_deliveries()) == 1
-    await coordinator.stop()
-    restored = _delivery_coordinator(tmp_path, config)
-    await restored.runtime.recover()
-    config.agents["worker"].display_name = "Renamed worker"
-    await restored.deliver_pending()
-    await restored.deliver_pending()
-    assert len(sent) == 2
-    assert sent[0] == sent[1]
-    assert await restored.runtime.pending_deliveries() == []
-    await restored.stop()
-
-
-@pytest.mark.asyncio
-async def test_live_wait_claim_suppresses_completion_delivery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_live_wait_claim_suppresses_completion_delivery(tmp_path: Path) -> None:
     """The delivery loop cannot race a result awaiting parent persistence."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
     job = await _finish_job(coordinator)
     waiting = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
-    sent: list[str] = []
-
-    async def send(
-        client: nio.AsyncClient,
-        room_id: str,
-        content: dict[str, Any],
-        *,
-        transaction_id: str,
-    ) -> DeliveredMatrixEvent:
-        assert client is not None
-        assert room_id == "!room:localhost"
-        sent.append(transaction_id)
-        return DeliveredMatrixEvent("$delivered", content)
-
-    monkeypatch.setattr(runtime_module, "send_message_result", send)
+    bot = coordinator.bot_provider("team")
+    assert bot is not None
     await coordinator.deliver_pending()
-    assert sent == []
+    bot.wake_tool_job_completion.assert_not_awaited()
     await coordinator.runtime.acknowledge_wait(job.job_id, waiting.token)
     await coordinator.deliver_pending()
-    assert sent == []
+    bot.wake_tool_job_completion.assert_not_awaited()
     await coordinator.stop()
 
 
@@ -429,7 +245,6 @@ def test_constructing_orchestrator_support_does_not_claim_runtime_storage(tmp_pa
 @pytest.mark.asyncio
 async def test_authority_revoked_during_membership_read_prevents_send(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An asynchronous room check cannot preserve pre-reload requester authority."""
     config = _config(tmp_path)
@@ -444,30 +259,13 @@ async def test_authority_revoked_during_membership_read_prevents_send(
         return nio.JoinedRoomsResponse(rooms=["!room:localhost"])
 
     bot.client.joined_rooms = membership
-    sent = False
-
-    async def send(
-        client: nio.AsyncClient,
-        room_id: str,
-        content: dict[str, Any],
-        *,
-        transaction_id: str,
-    ) -> DeliveredMatrixEvent:
-        nonlocal sent
-        assert client is bot.client
-        assert room_id == "!room:localhost"
-        assert transaction_id
-        sent = True
-        return DeliveredMatrixEvent("$delivered", content)
-
-    monkeypatch.setattr(runtime_module, "send_message_result", send)
     await coordinator.deliver_pending()
-    assert not sent
+    bot.wake_tool_job_completion.assert_not_awaited()
     await coordinator.stop()
 
 
 @pytest.mark.asyncio
-async def test_replaced_response_runner_pauses_retained_background_job(
+async def test_replaced_response_runner_releases_wait_without_pausing_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -499,6 +297,8 @@ async def test_replaced_response_runner_pauses_retained_background_job(
         operation=operation,
         human_signal=signal,
     )
+    waiting = asyncio.create_task(runtime.wait(job.job_id, owner=fixture.owner, depth=0))
+    await asyncio.sleep(0)
     replacement = ResponseRunner(deps)
     unrelated_thread = target.with_thread_root("$unrelated")
     replacement._lifecycle_coordinator.reserve_waiting_human_message(
@@ -514,18 +314,22 @@ async def test_replaced_response_runner_pauses_retained_background_job(
         response_envelope=_envelope(target=target),
     )
     assert (await runtime.lookup(job.job_id, owner=fixture.owner, depth=0)).status == "running"
+    assert not waiting.done()
     replacement._lifecycle_coordinator.reserve_waiting_human_message(
         target=target,
         response_envelope=_envelope(target=target),
     )
+    released = await asyncio.wait_for(waiting, 1)
+    assert released.job.status == "running"
     advance.set()
     await checkpoint_reached.wait()
-    paused = await runtime.wait(job.job_id, owner=fixture.owner, depth=0, timeout=0)
+    signal.clear()
+    completed = await runtime.wait(job.job_id, owner=fixture.owner, depth=0)
     try:
-        assert paused.job.status == "paused_for_human"
-        assert not tool_executed.is_set()
+        assert completed.job.status == "completed"
+        assert tool_executed.is_set()
     finally:
-        await runtime.release_wait(job.job_id, paused.token)
+        await runtime.release_wait(job.job_id, completed.token)
         await coordinator.stop()
 
 
@@ -578,7 +382,7 @@ async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> 
             initial_wait_token=foreground_claim,
         )
         await done.wait()
-        assert await coordinator.runtime.pending_deliveries() == []
+        assert await coordinator.runtime.pending_outcomes() == []
         waited = await coordinator.runtime.wait(
             job.job_id,
             owner=fixture.owner,
@@ -587,7 +391,7 @@ async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> 
         )
         assert waited.token == foreground_claim
         await coordinator.runtime.release_wait(job.job_id, waited.token)
-        assert len(await coordinator.runtime.pending_deliveries()) == 1
+        assert len(await coordinator.runtime.pending_outcomes()) == 1
     finally:
         await coordinator.stop()
 
@@ -614,30 +418,6 @@ async def test_failed_worker_sync_reuses_runtime_without_replaying_jobs(
         assert coordinator._task is not failed
         assert coordinator.runtime is runtime
         assert (await runtime.lookup(job.job_id, owner=job.owner, depth=0)).result == "Saved answer"
-    finally:
-        await coordinator.stop()
-
-
-@pytest.mark.asyncio
-async def test_frozen_recipient_replacement_has_terminal_delivery_disposition(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A replaced Matrix account cannot keep an old frozen claim retrying forever."""
-    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
-    job = await _finish_job(coordinator)
-    sent = AsyncMock(return_value=None)
-    monkeypatch.setattr(runtime_module, "send_message_result", sent)
-    try:
-        await coordinator.deliver_pending()
-        assert sent.await_count == 1
-        bot = coordinator.bot_provider("team")
-        assert bot is not None
-        bot.matrix_id = MatrixID.parse("@replacement_team:localhost")
-        await coordinator.deliver_pending()
-        assert sent.await_count == 1
-        assert await coordinator.runtime.pending_deliveries() == []
-        assert (await coordinator.runtime.lookup(job.job_id, owner=job.owner, depth=0)).result == "Saved answer"
     finally:
         await coordinator.stop()
 
@@ -705,7 +485,7 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
     bind_toolkit_authority(toolkit, authored_name="mcp_demo")
     function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
-    set_execution_authorizer(coordinator._authorize_execution)
+    set_execution_authorizer(coordinator.runtime_paths, coordinator._authorize_execution)
     try:
         with (
             tool_runtime_context(

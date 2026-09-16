@@ -347,3 +347,89 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
     finally:
         register_background_runtime(paths, None)
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path) -> None:
+    """Management waits share the timeout contract, while work remains discoverable."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    gate = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await gate.wait()
+        return BackgroundOutcome("completed", "answer")
+
+    tools = JobTools(paths, owner)
+    try:
+        await runtime.start(JobSpec("ordinary", "slow", 0), owner=owner, operation=operation)
+        with tool_runtime_context(context):
+            result = await tools.job("wait", "ordinary", wait_timeout=0)
+            assert json.loads(result)["status"] == "running"
+            gate.set()
+            assert await tools.job("wait", "ordinary", wait_timeout=None) == "answer"
+    finally:
+        gate.set()
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_cancel_acknowledges_only_saved_management_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    save_fails: bool,
+) -> None:
+    """A saved cancellation receipt suppresses completion; failed parent saves remain discoverable."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        return BackgroundOutcome("completed", "unreachable")
+
+    storage = storage_factory()
+    if save_fails:
+
+        def fail_save(*_args: object, **_kwargs: object) -> None:
+            msg = "storage unavailable"
+            raise RuntimeError(msg)
+
+        monkeypatch.setattr(type(storage), "upsert_run", fail_save)
+    try:
+        await runtime.start(JobSpec("cancelled", "slow", 0), owner=owner, operation=operation)
+        model = DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("job", "cancel", action="cancel", job_id="cancelled")]),
+                ModelResponse(content="stopped"),
+            ],
+        )
+        install_tool_job_execution(model)
+        agent = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage)
+
+        @owned_tool_execution
+        async def run() -> RunOutput:
+            set_consumption_storage(storage_factory)
+            return await agent.arun("cancel", session_id=context.session_id, user_id=context.requester_id)
+
+        with tool_runtime_context(context):
+            response = await run()
+        assert json.loads(response.tools[0].result)["status"] == "cancelled"
+        job = await runtime.lookup("cancelled", owner=owner, depth=0)
+        assert job.wait_acknowledged is not save_fails
+    finally:
+        storage.close()
+        register_background_runtime(paths, None)
+        await runtime.shutdown()

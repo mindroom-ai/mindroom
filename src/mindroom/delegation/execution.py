@@ -55,10 +55,12 @@ from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
+from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
+from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -73,6 +75,8 @@ from mindroom.tool_system.worker_routing import (
     run_with_tool_execution_identity,
 )
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -106,7 +110,6 @@ class _DelegationOptions(TypedDict):
 
 
 _RUNNING_CHILD_ID: ContextVar[str | None] = ContextVar("running_delegated_child", default=None)
-_FOREGROUND_WAIT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -599,8 +602,9 @@ async def _background_child_outcome(
     fresh: bool,
 ) -> BackgroundOutcome:
     """Keep child execution, liveness and settlement owned by its background job."""
-    try:
-        async with subagent_liveness(child, runtime_paths):
+    async with subagent_liveness(child, runtime_paths):
+        primary_error: Exception | None = None
+        try:
             await reserve_child_turn(child, owner=owner, runtime_paths=runtime_paths)
             outcome = await _run_child(
                 child,
@@ -613,27 +617,65 @@ async def _background_child_outcome(
                 approval_calls=approval_calls,
                 fresh=fresh,
             )
-        if outcome.response.status == RunStatus.paused:
-            return BackgroundOutcome(
-                status="awaiting_approval",
-                approval_state={
-                    "response": outcome.response.to_dict(),
-                    "toolkit_owners": [[*key, value] for key, value in outcome.toolkit_owners.items()],
-                },
+            if outcome.response.status == RunStatus.paused:
+                return BackgroundOutcome(
+                    status="awaiting_approval",
+                    approval_state={
+                        "response": outcome.response.to_dict(),
+                        "toolkit_owners": [[*key, value] for key, value in outcome.toolkit_owners.items()],
+                    },
+                )
+        except asyncio.CancelledError:
+            await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
+            raise
+        except Exception as error:
+            primary_error = error
+            try:
+                await interrupt_child(
+                    child,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    reason=str(error),
+                    status="failed",
+                )
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Native delegation cleanup failed after execution failure",
+                    delegation_id=child.delegation_id,
+                    error=str(cleanup_error),
+                    exc_info=True,
+                )
+                return BackgroundOutcome(
+                    status="failed",
+                    result=(
+                        f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}"
+                    ),
+                )
+        try:
+            receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
+        except Exception as settlement_error:
+            if primary_error is None:
+                raise
+            logger.warning(
+                "Native delegation settlement failed after execution failure",
+                delegation_id=child.delegation_id,
+                error=str(settlement_error),
+                exc_info=True,
             )
-    except asyncio.CancelledError:
-        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason="Delegation cancelled.")
-        raise
-    except Exception as error:
-        await interrupt_child(child, config=config, runtime_paths=runtime_paths, reason=str(error), status="failed")
-    receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
-    result = child.result or "Agent completed the task but returned no content."
-    if child.status != "completed":
-        result = f"Delegation to '{child.child_agent_name}' {child.status}: {result}"
-    status = child.status
-    assert status != "running"
-    assert status != "paused"
-    return BackgroundOutcome(status=status, result=f"{result}\n\n{receipt}")
+            return BackgroundOutcome(
+                status="failed",
+                result=(
+                    f"{primary_error}\n\n"
+                    f"Delegation settlement did not complete; recovery may still be required: {settlement_error}"
+                ),
+            )
+        result = child.result or "Agent completed the task but returned no content."
+        if child.status != "completed":
+            result = f"Delegation to '{child.child_agent_name}' {child.status}: {result}"
+        status = child.status
+        assert status != "running"
+        assert status != "paused"
+        return BackgroundOutcome(status=status, result=f"{result}\n\n{receipt}")
 
 
 async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -728,7 +770,11 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 agent_name=agent_name,
                 on_event=on_event,
             )
-            args = tool.tool_args or {}
+            wait_timeout = read_wait_timeout(
+                tool.tool_args,
+                owned_execution=(job_owns_execution() or delegation_depth > 0) and tool.tool_name != "job",
+            )
+            args = application_arguments(tool.tool_args) or {}
             retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             previous_child = None
             background_job = None
@@ -970,7 +1016,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 child.delegation_id,
                                 owner=caller_identity,
                                 depth=delegation_depth,
-                                timeout=_FOREGROUND_WAIT_SECONDS,
+                                timeout=wait_timeout,
                                 reserved_token=initial_wait_token,
                             )
                         except BaseException:

@@ -63,7 +63,8 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Research Sources](research-sources.md) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](ai-and-generation.md) - Image, video, speech, and transcription APIs.
 - [Media & Content](media-and-content.md) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, and model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](matrix-and-attachments.md) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, Chat UI actions, low-level Matrix API access, and attachment-aware workflows.
+- [Agent Chat UI Actions](chat-ui.md) - Bounded requests to reveal an agent computer, open Settings, or open Members in MindRoom Chat.
 - [Messaging & Social](messaging-and-social.md) - Email, chat, and social/community integrations.
 - [Project Management](project-management.md) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](calendar-and-scheduling.md) - Calendar APIs and MindRoom scheduling tools.
@@ -85,7 +86,7 @@ Today `matrix_message` implies both `attachments` and `matrix_room`, so the effe
 When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
 This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
-Tools like `matrix_message`, `matrix_room`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
+Tools like `matrix_message`, `matrix_room`, `chat_ui`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
 `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.

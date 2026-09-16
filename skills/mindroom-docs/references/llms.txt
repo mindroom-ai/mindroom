@@ -25,6 +25,7 @@
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/)
 - [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/)
 - [Matrix Message Full Semantics](https://docs.mindroom.chat/tools/matrix-message/)
+- [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/)
 - [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/)
 - [Project Management](https://docs.mindroom.chat/tools/project-management/)

@@ -72,7 +72,6 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_worker_key,
     resolve_worker_target,
-    tool_stays_local,
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
@@ -1460,6 +1459,7 @@ def _sandbox_proxy_test_metadata(
     *,
     default_execution_target: ToolExecutionTarget = ToolExecutionTarget.PRIMARY,
     consumes_workspace_paths: bool = False,
+    requires_primary_runtime: bool = False,
 ) -> ToolMetadata:
     return ToolMetadata(
         name=name,
@@ -1468,6 +1468,7 @@ def _sandbox_proxy_test_metadata(
         category=ToolCategory.DEVELOPMENT,
         default_execution_target=default_execution_target,
         consumes_workspace_paths=consumes_workspace_paths,
+        requires_primary_runtime=requires_primary_runtime,
     )
 
 
@@ -1491,6 +1492,54 @@ def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytes
     )
 
     assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is True
+
+
+def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A catalog declaration must win over global and per-agent worker routing requests."""
+    tool_name = "declared_primary_runtime_test"
+    monkeypatch.setitem(
+        TOOL_METADATA,
+        tool_name,
+        _sandbox_proxy_test_metadata(tool_name, requires_primary_runtime=True),
+    )
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox:8765",
+        execution_mode="all",
+    )
+
+    assert TOOL_METADATA[tool_name].requires_primary_runtime is True
+    assert sandbox_proxy_module.sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths) is False
+    assert (
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=[tool_name],
+        )
+        is False
+    )
+
+
+def test_primary_default_tool_remains_explicitly_worker_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A primary default alone must not become a non-overridable primary-runtime restriction."""
+    tool_name = "primary_default_override_test"
+    monkeypatch.setitem(TOOL_METADATA, tool_name, _sandbox_proxy_test_metadata(tool_name))
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox:8765",
+        execution_mode="off",
+    )
+
+    assert TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.PRIMARY
+    assert TOOL_METADATA[tool_name].requires_primary_runtime is False
+    assert (
+        sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
+            tool_name,
+            runtime_paths=runtime_paths,
+            worker_tools_override=[tool_name],
+        )
+        is True
+    )
 
 
 def test_attachment_save_uses_workspace_consumer_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5865,8 +5914,13 @@ class TestWorkerToolsOverride:
     @pytest.mark.parametrize(
         "tool_name",
         [
+            "approved_egress",
+            "attachments",
             "callback_manager",
+            "chat_ui",
             "desktop",
+            "external_trigger_manager",
+            "github",
             "gmail",
             "google_calendar",
             "google_docs",
@@ -5875,6 +5929,7 @@ class TestWorkerToolsOverride:
             "homeassistant",
             "invite_router",
             "oauth_connections",
+            "script",
             "todo",
             "usage_stats",
         ],
@@ -5899,7 +5954,7 @@ class TestWorkerToolsOverride:
             )
             is False
         )
-        assert tool_stays_local(tool_name)
+        assert TOOL_METADATA[tool_name].requires_primary_runtime is True
         assert (
             sandbox_proxy_module.sandbox_proxy_enabled_for_tool(
                 tool_name,
@@ -5909,9 +5964,51 @@ class TestWorkerToolsOverride:
             is False
         )
 
+    def test_get_tool_by_name_keeps_chat_ui_local_when_explicitly_worker_routed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A configured worker_tools entry must retain the live primary-runtime context boundary."""
+
+        class _ForbiddenClient:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                msg = "Sandbox proxy should not be used for local-only tools."
+                raise AssertionError(msg)
+
+        runtime_paths = _configure_proxy_runtime(
+            monkeypatch,
+            proxy_url="http://sandbox:8765",
+            proxy_token=_TEST_AUTH_TOKEN,
+            execution_mode="all",
+            credential_policy={},
+        )
+        monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
+        execution_identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="general",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+
+        tool = get_tool_by_name(
+            "chat_ui",
+            runtime_paths,
+            worker_tools_override=["chat_ui"],
+            worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
+        )
+        entrypoint = tool.async_functions["show_computer"].entrypoint
+        assert entrypoint is not None
+
+        result = json.loads(asyncio.run(entrypoint()))
+        assert result["status"] == "error"
+        assert "runtime context" in result["message"]
+
     def test_usage_stats_stays_local(self) -> None:
         """Usage scans must not leave the primary runtime."""
-        assert tool_stays_local("usage_stats")
+        assert TOOL_METADATA["usage_stats"].requires_primary_runtime is True
 
     def test_browser_can_still_use_explicit_worker_routing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Host-browser isolation must not be disabled by the optional Matrix desktop target."""

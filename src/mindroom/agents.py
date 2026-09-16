@@ -1975,7 +1975,7 @@ def create_agent(
     )
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
-    install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth, checkpoint=True)
+    install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
 
     logger.info(
         "Created agent",

@@ -1819,7 +1819,9 @@ class TestAgentBot(AgentBotTestBase):
                     selected_value=selection.selected_value,
                 )
                 if failure_stage == "queued_cancel":
-                    assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=0.01) is False
+                    # This checks ownership recovery, not millisecond shutdown latency.
+                    # Allow queued acquisition cancellation and shielded reservation cleanup to finish.
+                    assert await bot._response_runner.drain_inbox_responses(cancel_after_seconds=1.0) is False
                 else:
                     await bot._response_runner.drain_inbox_responses()
 

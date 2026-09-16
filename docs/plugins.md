@@ -163,6 +163,9 @@ The MCP gateway omits these toolkits from discovery and rejects direct schema an
 Agent runs without a room also hide these tools using the same metadata.
 This requirement describes runtime compatibility; it does not grant or replace tool authorization.
 
+Set `requires_primary_runtime=True` when a toolkit depends on process-local services or primary-runtime authority and must never be routed to a worker, even if an agent lists it in `worker_tools`.
+This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
+
 ## OAuth providers
 
 An OAuth module registers provider definitions without registering FastAPI routes.
@@ -403,7 +406,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `auth_provider` | string | `None` | OAuth provider identifier when using OAuth-based setup |
 | `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
 | `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
-| `requires_primary_runtime` | bool | `false` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
+| `requires_primary_runtime` | boolean | `False` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
 
 ### Dependencies
 

@@ -2223,7 +2223,7 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
 When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
+Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
 Agent-scoped workers snapshot only that agent's projected context files and assigned knowledge bases, while scopes that intentionally share one worker across multiple agents keep the broader shared projection for that worker.
 Writable file-memory paths are rewritten into worker-owned state instead of being mounted from the host config tree.
@@ -2235,7 +2235,7 @@ That list includes `spotify` and `homeassistant`.
 Configured `mcp_<server_id>` tools work on every worker scope: generated OAuth providers follow the selected agent's effective credential scope, while non-OAuth servers use the shared MCP session without requester credentials.
 For OAuth-backed MCP, `shared` uses one agent-owned connection, `user` reuses one requester-owned connection across agents, `user_agent` isolates each requester-agent pair, and unscoped uses one installation-level connection.
 Among those shared-scope integrations, `homeassistant` always stays local regardless of `worker_tools` and is never proxied to the sandbox.
-`github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, and `oauth_connections` also always stay local.
+Credential-backed integrations that declare `requires_primary_runtime=True` also always stay local.
 `spotify` can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 
@@ -2523,9 +2523,12 @@ When configured, a delegation tool is automatically added to the agent, so you d
 
 The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
 Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
-Managed Matrix calls wait up to 10 seconds before returning an exact job handle while the child continues in the background.
+Managed Matrix calls wait until completion or human input by default.
+The shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
+Human input releases the wait while the child keeps working; it does not automatically pause the child.
 Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
-The accepted `action` values are `list`, `inspect`, `wait`, `resume`, and `cancel`; every action except `list` requires `job_id`.
+The accepted `action` values are `list`, `inspect`, `wait`, and `cancel`; every action except `list` requires `job_id`.
+The `wait` action accepts the same optional `wait_timeout` budget.
 Use `continue_subagent` with the reusable subagent ID for a follow-up in the same child session after its previous turn returns.
 The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
 Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
@@ -3654,7 +3657,8 @@ The dashboard remains a manual alternative only when no `connect_url` is availab
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, and model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, summaries, model overrides, Chat UI actions, low-level Matrix API access, and attachment-aware workflows.
+- [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, or open Members in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.
 - [Project Management](https://docs.mindroom.chat/tools/project-management/) - Git hosting, issue trackers, docs platforms, per-thread work plans, and task managers.
 - [Calendar & Scheduling](https://docs.mindroom.chat/tools/calendar-and-scheduling/) - Calendar APIs and MindRoom scheduling tools.
@@ -3676,7 +3680,7 @@ Today `matrix_message` implies both `attachments` and `matrix_room`, so the effe
 When a tool runs inside a Matrix-connected agent, it receives a `ToolRuntimeContext` via a context variable.
 This context carries the current `room_id`, source `thread_id`, canonical `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` preserves the raw inbound thread provenance, while `resolved_thread_id` is the canonical thread scope after compatible plain replies and other transitive resolution are applied.
-Tools like `matrix_message`, `matrix_room`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
+Tools like `matrix_message`, `matrix_room`, `chat_ui`, `thread_tags`, `thread_resolution`, and `matrix_api` use this context to act on the correct room and canonical thread without the caller passing explicit IDs.
 `thread_tags` can also target another authorized room, but it still checks the target room's canonical thread root and requester membership before writing the shared tag state.
 `thread_tags.tag_thread()` and `thread_tags.untag_thread()` still use the active thread when the caller explicitly repeats the current `room_id`.
 `thread_tags.list_thread_tags()` uses the active thread by default, but passing `room_id` without `thread_id` forces room-wide listing even from inside an active thread.
@@ -8290,6 +8294,81 @@ Sections require a non-empty main message body.
 HTML supports basic fragments only, with no scripts, styles, images, forms, media, SVG, math, or interactive elements; links permit `http`, `https`, and `mailto`.
 Direct send/edit calls reject interactive prompts; use normal agent response delivery for interactive prompts.
 
+# Agent Chat UI Actions
+
+The `chat_ui` tool lets an agent ask MindRoom Chat to reveal its worker computer, open a Settings section, or open the room's Members panel.
+It sends a normal Matrix notice with a readable fallback and bounded action metadata.
+The tool reports that the request was sent; it cannot know whether a client opened the requested interface.
+
+## Enable the tool
+
+Add `chat_ui` to the agent that should be allowed to request UI actions:
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Research topics with browser and shell tools.
+    model: default
+    tools:
+      - chat_ui
+      - browser
+      - shell
+```
+
+The toolkit is opt-in and requires a live Matrix room context.
+It does not accept a URL, credential, API endpoint, DOM selector, Matrix identity, room ID, or thread ID from the model.
+MindRoom supplies the addressed requester, configured agent sender, current room, and canonical thread from the active turn.
+Delegated transport identities and team contexts are rejected because they cannot identify one Matrix sender and one agent worker safely.
+
+## Actions
+
+- `show_computer()` asks Chat to reveal the requesting agent's worker computer in watch mode.
+- `open_settings(section="general")` opens `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about`.
+- `open_panel(panel="members")` opens the Members side panel. `members` is the only supported panel in this release.
+
+Each call sends an `m.room.message` notice in the current conversation.
+Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
+The Matrix event sender must equal the metadata's agent identity, or the request is rejected before sending.
+
+## What the user sees
+
+MindRoom Chat automatically acts only for the addressed user when that exact room and thread are active, the client is visible and focused, the request arrived as a current live event, and the deployment explicitly trusts the agent's homeserver for automatic opening.
+When the conversation is inactive, the event is historical, or automatic opening is otherwise unavailable, the notice remains in the conversation with a button the addressed user can choose later.
+A dismissed request stays dismissed, while a new event can request the action again.
+
+Other Matrix clients display the notice's fallback text, such as “Open Settings (general) in MindRoom Chat.”
+Receiving or sending the notice is not evidence that a client opened anything.
+
+The Chat deployment controls automatic opening through its runtime `config.json`:
+
+```json
+{
+  "mindroom": {
+    "uiActions": {
+      "autoOpenFromHomeservers": ["mindroom.chat"]
+    }
+  }
+}
+```
+
+The shipped MindRoom Chat configuration lists `mindroom.chat`.
+An absent or empty list keeps requests passive with explicit buttons.
+Entries match the exact server name in the agent's Matrix ID, including any port; URLs, wildcards, and implicit subdomain matching are unsupported.
+The existing joined, same-homeserver `mindroom_` identity checks still apply.
+Operators must reserve and control the agent username namespace on any homeserver they allow, as `mindroom.chat` does.
+UI requests reveal only the bounded Chat surfaces described above; worker computer access remains independently authorized by the configured computer gateway.
+
+## Worker computer requirements
+
+`show_computer()` uses the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.
+The target agent still needs a dedicated Docker or Kubernetes worker, effective `worker_scope: user_agent`, worker-routed browser tools, and an operator-configured Chat computer API origin.
+See [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) for the backend, worker, proxy, and Chat configuration.
+
+If the computer gateway or requesting agent is unavailable, Chat keeps the request visible and shows an unavailable state instead of using an event-provided endpoint.
+When a worker computer is already under human control, an automatic request does not replace that session; the notice remains available for the user to choose.
+Opening the worker from a request starts watch mode, and another request for the same agent preserves the current worker view instead of resetting it.
+
 # Matrix Desktop Bridge
 
 The `desktop` tool lets a cloud-hosted MindRoom agent inspect and operate explicitly allowlisted applications on a local computer without opening an inbound port.
@@ -10526,7 +10605,8 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
 Fast calls return the child's response inline.
-Managed Matrix calls wait up to 10 seconds; longer work returns an exact job handle and continues in the background.
+Managed Matrix calls wait until completion or a human follow-up by default.
+Set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
 OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
@@ -10562,21 +10642,33 @@ Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions
 
 ### Background jobs
 
-Every model-invoked application tool uses a shared managed job owner when a conversation runtime is present.
-Original tool names and argument schemas stay unchanged.
-Fast calls return their original results; a call that outlasts its foreground wait returns a `job_id` while the accepted work continues.
-The automatically added `job(action, job_id=None, limit=20, offset=0)` function manages both ordinary tools and native delegation.
+Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
+Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
+This waiting budget is separate from a tool's own execution or network timeout.
+
+| `wait_timeout` | Behavior |
+| --- | --- |
+| Omitted or `null` | Wait until completion or a human follow-up. |
+| `0` | Return a job handle immediately while execution continues. |
+| Positive finite seconds | Return the result if ready, otherwise return a handle when the waiting budget expires. |
+
+Negative, nonnumeric, boolean, and nonfinite waiting budgets are rejected before execution.
+A human follow-up releases the foreground wait without pausing or cancelling the accepted work.
+The same execution continues across subsequent parent turns, and its result remains discoverable if compaction loses the handle.
+
+The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None)` function manages ordinary tools and native delegation.
 The management function never backgrounds itself.
 
 | Action | Behavior |
 | --- | --- |
 | `list` | Discover accessible jobs, active first, with bounded pagination and retained terminal outcomes. |
 | `inspect` | Read an exact job's status and saved summary without consuming it. |
-| `wait` | Wait up to ten seconds and retrieve the original result, including supported structured data and media. |
-| `resume` | Release a cooperative human hold; never grant approval. |
-| `cancel` | Cancel the exact job and wait for owned execution and cleanup to settle. |
+| `wait` | Retrieve the original result, including supported structured data and media, using the same optional waiting budget. |
+| `cancel` | Request cancellation and wait for owned execution and cleanup to settle. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
+Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
+A cleanup failure is retained as a failure instead of claiming successful cancellation.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
@@ -10586,22 +10678,32 @@ Still-authorized deferred tools remain discoverable without loading them or conn
 Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
 Remote service availability alone does not revoke access to a saved result.
 
-A queued human follow-up releases the foreground wait and holds the next cooperative application-tool boundary.
-An external operation already in progress may finish.
-Provider-hosted internal tools cannot be individually detached or interrupted by the application-tool boundary.
-Native child approval reached during the original foreground wait remains inline in the parent run, with the paused parent-child continuation retained durably.
-After delegation detaches, the exact reserved `job(action="wait", job_id=...)` call presents pending approval through that persisted continuation.
-Resuming a human hold never approves a tool, and current execution authority is rechecked before the next retained callable runs.
-Nested work remains owned by its accepted outer job.
-Unmanaged detached API execution keeps its existing synchronous lifetime and approval restrictions.
+Native child approvals retain the existing persisted parent-child continuation and approval cards.
+After delegation detaches, `job(action="wait", job_id=...)` presents a pending approval through that same continuation.
+Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
+Nested tools remain part of their accepted outer job rather than starting independent jobs.
+Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
+Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
+Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.
 
-Completed background jobs notify the original Matrix conversation and exact agent or team.
-Notifications enter normal conversation ordering; the response checks the immutable delivery claim and current outcome after acquiring the conversation lock.
+After the agent finishes independent work, the runtime waits for outstanding jobs without repeated model polling.
+Streaming and non-streaming responses show waiting progress, and a human message can release the wait immediately.
+Resuming an approved tool follows the same waiting behavior.
+Ready outcomes or approval boundaries cause one internal continuation using the native result-retrieval tool.
+A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
+Idle completion work uses an internal event-journal source and the existing serialized conversation runner, without sending a synthetic completion message to Matrix.
+Runtime updates retain requester authorization but are identified separately from human input.
+
 A result is consumed only after exact persisted parent tool-result evidence is verified.
-Inspecting, listing, or merely sending a notification does not consume it.
-Stale and consumed notifications settle without another model response.
-Failed sends retry the same frozen payload and Matrix transaction ID; an account mismatch blocks that delivery while preserving authorized result access.
-Completed outcomes survive restart; abandoned work becomes interrupted and is never restarted automatically.
+Inspecting, listing, or scheduling internal completion work does not consume it.
+Consumed results, errors, and acknowledged cancellation do not cause another completion response.
+If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
+Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
+
+Each durable result envelope has a 64 MiB encoded JSON limit, including base64 expansion, its artifacts, and structural overhead.
+A job record can contain several envelopes for its result, state updates, events, and replay data, so this is not a limit on total job storage.
+A result that exceeds this limit becomes a failed job with a size-limit error.
+Artifact files are read within the remaining budget; the configured large-output policy can save eligible text to a file before result encoding.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.
 The folder date is the delegation's start date in UTC, so approval continuations keep the same location across midnight and restarts.
@@ -13061,6 +13163,9 @@ The MCP gateway omits these toolkits from discovery and rejects direct schema an
 Agent runs without a room also hide these tools using the same metadata.
 This requirement describes runtime compatibility; it does not grant or replace tool authorization.
 
+Set `requires_primary_runtime=True` when a toolkit depends on process-local services or primary-runtime authority and must never be routed to a worker, even if an agent lists it in `worker_tools`.
+This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
+
 ## OAuth providers
 
 An OAuth module registers provider definitions without registering FastAPI routes.
@@ -13301,7 +13406,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `auth_provider` | string | `None` | OAuth provider identifier when using OAuth-based setup |
 | `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
 | `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
-| `requires_primary_runtime` | bool | `false` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
+| `requires_primary_runtime` | boolean | `False` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
 
 ### Dependencies
 
@@ -18008,7 +18113,9 @@ MindRoom's architecture consists of several key components working together.
 | `execution_preparation.py` | Request-scoped execution preparation for prompts and persisted replay |
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
+| `custom_tools/chat_ui.py` | Runtime-bound MindRoom Chat UI action requests with canonical Matrix conversation and sender identity |
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
+| `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
@@ -18634,10 +18741,15 @@ The child uses the normal agent response envelope, so its history, tools, and mo
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
 Managed application calls and native delegation share a durable tool-job owner that retains execution after the foreground wait ends.
 Job IDs identify exact tool calls or delegation turns, while subagent IDs retain child conversations.
-Completion events carry the original requester and exact recipient into normal durable Matrix ingress and conversation ordering.
-Notification claims freeze content and transaction IDs before sending; foreground consumption is acknowledged only after durable parent-result readback, and stale completion events are suppressed under the response lifecycle lock.
-Config reload retains active jobs while every control or delivery checks current authorization.
+Completed jobs admit nonprojected internal event-journal sources carrying the original requester and exact recipient into the existing response owner.
+Completion does not send Matrix messages back through ingress.
+Foreground waits and automatic joining share durable parent-result readback, while the response lifecycle lock serializes internal completions with human turns.
+The runtime waits outside the model and supplies one ready-result continuation at a response boundary.
+Human input releases waits without pausing execution.
+Config reload retains active jobs while controls and result admission check current authorization.
 Shutdown cancels owned work; recovery retains terminal outcomes and marks abandoned execution interrupted without replay.
+Accepted jobs retain their original source identity so a still-pending request recovers stored outcomes instead of repeating its tool calls.
+Internal completion defers to that original source while it remains pending, preventing duplicate result responses.
 
 Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and approval semantics stay in `src/mindroom/delegation/`.
 
@@ -18647,13 +18759,14 @@ Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and
 | `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
 | `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
 | `delegation/background.py` | Native child adapter for the shared job owner |
-| `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, wait and immutable delivery claims |
+| `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, interruptible waits and durable result claims |
 | `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |
 | `tool_jobs/resources.py` | Shared connection and cleanup lifetime across foreground handoff |
 | `custom_tools/job.py` | One reserved management schema and exact native wait projection |
-| `tool_jobs/completion.py` | Current claim admission under the response lifecycle lock |
-| `tool_jobs/control.py` | Human-follow-up signals and cooperative tool checkpoints |
-| `orchestration/tool_job_runtime.py` | Job service lifecycle and durable Matrix completion sends |
+| `tool_jobs/completion.py` | Internal completion sources, admission and automatic joining at response boundaries |
+| `tool_jobs/control.py` | Human-follow-up wait signals and explicit cancellation checkpoints |
+| `tool_jobs/wait_timeout.py` | Validation and separation of framework waiting metadata from application arguments |
+| `orchestration/tool_job_runtime.py` | Job service lifecycle and internal completion wakeups |
 | `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
 | `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
 | `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |
@@ -18800,6 +18913,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 
 | Boundary owners | Behavioral evidence |
 | --- | --- |
+| `tool_jobs/runtime.py` | `tests/test_tool_jobs.py` preserves exact outcomes, native approval state, and consumption evidence while discarding retired pause and Matrix-notification fields from unreleased job snapshots. |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
 | [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover precedence and retained duplicates. |
 | [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments and placeholder pairs; [Responses replay tests][openai-replay-tests] and [history tests][native-history-tests] cover reasoning tails, filtered call/result links, bounded SQLite replay, and unchanged canonical state. |
@@ -19138,7 +19252,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
-| Application tools lack a public accepted-execution owner and per-call native wait projection. | Add ownership around approved FunctionCalls and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
+| Application tools lack a public accepted-execution owner, framework waiting metadata, and per-call native wait projection. | Add ownership around approved FunctionCalls, provider-schema metadata hooks, and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
 | Agent and Team cleanup closes connectable resources when detached work still owns them. | Add shared resource leases with task-affine async teardown. | `tool_jobs/agno_compat_resources.py`; physical connections close after the final execution owner releases them. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
@@ -19154,7 +19268,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Embedder requests are built separately across sync, async, and batch paths. | Add shared request and response hooks while retaining typed provider failures. | `agno_compat_openai_embedder.py`. |
 | Denying a persisted tool call requires a live Function and private continuation interception. | Support denial after tool removal and an owner callback before resumed-tool lookup. | `agno_compat_approval.py`. |
 | Message projection and historical-media policy require private message interception. | Propose supported message-preparation hooks with explicit history-mutation ownership. | `agno_compat_model_hooks.py`, `history/agno_compat_message_builder.py`. |
-| Post-tool callbacks lack mutable messages/results at the required stage. | Extend the callback surface after result formatting and media insertion. | `agno_compat_model_hooks.py`. |
+| Post-tool callbacks lack mutable messages/results at the required stage; approved continuations bypass them. | Extend the callback surface after result formatting, media insertion, and resumed batches at response entry. | `agno_compat_model_hooks.py`. |
 | Invocation, retry-cycle, scoped request, and final SDK payload hooks are missing. | Define each lifecycle stage separately, including wrapper order, cache behavior, and cancellation cleanup. | `agno_compat_model_hooks.py`. |
 | Tool-hook chains cannot express the required deferred-result and synchronous execution ownership. | Propose an execution hook with regression coverage for cache hits, argument rewrites, and cancellation. | `tool_system/agno_compat_tool_hooks.py`. |
 | Function schema postprocessors are lost or misbound during copying/preparation. | Add a supported postprocessor that survives copies and runs after schema preparation. | `tool_system/agno_compat_function_schema.py`. |
@@ -19178,11 +19292,13 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
-| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, prompt caching, and participation decisions remain in their owning modules; `tool_jobs/agno_compat_execution.py` owns managed job checkpoints before agent primary and fallback provider requests. |
+| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
+| `tool_jobs/agno_compat_execution.py` | Approved FunctionCall driver binding, provider-schema projection of shared wait metadata, and exact-call native requirement projection. | `tool_jobs/agno_execution.py`, `wait_timeout.py`, and `runtime.py` own admission, wait validation, execution, result claims, and cancellation. |
+| `tool_jobs/agno_compat_resources.py` | Agent/Team resource connection and teardown binding. | `tool_jobs/resources.py` retains shared leases and closes resources after their final execution owner releases them. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs and retained terminal metadata. | `openai_models.py` retains provider classes and canonical history/replay policy. |
 | `agno_compat_openai_responses.py` | Responses stream completion, response-ID publication, retry protection, and continuation adaptation. | `openai_models.py` retains request configuration and native/portable replay policy. |
 | `agno_compat_openai_responses_items.py` | Capture of provider output items lost by Agno parsing. | `openai_response_replay.py` retains canonical filtering, output ordering, and replay selection. |
@@ -21448,7 +21564,7 @@ The `worker_tools` field has three states:
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Some local-only tools stay in the primary runtime even when listed: `approved_egress`, `attachments`, `callback_manager`, `desktop`, `external_trigger_manager`, `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, `invite_router`, `oauth_connections`, and `todo`.
+Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
 If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
@@ -21458,7 +21574,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 
 `worker_tools` controls which tools run in the sandbox proxy.
 `worker_scope` controls how those sandbox runtimes are shared between calls.
-Some credential-backed tools always stay local regardless of `worker_tools`: `github`, `gmail`, `google_calendar`, `google_docs`, `google_drive`, `google_sheets`, `homeassistant`, and `oauth_connections`.
+Credential-backed tools that declare `requires_primary_runtime=True` always stay local regardless of `worker_tools`.
 Additionally, `spotify` is a shared-only integration that requires `worker_scope` unset or `shared` but can still be proxied through the sandbox.
 The built-in `memory`, `delegate`, and `self_config` tools are also created directly in the primary runtime today and are not routed through `worker_tools`.
 

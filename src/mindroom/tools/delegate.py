@@ -18,7 +18,7 @@ register_builtin_tool_metadata(
     ToolMetadata(
         name="delegate",
         display_name="Subagents",
-        description="Start allowed subagents, continue conversations, and inspect or control background jobs",
+        description="Start allowed subagents and continue conversations",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

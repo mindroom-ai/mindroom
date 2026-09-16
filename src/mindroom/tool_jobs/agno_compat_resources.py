@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import copy
+from threading import Lock
 from typing import TYPE_CHECKING
 
 from agno.agent import _init as agent_init
@@ -29,6 +30,7 @@ type _Connect[Actor] = Callable[[Actor], None]
 type _AsyncConnect[Actor] = Callable[[Actor], Coroutine[object, object, None]]
 
 _INSTALLED = False
+_INSTALL_LOCK = Lock()
 
 
 def _sync_bindings[Actor: _Actor](
@@ -121,22 +123,27 @@ def _async_bindings[Actor: _Actor](
 def install_execution_resource_bindings() -> None:
     """Bind only connection admission and exact toolkit-list teardown ownership."""
     global _INSTALLED
-    if _INSTALLED:
-        return
-    vars(agent_init)["connect_connectable_tools"], vars(agent_init)["disconnect_connectable_tools"] = _sync_bindings(
-        agent_init.connect_connectable_tools,
-        agent_init.disconnect_connectable_tools,
-    )
-    vars(team_init)["_connect_connectable_tools"], vars(team_init)["_disconnect_connectable_tools"] = _sync_bindings(
-        team_init._connect_connectable_tools,
-        team_init._disconnect_connectable_tools,
-    )
-    vars(agent_init)["connect_mcp_tools"], vars(agent_init)["disconnect_mcp_tools"] = _async_bindings(
-        agent_init.connect_mcp_tools,
-        agent_init.disconnect_mcp_tools,
-    )
-    vars(team_init)["_connect_mcp_tools"], vars(team_init)["_disconnect_mcp_tools"] = _async_bindings(
-        team_init._connect_mcp_tools,
-        team_init._disconnect_mcp_tools,
-    )
-    _INSTALLED = True
+    with _INSTALL_LOCK:
+        if _INSTALLED:
+            return
+        vars(agent_init)["connect_connectable_tools"], vars(agent_init)["disconnect_connectable_tools"] = (
+            _sync_bindings(
+                agent_init.connect_connectable_tools,
+                agent_init.disconnect_connectable_tools,
+            )
+        )
+        vars(team_init)["_connect_connectable_tools"], vars(team_init)["_disconnect_connectable_tools"] = (
+            _sync_bindings(
+                team_init._connect_connectable_tools,
+                team_init._disconnect_connectable_tools,
+            )
+        )
+        vars(agent_init)["connect_mcp_tools"], vars(agent_init)["disconnect_mcp_tools"] = _async_bindings(
+            agent_init.connect_mcp_tools,
+            agent_init.disconnect_mcp_tools,
+        )
+        vars(team_init)["_connect_mcp_tools"], vars(team_init)["_disconnect_mcp_tools"] = _async_bindings(
+            team_init._connect_mcp_tools,
+            team_init._disconnect_mcp_tools,
+        )
+        _INSTALLED = True

@@ -10,7 +10,8 @@ from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStar
 
 from mindroom.ai import _collect_streamed_response_content, ai_response
 from mindroom.config.main import Config
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_jobs.completion import background_wait_notice
+from mindroom.tool_system.events import BackgroundWaitChunk, ToolTraceEntry
 from tests.conftest import make_turn_context
 
 if TYPE_CHECKING:
@@ -193,3 +194,22 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(monkeypat
     assert body == "Before. After."
     assert trace == []
     assert seen_kwargs["show_tool_calls"] is False
+
+
+@pytest.mark.asyncio
+async def test_collected_wait_updates_owner_before_requesting_next_chunk() -> None:
+    """A nonstream Matrix response must expose wait progress before its generator parks."""
+    notices: list[str] = []
+
+    async def notice(text: str) -> None:
+        notices.append(text)
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield "Independent work done."
+        yield BackgroundWaitChunk(" Waiting for background work")
+        assert notices == ["Independent work done. Waiting for background work"]
+        yield " Result received."
+
+    with background_wait_notice(notice):
+        body, _trace = await _collect_streamed_response_content(stream(), show_tool_calls=True)
+    assert body == "Independent work done. Result received."

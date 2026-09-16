@@ -161,10 +161,15 @@ The child uses the normal agent response envelope, so its history, tools, and mo
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
 Managed application calls and native delegation share a durable tool-job owner that retains execution after the foreground wait ends.
 Job IDs identify exact tool calls or delegation turns, while subagent IDs retain child conversations.
-Completion events carry the original requester and exact recipient into normal durable Matrix ingress and conversation ordering.
-Notification claims freeze content and transaction IDs before sending; foreground consumption is acknowledged only after durable parent-result readback, and stale completion events are suppressed under the response lifecycle lock.
-Config reload retains active jobs while every control or delivery checks current authorization.
+Completed jobs admit nonprojected internal event-journal sources carrying the original requester and exact recipient into the existing response owner.
+Completion does not send Matrix messages back through ingress.
+Foreground waits and automatic joining share durable parent-result readback, while the response lifecycle lock serializes internal completions with human turns.
+The runtime waits outside the model and supplies one ready-result continuation at a response boundary.
+Human input releases waits without pausing execution.
+Config reload retains active jobs while controls and result admission check current authorization.
 Shutdown cancels owned work; recovery retains terminal outcomes and marks abandoned execution interrupted without replay.
+Accepted jobs retain their original source identity so a still-pending request recovers stored outcomes instead of repeating its tool calls.
+Internal completion defers to that original source while it remains pending, preventing duplicate result responses.
 
 Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and approval semantics stay in `src/mindroom/delegation/`.
 
@@ -174,13 +179,14 @@ Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and
 | `ai.py` | `run_delegated_child_response`, supplied as a typed callback to the native driver |
 | `delegation/execution.py` | Parent waits, approval gates, child approval projection, and parent continuation |
 | `delegation/background.py` | Native child adapter for the shared job owner |
-| `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, wait and immutable delivery claims |
+| `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, interruptible waits and durable result claims |
 | `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |
 | `tool_jobs/resources.py` | Shared connection and cleanup lifetime across foreground handoff |
 | `custom_tools/job.py` | One reserved management schema and exact native wait projection |
-| `tool_jobs/completion.py` | Current claim admission under the response lifecycle lock |
-| `tool_jobs/control.py` | Human-follow-up signals and cooperative tool checkpoints |
-| `orchestration/tool_job_runtime.py` | Job service lifecycle and durable Matrix completion sends |
+| `tool_jobs/completion.py` | Internal completion sources, admission and automatic joining at response boundaries |
+| `tool_jobs/control.py` | Human-follow-up wait signals and explicit cancellation checkpoints |
+| `tool_jobs/wait_timeout.py` | Validation and separation of framework waiting metadata from application arguments |
+| `orchestration/tool_job_runtime.py` | Job service lifecycle and internal completion wakeups |
 | `delegation/lifecycle.py` | Child preparation, attempt identity, outcome transitions, and publication to storage and audit |
 | `delegation/recovery.py` | Abandoned-turn reconciliation and recursive cancellation from retained Agno runs |
 | `delegation/sessions.py` | Scoped handle reads, atomic reservations, snapshots, and liveness locks |

@@ -1,8 +1,9 @@
-"""Generic job ownership, scoped discovery, admission, and durable delivery."""
+"""Generic job ownership, scoped discovery, admission, and durable consumption."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
-async def test_scoped_listing_keeps_delivered_outcomes_across_turns_and_restart(tmp_path: Path) -> None:
+async def test_scoped_listing_keeps_consumed_outcomes_across_turns_and_restart(tmp_path: Path) -> None:
     """Discovery survives forgotten handles without exposing another caller or consuming results."""
     runtime = ToolJobRuntime(tmp_path)
 
@@ -92,47 +93,8 @@ async def test_failed_admission_rolls_back_without_subscription_or_execution(
 
 
 @pytest.mark.asyncio
-async def test_old_delivery_ack_cannot_consume_replacement_generation(tmp_path: Path) -> None:
-    """An in-flight approval send retains its frozen identity through cancellation."""
-    runtime = ToolJobRuntime(tmp_path)
-
-    async def approval() -> BackgroundOutcome:
-        return BackgroundOutcome("awaiting_approval")
-
-    job = await runtime.start(JobSpec("approval", "delegate", 0), owner=_owner(), operation=approval)
-    waiting = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    await runtime.release_wait(job.job_id, waiting.token)
-    claim = await runtime.claim_delivery(
-        job.job_id,
-        expected_generation=waiting.job.generation,
-        content={"body": "approval"},
-        transaction_id="first",
-    )
-    assert claim is not None
-    await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
-    await runtime.acknowledge_delivery(job.job_id, "first", event_id="$old")
-    pending = await runtime.pending_deliveries()
-    assert len(pending) == 1
-    assert pending[0].generation > claim.generation
-    assert await runtime.delivery_outcome(job.job_id, claim.generation, claim.transaction_id) is None
-    replacement = await runtime.claim_delivery(
-        job.job_id,
-        expected_generation=pending[0].generation,
-        content={"body": "cancelled"},
-        transaction_id="second",
-    )
-    assert replacement is not None
-    assert replacement.transaction_id == "second"
-    await runtime.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("already_claimed", [False, True])
-async def test_stale_snapshot_cannot_create_or_retrieve_current_delivery(
-    tmp_path: Path,
-    already_claimed: bool,
-) -> None:
-    """Generation matching precedes both first claim and immutable claim retries."""
+async def test_stale_wait_receipt_cannot_consume_replacement_generation(tmp_path: Path) -> None:
+    """Replacing an approval invalidates its old result lease and pending generation."""
     runtime = ToolJobRuntime(tmp_path)
 
     async def approval() -> BackgroundOutcome:
@@ -141,65 +103,57 @@ async def test_stale_snapshot_cannot_create_or_retrieve_current_delivery(
     try:
         job = await runtime.start(JobSpec("approval", "delegate", 0), owner=_owner(), operation=approval)
         waiting = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-        await runtime.release_wait(job.job_id, waiting.token)
         await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
-        current = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
-        assert current.generation > waiting.job.generation
-        if already_claimed:
-            await runtime.claim_delivery(
-                job.job_id,
-                expected_generation=current.generation,
-                content={"body": "cancelled"},
-                transaction_id="current",
-            )
-        before = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
-        assert (
-            await runtime.claim_delivery(
-                job.job_id,
-                expected_generation=waiting.job.generation,
-                content={"body": "approval"},
-                transaction_id="stale",
-            )
-            is None
-        )
-        assert await runtime.lookup(job.job_id, owner=_owner(), depth=0) == before
-        claim = await runtime.claim_delivery(
-            job.job_id,
-            expected_generation=current.generation,
-            content={"body": "cancelled"},
-            transaction_id="current",
-        )
-        assert claim is not None
-        assert claim.generation == current.generation
-        assert claim.transaction_id == "current"
-        assert claim.content == {"body": "cancelled"}
+        with pytest.raises(ValueError, match="no longer belongs"):
+            await runtime.acknowledge_wait(job.job_id, waiting.token)
+        pending = await runtime.pending_outcomes()
+        assert len(pending) == 1
+        assert pending[0].generation > waiting.job.generation
+        assert await runtime.outcome(job.job_id, waiting.job.generation) is None
+        current = await runtime.outcome(job.job_id, pending[0].generation)
+        assert current is not None
+        assert current.status == "cancelled"
+        claimed = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        assert await runtime.outcome(job.job_id, pending[0].generation) is None
+        await runtime.acknowledge_wait(job.job_id, claimed.token)
+        assert await runtime.pending_outcomes() == []
     finally:
         await runtime.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_human_followup_does_not_claim_running_tool_is_paused(tmp_path: Path) -> None:
-    """Only a reached cooperative checkpoint reports paused execution."""
+async def test_human_followup_releases_wait_without_pausing_next_tool(tmp_path: Path) -> None:
+    """A human follow-up releases only the waiter while one execution crosses later checkpoints."""
     runtime = ToolJobRuntime(tmp_path)
     signal = HumanMessageSignal()
-    running, checkpoint = asyncio.Event(), asyncio.Event()
+    running, proceed, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    calls = 0
 
     async def operation() -> BackgroundOutcome:
+        nonlocal calls
+        calls += 1
         running.set()
-        await checkpoint.wait()
+        await proceed.wait()
         await job_checkpoint()
+        finished.set()
         return BackgroundOutcome("completed", "done")
 
-    job = await runtime.start(JobSpec("work", "tool", 0), owner=_owner(), operation=operation, human_signal=signal)
-    await running.wait()
-    signal.notify()
-    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
-    assert result.job.status == "running"
-    assert result.job.human_paused
-    checkpoint.set()
-    await runtime.resume(job.job_id, owner=_owner(), depth=0)
-    assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "done"
-    await runtime.shutdown()
+    try:
+        job = await runtime.start(JobSpec("work", "tool", 0), owner=_owner(), operation=operation, human_signal=signal)
+        await running.wait()
+        waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0))
+        await asyncio.sleep(0)
+        signal.notify()
+        signal.clear()
+        result = await asyncio.wait_for(waiter, 1)
+        assert result.job.status == "running"
+        assert result.token is None
+        proceed.set()
+        await asyncio.wait_for(finished.wait(), 1)
+        assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "done"
+        assert calls == 1
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -296,7 +250,7 @@ async def test_cancel_requested_remains_owned_until_operation_finally_finishes(t
     await cleaning.wait()
     assert requested.status == "cancel_requested"
     assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancel_requested"
-    assert await runtime.pending_deliveries() == []
+    assert await runtime.pending_outcomes() == []
     finished.set()
     settled = await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
     assert settled.status == "cancelled"
@@ -304,11 +258,214 @@ async def test_cancel_requested_remains_owned_until_operation_finally_finishes(t
 
 
 @pytest.mark.asyncio
-async def test_reads_are_copies_and_blocked_delivery_does_not_hide_results(
+@pytest.mark.parametrize("failed_write", [1, 2], ids=["admission", "terminal"])
+async def test_failed_cancellation_persistence_can_be_retried(
+    tmp_path: Path,
+    failed_write: int,
+) -> None:
+    """A failed cancellation write cannot poison retry or publish an undurable terminal result."""
+    runtime = ToolJobRuntime(tmp_path)
+    started = asyncio.Event()
+    human_signal = HumanMessageSignal()
+    cleanup_calls = 0
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def cleanup(_job: runtime_module.BackgroundJob) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    job = await runtime.start(
+        JobSpec("retry-cancel", "tool", 0),
+        owner=_owner(),
+        operation=operation,
+        human_signal=human_signal,
+        cancel=cleanup,
+    )
+    await started.wait()
+    original_persist = runtime._persist
+    writes = 0
+
+    async def persist(entry: runtime_module._Entry) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == failed_write:
+            msg = "injected durable write failure"
+            raise OSError(msg)
+        await original_persist(entry)
+
+    runtime._persist = persist
+    try:
+        with pytest.raises(OSError, match="injected durable write failure"):
+            await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        settled = await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        saved = json.loads((tmp_path / "tool_jobs" / "retry-cancel.json").read_text())
+        assert settled.status == "cancelled"
+        assert saved["status"] == "cancelled"
+        assert cleanup_calls == 1
+        assert not human_signal.has_subscribers
+    finally:
+        runtime._persist = original_persist
+        task = runtime._entries[job.job_id].task
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_claim", ["acknowledged", "retained"])
+async def test_failed_approval_cancellation_admission_preserves_generation_transition(
+    tmp_path: Path,
+    prior_claim: str,
+) -> None:
+    """Retry retains approval identity and invalidates every prior-generation result claim."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    job = await runtime.start(JobSpec("approval-cancel", "tool", 0), owner=_owner(), operation=approval)
+    claimed = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+    assert claimed.token is not None
+    if prior_claim == "acknowledged":
+        await runtime.acknowledge_wait(job.job_id, claimed.token)
+
+    original_persist = runtime._persist
+    writes = 0
+
+    async def persist(entry: runtime_module._Entry) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            msg = "approval cancellation admission failed"
+            raise OSError(msg)
+        await original_persist(entry)
+
+    runtime._persist = persist
+    try:
+        with pytest.raises(OSError, match="approval cancellation admission failed"):
+            await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        after_failure = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
+        assert after_failure.status == "awaiting_approval"
+        assert after_failure.generation == 0
+        assert after_failure.wait_acknowledged is (prior_claim == "acknowledged")
+        expected_token = None if prior_claim == "acknowledged" else claimed.token
+        assert runtime._entries[job.job_id].wait_token == expected_token
+
+        settled = await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        assert settled.status == "cancelled"
+        assert settled.generation == 1
+        assert not settled.wait_acknowledged
+        assert runtime._entries[job.job_id].wait_token is None
+        assert [pending.job_id for pending in await runtime.pending_outcomes()] == [job.job_id]
+        if prior_claim == "retained":
+            with pytest.raises(ValueError, match="claim no longer belongs"):
+                await runtime.acknowledge_wait(job.job_id, claimed.token)
+    finally:
+        runtime._persist = original_persist
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_default_cancellation_retry_propagates_failed_terminal_persistence(tmp_path: Path) -> None:
+    """A stale admission signal cannot report terminal success after retry persistence fails."""
+    runtime = ToolJobRuntime(tmp_path)
+    started = asyncio.Event()
+    retry_write_started = asyncio.Event()
+    release_retry_write = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    job = await runtime.start(JobSpec("retry-terminal", "tool", 0), owner=_owner(), operation=operation)
+    await started.wait()
+    original_persist = runtime._persist
+    writes = 0
+
+    async def persist(entry: runtime_module._Entry) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            msg = "initial terminal write failed"
+            raise OSError(msg)
+        if writes == 3:
+            retry_write_started.set()
+            await release_retry_write.wait()
+            msg = "retry terminal write failed"
+            raise OSError(msg)
+        await original_persist(entry)
+
+    runtime._persist = persist
+    retry: asyncio.Task[runtime_module.BackgroundJob] | None = None
+    try:
+        with pytest.raises(OSError, match="initial terminal write failed"):
+            await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        retry = asyncio.create_task(runtime.cancel(job.job_id, owner=_owner(), depth=0))
+        await asyncio.wait_for(retry_write_started.wait(), 2)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        release_retry_write.set()
+        with pytest.raises(OSError, match="retry terminal write failed"):
+            await retry
+        saved = json.loads((tmp_path / "tool_jobs" / "retry-terminal.json").read_text())
+        assert saved["status"] == "cancel_requested"
+    finally:
+        release_retry_write.set()
+        if retry is not None:
+            await asyncio.gather(retry, return_exceptions=True)
+        cancel_task = runtime._entries[job.job_id].cancel_task
+        if cancel_task is not None:
+            await asyncio.gather(cancel_task, return_exceptions=True)
+        runtime._persist = original_persist
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_operation_after_failed_cancellation_admission(tmp_path: Path) -> None:
+    """A completed failed cancellation task cannot leave its operation blocking shutdown."""
+    runtime = ToolJobRuntime(tmp_path)
+    started = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    job = await runtime.start(JobSpec("failed-cancel", "tool", 0), owner=_owner(), operation=operation)
+    await started.wait()
+    original_persist = runtime._persist
+
+    async def fail_persist(_entry: runtime_module._Entry) -> None:
+        msg = "injected durable write failure"
+        raise OSError(msg)
+
+    runtime._persist = fail_persist
+    with pytest.raises(OSError, match="injected durable write failure"):
+        await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+    runtime._persist = original_persist
+    shutdown = asyncio.create_task(runtime.shutdown())
+    done, _ = await asyncio.wait({shutdown}, timeout=0.2)
+    completed_without_rescue = shutdown in done
+    if not completed_without_rescue:
+        task = runtime._entries[job.job_id].task
+        assert task is not None
+        task.cancel()
+    await shutdown
+    assert completed_without_rescue
+
+
+@pytest.mark.asyncio
+async def test_reads_are_copies_and_consumption_hides_pending_results(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Inspect/list are pure snapshots; recipient mismatch preserves discoverable results."""
+    """Read snapshots cannot mutate stored results, and only acknowledgement consumes them."""
     runtime = ToolJobRuntime(tmp_path)
 
     async def operation() -> BackgroundOutcome:
@@ -317,17 +474,6 @@ async def test_reads_are_copies_and_blocked_delivery_does_not_hide_results(
     job = await runtime.start(JobSpec("read", "tool", 0), owner=_owner(), operation=operation)
     result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     await runtime.release_wait(job.job_id, result.token)
-    claim = await runtime.claim_delivery(
-        job.job_id,
-        expected_generation=result.job.generation,
-        content={"body": "answer"},
-        transaction_id="frozen",
-    )
-    assert claim is not None
-    assert await runtime.delivery_outcome(job.job_id, job.generation, claim.transaction_id) is not None
-    await runtime.block_delivery(job.job_id, claim.transaction_id)
-    assert await runtime.pending_deliveries() == []
-    assert await runtime.delivery_outcome(job.job_id, job.generation, claim.transaction_id) is None
     writer = runtime_module.write_json_file_durable
 
     def forbid_write(_path: Path, _payload: object) -> None:
@@ -337,13 +483,19 @@ async def test_reads_are_copies_and_blocked_delivery_does_not_hide_results(
     monkeypatch.setattr(runtime_module, "write_json_file_durable", forbid_write)
     snapshot = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
     snapshot.result_payload["exact"].append(2)
+    pending = await runtime.pending_outcomes()
+    pending[0].result_payload["exact"].append(3)
+    outcome = await runtime.outcome(job.job_id, job.generation)
+    assert outcome is not None
+    outcome.result_payload["exact"].append(4)
     listed = await runtime.list_jobs(owner=_owner(), depth=0)
     assert listed[0].result_payload == {"exact": [1]}
-    assert listed[0].delivery.disposition == "recipient_mismatch"
     monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
     waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     await runtime.acknowledge_wait(job.job_id, waited.token)
-    assert await runtime.delivery_outcome(job.job_id, job.generation, claim.transaction_id) is None
+    assert await runtime.outcome(job.job_id, job.generation) is None
+    assert await runtime.pending_outcomes() == []
+    assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).result_payload == {"exact": [1]}
     await runtime.shutdown()
 
 
@@ -382,7 +534,7 @@ async def test_terminal_operation_stays_pending_until_cancellation_cleanup_settl
         waiting = await runtime.wait(job.job_id, owner=_owner(), depth=0, timeout=0)
         assert waiting.token is None
         assert waiting.job.status == "cancel_requested"
-        assert await runtime.pending_deliveries() == []
+        assert await runtime.pending_outcomes() == []
         assert not cancelling.done()
     finally:
         finish_cleanup.set()
@@ -469,3 +621,286 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
         release_writer.set()
         monkeypatch.setattr(runtime_module, "write_json_file_durable", original_writer)
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [None, 0, 0.01])
+async def test_wait_budget_never_cancels_owned_execution(tmp_path: Path, budget: float | None) -> None:
+    """Unlimited waits stay pending; finite waits detach and every mode preserves one operation."""
+    runtime = ToolJobRuntime(tmp_path)
+    started, finish = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def operation() -> BackgroundOutcome:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await finish.wait()
+        return BackgroundOutcome("completed", "once")
+
+    waiter = None
+    try:
+        job = await runtime.start(JobSpec("budget", "tool", 0), owner=_owner(), operation=operation)
+        await started.wait()
+        waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0, timeout=budget))
+        if budget is None:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(waiter), 0.02)
+            finish.set()
+            result = await asyncio.wait_for(waiter, 1)
+        else:
+            detached = await asyncio.wait_for(waiter, 1)
+            assert detached.job.status == "running"
+            assert detached.token is None
+            finish.set()
+            result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        assert result.job.result == "once"
+        assert calls == 1
+    finally:
+        if waiter is not None:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [-1, float("inf"), float("-inf"), float("nan"), True, "1"])
+async def test_invalid_wait_budget_cannot_claim_result(tmp_path: Path, budget: object) -> None:
+    """Malformed budgets fail before acquiring the job's result lease."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        job = await runtime.start(JobSpec("invalid", "tool", 0), owner=_owner(), operation=operation)
+        with pytest.raises(ValueError, match="timeout"):
+            await runtime.wait(job.job_id, owner=_owner(), depth=0, timeout=budget)  # type: ignore[arg-type]
+        assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "saved"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_repeated_human_followups_release_each_wait_and_clear_allows_waiting(tmp_path: Path) -> None:
+    """A prior follow-up cannot permanently detach later turns from the same job."""
+    runtime = ToolJobRuntime(tmp_path)
+    signal = HumanMessageSignal()
+    finish = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        await finish.wait()
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        job = await runtime.start(
+            JobSpec("repeat", "tool", 0),
+            owner=_owner(),
+            operation=operation,
+            human_signal=signal,
+        )
+        for _ in range(2):
+            signal.clear()
+            waiter = asyncio.create_task(runtime.wait(job.job_id, owner=_owner(), depth=0))
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(waiter), 0.02)
+            signal.notify()
+            assert (await asyncio.wait_for(waiter, 1)).job.status == "running"
+        signal.clear()
+        finish.set()
+        assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "saved"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_cancellation_cleanup_settles_without_claiming_side_effects_stopped(tmp_path: Path) -> None:
+    """Cleanup failure must release ownership and retain an honest durable failure outcome."""
+    runtime = ToolJobRuntime(tmp_path)
+    started = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def cleanup(_job: runtime_module.BackgroundJob) -> None:
+        msg = "remote cleanup unavailable"
+        raise RuntimeError(msg)
+
+    try:
+        job = await runtime.start(JobSpec("cleanup", "tool", 0), owner=_owner(), operation=operation, cancel=cleanup)
+        await started.wait()
+        result = await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        assert result.status == "failed"
+        assert "remote cleanup unavailable" in (result.result or "")
+        assert "may still" in (result.result or "")
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "failed"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cleanup_failure_does_not_strand_other_jobs(tmp_path: Path) -> None:
+    """One failing cleanup cannot prevent later executions from settling and releasing the lease."""
+    runtime = ToolJobRuntime(tmp_path)
+    cleaned: list[str] = []
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def cleanup(job: runtime_module.BackgroundJob) -> None:
+        cleaned.append(job.job_id)
+        if job.job_id == "first":
+            msg = "cleanup failed"
+            raise RuntimeError(msg)
+
+    for name in ("first", "second"):
+        await runtime.start(JobSpec(name, "tool", 0), owner=_owner(), operation=operation, cancel=cleanup)
+    await runtime.shutdown()
+    assert cleaned == ["first", "second"]
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        assert (await restored.lookup("first", owner=_owner(), depth=0)).status == "failed"
+        assert (await restored.lookup("second", owner=_owner(), depth=0)).status == "interrupted"
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failure_while_draining_cancellation_is_not_reported_cancelled(tmp_path: Path) -> None:
+    """An operation's failing finalizer remains visible after its cancellation request."""
+    runtime = ToolJobRuntime(tmp_path)
+    started = asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            msg = "operation cleanup failed"
+            raise RuntimeError(msg)
+
+    try:
+        job = await runtime.start(JobSpec("draining", "tool", 0), owner=_owner(), operation=operation)
+        await started.wait()
+        result = await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        assert result.status == "failed"
+        assert result.result == "operation cleanup failed"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_human_signal_wait_observes_pending_and_releases_subscriptions() -> None:
+    """Notify is latched before wait; clear permits a fresh wait and cancellation releases it."""
+    signal = HumanMessageSignal()
+    signal.notify()
+    await asyncio.wait_for(signal.wait(), 1)
+    assert not signal.has_subscribers
+    signal.clear()
+    waiter = asyncio.create_task(signal.wait())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), 0.02)
+    assert signal.has_subscribers
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not signal.has_subscribers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "awaiting_approval"])
+@pytest.mark.parametrize("consumed", [False, True])
+async def test_legacy_job_snapshot_preserves_outcome_and_consumption(
+    tmp_path: Path,
+    status: runtime_module._OutcomeStatus,
+    consumed: bool,
+) -> None:
+    """Retired pause and Matrix receipts never discard results or replace durable consumption."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome(
+            status,
+            "saved result",
+            approval_state={"call": "exact"},
+            result_payload={"value": [1]},
+        )
+
+    job = await runtime.start(JobSpec("legacy", "tool", 0), owner=_owner(), operation=operation)
+    result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+    if consumed:
+        await runtime.acknowledge_wait(job.job_id, result.token)
+    else:
+        await runtime.release_wait(job.job_id, result.token)
+    await runtime.shutdown()
+    path = tmp_path / "tool_jobs" / "legacy.json"
+    payload = json.loads(path.read_text())
+    payload["human_paused"] = True
+    payload["deliveries"] = [
+        {
+            "job_id": "legacy",
+            "generation": 0,
+            "content": {"body": "old completion notice"},
+            "transaction_id": "old-send",
+            "acknowledged": True,
+            "event_id": "$old-notice",
+            "disposition": None,
+        },
+    ]
+    runtime_module.write_json_file_durable(path, payload)
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        saved = await restored.lookup(job.job_id, owner=_owner(), depth=0)
+        assert saved.status == status
+        assert saved.result == "saved result"
+        assert saved.result_payload == {"value": [1]}
+        assert saved.approval_state == {"call": "exact"}
+        assert [item.job_id for item in await restored.pending_outcomes()] == ([] if consumed else ["legacy"])
+        if consumed:
+            assert await restored.outcome(job.job_id, 0) is None
+        else:
+            pending = await restored.outcome(job.job_id, 0)
+            assert pending is not None
+            assert pending.result == "saved result"
+            claimed = await restored.wait(job.job_id, owner=_owner(), depth=0)
+            await restored.acknowledge_wait(job.job_id, claimed.token)
+            assert await restored.pending_outcomes() == []
+    finally:
+        await restored.shutdown()
+    final = ToolJobRuntime(tmp_path)
+    try:
+        await final.recover()
+        assert await final.pending_outcomes() == []
+    finally:
+        await final.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_legacy_paused_execution_is_interrupted_without_replay(tmp_path: Path) -> None:
+    """Retired human holds represent abandoned execution, never work to restart."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    job = await runtime.start(JobSpec("abandoned", "tool", 0), owner=_owner(), operation=operation)
+    await runtime.shutdown()
+    path = tmp_path / "tool_jobs" / "abandoned.json"
+    payload = json.loads(path.read_text())
+    payload.update(status="paused_for_human", human_paused=True, deliveries=[])
+    runtime_module.write_json_file_durable(path, payload)
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        saved = await restored.lookup(job.job_id, owner=_owner(), depth=0)
+        assert saved.status == "interrupted"
+        assert "not replayed" in (saved.result or "")
+        assert [item.job_id for item in await restored.pending_outcomes()] == ["abandoned"]
+    finally:
+        await restored.shutdown()

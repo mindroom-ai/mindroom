@@ -39,7 +39,6 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
-from mindroom.tool_job_completion import TOOL_JOB_COMPLETION_KEY, ToolJobCompletion
 from tests.conftest import (
     bind_runtime_paths,
     make_matrix_client_mock,
@@ -911,20 +910,20 @@ async def test_exact_source_pages_and_resolves_sidecar_with_revision_proof(
 @pytest.mark.parametrize("lightweight", [False, True])
 @pytest.mark.parametrize("trusted", [False, True])
 @pytest.mark.parametrize("malformed", [False, True])
-def test_completion_reference_requires_trusted_structured_content(
+def test_matrix_metadata_cannot_create_internal_completion_reference(
     config: Config,
     lightweight: bool,
     trusted: bool,
     malformed: bool,
 ) -> None:
-    """Both envelope builders carry typed completion identity only from trusted valid metadata."""
+    """Matrix metadata cannot manufacture an internal runtime completion source."""
     resolver = _resolver(config)
     event = _event(
         {
             "body": "job fake, generation 99",
             SOURCE_KIND_KEY: "hook_dispatch",
             HOOK_SOURCE_KEY: "tool_job_completion",
-            TOOL_JOB_COMPLETION_KEY: {
+            "org.mindroom.tool_job_completion": {
                 "job_id": "exact",
                 "generation": True if malformed else 2,
                 "transaction_id": "claim",
@@ -946,6 +945,4 @@ def test_completion_reference_requires_trusted_structured_content(
             context=context,
             target=target,
         )
-    assert envelope.tool_job_completion == (
-        ToolJobCompletion("exact", 2, "claim", _BOT_USER_ID) if trusted and not malformed else None
-    )
+    assert envelope.tool_job_completion is None

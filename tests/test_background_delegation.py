@@ -6,7 +6,8 @@ import asyncio
 import json
 import threading
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+from unittest.mock import AsyncMock
 
 import pytest
 from agno.agent import Agent
@@ -23,20 +24,21 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.background import delegation_child
+from mindroom.delegation import execution as delegation_execution
+from mindroom.delegation.background import continue_delegation, delegation_child, start_delegation
 from mindroom.delegation.execution import drive_delegations
+from mindroom.delegation.lifecycle import prepare_child_turn, start_child_turn
 from mindroom.delegation.recovery import read_child_run
+from mindroom.delegation.sessions import load_retained_subagent_turn, subagent_recovery_lock
 from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.tool_jobs import runtime as background_module
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
-    JobControl,
     human_message_signal_context,
-    job_control_context,
 )
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
@@ -175,7 +177,6 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     )
     runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
-    monkeypatch.setattr("mindroom.delegation.execution._FOREGROUND_WAIT_SECONDS", 0.01 if detach and not human else 10)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
     storage = create_session_storage("leader", config, paths, identity)
@@ -275,7 +276,15 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
             human_message_signal_context(signal),
         ):
-            current_parent = parent(_call("run_subagent", "first", task="Report", agent_name="code"))
+            current_parent = parent(
+                _call(
+                    "run_subagent",
+                    "first",
+                    task="Report",
+                    agent_name="code",
+                    wait_timeout=0.01 if detach and not human else None,
+                ),
+            )
             result = await asyncio.wait_for(drive(current_parent), 5)
             assert result.status == (RunStatus.paused if approval and not detach else RunStatus.completed)
             assert len(children) == 1
@@ -288,19 +297,16 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert handle["job_id"] == child.delegation_id
                 assert handle["subagent_id"] == child.subagent_id
                 assert handle["tool"] == "delegate"
-                assert handle["status"] in ({"running", "paused_for_human"} if human else {"running"})
+                assert handle["status"] == "running"
                 assert not completed.is_set()
                 assert DelegationState.from_metadata(result.metadata).children == []
                 if human:
                     assert '"status": "running"' in str(
                         await JobTools(paths, identity).job("inspect", child.delegation_id),
                     )
-                    assert '"status": "running"' in str(
-                        await JobTools(paths, identity).job("resume", child.delegation_id),
-                    )
                 release.set()
                 await asyncio.wait_for(completed.wait(), 5)
-                monkeypatch.setattr("mindroom.delegation.execution._FOREGROUND_WAIT_SECONDS", 10)
+                signal.clear()
                 current_parent = parent(_call("job", "wait", action="wait", job_id=child.delegation_id))
                 result = await drive(current_parent)
                 if not approval:
@@ -363,11 +369,11 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-async def test_human_pause_stops_next_provider_invocation_without_cancelling_active_request(
+async def test_human_followup_does_not_stop_next_provider_invocation(
     fallback: bool,
     stream: bool,
 ) -> None:
-    """Provider-native tools cannot start in a fresh request while the owning job is paused."""
+    """Human follow-ups leave current and subsequent model requests running."""
     entered = asyncio.Event()
     release = asyncio.Event()
     called = asyncio.Event()
@@ -391,9 +397,9 @@ async def test_human_pause_stops_next_provider_invocation_without_cancelling_act
     primary = ProviderModel(id="primary")
     fallback_model = ProviderModel(id="fallback")
     fallback_config = FallbackConfig(on_error=[fallback_model]) if fallback else None
-    install_tool_job_execution(primary, fallback_config, checkpoint=True)
+    install_tool_job_execution(primary, fallback_config)
     model = fallback_model if fallback else primary
-    control = JobControl()
+    signal = HumanMessageSignal()
 
     async def invoke() -> str:
         called.set()
@@ -405,10 +411,10 @@ async def test_human_pause_stops_next_provider_invocation_without_cancelling_act
                 await events.aclose()
         return str((await model.ainvoke()).content)
 
-    with job_control_context(control):
+    with human_message_signal_context(signal):
         first = asyncio.create_task(invoke())
         await entered.wait()
-        control.pause()
+        signal.notify()
         release.set()
         assert await asyncio.wait_for(first, 1) == "Provider finished"
         assert not stream or closed.is_set()
@@ -416,9 +422,7 @@ async def test_human_pause_stops_next_provider_invocation_without_cancelling_act
         called.clear()
         second = asyncio.create_task(invoke())
         await called.wait()
-        assert not entered.is_set()
-        assert not second.done()
-        control.resume()
+        assert entered.is_set()
         assert await asyncio.wait_for(second, 1) == "Provider finished"
 
 
@@ -517,3 +521,229 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
         register_background_runtime(paths, None)
         await runtime.shutdown()
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_early_child_failure_retains_liveness_through_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery cannot claim a child between startup failure and durable terminal settlement."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+    settling, release = asyncio.Event(), asyncio.Event()
+    original_interrupt = delegation_execution.interrupt_child
+
+    async def interrupt(
+        retained: DelegationChild,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        reason: str,
+        status: Literal["cancelled", "failed"] = "cancelled",
+    ) -> None:
+        assert retained is child
+        settling.set()
+        await release.wait()
+        await original_interrupt(retained, config=config, runtime_paths=runtime_paths, reason=reason, status=status)
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        msg = "startup failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+        await start_child_turn(
+            child,
+            parent_run_id="parent-run",
+            config=config,
+            runtime_paths=paths,
+            caller_execution_identity=owner,
+        )
+        pending = asyncio.create_task(
+            delegation_execution._background_child_outcome(
+                child,
+                owner=owner,
+                run_child=run_child,
+                config=config,
+                runtime_paths=paths,
+                refresh_scheduler=None,
+                decisions=None,
+                denial_reasons=None,
+                approval_calls=(),
+                fresh=True,
+            ),
+        )
+        try:
+            await asyncio.wait_for(settling.wait(), 2)
+            with subagent_recovery_lock(child.subagent_id, paths) as acquired:
+                assert not acquired, "Failure settlement released its exact live child too early"
+        finally:
+            release.set()
+            outcome = await pending
+    assert outcome.status == "failed"
+    assert "startup failed" in outcome.result
+    retained = await load_retained_subagent_turn(child, paths)
+    assert retained.status == "failed"
+    assert retained.delegation_id == child.delegation_id
+    with subagent_recovery_lock(child.subagent_id, paths) as acquired:
+        assert acquired
+
+
+@pytest.mark.asyncio
+async def test_child_failure_remains_primary_when_native_interruption_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed native cleanup reports uncertainty without replacing or falsely settling the child."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        msg = "primary execution failed"
+        raise RuntimeError(msg)
+
+    async def interrupt(*_args: object, **_kwargs: object) -> None:
+        msg = "native cleanup unavailable"
+        raise OSError(msg)
+
+    finish = AsyncMock(side_effect=AssertionError("Unsettled native cleanup cannot be reported as terminal"))
+    monkeypatch.setattr(delegation_execution, "interrupt_child", interrupt)
+    monkeypatch.setattr(delegation_execution, "finish_child_turn", finish)
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+        await start_child_turn(
+            child,
+            parent_run_id="parent-run",
+            config=config,
+            runtime_paths=paths,
+            caller_execution_identity=owner,
+        )
+        outcome = await delegation_execution._background_child_outcome(
+            child,
+            owner=owner,
+            run_child=run_child,
+            config=config,
+            runtime_paths=paths,
+            refresh_scheduler=None,
+            decisions=None,
+            denial_reasons=None,
+            approval_calls=(),
+            fresh=True,
+        )
+
+    assert outcome.status == "failed"
+    assert "primary execution failed" in (outcome.result or "")
+    assert "cleanup" in (outcome.result or "").lower()
+    assert "native cleanup unavailable" in (outcome.result or "")
+    finish.assert_not_awaited()
+    retained = await load_retained_subagent_turn(child, paths)
+    assert retained.status == "running"
+    with subagent_recovery_lock(child.subagent_id, paths) as acquired:
+        assert acquired
+
+
+@pytest.mark.asyncio
+async def test_child_failure_remains_primary_when_terminal_receipt_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receipt failure cannot erase the execution error or overwrite terminal native evidence."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        msg = "primary execution failed"
+        raise RuntimeError(msg)
+
+    async def fail_receipt(*_args: object, **_kwargs: object) -> str:
+        msg = "terminal receipt unavailable"
+        raise OSError(msg)
+
+    monkeypatch.setattr(delegation_execution, "finish_child_turn", fail_receipt)
+    with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+        await start_child_turn(
+            child,
+            parent_run_id="parent-run",
+            config=config,
+            runtime_paths=paths,
+            caller_execution_identity=owner,
+        )
+        outcome = await delegation_execution._background_child_outcome(
+            child,
+            owner=owner,
+            run_child=run_child,
+            config=config,
+            runtime_paths=paths,
+            refresh_scheduler=None,
+            decisions=None,
+            denial_reasons=None,
+            approval_calls=(),
+            fresh=True,
+        )
+
+    assert outcome.status == "failed"
+    assert "primary execution failed" in (outcome.result or "")
+    assert "settlement" in (outcome.result or "").lower()
+    assert "terminal receipt unavailable" in (outcome.result or "")
+    retained = await load_retained_subagent_turn(child, paths)
+    assert retained.status == "failed"
+    assert retained.result == "primary execution failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_event_id", [None, "$original-request"])
+async def test_native_job_source_survives_approval_continuation_and_restart(
+    tmp_path: Path,
+    source_event_id: str | None,
+) -> None:
+    """Approval turns may update native child state without replacing its accepted human source."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader"), "code": AgentConfig(display_name="Code")})
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=owner),
+        membership_turn_id=source_event_id,
+    )
+    child = prepare_child_turn("leader", "code", "task", owner=owner, config=config, runtime_paths=paths, depth=0)
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def approval() -> BackgroundOutcome:
+        child.status = "paused"
+        return BackgroundOutcome("awaiting_approval")
+
+    async def completed() -> BackgroundOutcome:
+        child.status = "completed"
+        child.result = "finished once"
+        return BackgroundOutcome("completed", child.result)
+
+    try:
+        with tool_runtime_context(context):
+            job = await start_delegation(runtime, child, owner=owner, operation=approval)
+        waited = await runtime.wait(job.job_id, owner=owner, depth=0)
+        assert waited.job.adapter["source_event_id"] == source_event_id
+        assert waited.job.owner == owner
+        await runtime.acknowledge_wait(job.job_id, waited.token)
+        with tool_runtime_context(replace(context, membership_turn_id="$approval-request")):
+            await continue_delegation(runtime, job.job_id, owner=owner, depth=0, operation=completed)
+        waited = await runtime.wait(job.job_id, owner=owner, depth=0)
+        assert waited.job.adapter["source_event_id"] == source_event_id
+        assert waited.job.result == "finished once"
+        await runtime.release_wait(job.job_id, waited.token)
+    finally:
+        await runtime.shutdown()
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        saved = await restored.lookup(child.delegation_id, owner=owner, depth=0)
+        assert saved.adapter["source_event_id"] == source_event_id
+        assert saved.owner == owner
+        assert delegation_child(saved).run_id == child.run_id
+        assert saved.status == "completed"
+    finally:
+        await restored.shutdown()

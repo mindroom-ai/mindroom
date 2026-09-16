@@ -43,6 +43,7 @@ from mindroom.tools.cal_com import cal_com_tools
 from mindroom.tools.calculator import calculator_tools
 from mindroom.tools.callback_manager import callback_manager_tools
 from mindroom.tools.cartesia import cartesia_tools
+from mindroom.tools.chat_ui import chat_ui_tools
 from mindroom.tools.claude_agent import claude_agent_tools
 from mindroom.tools.clickup import clickup_tools
 from mindroom.tools.coding import coding_tools
@@ -175,6 +176,7 @@ __all__ = [
     "calculator_tools",
     "callback_manager_tools",
     "cartesia_tools",
+    "chat_ui_tools",
     "claude_agent_tools",
     "clickup_tools",
     "coding_tools",
@@ -312,6 +314,7 @@ def _openclaw_compat_tools() -> type[Toolkit]:
     dependencies=["httpx"],
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
     managed_init_args=(
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,

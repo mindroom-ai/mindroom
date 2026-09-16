@@ -55,9 +55,9 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                'Long-running tools return a job_id. Use job(action="list") to rediscover jobs after a new turn. '
+                'Tools return a job_id when their wait ends before execution completes. Use job(action="list") to rediscover jobs after a new turn. '
                 'Use job(action="wait", job_id=...) to retrieve the actual result. '
-                "A human follow-up may hold work; resume releases that hold but never grants approval. "
+                "Human follow-ups release waits while work continues. "
                 "Only the agent that started a job can access it; teams must ask that member to manage it."
             ),
         )
@@ -106,18 +106,20 @@ class JobTools(Toolkit):
 
     async def job(  # noqa: PLR0911 - Each public action returns its own result.
         self,
-        action: Literal["list", "inspect", "wait", "resume", "cancel"],
+        action: Literal["list", "inspect", "wait", "cancel"],
         job_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
+        wait_timeout: float | None = None,
     ) -> Any:  # noqa: ANN401 - Preserve the original SDK tool result type.
-        """Discover, inspect, wait for, resume or cancel this caller's managed work.
+        """Discover, inspect, wait for or cancel this caller's managed work.
 
         Args:
-            action: Operation; wait retrieves the stored result and waits up to ten seconds.
+            action: Operation; wait retrieves the stored result.
             job_id: Exact job ID, required except for list.
             limit: Maximum number of jobs to list, active jobs first.
             offset: Number of accessible jobs to skip.
+            wait_timeout: Seconds to wait; null waits until completion or human input, zero returns immediately.
 
         Returns:
             Scoped job summaries, the original result, or an unavailable-job error.
@@ -138,14 +140,15 @@ class JobTools(Toolkit):
             if job_id is None:
                 return "job_id is required for this action."
             if action == "wait":
-                waited = await runtime.wait(job_id, owner=owner, depth=self._depth)
+                waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=wait_timeout)
                 if waited.token is not None:
                     return await consume_tool_job(runtime, waited.job, waited.token)
                 return json.dumps(_summary(waited.job))
-            if action == "resume":
-                job = await runtime.resume(job_id, owner=owner, depth=self._depth)
-            elif action == "cancel":
+            if action == "cancel":
                 job = await runtime.cancel(job_id, owner=owner, depth=self._depth, await_completion=True)
+                waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=0)
+                if waited.token is not None:
+                    await consume_tool_job(runtime, waited.job, waited.token)
             elif action == "inspect":
                 job = await runtime.lookup(job_id, owner=owner, depth=self._depth)
             else:

@@ -1,4 +1,4 @@
-"""Lightweight human-follow-up signals and cooperative child tool checkpoints."""
+"""Lightweight human-follow-up signals and child tool cancellation checkpoints."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class HumanMessageSignal:
-    """Keep background subscribers alive beyond their parent's response turn."""
+    """Wake foreground waits and retain live conversation subscriptions."""
 
     _subscribers: set[Callable[[], None]] = field(default_factory=set)
     _pending: bool = False
@@ -35,62 +35,37 @@ class HumanMessageSignal:
         self._subscribers.discard(callback)
 
     def notify(self) -> None:
-        """Synchronously prevent subscribers from starting another tool."""
+        """Release subscribed waits without changing the execution of their jobs."""
         self._pending = True
         for callback in tuple(self._subscribers):
             callback()
 
     def clear(self) -> None:
-        """Consume queued intent without resuming already-paused subscribers."""
+        """Consume queued input so later waits can remain attached."""
         self._pending = False
+
+    async def wait(self) -> None:
+        """Wait for pending or new human input, releasing the subscription on exit."""
+        notified = asyncio.Event()
+        self.subscribe(notified.set)
+        try:
+            await notified.wait()
+        finally:
+            self.unsubscribe(notified.set)
 
 
 @dataclass
 class JobControl:
-    """Pause only future tool entry; leave already-running external work alone."""
+    """Prevent future tool entry after explicit cancellation."""
 
-    paused: asyncio.Event = field(default_factory=asyncio.Event)
-    resumed: asyncio.Event = field(default_factory=asyncio.Event)
     cancelled: bool = False
-    blocked: asyncio.Event = field(default_factory=asyncio.Event)
-    changed: asyncio.Event = field(default_factory=asyncio.Event)
-    _owner_loop: asyncio.AbstractEventLoop = field(default_factory=asyncio.get_running_loop, repr=False)
-
-    def pause(self) -> None:
-        """Latch human intent until explicit resumption."""
-        self.resumed.clear()
-        self.paused.set()
-        self.changed.set()
-
-    def resume(self) -> None:
-        """Allow future tools without modifying native approval decisions."""
-        self.paused.clear()
-        self.resumed.set()
-        self.changed.set()
 
     def cancel(self) -> None:
-        """Prevent future tool entry even when a cancelled operation catches cancellation."""
+        """Prevent tool entry even when the operation catches task cancellation."""
         self.cancelled = True
-        self.resumed.set()
-        self.changed.set()
 
     async def checkpoint(self) -> None:
-        """Wait for explicit resume or fail on cancellation before entering a tool."""
-        if asyncio.get_running_loop() is not self._owner_loop:
-            waiting = asyncio.run_coroutine_threadsafe(self._checkpoint_on_owner(), self._owner_loop)
-            await asyncio.wrap_future(waiting)
-            return
-        await self._checkpoint_on_owner()
-
-    async def _checkpoint_on_owner(self) -> None:
-        try:
-            while self.paused.is_set() and not self.cancelled:
-                self.blocked.set()
-                self.changed.set()
-                await self.resumed.wait()
-        finally:
-            self.blocked.clear()
-            self.changed.set()
+        """Fail on cancellation without creating waiters on another event loop."""
         if self.cancelled:
             raise asyncio.CancelledError
 
@@ -125,7 +100,7 @@ def job_control_context(control: JobControl) -> Iterator[None]:
 
 
 async def job_checkpoint() -> None:
-    """Enforce the active job's human hold immediately before tool execution."""
+    """Enforce the active job's cancellation immediately before tool execution."""
     control = _control.get()
     if control is not None:
         await control.checkpoint()

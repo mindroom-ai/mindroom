@@ -43,6 +43,7 @@ from mindroom.response_turn import (
     apply_local_approval_decisions,
     paused_attempt_from_response,
 )
+from mindroom.tool_jobs.completion import join_approval_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
@@ -186,6 +187,34 @@ async def _continue_persisted_agent(
         track_hidden_tools=True,
     )
     response = await _collect_agent_continuation(events, presentation)
+
+    async def retrieve_results(previous: RunOutput, prompt: str) -> RunOutput:
+        events = drive_delegation_stream(
+            agent,
+            agent.arun(
+                prompt,
+                session_id=continuation.session_id,
+                user_id=continuation.requester_id,
+                metadata=deepcopy(previous.metadata),
+                stream=True,
+                stream_events=True,
+                yield_run_output=True,
+            ),
+            run_child=run_delegated_child_response,
+            agent_name=continuation.entity_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            refresh_scheduler=refresh_scheduler,
+        )
+        return await _collect_agent_continuation(events, presentation)
+
+    response = await join_approval_jobs(
+        response,
+        is_complete=lambda result: result.status == RunStatus.completed,
+        continue_response=retrieve_results,
+        response_text=presentation.final_text,
+    )
     return response, presentation
 
 
@@ -322,24 +351,26 @@ class AgentApprovalExecution:
                         ),
                     )
         finally:
-            await finalize_consumption()
             try:
-                ai_runtime.register_queued_notice_storage(
-                    storage_factory=lambda: create_session_storage(
-                        continuation.entity_name,
-                        config,
-                        self.runtime_paths,
-                        execution_identity=execution_identity,
-                    ),
-                    session_id=continuation.session_id,
-                    session_type=SessionType.AGENT,
-                    entity_name=continuation.entity_name,
-                )
+                await finalize_consumption()
             finally:
                 try:
-                    close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+                    ai_runtime.register_queued_notice_storage(
+                        storage_factory=lambda: create_session_storage(
+                            continuation.entity_name,
+                            config,
+                            self.runtime_paths,
+                            execution_identity=execution_identity,
+                        ),
+                        session_id=continuation.session_id,
+                        session_type=SessionType.AGENT,
+                        entity_name=continuation.entity_name,
+                    )
                 finally:
-                    close_execution_storage(history_storage)
+                    try:
+                        close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+                    finally:
+                        close_execution_storage(history_storage)
         paused = paused_attempt_from_response(
             response,
             fallback_session_id=continuation.session_id,

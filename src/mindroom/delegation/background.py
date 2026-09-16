@@ -9,6 +9,7 @@ from weakref import WeakKeyDictionary
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import DelegationChild
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobSpec, ToolJobRuntime
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -95,7 +96,8 @@ async def start_delegation(
     if child.caller_agent_name != owner.agent_name:
         msg = "Child caller does not match its job owner."
         raise SubagentSessionError(msg)
-    adapter = {"child": asdict(child)}
+    context = get_tool_runtime_context()
+    adapter = {"child": asdict(child), "source_event_id": context.membership_turn_id if context is not None else None}
 
     async def run() -> BackgroundOutcome:
         try:
@@ -131,7 +133,7 @@ async def continue_delegation(
     depth: int,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
 ) -> BackgroundJob:
-    """Continue native approval work under the existing generic job and human hold."""
+    """Continue native approval work under the existing generic job."""
     job = await runtime.lookup(job_id, owner=owner, depth=depth)
     retained = _retained_delegation(runtime, job)
     child = retained.child

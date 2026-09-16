@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 import pytest
 
+from mindroom.approval_response import continuation_target
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalCardReservation,
@@ -26,45 +27,14 @@ from mindroom.event_journal import (
     ApprovalDecision,
     ApprovalDecisionMetadata,
     DeliveryStage,
-    EventClass,
-    EventKind,
-    InboundEvent,
     PrincipalStore,
-    ProjectedEvent,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_job_completion import ToolJobCompletion
-from mindroom.tool_jobs.completion import admit_job_completion
+from mindroom.tool_jobs.completion import admit_job_completion, completion_envelope, completion_event
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import message_origin, test_runtime_paths
-from tests.response_runner_helpers import _envelope, _target
-
-
-async def _admit_completion_source(store: PrincipalStore, *, event_id: str) -> None:
-    """Admit one completion source for durable approval ownership."""
-    await store.admit(
-        InboundEvent(
-            event_id=event_id,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender="@mindroom_general:localhost",
-            origin_server_ts=1,
-            source={"event_id": event_id, "content": {"body": "job paused"}},
-        ),
-        ProjectedEvent(
-            event_id=event_id,
-            room_id="!room:localhost",
-            thread_id="$thread",
-            sender="@mindroom_general:localhost",
-            origin_server_ts=1,
-            content={"body": "job paused"},
-            replaces_event_id=None,
-            redacts_event_id=None,
-        ),
-    )
+from tests.conftest import test_runtime_paths
+from tests.response_runner_helpers import _target
 
 
 async def _persist_waiting_continuation(
@@ -128,25 +98,10 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         await runtime.start(JobSpec("job", "tool", 0), owner=owner, operation=operation)
         waited = await runtime.wait("job", owner=owner, depth=0)
         await runtime.release_wait("job", waited.token)
-        await runtime.claim_delivery(
-            "job",
-            expected_generation=waited.job.generation,
-            content={"m.mentions": {"user_ids": ["@mindroom_general:localhost"]}},
-            transaction_id="claim",
-        )
-        envelope = replace(
-            _envelope(target),
-            hook_source="tool_job_completion",
-            tool_job_completion=ToolJobCompletion("job", waited.job.generation, "claim", "@mindroom_general:localhost"),
-            origin=message_origin(
-                sender_id="@mindroom_general:localhost",
-                requester_id="@human:localhost",
-                source_kind="hook_dispatch",
-            ),
-        )
+        envelope = completion_envelope(waited.job, sender_id="@mindroom_general:localhost")
         assert await admit_job_completion(envelope, target=target, runtime_paths=paths)
         assert not await admit_job_completion(
-            replace(envelope, tool_job_completion=replace(envelope.tool_job_completion, transaction_id="forged")),
+            replace(envelope, tool_job_completion=replace(envelope.tool_job_completion, generation=999)),
             target=target,
             runtime_paths=paths,
         )
@@ -185,18 +140,10 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(tmp_p
         await runtime.start(JobSpec("approval-job", "tool", 0), owner=owner, operation=operation)
         initial_wait = await runtime.wait("approval-job", owner=owner, depth=0)
         await runtime.release_wait("approval-job", initial_wait.token)
-        assert (
-            await runtime.claim_delivery(
-                "approval-job",
-                expected_generation=initial_wait.job.generation,
-                content={"m.mentions": {"user_ids": ["@mindroom_general:localhost"]}},
-                transaction_id="approval-claim",
-            )
-            is not None
-        )
         completion_wait = await runtime.wait("approval-job", owner=owner, depth=0)
-        source_event_id = "$approval-notice"
-        await _admit_completion_source(store, event_id=source_event_id)
+        event = completion_event(completion_wait.job, sender_id="@mindroom_general:localhost")
+        source_event_id = event.event_id
+        await store.admit(event)
         continuation = ApprovalContinuation(
             approval_id="approval-job-continuation",
             run_id="run-paused",
@@ -218,7 +165,10 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(tmp_p
             ),
             state="waiting",
             runtime_generation=runner.deps.approval_runtime_generation,
+            origin=completion_envelope(completion_wait.job, sender_id="@mindroom_general:localhost").origin,
+            hook_source="tool_job_completion",
         )
+        assert continuation_target(continuation, reply_to_event_id=source_event_id).reply_to_event_id is None
         await _persist_waiting_continuation(
             store,
             principal_id=bot._journal_principal_id,
@@ -246,21 +196,7 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(tmp_p
         request = replace(
             request,
             on_no_response_handled=settle,
-            response_envelope=replace(
-                request.response_envelope,
-                hook_source="tool_job_completion",
-                tool_job_completion=ToolJobCompletion(
-                    "approval-job",
-                    completion_wait.job.generation,
-                    "approval-claim",
-                    "@mindroom_general:localhost",
-                ),
-                origin=message_origin(
-                    sender_id="@mindroom_general:localhost",
-                    requester_id="@user:localhost",
-                    source_kind="hook_dispatch",
-                ),
-            ),
+            response_envelope=completion_envelope(completion_wait.job, sender_id="@mindroom_general:localhost"),
         )
         duplicate_response = AsyncMock(return_value="$duplicate")
         resume_continuation = AsyncMock(return_value="$waiting")
@@ -329,32 +265,12 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         await runtime.start(JobSpec("queued-job", "tool", 0), owner=owner, operation=operation)
         waited = await runtime.wait("queued-job", owner=owner, depth=0)
         await runtime.release_wait("queued-job", waited.token)
-        await runtime.claim_delivery(
-            "queued-job",
-            expected_generation=waited.job.generation,
-            content={"m.mentions": {"user_ids": ["@mindroom_general:localhost"]}},
-            transaction_id="queued-claim",
-        )
         request = _plain_request(target)
+        envelope = completion_envelope(waited.job, sender_id="@mindroom_general:localhost")
         completion = replace(
-            _plain_request(target, source_event_id="$notice"),
+            _plain_request(target, source_event_id=envelope.source_event_id),
             on_no_response_handled=settle,
-            response_envelope=replace(
-                request.response_envelope,
-                source_event_id="$notice",
-                hook_source="tool_job_completion",
-                tool_job_completion=ToolJobCompletion(
-                    "queued-job",
-                    waited.job.generation,
-                    "queued-claim",
-                    "@mindroom_general:localhost",
-                ),
-                origin=message_origin(
-                    sender_id="@mindroom_general:localhost",
-                    requester_id="@human:localhost",
-                    source_kind="hook_dispatch",
-                ),
-            ),
+            response_envelope=envelope,
         )
         first = asyncio.create_task(
             runner._run_locked_response_lifecycle(

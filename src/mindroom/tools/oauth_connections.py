@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     category=ToolCategory.INTEGRATIONS,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
     icon="Unplug",
     icon_color="text-amber-500",
     config_fields=[],

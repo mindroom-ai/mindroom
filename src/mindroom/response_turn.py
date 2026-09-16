@@ -45,9 +45,11 @@ from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
+from mindroom.tool_jobs.completion import join_conversation_jobs, report_background_wait
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.events import BackgroundWaitChunk
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -330,6 +332,7 @@ class TurnRunState:
     unseen_event_ids: list[str] = field(default_factory=list)
     standalone_replay_persisted: bool = False
     empty_response_retried: bool = False
+    attempted_job_outcomes: set[tuple[str, int]] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -910,7 +913,7 @@ async def run_blocking_response_turn(
                 try:
                     resolution = await adapter.run_attempt(run, continuation)
                     await finalize_consumption()
-                    settled = _settle_blocking_attempt(
+                    settled = await _settle_blocking_attempt(
                         ctx,
                         adapter,
                         sinks,
@@ -1006,7 +1009,7 @@ def _settle_skipped_attempt(
         sinks.turn_recorder.mark_skipped()
 
 
-def _settle_blocking_attempt(
+async def _settle_blocking_attempt(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
     sinks: TurnSinks,
@@ -1049,6 +1052,28 @@ def _settle_blocking_attempt(
         if resolution.original_status is RunStatus.cancelled:
             raise build_cancelled_error(resolution.reason)
         return resolution.response_text
+    return await _settle_joined_blocking_attempt(
+        ctx,
+        adapter,
+        sinks,
+        run,
+        resolution,
+        continuation,
+        continuation_count=continuation_count,
+    )
+
+
+async def _settle_joined_blocking_attempt(
+    ctx: ResponseTurnContext,
+    adapter: BlockingTurnAdapter,
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: CompletedAttempt,
+    continuation: DynamicContinuationRunState,
+    *,
+    continuation_count: int,
+) -> str | DynamicContinuationRunState:
+    """Publish top-level completion only after the ready-result continuation decision."""
     settle = _settle_completed_attempt(
         ctx,
         sinks,
@@ -1061,6 +1086,31 @@ def _settle_blocking_attempt(
     )
     if settle.keep_going:
         return settle.continuation
+    run.turn_state.sync_partial(
+        sinks.turn_recorder,
+        run_metadata=run.run_metadata,
+        assistant_text=settle.recorded_text,
+        completed_tools=settle.recorded_tools,
+        interrupted_tools=(),
+    )
+    joined_continuation = None
+    if continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+        async for joined in join_conversation_jobs(run.attempted_job_outcomes):
+            if isinstance(joined, str):
+                await report_background_wait(settle.response_text + joined)
+            else:
+                joined_continuation = _advance_turn_continuation(
+                    sinks,
+                    adapter.release_attempt_entity,
+                    run,
+                    resolution,
+                    continuation,
+                    next_prompt=joined.prompt,
+                    active_model_name=continuation.active_model_name,
+                    apply_model_to_team_members=continuation.apply_model_to_team_members,
+                )
+    if joined_continuation is not None:
+        return joined_continuation
     _publish_run_metadata(sinks, resolution.metadata_content)
     run.turn_state.record_completed(
         sinks.turn_recorder,
@@ -1203,7 +1253,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     sinks: TurnSinks,
     *,
     continuation: DynamicContinuationRunState,
-) -> AsyncGenerator[ChunkT, None]:
+) -> AsyncGenerator[ChunkT | BackgroundWaitChunk, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
     try:
@@ -1285,6 +1335,22 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     keep_going = settle.keep_going
                     if settle.response_text:
                         yield adapter.make_text_chunk(settle.response_text)
+                    if not keep_going and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
+                        async for joined in join_conversation_jobs(run.attempted_job_outcomes):
+                            if isinstance(joined, str):
+                                yield BackgroundWaitChunk(joined)
+                            else:
+                                continuation = _advance_turn_continuation(
+                                    sinks,
+                                    adapter.release_attempt_entity,
+                                    run,
+                                    resolution,
+                                    continuation,
+                                    next_prompt=joined.prompt,
+                                    active_model_name=continuation.active_model_name,
+                                    apply_model_to_team_members=continuation.apply_model_to_team_members,
+                                )
+                                keep_going = True
                     if not keep_going:
                         _publish_run_metadata(sinks, resolution.metadata_content)
                         run.turn_state.record_completed(

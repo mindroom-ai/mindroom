@@ -45,6 +45,7 @@ from mindroom.entity_resolution import current_internal_sender_ids, entity_ident
 from mindroom.event_journal import (
     ApprovalContinuation,
     ApprovalMemoryTurn,
+    EventKind,
     MatrixDelivery,
 )
 from mindroom.event_journal import (
@@ -124,7 +125,13 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
-from mindroom.tool_jobs.completion import admit_job_completion
+from mindroom.tool_jobs.completion import (
+    admit_job_completion,
+    background_wait_notice,
+    completion_envelope,
+    completion_prompt,
+    completion_source_id,
+)
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -192,7 +199,7 @@ if TYPE_CHECKING:
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.dispatch_source import ScheduledHistoryBudget
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import JournalEvent, PrincipalStore
     from mindroom.history.types import HistoryScope
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -842,7 +849,7 @@ class ResponseRunner:
         )
 
     def _human_signal_for_target(self, target: MessageTarget) -> HumanMessageSignal:
-        """Keep child pause signals attached to the transport across bot replacements."""
+        """Keep human wait-release signals attached to the transport across bot replacements."""
         runtime = get_background_runtime(self.deps.runtime_paths)
         if runtime is None:
             return HumanMessageSignal()
@@ -1428,12 +1435,19 @@ class ResponseRunner:
     ) -> tuple[FinalDeliveryOutcome, ApprovalContinuation]:
         """Run and classify one claimed continuation for either lifecycle entry path."""
         tool_trace: list[ToolTraceEntry] = []
-        result = await self._continue_entity_call(
-            claimed,
-            request=request,
-            target=target,
-            tool_trace_collector=tool_trace,
-        )
+
+        async def report_wait(text: str) -> None:
+            await self.deps.delivery_gateway.edit_text(
+                EditTextRequest(target=target, event_id=claimed.response_event_id, new_text=text.strip()),
+            )
+
+        with background_wait_notice(report_wait):
+            result = await self._continue_entity_call(
+                claimed,
+                request=request,
+                target=target,
+                tool_trace_collector=tool_trace,
+            )
         if isinstance(result, CompletedApprovalRun):
             current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
             show_tool_calls = claimed.show_tool_calls
@@ -2533,56 +2547,97 @@ class ResponseRunner:
         early_placeholder: _EarlyPlaceholderState,
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
-        """Dispatch journal-owned approval work through normal turn serialization."""
+        """Keep executable approval generations inside their response's lifecycle."""
         owned = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )
         if owned is None:
-            if not await admit_job_completion(
-                request.response_envelope,
+            event_id = await self._run_unowned_response(
+                request,
                 target=target,
-                runtime_paths=self.deps.runtime_paths,
-            ):
-                if request.on_no_response_handled is not None:
-
-                    async def settle() -> None:
-                        assert request.on_no_response_handled is not None
-                        await request.on_no_response_handled()
-
-                    await run_coroutine_until_complete(settle())
-                return None
-            return await locked_operation(target, early_placeholder)
-        self.deps.logger.info(
-            "response_source_owned_by_approval_continuation",
-            source_event_id=request.response_envelope.source_event_id,
-            approval_id=owned.approval_id,
-            approval_state=owned.state,
-        )
-        recovered, event_id = await self._recover_nonready_approval(owned, target=target)
-        if recovered:
-            return event_id
-        if not is_sender_allowed_for_entity_replies_in_room(
-            owned.requester_id,
-            _reply_authorization_entity_names(
+                early_placeholder=early_placeholder,
+                locked_operation=locked_operation,
+            )
+            owned = await self.deps.approval_store.approval_continuation_for_source(
+                request.response_envelope.source_event_id,
+            )
+            if owned is None or owned.state != "ready":
+                return event_id
+        while True:
+            self.deps.logger.info(
+                "response_source_owned_by_approval_continuation",
+                source_event_id=request.response_envelope.source_event_id,
+                approval_id=owned.approval_id,
+                approval_state=owned.state,
+            )
+            recovered, event_id = await self._recover_nonready_approval(owned, target=target)
+            if recovered:
+                return event_id
+            if not is_sender_allowed_for_entity_replies_in_room(
+                owned.requester_id,
+                _reply_authorization_entity_names(
+                    self.deps.runtime.config,
+                    owned.entity_name,
+                    owned.team_member_names,
+                ),
                 self.deps.runtime.config,
-                owned.entity_name,
-                owned.team_member_names,
-            ),
-            self.deps.runtime.config,
-            owned.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
+                owned.room_id,
+                self.deps.runtime_paths,
+                self.deps.runtime.agent_reply_memberships,
+                require_resolved_membership=True,
+            ):
+                return await self._settle_unauthorized_approval_continuation(owned)
+            claimed = await self.deps.approval_store.claim_approval_continuation(
+                owned.approval_id,
+                runtime_generation=self.deps.approval_runtime_generation,
+                legacy_show_tool_calls=self._show_tool_calls(owned.entity_name),
+            )
+            if claimed is None:
+                return None
+            event_id = await self._run_owned_approval_continuation(claimed, target=target)
+            owned = await self.deps.approval_store.approval_continuation_for_source(
+                request.response_envelope.source_event_id,
+            )
+            if (
+                owned is None
+                or owned.approval_id != claimed.approval_id
+                or owned.state != "ready"
+                or owned.generation <= claimed.generation
+            ):
+                return event_id
+
+    async def _run_unowned_response(
+        self,
+        request: ResponseRequest,
+        *,
+        target: MessageTarget,
+        early_placeholder: _EarlyPlaceholderState,
+        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+    ) -> str | None:
+        """Admit internal outcomes and bind wait progress to the ordinary response owner."""
+        if not await admit_job_completion(
+            request.response_envelope,
+            target=target,
+            runtime_paths=self.deps.runtime_paths,
         ):
-            return await self._settle_unauthorized_approval_continuation(owned)
-        claimed = await self.deps.approval_store.claim_approval_continuation(
-            owned.approval_id,
-            runtime_generation=self.deps.approval_runtime_generation,
-            legacy_show_tool_calls=self._show_tool_calls(owned.entity_name),
-        )
-        if claimed is None:
+            if request.on_no_response_handled is not None:
+
+                async def settle() -> None:
+                    assert request.on_no_response_handled is not None
+                    await request.on_no_response_handled()
+
+                await run_coroutine_until_complete(settle())
             return None
-        return await self._run_owned_approval_continuation(claimed, target=target)
+
+        async def report_wait(text: str) -> None:
+            event_id = early_placeholder.placeholder_event_id or request.existing_event_id
+            if event_id is not None and not _is_silent_schedule_response(request):
+                await self.deps.delivery_gateway.edit_text(
+                    EditTextRequest(target=target, event_id=event_id, new_text=text.strip()),
+                )
+
+        with background_wait_notice(report_wait):
+            return await locked_operation(target, early_placeholder)
 
     async def _settle_unauthorized_approval_continuation(
         self,
@@ -2658,6 +2713,79 @@ class ResponseRunner:
             locked_operation=ownership_disappeared,
             signal_queued_message=False,
         )
+
+    async def handoff_tool_job_completion(self, event: JournalEvent) -> bool:
+        """Transfer an internal outcome source to the existing serialized response owner."""
+        if event.kind is not EventKind.TOOL_JOB_COMPLETION:
+            msg = "Expected an internal tool-job completion source"
+            raise ValueError(msg)
+        job_id, generation = event.source.get("job_id"), event.source.get("generation")
+        if (
+            not isinstance(job_id, str)
+            or type(generation) is not int
+            or event.event_id != completion_source_id(job_id, generation)
+        ):
+            msg = "Invalid internal tool-job completion identity"
+            raise ValueError(msg)
+        if not self.has_live_inbox_response(event.event_id):
+            self.track_inbox_response(
+                self._resume_tool_job_completion(event, job_id, generation),
+                name=f"tool_job_completion:{job_id}:{generation}",
+                room_id=event.room_id,
+                source_event_ids=(event.event_id,),
+                recovery_proof_ready=lambda: True,
+            )
+        return False
+
+    async def _resume_tool_job_completion(self, event: JournalEvent, job_id: str, generation: int) -> None:
+        """Let all admitted human turns finish before considering an idle continuation."""
+        await self._lifecycle_coordinator.wait_for_thread_idle(event.room_id, event.thread_id)
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is None:
+            msg = "Tool job runtime is not ready for completion recovery"
+            raise RuntimeError(msg)
+        job = await runtime.outcome(job_id, generation)
+        if job is None:
+            await self.deps.approval_store.settle(event.event_id)
+            return
+        envelope = completion_envelope(job, sender_id=self.deps.matrix_full_id)
+        if envelope.agent_name != self.deps.agent_name or envelope.room_id != event.room_id:
+            msg = "Internal tool-job completion owner does not match its journal"
+            raise ValueError(msg)
+        original_source_id = job.adapter.get("source_event_id")
+        if isinstance(original_source_id, str) and original_source_id != event.event_id:
+            original = await self.deps.approval_store.load_event(original_source_id)
+            if (
+                original is not None
+                and original.room_id == event.room_id
+                and (
+                    original.thread_id == event.thread_id
+                    or (original.thread_id is None and original.event_id == event.thread_id)
+                )
+                and await self.deps.approval_store.is_pending(original_source_id)
+            ):
+                # The original journal source already owns crash recovery. Its
+                # locked admission retrieves accepted work instead of replaying it.
+                await self.deps.approval_store.settle(event.event_id)
+                return
+        request = ResponseRequest(
+            thread_history=(),
+            prompt=envelope.body,
+            response_envelope=envelope,
+            sources=ResponseSources((event.event_id,), (event.event_id,)),
+            user_id=envelope.requester_id,
+            on_no_response_handled=lambda: self.deps.approval_store.settle(event.event_id),
+        )
+        team = self.deps.runtime.config.teams.get(self.deps.agent_name)
+        if team is None:
+            await self.generate_response(request)
+        else:
+            registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+            await self.generate_team_response_helper(
+                request,
+                team_agents=[registry.current_ids[name] for name in team.agents],
+                team_mode=team.mode,
+            )
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
         """Transfer one durable continuation out of the journal lane and into response ownership."""
@@ -3157,6 +3285,37 @@ class ResponseRunner:
             reply_entity_names=reply_entity_names,
         )
 
+    async def _recover_tool_job_source(self, request: ResponseRequest) -> ResponseRequest:
+        """Resume accepted source work without asking the model to repeat its original side effects."""
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is None:
+            return request
+        envelope = request.response_envelope
+        jobs = await runtime.source_jobs(
+            envelope.source_event_id,
+            transport_agent_name=self.deps.agent_name,
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            session_id=envelope.target.session_id,
+            requester_id=envelope.requester_id,
+        )
+        if not jobs:
+            return request
+        prompt = (
+            "Previously accepted work belongs to this recovered response. Do not repeat its original tool calls. "
+            + completion_prompt(jobs)
+        )
+        origin = completion_envelope(jobs[0], sender_id=self.deps.matrix_full_id).origin
+        return replace(
+            request,
+            prompt=prompt,
+            model_prompt=prompt,
+            current_prompt_is_structured=False,
+            current_timestamp_ms=None,
+            payload_preparation=None,
+            response_envelope=replace(envelope, body=prompt, origin=origin, hook_source="tool_job_recovery"),
+        )
+
     async def _admit_locked_turn(
         self,
         request: ResponseRequest,
@@ -3174,6 +3333,7 @@ class ResponseRunner:
             reply_entity_names=reply_entity_names,
         ):
             return None
+        request = await self._recover_tool_job_source(request)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)

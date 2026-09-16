@@ -107,9 +107,11 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_jobs.completion import report_background_wait
 from mindroom.tool_jobs.resources import defer_execution_cleanup
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
+    BackgroundWaitChunk,
     CollectedStreamPresentation,
     StreamingToolTracker,
     complete_pending_tool_block,
@@ -148,7 +150,9 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AIStreamChunk = (
+    str | BackgroundWaitChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+)
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:
@@ -524,6 +528,8 @@ async def _collect_streamed_response_content(
         async for chunk in response_stream:
             if isinstance(chunk, str):
                 state.append_text(chunk)
+            elif isinstance(chunk, BackgroundWaitChunk):
+                await report_background_wait(state.final_text() + chunk.content)
             elif isinstance(chunk, RunContentEvent):
                 state.append_text(chunk.content)
             elif isinstance(chunk, RunCompletedEvent):

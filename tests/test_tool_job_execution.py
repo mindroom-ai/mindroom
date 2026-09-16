@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
+from dataclasses import replace
 from typing import TYPE_CHECKING, Never
 
 import anyio
@@ -199,7 +200,7 @@ async def test_sdk_toolkit_stays_connected_after_parent_handle(tmp_path: Path, t
             release.set()
             job_id = json.loads(response.tools[0].result)["job_id"]
             owner = build_execution_identity_from_runtime_context(context)
-            await runtime.resume(job_id, owner=owner, depth=0)
+            signal.clear()
             result = await runtime.wait(job_id, owner=owner, depth=0)
             assert result.job.result == "connected result"
             assert toolkit.closes == 1
@@ -253,7 +254,7 @@ async def test_generator_result_finishes_inside_owned_operation(tmp_path: Path, 
             assert not closed.is_set()
             job_id = json.loads(response.tools[0].result)["job_id"]
             release.set()
-            await runtime.resume(job_id, owner=owner, depth=0)
+            signal.clear()
             result = await runtime.wait(job_id, owner=owner, depth=0)
             assert closed.is_set()
             assert result.job.status == ("failed" if fails else "completed")
@@ -311,7 +312,7 @@ async def test_exact_call_reattachment_rejects_changed_arguments(tmp_path: Path)
 @pytest.mark.parametrize("team_parent", [False, True])
 @pytest.mark.parametrize("save_fails", [False, True])
 @pytest.mark.parametrize("approval", [False, True])
-async def test_fast_result_acknowledges_exact_saved_sdk_run(
+async def test_fast_result_acknowledges_exact_saved_sdk_run(  # noqa: PLR0915 - SDK, approval, receipt, and restart boundaries.
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     team_parent: bool,
@@ -321,7 +322,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(
     """A fast foreground result suppresses delivery only after database readback."""
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
-    context = _delegate_runtime_context(config, paths)
+    context = replace(_delegate_runtime_context(config, paths), membership_turn_id="$original-request")
     owner = build_execution_identity_from_runtime_context(context)
     runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
@@ -334,7 +335,10 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(
 
     model = DelegationModel(
         id="test",
-        responses=[ModelResponse(tool_calls=[_call("fast_tool", "exact-call")]), ModelResponse(content="done")],
+        responses=[
+            ModelResponse(tool_calls=[_call("fast_tool", "exact-call", wait_timeout=None)]),
+            ModelResponse(content="done"),
+        ],
     )
     install_tool_job_execution(model)
     storage = storage_factory()
@@ -368,6 +372,7 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(
         if approval:
             assert await runtime.list_jobs(owner=owner, depth=0) == []
             for requirement in response.requirements or []:
+                assert requirement.tool_execution.tool_args == {"wait_timeout": None}
                 requirement.confirm()
             response = await agent.acontinue_run(run_response=response)
         return response
@@ -379,8 +384,21 @@ async def test_fast_result_acknowledges_exact_saved_sdk_run(
             assert response.tools[0].result == "actual result"
         jobs = await runtime.list_jobs(owner=owner, depth=0)
         assert len(jobs) == 1
+        assert decode_tool_result(jobs[0].adapter["arguments"]) == {"wait_timeout": None}
+        assert jobs[0].adapter["source_event_id"] == "$original-request"
+        assert jobs[0].owner == owner
         assert jobs[0].wait_acknowledged is not save_fails
-        assert len(await runtime.pending_deliveries()) == int(save_fails)
+        assert len(await runtime.pending_outcomes()) == int(save_fails)
+        await runtime.shutdown()
+        restored = ToolJobRuntime(tmp_path)
+        try:
+            await restored.recover()
+            saved = await restored.lookup(jobs[0].job_id, owner=owner, depth=0)
+            assert saved.adapter["source_event_id"] == "$original-request"
+            assert saved.owner == owner
+            assert decode_tool_result(saved.adapter["arguments"]) == {"wait_timeout": None}
+        finally:
+            await restored.shutdown()
     finally:
         storage.close()
         await runtime.shutdown()
@@ -512,7 +530,7 @@ async def test_sdk_mcp_connection_closes_in_original_task(
             assert toolkit.initialized
             job_id = json.loads(response.tools[0].result)["job_id"]
             release.set()
-            await runtime.resume(job_id, owner=owner, depth=0)
+            signal.clear()
             result = await runtime.wait(job_id, owner=owner, depth=0)
             assert result.job.status == "completed"
             assert "connected result" in result.job.result
@@ -623,7 +641,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
                 returned = await parent
                 job_id = json.loads(returned[3].result)["job_id"]
                 release.set()
-                await runtime.resume(job_id, owner=owner, depth=0)
+                signal.clear()
                 waited = await runtime.wait(job_id, owner=owner, depth=0)
                 assert state == {"changed": 0, "conflict": "old", "unrelated": "old"}
                 state.update({"conflict": "newer", "unrelated": "newer"})

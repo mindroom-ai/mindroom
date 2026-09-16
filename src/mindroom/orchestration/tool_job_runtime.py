@@ -1,4 +1,4 @@
-"""Managed tool-job lifecycle and durable Matrix completion delivery."""
+"""Managed tool-job lifecycle and quiet serialized conversation wakeups."""
 
 from __future__ import annotations
 
@@ -9,17 +9,12 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.authorization import is_sender_allowed_for_responder
-from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.lifecycle import active_delegation_edges
 from mindroom.delegation.recovery import interrupt_child
-from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import get_joined_rooms
-from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.tool_job_completion import TOOL_JOB_COMPLETION_KEY
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
 from mindroom.tool_jobs.execution_authority import set_execution_authorizer
 from mindroom.tool_jobs.provenance import function_provenance
@@ -48,42 +43,9 @@ logger = get_logger(__name__)
 _RETRY_SECONDS = 5.0
 
 
-def _build_completion_content(
-    job: BackgroundJob,
-    recipient_user_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> dict[str, Any]:
-    """Build one exact-recipient event for normal durable Matrix ingress."""
-    body = f"Background tool job `{job.job_id}` ({job.tool_name}) is {job.status}."
-    body += f' Call job(action="wait", job_id="{job.job_id}") to retrieve its stored result or approval request.'
-    if job.owner.transport_agent_name and job.owner.transport_agent_name != job.owner.agent_name:
-        body += f" Ask member {job.owner.agent_name} to make this call; the job belongs to that member."
-    content = format_message_with_mentions(
-        config,
-        runtime_paths,
-        body,
-        thread_event_id=job.owner.resolved_thread_id,
-        latest_thread_event_id=job.owner.resolved_thread_id,
-        extra_content={
-            ORIGINAL_SENDER_KEY: job.owner.requester_id,
-            SOURCE_KIND_KEY: HOOK_DISPATCH_SOURCE_KIND,
-            HOOK_SOURCE_KEY: "tool_job_completion",
-            TOOL_JOB_COMPLETION_KEY: {
-                "job_id": job.job_id,
-                "generation": job.generation,
-                "transaction_id": f"tool_job_{job.job_id}_{job.generation}",
-            },
-        },
-    )
-    # Child text may mention other agents; only the exact parent receives this turn.
-    content["m.mentions"] = {"user_ids": [recipient_user_id]}
-    return content
-
-
 @dataclass
 class ToolJobRuntimeCoordinator:
-    """Own background jobs and deliver outcomes through ordinary serialized ingress."""
+    """Own background jobs and wake their serialized conversation response owner."""
 
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
@@ -169,7 +131,7 @@ class ToolJobRuntimeCoordinator:
         function: Function,
         arguments: Mapping[str, Any] | None = None,
     ) -> None:
-        """Recheck retained functions after cooperative human holds release."""
+        """Recheck retained functions immediately before application execution."""
         context = get_tool_runtime_context()
         if context is None or get_background_runtime(context.runtime_paths) is not self._runtime:
             return
@@ -226,17 +188,17 @@ class ToolJobRuntimeCoordinator:
             if self._task is not None and not self._task.cancelled():
                 error = self._task.exception()
                 if error is not None:
-                    logger.error("Tool job delivery worker stopped; restarting", error=str(error))
+                    logger.error("Tool job completion worker stopped; restarting", error=str(error))
             await self.runtime.recover()
             register_background_runtime(self.runtime_paths, self.runtime)
-            set_execution_authorizer(self._authorize_execution)
+            set_execution_authorizer(self.runtime_paths, self._authorize_execution)
             self._task = asyncio.create_task(self._run(), name="tool_job_completion_worker")
         self.runtime.changed.set()
 
     async def stop(self) -> None:
-        """Withdraw admission and stop delivery before cancelling owned child work."""
+        """Withdraw admission and stop wakeups before cancelling owned child work."""
         register_background_runtime(self.runtime_paths, None)
-        set_execution_authorizer(None)
+        set_execution_authorizer(self.runtime_paths, None)
         task, self._task = self._task, None
         if task is not None:
             task.cancel()
@@ -253,12 +215,12 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def deliver_pending(self) -> None:
-        """Retry pending notices, retaining their durable claim on ambiguous sends."""
-        for job in await self.runtime.pending_deliveries():
+        """Wake pending outcomes; durable journal admission absorbs repeated wakeups."""
+        for job in await self.runtime.pending_outcomes():
             try:
                 await self._deliver(job)
             except Exception:
-                logger.exception("Background tool job completion delivery failed", job_id=job.job_id)
+                logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
 
     async def _deliver(self, job: BackgroundJob) -> None:
         recipient = job.owner.transport_agent_name or job.owner.agent_name
@@ -275,29 +237,8 @@ class ToolJobRuntimeCoordinator:
         joined_rooms = await get_joined_rooms(client)
         if joined_rooms is None or job.owner.room_id not in joined_rooms:
             return
-        config = self.config_provider()
-        if config is None or not self._authorized(job):
-            return
-        recipient_user_id = bot.matrix_id.full_id
-        delivery = await self.runtime.claim_delivery(
-            job.job_id,
-            expected_generation=job.generation,
-            content=_build_completion_content(job, recipient_user_id, config, self.runtime_paths),
-            transaction_id=f"tool_job_{job.job_id}_{job.generation}",
-        )
-        if delivery is None or delivery.acknowledged:
-            return
-        # A replaced Matrix account cannot reuse another account's transaction scope.
-        if delivery.content.get("m.mentions") != {"user_ids": [recipient_user_id]}:
-            await self.runtime.block_delivery(job.job_id, delivery.transaction_id)
-            return
         if self.bot_provider(recipient) is not bot or not bot.running or not self._authorized(job):
             return
-        delivered = await send_message_result(
-            client,
-            job.owner.room_id,
-            delivery.content,
-            transaction_id=delivery.transaction_id,
-        )
-        if delivered is not None:
-            await self.runtime.acknowledge_delivery(job.job_id, delivery.transaction_id, event_id=delivered.event_id)
+        current = await self.runtime.outcome(job.job_id, job.generation)
+        if current is not None:
+            await bot.wake_tool_job_completion(current)
