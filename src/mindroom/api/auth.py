@@ -829,14 +829,23 @@ def _require_connections_route_authorized(
 
 async def require_connections_user(request: Request) -> dict[str, Any]:
     """Authenticate a Connections user through a signed upstream Matrix identity."""
+    return await _require_signed_matrix_user(request, label="Connections")
+
+
+async def require_personal_user(request: Request) -> dict[str, Any]:
+    """Authenticate personal read APIs without granting administrator access."""
+    return await _require_signed_matrix_user(request, label="Personal APIs")
+
+
+async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[str, Any]:
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
     if not settings.enabled or not settings.jwt.require_jwt:
-        raise HTTPException(status_code=403, detail="Connections require trusted signed authentication")
+        raise HTTPException(status_code=403, detail=f"{label} require trusted signed authentication")
     auth_user = await _trusted_upstream_auth_user(request, settings, auth_state.trusted_upstream_jwt_client)
     matrix_user_id = auth_user.get("matrix_user_id") if auth_user is not None else None
     if not isinstance(matrix_user_id, str) or try_parse_historical_matrix_user_id(matrix_user_id) is None:
-        raise HTTPException(status_code=403, detail="Connections require a verified Matrix identity")
+        raise HTTPException(status_code=403, detail=f"{label} require a verified Matrix identity")
     request.scope["auth_user"] = auth_user
     return cast("dict[str, Any]", auth_user)
 

@@ -7095,6 +7095,7 @@
       "docs_url": null,
       "function_names": [
         "get_my_usage",
+        "get_my_private_usage",
         "get_all_usage"
       ],
       "helper_text": null,
