@@ -38,7 +38,20 @@ class _QueuedCall:
 
 
 class PlaywrightMCPSession:
-    """Own all MCP context entry/exit on one task, never behind abandoned work."""
+    """Own one lazy stdio transport and serialize discovery and tool calls on one task.
+
+    Callers supply launch configuration and interpret results; this owner enters
+    and exits the MCP contexts and owns the subprocess lifetime. A request's
+    deadline includes startup and queueing. Timeout or caller cancellation,
+    even while queued, retires the whole session just like explicit close:
+    active work is interrupted and queued work fails without dispatch.
+
+    Retirement waits for context exit and bounded process cleanup before
+    settling interrupted calls. The optional cleanup callback for cancelled
+    active calls runs after process cleanup, when late output can no longer
+    appear. Successful calls leave the transport open. A retired instance
+    cannot reopen; its provider must create a fresh session.
+    """
 
     def __init__(
         self,
@@ -96,7 +109,11 @@ class PlaywrightMCPSession:
             raise
 
     async def close(self) -> None:
-        """Interrupt active work, then await SDK bounded process-tree termination/reaping."""
+        """Permanently retire all requests and wait for owned process cleanup.
+
+        Repeated close is safe. Cancellation of the waiter cannot interrupt
+        context exit or the SDK's bounded process termination/reaping.
+        """
         self._closed = True
         if self._work_scope is not None:
             self._work_scope.cancel()
@@ -117,7 +134,7 @@ class PlaywrightMCPSession:
         drain: asyncio.Task[None] | None = None
         error: BaseException = RuntimeError("Playwright MCP session is closed.")
         try:
-            # Startup has its own deadline and closes entered contexts on failure.
+            # The request deadline covers startup; failure closes entered contexts.
             async with stdio_client(self._parameters) as (read_stream, write_stream):
                 try:
                     # Session closure must not close the transport's last reader:

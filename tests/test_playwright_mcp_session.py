@@ -91,6 +91,48 @@ async def test_stuck_call_releases_transport(transport: list[str], operation: st
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["close", "cancel_active", "cancel_queued"])
+async def test_retirement_settles_active_and_queued_calls_without_queued_dispatch(
+    transport: list[str],
+    operation: str,
+) -> None:
+    """Retiring a session interrupts active work and never dispatches queued mutations."""
+    actor = PlaywrightMCPSession(
+        StdioServerParameters(command="unused"),
+        call_timeout_seconds=5,
+        cancelled_call_cleanup=lambda name, _arguments: transport.append(f"cleanup:{name}"),
+    )
+    active = asyncio.create_task(actor.call_tool("stuck", {}))
+    queued: asyncio.Task[CallToolResult] | None = None
+    try:
+        async with asyncio.timeout(1):
+            while "stuck" not in transport:  # noqa: ASYNC110 - observe fake collaborator dispatch
+                await asyncio.sleep(0)
+        queued = asyncio.create_task(actor.call_tool("queued_mutation", {}))
+        await asyncio.sleep(0)
+        assert actor._queue.qsize() == 1
+        if operation == "close":
+            await asyncio.wait_for(actor.close(), 1)
+        elif operation == "cancel_active":
+            active.cancel()
+        else:
+            queued.cancel()
+        results = await asyncio.wait_for(asyncio.gather(active, queued, return_exceptions=True), 1)
+        assert isinstance(results[0], asyncio.CancelledError if operation == "cancel_active" else RuntimeError)
+        assert isinstance(results[1], asyncio.CancelledError if operation == "cancel_queued" else RuntimeError)
+        expected_cleanup = ["cleanup:stuck"] if operation == "cancel_active" else []
+        assert transport == ["session", "initialize", "stuck", "closed", "reaped", *expected_cleanup]
+        assert not actor.running
+        with pytest.raises(RuntimeError, match="session is closed"):
+            await actor.call_tool("later_mutation", {})
+        await actor.close()
+        assert transport.count("reaped") == 1
+    finally:
+        await actor.close()
+        await asyncio.gather(active, *([queued] if queued is not None else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["timeout", "cancel", "crash", "startup", "close"])
 @pytest.mark.parametrize("detached", [False, True])
 @pytest.mark.parametrize("birth_delay_ms", [0, 500])

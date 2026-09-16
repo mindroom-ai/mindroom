@@ -82,7 +82,13 @@ class _ScreenshotOutput:
 
 
 class PlaywrightMCPBrowserProvider:
-    """Drive the user's existing browser profile through Playwright MCP extension mode."""
+    """Own extension launch policy, action restrictions, and browser result handling.
+
+    Each shared session owns its MCP transport and subprocesses. User-facing
+    stop retires that session before a later start creates a fresh one; close
+    permanently forbids restart. Screenshot files are removed after the shared
+    session settles each call, including cancellation and late process output.
+    """
 
     def __init__(
         self,

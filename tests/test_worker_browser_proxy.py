@@ -330,8 +330,8 @@ async def test_pinned_browser_redirect_destinations(tmp_path: Path, monkeypatch:
 
     monkeypatch.setattr(asyncio, "open_connection", dial)
     monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
-    monkeypatch.setattr(mcp_provider, "_SERVER", cli)
-    monkeypatch.setattr(mcp_provider, "_BROWSER", executable)
+    monkeypatch.setattr(mcp_provider, "COMPUTER_BROWSER_MCP_SERVER", cli)
+    monkeypatch.setattr(mcp_provider, "COMPUTER_BROWSER_EXECUTABLE", executable)
     monkeypatch.setattr(mcp_provider.WorkerBrowserMCP, "_server_parameters", parameters)
     browser = mcp_provider.WorkerBrowserMCP(
         display=":99",

@@ -7,6 +7,7 @@ import base64
 import contextlib
 import json
 import os
+import shutil
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -422,15 +423,53 @@ async def test_permanent_close_rejects_calls(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_browser_stop_remains_restartable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """User-facing stop releases MCP without permanently closing the provider."""
-    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    session = AsyncMock()
-    session.call_tool.return_value = _text_result("started")
-    monkeypatch.setattr(provider, "_new_session", lambda: session)
-    stopped = await provider.execute("stop", {})
-    started = await provider.execute("start", {})
-    assert stopped.payload["running"] is False
-    assert started.payload["result"] == "started"
+    """Stop retires a live stdio session; each restart creates a fresh process and session."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node fixture required")
+    script = tmp_path / "server.cjs"
+    script.write_text("""
+require('readline').createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  let result;
+  if (request.method === 'initialize') {
+    result = {protocolVersion:'2025-11-25',capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};
+  } else if (request.method === 'tools/list') {
+    result = {tools:[{name:'browser_tabs',inputSchema:{type:'object'}}]};
+  } else if (request.method === 'tools/call') {
+    result = {content:[{type:'text',text:String(process.pid)}]};
+  }
+  if (result) console.log(JSON.stringify({jsonrpc:'2.0',id:request.id,result}));
+});
+""")
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path, command=node, call_timeout_seconds=5)
+    monkeypatch.setattr(provider, "_server_args", lambda: [str(script)])
+    previous_session = None
+    process_ids: set[str] = set()
+    try:
+        for _ in range(3):
+            started = await provider.execute("start", {})
+            session = provider._session
+            assert session is not None
+            assert session is not previous_session
+            assert session.running
+            assert provider.running
+            process_id = started.payload["result"]
+            assert isinstance(process_id, str)
+            assert process_id.isdigit()
+            assert process_id not in process_ids
+            process_ids.add(process_id)
+            stopped = await asyncio.wait_for(provider.execute("stop", {}), 6)
+            assert stopped.payload["running"] is False
+            assert not provider.running
+            assert not session.running
+            with pytest.raises(RuntimeError, match="session is closed"):
+                await session.call_tool("browser_tabs", {"action": "list"})
+            previous_session = session
+    finally:
+        await provider.close()
+    with pytest.raises(PlaywrightBrowserError, match="provider is closed"):
+        await provider.execute("start", {})
 
 
 @pytest.mark.asyncio
