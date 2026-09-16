@@ -438,3 +438,67 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
     finally:
         await runtime.shutdown()
         register_background_runtime(paths, None)
+
+
+@pytest.mark.asyncio
+async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) -> None:
+    """The native driver resolves generic lookup rejection instead of aborting its parent run."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+            "code": AgentConfig(display_name="Code"),
+        },
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+    )
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        None,
+        None,
+        "parent",
+    )
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
+    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    storage = create_session_storage("leader", config, paths, identity)
+    agent = Agent(
+        name="leader",
+        db=storage,
+        tools=[toolkit],
+        model=DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("wait_subagent", "missing-call", job_id="missing")]),
+                ModelResponse(content="Job unavailable"),
+            ],
+        ),
+    )
+
+    async def unused_child(*_args: object, **_kwargs: object) -> str:
+        msg = "An unavailable job must not start native execution"
+        raise AssertionError(msg)
+
+    try:
+        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+            response = await agent.arun("Wait", session_id="parent", user_id=identity.requester_id)
+            result = await drive_delegations(
+                agent,
+                response,
+                run_child=unused_child,
+                agent_name="leader",
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+            )
+        assert result.status == RunStatus.completed
+        content = next(message.content for message in result.messages if message.tool_call_id == "missing-call")
+        assert "not available in this conversation" in content
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+        storage.close()

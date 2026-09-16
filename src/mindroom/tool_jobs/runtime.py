@@ -138,6 +138,7 @@ class _Entry:
     wait_token: str | None = None
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] | None = None
     stopping: bool = False
+    stopped_outcome: BackgroundOutcome | None = None
     cancel_task: asyncio.Task[BackgroundJob] | None = None
     cancel_ready: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -185,6 +186,7 @@ class ToolJobRuntime:
         self._entries: dict[str, _Entry] = {}
         self._lock = asyncio.Lock()
         self._closed = False
+        self._recovered = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self.changed = asyncio.Event()
         self._human_signals: WeakValueDictionary[tuple[str, str, str | None], HumanMessageSignal] = (
@@ -249,9 +251,11 @@ class ToolJobRuntime:
         """Restore outcomes and approval snapshots, never automatically replay execution."""
         async with self._lock:
             self._ensure_open()
-            if self._entries:
-                return [entry.job for entry in self._entries.values()]
+            if self._recovered:
+                return [self._snapshot(entry) for entry in self._entries.values()]
             for path in sorted(self._root.glob("*.json")):
+                if path.stem in self._entries:
+                    continue
                 if path != self._path(path.stem):
                     raise ValueError(_UNAVAILABLE)
                 payload = json.loads(await asyncio.to_thread(path.read_text))
@@ -272,10 +276,11 @@ class ToolJobRuntime:
                         reason="Tool execution was interrupted by a runtime restart; it was not replayed.",
                         outcome=outcome,
                     )
+                await self._persist(entry)
                 self._entries[job.job_id] = entry
                 self._restore_approval_control(entry)
-                await self._persist(entry)
-            return [entry.job for entry in self._entries.values()]
+            self._recovered = True
+            return [self._snapshot(entry) for entry in self._entries.values()]
 
     def _restore_approval_control(self, entry: _Entry) -> None:
         """Observe future human ingress while a recovered approval awaits reattachment."""
@@ -316,21 +321,32 @@ class ToolJobRuntime:
             self._entries[job.job_id] = entry
             if entry.human_signal is not None:
                 entry.human_signal.subscribe(entry.control.pause)
-            try:
-                await run_coroutine_until_complete(self._persist_and_launch(entry, operation))
-            except Exception:
-                self._release_control(entry)
-                if not self._path(job.job_id).exists():
-                    self._entries.pop(job.job_id)
-                else:
-                    job.status = "interrupted"
-                    job.result = "Job admission failed after publication; execution was not started."
-                raise
+            await run_coroutine_until_complete(self._persist_and_launch(entry, operation))
             return self._snapshot(entry)
 
-    async def _persist_and_launch(self, entry: _Entry, operation: Callable[[], Awaitable[BackgroundOutcome]]) -> None:
-        """Finish accepted admission before propagating cancellation to its former parent."""
-        await self._persist(entry)
+    async def _persist_and_launch(
+        self,
+        entry: _Entry,
+        operation: Callable[[], Awaitable[BackgroundOutcome]],
+        *,
+        previous: tuple[BackgroundJob, str | None] | None = None,
+    ) -> None:
+        """Reconcile acceptance inside the owned task before propagating parent cancellation."""
+        try:
+            await self._persist(entry)
+        except Exception:
+            if previous is not None:
+                saved = json.loads(await asyncio.to_thread(self._path(entry.job.job_id).read_text))
+                if saved["generation"] == previous[0].generation:
+                    entry.job, entry.wait_token = previous
+                    raise
+            self._release_control(entry)
+            if not self._path(entry.job.job_id).exists():
+                self._entries.pop(entry.job.job_id)
+            else:
+                entry.job.status = "interrupted"
+                entry.job.result = "Job admission failed after publication; execution was not started."
+            raise
         self._launch(entry, operation)
 
     def owns_execution(self, job_id: str, adapter: dict[str, Any]) -> bool:
@@ -368,7 +384,9 @@ class ToolJobRuntime:
                 finally:
                     await finalize_queued_notice_response_turn_async(notice)
             async with self._lock:
-                if entry.job.status not in _TERMINAL:
+                if entry.stopping:
+                    entry.stopped_outcome = outcome
+                elif entry.job.status not in _TERMINAL:
                     entry.job.status = outcome.status
                     entry.job.result = outcome.result
                     entry.job.approval_state = outcome.approval_state
@@ -602,7 +620,14 @@ class ToolJobRuntime:
         reason: str | None,
         outcome: BackgroundOutcome | None = None,
     ) -> None:
-        """Prefer committed adapter terminal evidence over interruption classification."""
+        """Publish retained terminal evidence only after owned execution and cleanup settle."""
+        if (
+            entry.stopped_outcome is not None
+            and entry.stopped_outcome.status in _TERMINAL
+            and (outcome is None or outcome.status not in {"completed", "failed", "denied"})
+        ):
+            outcome = entry.stopped_outcome
+        entry.stopped_outcome = None
         if outcome is not None and outcome.status in _TERMINAL:
             entry.job.status = outcome.status
             entry.job.result = outcome.result
@@ -638,18 +663,9 @@ class ToolJobRuntime:
                 entry.human_signal = current_human_message_signal()
                 if entry.human_signal is not None:
                     entry.human_signal.subscribe(entry.control.pause)
-            try:
-                await run_coroutine_until_complete(self._persist_and_launch(entry, operation))
-            except Exception:
-                saved = json.loads(await asyncio.to_thread(self._path(job_id).read_text))
-                if saved["generation"] == previous.generation:
-                    entry.job = previous
-                    entry.wait_token = previous_token
-                else:
-                    entry.job.status = "interrupted"
-                    entry.job.result = "Continuation admission failed after publication; execution was not started."
-                    self._release_control(entry)
-                raise
+            await run_coroutine_until_complete(
+                self._persist_and_launch(entry, operation, previous=(previous, previous_token)),
+            )
             return self._snapshot(entry)
 
     async def pending_deliveries(self) -> list[BackgroundJob]:

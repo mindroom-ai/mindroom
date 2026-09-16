@@ -763,6 +763,12 @@ async def test_native_recovery_requires_exclusive_child_liveness(tmp_path: Path)
         await asyncio.Event().wait()
         raise AssertionError
 
+    async def earlier_approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    earlier = await start_delegation(runtime, _child("0" * 32), owner=_owner(), operation=earlier_approval)
+    waiting = await runtime.wait(earlier.job_id, owner=_owner(), depth=0)
+    await runtime.release_wait(earlier.job_id, waiting.token)
     await start_delegation(runtime, child, owner=_owner(), operation=operation)
     await runtime.shutdown()
     path = paths.storage_root / "tool_jobs" / f"{child.delegation_id}.json"
@@ -787,6 +793,10 @@ async def test_native_recovery_requires_exclusive_child_liveness(tmp_path: Path)
                 await restored.recover()
             assert calls == 0
         await restored.recover()
+        assert {job.job_id for job in await restored.list_jobs(owner=_owner(), depth=0)} == {
+            earlier.job_id,
+            child.delegation_id,
+        }
         job = await restored.lookup(child.delegation_id, owner=_owner(), depth=0)
         assert job.status == "completed"
         assert job.result == "Native durable answer"

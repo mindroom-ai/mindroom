@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -278,3 +279,127 @@ async def test_reads_are_copies_and_blocked_delivery_does_not_hide_results(
     await runtime.acknowledge_wait(job.job_id, waited.token)
     assert not await runtime.is_current_outcome(job.job_id, job.generation)
     await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_status", [None, "cancelled", "completed"])
+async def test_terminal_operation_stays_pending_until_cancellation_cleanup_settles(
+    tmp_path: Path,
+    cleanup_status: str | None,
+) -> None:
+    """A cancellation-catching operation cannot make its result deliverable before cleanup."""
+    runtime = ToolJobRuntime(tmp_path)
+    started, cleaning, finish_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return BackgroundOutcome("completed", "operation answer", result_payload={"source": "operation"})
+
+    async def cleanup(_job: runtime_module.BackgroundJob) -> BackgroundOutcome | None:
+        cleaning.set()
+        await finish_cleanup.wait()
+        if cleanup_status == "completed":
+            return BackgroundOutcome("completed", "reconciled answer", result_payload={"source": "cleanup"})
+        if cleanup_status == "cancelled":
+            return BackgroundOutcome("cancelled")
+        return None
+
+    job = await runtime.start(JobSpec("cleanup", "tool", 0), owner=_owner(), operation=operation, cancel=cleanup)
+    await started.wait()
+    cancelling = asyncio.create_task(runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True))
+    try:
+        await cleaning.wait()
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "cancel_requested"
+        waiting = await runtime.wait(job.job_id, owner=_owner(), depth=0, timeout=0)
+        assert waiting.token is None
+        assert waiting.job.status == "cancel_requested"
+        assert await runtime.pending_deliveries() == []
+        assert not cancelling.done()
+    finally:
+        finish_cleanup.set()
+        settled = await cancelling
+        await runtime.shutdown()
+    assert settled.status == "completed"
+    expected_source = "cleanup" if cleanup_status == "completed" else "operation"
+    expected_answer = "reconciled answer" if cleanup_status == "completed" else "operation answer"
+    assert settled.result == expected_answer
+    assert settled.result_payload == {"source": expected_source}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("continuation", [False, True])
+@pytest.mark.parametrize("published", [False, True])
+async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    continuation: bool,
+    published: bool,
+) -> None:
+    """Parent cancellation must not hide writer failure or prevent exact admission rollback."""
+    runtime = ToolJobRuntime(tmp_path)
+    human = HumanMessageSignal()
+    original_writer = runtime_module.write_json_file_durable
+    writing, release_writer = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    calls = 0
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    async def operation() -> BackgroundOutcome:
+        nonlocal calls
+        calls += 1
+        return BackgroundOutcome("completed", "once")
+
+    if continuation:
+        await runtime.start(JobSpec("failed", "tool", 0), owner=_owner(), operation=approval, human_signal=human)
+        waiting = await runtime.wait("failed", owner=_owner(), depth=0)
+        await runtime.release_wait("failed", waiting.token)
+
+    def failed_writer(path: Path, payload: object) -> None:
+        if published:
+            original_writer(path, payload)
+        loop.call_soon_threadsafe(writing.set)
+        assert release_writer.wait(5)
+        msg = "admission write failed"
+        raise OSError(msg)
+
+    monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_writer)
+    accepting = asyncio.create_task(
+        runtime.continue_job("failed", owner=_owner(), depth=0, operation=operation)
+        if continuation
+        else runtime.start(JobSpec("failed", "tool", 0), owner=_owner(), operation=operation, human_signal=human),
+    )
+    try:
+        await writing.wait()
+        accepting.cancel()
+        release_writer.set()
+        with pytest.raises(asyncio.CancelledError):
+            await accepting
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", original_writer)
+        jobs = await runtime.list_jobs(owner=_owner(), depth=0)
+        assert calls == 0
+        if published:
+            assert len(jobs) == 1
+            assert jobs[0].status == "interrupted"
+            assert not human.has_subscribers
+        elif continuation:
+            assert len(jobs) == 1
+            assert jobs[0].status == "awaiting_approval"
+            assert jobs[0].generation == 0
+            assert human.has_subscribers
+            await runtime.continue_job("failed", owner=_owner(), depth=0, operation=operation)
+        else:
+            assert jobs == []
+            assert not human.has_subscribers
+            await runtime.start(JobSpec("failed", "tool", 0), owner=_owner(), operation=operation)
+        if not published:
+            assert (await runtime.wait("failed", owner=_owner(), depth=0)).job.result == "once"
+            assert calls == 1
+    finally:
+        release_writer.set()
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", original_writer)
+        await runtime.shutdown()

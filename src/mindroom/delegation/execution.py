@@ -58,7 +58,7 @@ from mindroom.history.session_context import close_agent_runtime_state_dbs
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_jobs.runtime import BackgroundOutcome, get_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, get_background_runtime
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -741,7 +741,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     continue
                 try:
                     background_job = await background.lookup(job_id, owner=caller_identity, depth=delegation_depth)
-                except SubagentSessionError as error:
+                except JobAccessError as error:
                     resolve_result(str(error))
                     continue
                 retained = retained_child(background, background_job)
