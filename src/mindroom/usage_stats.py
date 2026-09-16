@@ -16,6 +16,7 @@ from mindroom.usage_stats_storage import (
     UsageStorageDiagnostic,
     UsageStorageSource,
     discover_admin_usage_sources,
+    discover_private_usage_sources,
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
@@ -33,13 +34,16 @@ __all__ = [
     "UsageCoverage",
     "UsageDailyBreakdownRow",
     "UsageModelBreakdownRow",
+    "UsagePrivateAgentBreakdownRow",
     "UsageReport",
     "UsageUserBreakdownRow",
     "collect_admin_usage",
+    "collect_private_usage",
     "collect_self_usage",
 ]
 
 type _Scope = Literal["self", "admin"]
+type _ModelUsageEntry = tuple[UsageRunNode, TokenTotals, Mapping[tuple[str, str], TokenTotals]]
 
 _COVERAGE_NOTE = (
     "Shared self totals use requester-attributed retained agent runs. "
@@ -65,6 +69,12 @@ _DAILY_COVERAGE_NOTE = (
     "Runs with unusable model details retain their totals under the unknown model. "
     "It does not necessarily sum to report totals, which may include compacted history "
     "and nested team-member usage. Deleted sessions are unavailable."
+)
+_PRIVATE_COVERAGE_NOTE = (
+    "Private-agent totals use session aggregates, attributed to a validated private-instance owner "
+    "or the session's recorded requester. Retained-run totals, models, and days use recorded run requesters "
+    "with the private owner as fallback. A null user_id means attribution is unavailable. "
+    "Compacted or deleted run detail cannot be reconstructed."
 )
 
 
@@ -208,6 +218,36 @@ class UsageDailyBreakdownRow:
 
 
 @dataclass(frozen=True, slots=True)
+class UsagePrivateAgentBreakdownRow:
+    """Session totals and retained detail for one user's private agent."""
+
+    agent_name: str
+    user_id: str | None
+    totals: TokenTotals
+    session_count: int
+    retained_run_totals: TokenTotals
+    run_count: int
+    model_breakdown: tuple[UsageModelBreakdownRow, ...]
+    daily_breakdown: tuple[UsageDailyBreakdownRow, ...] | None
+
+    def to_dict(self, *, admin: bool) -> dict[str, object]:
+        """Keep owner identities out of personal reports."""
+        payload: dict[str, object] = {
+            "agent_name": self.agent_name,
+            "totals": self.totals.to_dict(),
+            "session_count": self.session_count,
+            "retained_run_totals": self.retained_run_totals.to_dict(),
+            "run_count": self.run_count,
+            "model_breakdown": [row.to_dict() for row in self.model_breakdown],
+        }
+        if admin:
+            payload["user_id"] = self.user_id
+        if self.daily_breakdown is not None:
+            payload["daily_breakdown"] = [row.to_dict() for row in self.daily_breakdown]
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class UsageReport:
     """Aggregate-only retained token usage."""
 
@@ -221,6 +261,8 @@ class UsageReport:
     user_breakdown: tuple[UsageUserBreakdownRow, ...] = ()
     daily_breakdown: tuple[UsageDailyBreakdownRow, ...] = ()
     daily_coverage: UsageCoverage | None = None
+    private_agent_breakdown: tuple[UsagePrivateAgentBreakdownRow, ...] = ()
+    private_agent_coverage: UsageCoverage | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable custom-tool payload fields."""
@@ -239,6 +281,11 @@ class UsageReport:
         if self.daily_coverage is not None:
             payload["daily_breakdown"] = [row.to_dict() for row in self.daily_breakdown]
             payload["daily_coverage"] = self.daily_coverage.to_dict()
+        if self.private_agent_coverage is not None:
+            payload["private_agent_breakdown"] = [
+                row.to_dict(admin=self.scope == "admin") for row in self.private_agent_breakdown
+            ]
+            payload["private_agent_coverage"] = self.private_agent_coverage.to_dict()
         return payload
 
 
@@ -350,10 +397,10 @@ class _ModelUsageAccumulator:
         scope: _Scope,
         expected_agent: str | None,
         expected_requester: str | None,
-    ) -> None:
+    ) -> list[_ModelUsageEntry]:
         if not row.runs_available:
             self.unavailable_sources.add(row.source.path_label)
-            return
+            return []
         try:
             entries = _model_entries_for_row(
                 row,
@@ -363,7 +410,8 @@ class _ModelUsageAccumulator:
             )
         except ValueError:
             self.unavailable_sources.add(row.source.path_label)
-            return
+            return []
+        accepted: list[_ModelUsageEntry] = []
         for run, totals in entries:
             if run.run_id is not None:
                 identity = (row.source.path_label, row.row_key, run.run_id)
@@ -374,19 +422,136 @@ class _ModelUsageAccumulator:
             if models is None:
                 self.unavailable_sources.add(row.source.path_label)
                 models = {("unknown", "unknown"): totals}
-            _add_model_totals(self.buckets, models)
+            self.add_run(run, totals, models, scope=scope, source_path=row.source.path_label)
+            accepted.append((run, totals, models))
+        return accepted
+
+    def add_run(
+        self,
+        run: UsageRunNode,
+        totals: TokenTotals,
+        models: Mapping[tuple[str, str], TokenTotals],
+        *,
+        scope: _Scope,
+        source_path: str,
+    ) -> None:
+        """Accumulate an already validated, deduplicated run for any report view."""
+        _add_model_totals(self.buckets, models)
+        if scope == "admin":
+            self.user_totals.setdefault(run.requester_id, _Aggregate()).add(totals)
+            _add_model_totals(self.user_buckets.setdefault(run.requester_id, {}), models)
+        if self.daily_usage is not None:
+            self.daily_usage.add_run(run, totals, models, source_path=source_path)
             if scope == "admin":
-                self.user_totals.setdefault(run.requester_id, _Aggregate()).add(totals)
-                _add_model_totals(self.user_buckets.setdefault(run.requester_id, {}), models)
-            if self.daily_usage is not None:
-                self.daily_usage.add_run(run, totals, models, source_path=row.source.path_label)
-                if scope == "admin":
-                    self.user_daily_usage.setdefault(run.requester_id, _DailyUsageAccumulator()).add_run(
-                        run,
-                        totals,
-                        models,
-                        source_path=row.source.path_label,
-                    )
+                self.user_daily_usage.setdefault(run.requester_id, _DailyUsageAccumulator()).add_run(
+                    run,
+                    totals,
+                    models,
+                    source_path=source_path,
+                )
+
+
+@dataclass(slots=True)
+class _PrivateUsageAccumulator:
+    include_daily: bool
+    buckets: dict[tuple[str | None, str], tuple[_UsageAccumulator, _ModelUsageAccumulator]] = dataclass_field(
+        default_factory=dict,
+    )
+    sources: set[str] = dataclass_field(default_factory=set)
+    unavailable_sources: set[str] = dataclass_field(default_factory=set)
+
+    def bucket(self, user_id: str | None, agent_name: str) -> tuple[_UsageAccumulator, _ModelUsageAccumulator]:
+        """Reuse the report accumulators without rescanning a database."""
+        key = (user_id, agent_name)
+        if key not in self.buckets:
+            self.buckets[key] = (
+                _UsageAccumulator(),
+                _ModelUsageAccumulator(daily_usage=_DailyUsageAccumulator() if self.include_daily else None),
+            )
+        return self.buckets[key]
+
+    def add_row(
+        self,
+        row: UsageSessionRow,
+        entries: list[_ModelUsageEntry],
+        *,
+        scope: _Scope,
+        requester_id: str | None,
+    ) -> None:
+        """Preserve session ownership separately from retained run attribution."""
+        if row.source.scope != "private_agent" or (agent_name := _admin_entity_id(row)) is None:
+            return
+        self.sources.add(row.source.path_label)
+        owner = requester_id if scope == "self" else row.source.owner_id or row.requester_id
+        if owner is None:
+            self.unavailable_sources.add(row.source.path_label)
+        usage, _ = self.bucket(owner, agent_name)
+        usage.add_row(row, scope="admin", expected_agent=None, expected_requester=None)
+        for run, totals, model_totals in entries:
+            user_id = owner if scope == "self" else run.requester_id or owner
+            _, models = self.bucket(user_id, agent_name)
+            models.add_run(
+                run,
+                totals,
+                model_totals,
+                scope="admin",
+                source_path=row.source.path_label,
+            )
+
+    def rows(self) -> tuple[UsagePrivateAgentBreakdownRow, ...]:
+        """Build deterministic per-user, per-agent rows from shared accumulators."""
+        rows = []
+        for (user_id, agent_name), (usage, models) in sorted(
+            self.buckets.items(),
+            key=lambda item: (item[0][0] or "", item[0][1]),
+        ):
+            retained = TokenTotals()
+            run_count = 0
+            for aggregate in models.user_totals.values():
+                retained = retained.plus(aggregate.totals)
+                run_count += aggregate.count
+            rows.append(
+                UsagePrivateAgentBreakdownRow(
+                    agent_name,
+                    user_id,
+                    usage.total,
+                    len(usage.sessions),
+                    retained,
+                    run_count,
+                    _model_breakdown(models.buckets),
+                    models.daily_usage.rows() if models.daily_usage is not None else None,
+                ),
+            )
+        return tuple(rows)
+
+    def coverage(self) -> UsageCoverage:
+        """Report unavailable attribution or metrics without guessing missing history."""
+        unavailable = set(self.unavailable_sources)
+        for usage, models in self.buckets.values():
+            unavailable.update(usage.unavailable_sources | models.unavailable_sources)
+            if models.daily_usage is not None:
+                unavailable.update(models.daily_usage.unavailable_sources)
+        return UsageCoverage(len(self.sources), len(unavailable), _PRIVATE_COVERAGE_NOTE)
+
+
+def collect_private_usage(
+    *,
+    requester_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    include_daily: bool = False,
+) -> UsageReport:
+    """Collect only the requester's own configured private agents across known aliases."""
+    requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    return _collect_usage(
+        sources=discover_private_usage_sources(requester_id=requester_id, config=config, runtime_paths=runtime_paths),
+        config=config,
+        runtime_paths=runtime_paths,
+        scope="self",
+        expected_agent=None,
+        expected_requester=requester_id,
+        include_daily=include_daily,
+    )
 
 
 def collect_self_usage(
@@ -445,6 +610,7 @@ def _collect_usage(
     usage = _UsageAccumulator()
     daily_usage = _DailyUsageAccumulator() if include_daily else None
     model_usage = _ModelUsageAccumulator(daily_usage=daily_usage)
+    private_usage = _PrivateUsageAccumulator(include_daily)
     scanned_sources: set[str] = set()
     for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
@@ -453,38 +619,42 @@ def _collect_usage(
             continue
         source = discovered
         scanned_sources.add(source.path_label)
+        if source.scope == "private_agent":
+            private_usage.sources.add(source.path_label)
         mode = "runs" if scope == "self" and not source.requester_isolated else "both"
         for item in iter_usage_storage_rows(source, mode=mode):
             if isinstance(item, UsageStorageDiagnostic):
                 usage.unavailable_sources.add(item.path_label)
                 model_usage.unavailable_sources.add(item.path_label)
+                if source.scope == "private_agent":
+                    private_usage.unavailable_sources.add(item.path_label)
                 continue
-            row = item
-            if scope == "admin" or not item.source.requester_isolated:
-                row = replace(
-                    item,
-                    runs=tuple(
-                        replace(
-                            run,
-                            requester_id=canonical_requester(run.requester_id),
-                        )
-                        if run.requester_id is not None
-                        else run
-                        for run in item.runs
-                    ),
-                )
+            owner = canonical_requester(item.source.owner_id) if item.source.owner_id is not None else None
+            row = replace(
+                item,
+                source=replace(item.source, owner_id=owner),
+                requester_id=canonical_requester(item.requester_id) if item.requester_id is not None else None,
+                runs=tuple(
+                    replace(run, requester_id=canonical_requester(run.requester_id) if run.requester_id else owner)
+                    for run in item.runs
+                ),
+            )
             usage.add_row(
                 row,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
             )
-            model_usage.add_row(
+            entries = model_usage.add_row(
                 row,
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
             )
+            if scope == "admin" or _self_source_allowed(source, expected_agent):
+                private_usage.add_row(row, entries, scope=scope, requester_id=expected_requester)
+            if source.scope == "private_agent" and source.path_label in model_usage.unavailable_sources:
+                private_usage.unavailable_sources.add(source.path_label)
 
     breakdown = tuple(
         UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.count)
@@ -523,6 +693,8 @@ def _collect_usage(
         )
         if daily_usage is not None
         else None,
+        private_agent_breakdown=private_usage.rows(),
+        private_agent_coverage=private_usage.coverage(),
     )
 
 
@@ -602,7 +774,7 @@ def _model_entries_for_row(
     if scope == "admin":
         if _admin_entity_id(row) is None:
             return []
-    elif row.source.source_agent_id != expected_agent or expected_agent not in row.source.allowed_agent_ids:
+    elif not _self_source_allowed(row.source, expected_agent):
         return []
 
     entries: list[tuple[UsageRunNode, TokenTotals]] = []
@@ -625,7 +797,7 @@ def _self_row_totals(
     expected_requester: str | None,
     seen_runs: set[tuple[str, str, str]],
 ) -> TokenTotals | None:
-    if row.source.source_agent_id != expected_agent or expected_agent not in row.source.allowed_agent_ids:
+    if not _self_source_allowed(row.source, expected_agent):
         return None
     if row.source.requester_isolated:
         return _metrics_totals(row.session_metrics)
@@ -647,6 +819,14 @@ def _self_row_totals(
         total = total.plus(run_totals)
         accepted = True
     return total if accepted else None
+
+
+def _self_source_allowed(source: UsageStorageSource, expected_agent: str | None) -> bool:
+    if source.source_agent_id not in source.allowed_agent_ids:
+        return False
+    if expected_agent is None:
+        return source.scope == "private_agent" and source.requester_isolated
+    return source.source_agent_id == expected_agent
 
 
 def _admin_entity_id(row: UsageSessionRow) -> str | None:

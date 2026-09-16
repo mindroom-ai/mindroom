@@ -18,8 +18,10 @@ from mindroom.legacy_session_storage import (
     legacy_session_runs_projection,
     merge_legacy_run_payloads,
 )
+from mindroom.private_instance_identity import PrivateInstanceIdentityError, load_private_instance_identity
+from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import build_tool_execution_identity, worker_dir_name
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -35,6 +37,7 @@ __all__ = [
     "UsageStorageDiagnostic",
     "UsageStorageSource",
     "discover_admin_usage_sources",
+    "discover_private_usage_sources",
     "discover_self_usage_sources",
     "iter_usage_storage_rows",
 ]
@@ -78,6 +81,7 @@ class UsageStorageSource:
     allowed_agent_ids: frozenset[str]
     allowed_team_ids: frozenset[str]
     requester_isolated: bool
+    owner_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +118,7 @@ class UsageSessionRow:
     row_key: str
     runs: tuple[UsageRunNode, ...]
     session_metrics: Mapping[str, _MetricValue] = field(default_factory=lambda: MappingProxyType({}))
+    requester_id: str | None = None
     payload_bytes: int = 0
     runs_available: bool = True
     session_metrics_available: bool = True
@@ -182,8 +187,50 @@ def discover_self_usage_sources(
             agent_name=agent_name,
             config=config,
             requester_isolated=resolved.execution.is_private,
+            owner_id=execution_identity.requester_id if resolved.execution.is_private else None,
         ),
     )
+
+
+def discover_private_usage_sources(
+    *,
+    requester_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[UsageStorageSource | UsageStorageDiagnostic, ...]:
+    """Resolve existing private databases for this canonical requester and known aliases only."""
+    canonical = resolve_human_requester_alias(requester_id, config, runtime_paths)
+    requester_ids = {canonical}
+    requester_ids.update(
+        alias
+        for aliases in config.authorization.aliases.values()
+        for alias in aliases
+        if resolve_human_requester_alias(alias, config, runtime_paths) == canonical
+    )
+    sources: dict[str, UsageStorageSource | UsageStorageDiagnostic] = {}
+    for agent_name, agent_config in config.agents.items():
+        if agent_config.private is None:
+            continue
+        for user_id in sorted(requester_ids):
+            identity = build_tool_execution_identity(
+                channel="matrix",
+                agent_name=agent_name,
+                runtime_paths=runtime_paths,
+                requester_id=user_id,
+                room_id=None,
+                thread_id=None,
+                resolved_thread_id=None,
+                session_id=None,
+            )
+            for source in discover_self_usage_sources(
+                agent_name=agent_name,
+                config=config,
+                runtime_paths=runtime_paths,
+                execution_identity=identity,
+            ):
+                if isinstance(source, UsageStorageDiagnostic) or source.path.is_file():
+                    sources[source.path_label] = source
+    return tuple(sources[key] for key in sorted(sources))
 
 
 def discover_admin_usage_sources(
@@ -194,7 +241,7 @@ def discover_admin_usage_sources(
     """Find configured shared agents plus existing private and team databases."""
     root = _session_root(runtime_paths)
     sources = _shared_agent_sources(root, config)
-    sources.extend(_private_agent_sources(root, config))
+    sources.extend(_private_agent_sources(root, config, runtime_paths.storage_root))
     sources.extend(_team_sources(root, config))
     return tuple(sorted(sources, key=lambda item: item.path_label))
 
@@ -231,6 +278,7 @@ def _shared_agent_sources(
 def _private_agent_sources(
     root: Path,
     config: Config,
+    state_root: Path,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
     private_root = root / "private_instances"
     directory_entries = _directory_entries(private_root)
@@ -244,6 +292,14 @@ def _private_agent_sources(
             continue
         if _WORKER_DIRECTORY.fullmatch(worker_directory.name) is None:
             continue
+        # Ownership lives with runtime state, even when sessions use a separate root.
+        try:
+            owner = load_private_instance_identity(
+                state_root,
+                state_root / "private_instances" / worker_directory.name,
+            )
+        except (PrivateInstanceIdentityError, OSError):
+            owner = None
         for agent_name in private_agents:
             relative = Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db"
             candidate = _safe_candidate(root, relative)
@@ -258,6 +314,7 @@ def _private_agent_sources(
                     agent_name=agent_name,
                     config=config,
                     requester_isolated=True,
+                    owner_id=owner.requester_id if owner is not None else None,
                 ),
             )
     return sources
@@ -331,6 +388,7 @@ def _source(
     agent_name: str | None,
     config: Config,
     requester_isolated: bool,
+    owner_id: str | None = None,
 ) -> UsageStorageSource:
     return UsageStorageSource(
         path=path,
@@ -341,6 +399,7 @@ def _source(
         allowed_agent_ids=frozenset(config.agents),
         allowed_team_ids=frozenset(config.teams),
         requester_isolated=requester_isolated,
+        owner_id=owner_id,
     )
 
 
@@ -526,6 +585,7 @@ def _extract_row(
         row_key=_bounded_string(row_key),
         runs=runs,
         session_metrics=session_metrics,
+        requester_id=row_requester,
         payload_bytes=payload_bytes,
         runs_available=runs_available,
         session_metrics_available=session_metrics_available,

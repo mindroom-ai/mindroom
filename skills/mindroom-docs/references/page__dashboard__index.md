@@ -304,6 +304,25 @@ The `coverage`, `model_coverage`, and `user_coverage` fields describe missing so
 This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
+The administrator response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
+Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
+They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
+Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
+Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
+Compacted history can contribute to session totals without recoverable model or daily detail.
+
+#### Personal Private-Agent Usage
+
+`GET /api/usage/me/private-agents?include_daily=true` returns the authenticated requester's usage across their configured private agents.
+It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an administrator `user_breakdown`.
+Known requester aliases share one history; other users' databases and shared-agent databases are excluded.
+The optional `include_daily` parameter defaults to `false`.
+
+This endpoint requires trusted upstream authentication with signed JWTs and a verified Matrix identity, using the same identity checks as the personal Connections API.
+An instance API key alone cannot select a personal user.
+The requester comes only from authenticated identity; user, agent, and storage-path query overrides are rejected.
+Ordinary authenticated users can access this personal endpoint; `/api/usage` retains its existing dashboard administrator access rules.
+
 ### Health & Readiness
 
 | Method | Endpoint | Description |

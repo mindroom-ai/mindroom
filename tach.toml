@@ -1478,6 +1478,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.usage"
 depends_on = [
+    "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.usage_stats",
 ]
