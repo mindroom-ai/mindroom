@@ -11,8 +11,6 @@ import nio
 import pytest
 
 import mindroom.tools  # noqa: F401
-from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
 from mindroom.custom_tools.chat_ui import ChatUITools
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.client_visible_messages import extract_visible_message, is_visible_room_message
@@ -20,79 +18,21 @@ from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.room_history_reads import parse_room_message_event
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import (
-    bind_runtime_paths,
-    make_conversation_reader_mock,
-    make_matrix_client_mock,
-    make_relation_lookup,
-    runtime_paths_for,
-    test_runtime_paths,
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.chat_ui_contract_fixture import (
+    REQUESTER_ID,
+    ROOM_ID,
+    THREAD_ID,
 )
-from tests.identity_helpers import entity_ids
+from tests.chat_ui_contract_fixture import (
+    make_chat_ui_context as _context,
+)
+from tests.chat_ui_contract_fixture import (
+    sent_chat_ui_content as _sent_content,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-ROOM_ID = "!room:example.org"
-THREAD_ID = "$root"
-REQUESTER_ID = "@alice:example.org"
-
-
-def _context(
-    tmp_path: Path,
-    *,
-    thread_id: str | None = THREAD_ID,
-    reply_to_event_id: str | None = "$request",
-    agent_name: str = "researcher",
-    transport_agent_name: str | None = None,
-    include_team: bool = False,
-) -> ToolRuntimeContext:
-    config = bind_runtime_paths(
-        Config(
-            agents={"researcher": AgentConfig(display_name="Researcher")},
-            teams=(
-                {
-                    "research": TeamConfig(
-                        display_name="Research Team",
-                        role="Coordinate research",
-                        agents=["researcher"],
-                    ),
-                }
-                if include_team
-                else {}
-            ),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    runtime_paths = runtime_paths_for(config)
-    agent_user_id = entity_ids(config, runtime_paths)[agent_name].full_id
-    client = make_matrix_client_mock(user_id=agent_user_id)
-    client.room_send.return_value = nio.RoomSendResponse("$ui-action", ROOM_ID)
-    return make_test_tool_runtime_context(
-        agent_name=agent_name,
-        transport_agent_name=transport_agent_name,
-        target=MessageTarget.resolve(
-            room_id=ROOM_ID,
-            thread_id=thread_id,
-            reply_to_event_id=reply_to_event_id,
-            room_mode=thread_id is None,
-        ),
-        requester_id=REQUESTER_ID,
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-    )
-
-
-def _sent_content(context: ToolRuntimeContext) -> dict[str, object]:
-    content = context.client.room_send.await_args.kwargs["content"]
-    assert isinstance(content, dict)
-    return content
 
 
 def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Path) -> None:
