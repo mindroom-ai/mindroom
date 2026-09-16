@@ -305,7 +305,14 @@ def test_private_coverage_reports_unreadable_namespace(tmp_path: Path, monkeypat
 
 
 @pytest.mark.parametrize("separate_sessions", [False, True])
-def test_personal_usage_isolates_rejected_private_paths(tmp_path: Path, separate_sessions: bool) -> None:
+@pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+def test_usage_isolates_rejected_private_paths(
+    tmp_path: Path,
+    separate_sessions: bool,
+    admin: bool,
+    nested: bool,
+) -> None:
     """One unsafe worker path cannot hide usage from other owned private agents."""
     data = private_usage_data(tmp_path, separate_sessions=separate_sessions)
     database = seed_private_usage(
@@ -316,16 +323,21 @@ def test_personal_usage_isolates_rejected_private_paths(tmp_path: Path, separate
         run_tokens=20,
         stored_requester=None,
     )
-    worker_root = data.paths.storage_root / "private_instances" / database.parents[2].name
-    blocked_root = worker_root.rename(tmp_path / "blocked-worker")
-    worker_root.symlink_to(blocked_root, target_is_directory=True)
+    worker_root = (
+        database.parents[2] if admin else data.paths.storage_root / "private_instances" / database.parents[2].name
+    )
+    rejected_path = database if nested else worker_root
+    blocked_path = rejected_path.rename(tmp_path / "blocked-private-path")
+    rejected_path.symlink_to(blocked_path, target_is_directory=not nested)
 
-    report = usage_stats.collect_private_usage(
-        requester_id=ALICE,
-        config=data.config,
-        runtime_paths=data.paths,
+    report = (
+        usage_stats.collect_admin_usage(config=data.config, runtime_paths=data.paths)
+        if admin
+        else usage_stats.collect_private_usage(requester_id=ALICE, config=data.config, runtime_paths=data.paths)
     ).to_dict()
-    assert report["totals"]["total_tokens"] == 50
-    assert [row["agent_name"] for row in report["private_agent_breakdown"]] == ["helper"]
+    assert report["totals"]["total_tokens"] == (620 if admin else 50)
+    assert [row["agent_name"] for row in report["private_agent_breakdown"]] == (
+        ["helper", "code"] if admin else ["helper"]
+    )
     assert report["coverage"]["unavailable_sources"] == 1
     assert report["private_agent_coverage"]["unavailable_sources"] == 1

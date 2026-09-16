@@ -300,9 +300,17 @@ def _private_agent_sources(
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for worker_directory in entries:
-        if worker_directory.is_symlink() or not worker_directory.is_dir():
-            continue
         if _WORKER_DIRECTORY.fullmatch(worker_directory.name) is None:
+            continue
+        if worker_directory.is_symlink() or not worker_directory.is_dir():
+            sources.append(
+                _diagnostic(
+                    worker_directory.relative_to(root).as_posix(),
+                    "partial",
+                    "source discovery unavailable",
+                    scope="private_agent",
+                ),
+            )
             continue
         # Ownership lives with runtime state, even when sessions use a separate root.
         try:
@@ -315,7 +323,12 @@ def _private_agent_sources(
         for agent_name in private_agents:
             relative = Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db"
             candidate = _safe_candidate(root, relative)
-            if candidate is None or not candidate.is_file():
+            if candidate is None:
+                sources.append(
+                    _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="private_agent"),
+                )
+                continue
+            if not candidate.is_file():
                 continue
             sources.append(
                 _source(
@@ -742,8 +755,10 @@ def _diagnostic(
     path_label: str,
     status: Literal["partial"],
     detail: str,
+    *,
+    scope: _UsageStorageScope | None = None,
 ) -> UsageStorageDiagnostic:
-    return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail)
+    return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail, scope=scope)
 
 
 def _source_diagnostic(
