@@ -318,12 +318,11 @@ uv run scripts/test-worker-computer.py --build \
 ```
 
 Use `--image <already-built-image>` without `--build` to reuse a local worker image.
-Use `--provider browser_mcp` to exercise the native provider, including uploads, inline image decoding through
-the primary proxy, named image/PDF files, and native typing. The default remains `--provider browser`.
+Use `--provider browser_mcp` to exercise the native provider, including uploads, inline image decoding through the primary proxy, named image/PDF files, and native typing.
+The default remains `--provider browser`.
 Use `--chromium <executable>` if host Chromium is not discoverable.
-The probe verifies browser-session reuse, framebuffer pixels, rejected watch input, takeover waiting for an active
-browser call, agent blocking during control, tab focus/navigation, downloads through shell, stop/restart persistence,
-and requester isolation. It records the actual worker security settings and Chromium sandbox diagnostics.
+The probe verifies browser-session reuse, framebuffer pixels, rejected watch input, takeover waiting for an active browser call, agent blocking during control, tab focus/navigation, downloads through shell, stop/restart persistence, and requester isolation.
+It records the actual worker security settings and Chromium sandbox diagnostics.
 
 For the Chat desktop/mobile spec, make a local Tuwunel image available, start Chat on loopback, then start this fixture:
 
