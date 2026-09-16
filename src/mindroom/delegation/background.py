@@ -78,6 +78,7 @@ async def start_delegation(
     owner: ToolExecutionIdentity,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
     human_signal: HumanMessageSignal | None = None,
+    initial_wait_token: str | None = None,
     cancel: Callable[[DelegationChild], Awaitable[None]] | None = None,
 ) -> BackgroundJob:
     """Accept native child ownership without exposing its live object in a generic record."""
@@ -104,6 +105,7 @@ async def start_delegation(
             owner=owner,
             operation=run,
             human_signal=human_signal,
+            initial_wait_token=initial_wait_token,
             cancel=cleanup,
         )
     finally:

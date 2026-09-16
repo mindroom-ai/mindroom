@@ -16,7 +16,6 @@ from agno.tools import Toolkit
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.background import delegation_child
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
     child_run_context,
@@ -32,7 +31,7 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
-from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
+from mindroom.tool_jobs.runtime import JobAccessError
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
@@ -117,10 +116,6 @@ class DelegateTools(Toolkit):
             tools=[
                 self.run_subagent,
                 self.continue_subagent,
-                self.inspect_subagent,
-                self.wait_subagent,
-                self.resume_subagent,
-                self.cancel_subagent,
             ],
         )
         delegate_function = self.async_functions["run_subagent"]
@@ -225,78 +220,6 @@ class DelegateTools(Toolkit):
         except (SubagentSessionError, JobAccessError) as error:
             return str(error)
         return await self._run_child(child.child_agent_name, message, continuation=child)
-
-    async def _control_job(self, job_id: str, operation: str) -> str:
-        """Validate current delegation authority before reading or controlling one exact turn."""
-        runtime = get_background_runtime(self._runtime_paths)
-        if runtime is None or self._delegation_depth != 0:
-            return "Background subagent controls require a managed Matrix conversation."
-        owner = self._caller_identity()
-        try:
-            job = await runtime.lookup(job_id, owner=owner, depth=self._delegation_depth)
-            authorization = authorize_delegation(
-                self._agent_name,
-                delegation_child(job).child_agent_name,
-                delegation_child(job).task,
-                config=self._config,
-                runtime_paths=self._runtime_paths,
-                execution_identity=owner,
-                depth=self._delegation_depth,
-                allowed_targets=self._delegate_to,
-            )
-            if isinstance(authorization, str):
-                return authorization
-            if operation == "resume":
-                job = await runtime.resume(job_id, owner=owner, depth=self._delegation_depth)
-            elif operation == "cancel":
-                job = await runtime.cancel(job_id, owner=owner, depth=self._delegation_depth, await_completion=True)
-        except (SubagentSessionError, JobAccessError) as error:
-            return str(error)
-        result = f"Job ID: {job.job_id}\nSubagent ID: {delegation_child(job).subagent_id}\nStatus: {job.status}"
-        if job.result is not None:
-            result += f"\n\n{job.result}"
-        return result
-
-    async def inspect_subagent(self, job_id: str) -> str:
-        """Read the current status and retained result of an exact background job.
-
-        Args:
-            job_id: Exact Job ID returned by a delegation call, not the reusable Subagent ID.
-
-        """
-        return await self._control_job(job_id, "inspect")
-
-    async def wait_subagent(self, job_id: str) -> str:
-        """Reattach to an exact background job for up to 10 seconds without restarting it.
-
-        Approval requirements transfer to this parent call and still require user approval.
-        Waiting does not resume a child paused for human input; use resume_subagent first.
-
-        Args:
-            job_id: Exact Job ID returned by a delegation call.
-
-        """
-        return await self._control_job(job_id, "inspect")
-
-    async def resume_subagent(self, job_id: str) -> str:
-        """Resume a child paused for human input; never grants tool approval.
-
-        To redirect work, cancel its current job, then use continue_subagent with new instructions.
-
-        Args:
-            job_id: Exact Job ID of the paused turn.
-
-        """
-        return await self._control_job(job_id, "resume")
-
-    async def cancel_subagent(self, job_id: str) -> str:
-        """Cancel the exact background turn before continuing its conversation with new instructions.
-
-        Args:
-            job_id: Exact Job ID of the turn to cancel.
-
-        """
-        return await self._control_job(job_id, "cancel")
 
     async def _run_child(
         self,

@@ -23,11 +23,12 @@ from agno.utils.timer import Timer
 from pydantic import BaseModel
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.mcp.config import resolved_mcp_tool_prefix
-from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.custom_tools.job import is_job_function
+from mindroom.tool_jobs.authorization import function_authority
 from mindroom.tool_jobs.consumption import consume_tool_job, consuming_function_call, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
+from mindroom.tool_jobs.provenance import callable_origin, function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, get_background_runtime
@@ -51,37 +52,8 @@ type _Execute = Callable[[FunctionCall], Coroutine[object, object, _CallResult]]
 _EVENT_TYPES = {**RUN_EVENT_TYPE_REGISTRY, **TEAM_RUN_EVENT_TYPE_REGISTRY, **WORKFLOW_RUN_EVENT_TYPE_REGISTRY}
 
 
-def _origin(function: Function) -> dict[str, Any]:
-    entrypoint = inspect.unwrap(function.entrypoint) if function.entrypoint is not None else None
-    return {
-        "module": entrypoint.__module__ if inspect.isfunction(entrypoint) or inspect.ismethod(entrypoint) else None,
-        "qualname": entrypoint.__qualname__ if inspect.isfunction(entrypoint) or inspect.ismethod(entrypoint) else None,
-    }
-
-
-def _provenance(call: FunctionCall) -> dict[str, Any]:
-    origin = _origin(call.function)
-    toolkit = call.function.source_toolkit
-    if isinstance(toolkit, MindRoomMCPToolkit):
-        origin["mcp_server_id"] = toolkit.server_id
-        remote = (
-            next(
-                (tool.remote_name for tool in toolkit.catalog.tools if tool.function_name == call.function.name),
-                None,
-            )
-            if toolkit.catalog is not None
-            else None
-        )
-        if toolkit.server_config is not None:
-            prefix = resolved_mcp_tool_prefix(toolkit.server_id, toolkit.server_config)
-            if call.function.name == f"{prefix}_call_tool":
-                remote = (call.arguments or {}).get("tool_name")
-        origin["mcp_tool_name"] = remote
-    return origin
-
-
 def _framework_function(function: Function) -> bool:
-    origin = _origin(function)
+    origin = callable_origin(function)
     return (
         origin["module"] == "agno.team._default_tools"
         and origin["qualname"] is not None
@@ -193,7 +165,7 @@ async def _run_operation(
         with (
             tool_execution_identity(owner),
             track_sync_tool_completion(tracker),
-            authorized_tool_call(owner, owned_call.function),
+            authorized_tool_call(owner, owned_call.function, arguments=owned_call.arguments),
         ):
             await job_checkpoint()
             check_current_execution_authority()
@@ -280,9 +252,9 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
         if actor is not None and actor.id:
             owner = replace(owner, agent_name=actor.id)
         await job_checkpoint()
-        with authorized_tool_call(owner, call.function), consuming_function_call(call):
+        with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
             check_current_execution_authority()
-            if job_owns_execution() or call.function.name == "job" or call.function.external_execution:
+            if job_owns_execution() or is_job_function(call.function) or call.function.external_execution:
                 return await original(call)
         run_context = call.function._run_context
         if run_context is None or not run_context.run_id or not call.call_id:
@@ -294,7 +266,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
             "run_id": run_context.run_id,
             "tool_call_id": call.call_id,
             "arguments": encode_tool_result(call.arguments),
-            "origin": _provenance(call),
+            "origin": function_provenance(call.function, call.arguments),
+            "authority": function_authority(call.function),
         }
         spec = JobSpec(job_id, call.function.name, depth, toolkit_name=call.function.owning_toolkit, adapter=adapter)
         owned_call = _copy_call(call)

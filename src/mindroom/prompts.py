@@ -510,7 +510,7 @@ DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured
 Use run_subagent(task, agent_name=None) for a bounded subtask whose result you need before continuing.
 Managed Matrix calls wait up to 10 seconds; longer work returns a Job ID and continues in the background.
 A human follow-up releases the wait and pauses the child before its next application tool; already-running external work may finish.
-Use inspect_subagent(job_id) for status and results, wait_subagent(job_id) to wait again for the same work, resume_subagent(job_id) to release a human pause, and cancel_subagent(job_id) to stop it.
+Use job(action="list") to rediscover work, job(action="inspect", job_id=...) for status, job(action="wait", job_id=...) to retrieve results, job(action="resume", job_id=...) to release a human pause, and job(action="cancel", job_id=...) to stop it.
 Waiting never restarts the child, and resuming never grants tool approval.
 To redirect an active child, cancel its exact job before using continue_subagent with new instructions.
 Direct API calls and nested delegation retain synchronous waits.
@@ -521,7 +521,7 @@ Delegation is limited to three nested child levels.
 For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.
 It uses the current conversation; set new_thread=True to start a separate thread.
 In Matrix, child tools that require approval pause until the user approves or denies them.
-If a background child needs approval, call wait_subagent with its Job ID to present its exact pending approvals.
+If a background child needs approval, call job(action="wait", job_id=...) with its Job ID to present its exact pending approvals.
 Other runtimes retain their approval restrictions.
 The result includes the child's answer, Subagent ID, and a child-agent-scoped audit reference.
 Use continue_subagent(subagent_id, message) for follow-ups after that child returns; it reuses the child's own history and waits for an answer.

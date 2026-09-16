@@ -123,7 +123,14 @@ def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequi
         for requirement in response.requirements or ()
         if requirement.needs_external_execution
         and requirement.tool_execution is not None
-        and requirement.tool_execution.tool_name in {"run_subagent", "continue_subagent", "wait_subagent"}
+        and (
+            requirement.tool_execution.tool_name in {"run_subagent", "continue_subagent"}
+            or (
+                requirement.tool_execution.tool_name == "job"
+                and requirement.tool_execution.approval_type == "mindroom_job_wait"
+                and (requirement.tool_execution.tool_args or {}).get("action") == "wait"
+            )
+        )
     ]
 
 
@@ -634,7 +641,7 @@ def _background_handle(job_id: str, child: DelegationChild, status: str, *, deli
     delivery = "\nOutcome delivery is queued for this conversation." if delivery_queued else ""
     return (
         f"Job ID: {job_id}\nSubagent ID: {child.subagent_id}\nStatus: {status}{delivery}\n"
-        "Use inspect_subagent, wait_subagent, resume_subagent or cancel_subagent with the Job ID."
+        'Use job(action="list"), or job(action="inspect"/"wait"/"resume"/"cancel", job_id=...) with the Job ID.'
     )
 
 
@@ -734,7 +741,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
             retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             previous_child = None
             background_job = None
-            if tool.tool_name == "wait_subagent":
+            if tool.tool_name == "job":
                 job_id = args.get("job_id")
                 if background is None or not isinstance(job_id, str):
                     resolve_result("Cannot wait: a managed Matrix job and string job_id are required.")
@@ -944,33 +951,41 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             approval_calls=child_calls,
                             fresh=fresh,
                         )
-                        if child_decisions is not None:
-                            background_job = await continue_delegation(
-                                background,
+                        initial_wait_token = uuid4().hex if child_decisions is None and background_job is None else None
+                        try:
+                            if child_decisions is not None:
+                                background_job = await continue_delegation(
+                                    background,
+                                    child.delegation_id,
+                                    owner=caller_identity,
+                                    depth=delegation_depth,
+                                    operation=operation,
+                                )
+                            elif background_job is None:
+                                background_job = await start_delegation(
+                                    background,
+                                    child,
+                                    owner=caller_identity,
+                                    operation=operation,
+                                    initial_wait_token=initial_wait_token,
+                                    cancel=partial(
+                                        interrupt_child,
+                                        config=config,
+                                        runtime_paths=runtime_paths,
+                                        reason="Delegation cancelled.",
+                                    ),
+                                )
+                            waited = await background.wait(
                                 child.delegation_id,
                                 owner=caller_identity,
                                 depth=delegation_depth,
-                                operation=operation,
+                                timeout=_FOREGROUND_WAIT_SECONDS,
+                                reserved_token=initial_wait_token,
                             )
-                        elif background_job is None:
-                            background_job = await start_delegation(
-                                background,
-                                child,
-                                owner=caller_identity,
-                                operation=operation,
-                                cancel=partial(
-                                    interrupt_child,
-                                    config=config,
-                                    runtime_paths=runtime_paths,
-                                    reason="Delegation cancelled.",
-                                ),
-                            )
-                        waited = await background.wait(
-                            child.delegation_id,
-                            owner=caller_identity,
-                            depth=delegation_depth,
-                            timeout=_FOREGROUND_WAIT_SECONDS,
-                        )
+                        except BaseException:
+                            if initial_wait_token is not None:
+                                await background.release_wait(child.delegation_id, initial_wait_token)
+                            raise
                         background_job = waited.job
                         child = retained_child(background, background_job)
                         try:

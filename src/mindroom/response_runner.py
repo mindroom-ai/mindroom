@@ -124,6 +124,7 @@ from mindroom.teams import (
 )
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming, timed
+from mindroom.tool_jobs.completion import admit_job_completion
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
@@ -2533,6 +2534,19 @@ class ResponseRunner:
         locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
     ) -> str | None:
         """Dispatch journal-owned approval work through normal turn serialization."""
+        if not await admit_job_completion(
+            request.response_envelope,
+            target=target,
+            runtime_paths=self.deps.runtime_paths,
+        ):
+            if request.on_no_response_handled is not None:
+
+                async def settle() -> None:
+                    assert request.on_no_response_handled is not None
+                    await request.on_no_response_handled()
+
+                await run_coroutine_until_complete(settle())
+            return None
         owned = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )

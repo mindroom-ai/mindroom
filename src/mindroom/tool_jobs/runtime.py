@@ -753,19 +753,6 @@ class ToolJobRuntime:
             delivery.event_id = event_id
             await self._persist(entry)
 
-    async def is_current_outcome(self, job_id: str, generation: int) -> bool:
-        """Check whether an exact notification outcome remains unconsumed and authorized."""
-        async with self._lock:
-            entry = self._entries.get(job_id)
-            return bool(
-                not self._closed
-                and entry is not None
-                and entry.job.generation == generation
-                and entry.job.status in _READY
-                and not entry.job.wait_acknowledged
-                and self._allowed(entry.job),
-            )
-
     async def delivery_outcome(
         self,
         job_id: str,

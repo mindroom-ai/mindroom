@@ -752,7 +752,7 @@ async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boun
     tool_body_started_at = time.perf_counter()
     try:
         await job_checkpoint()
-        check_current_execution_authority()
+        check_current_execution_authority(arguments=args)
         result = await _call_tool(
             func,
             args,

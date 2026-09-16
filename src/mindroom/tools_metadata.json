@@ -7878,11 +7878,7 @@
       "docs_url": null,
       "function_names": [
         "run_subagent",
-        "continue_subagent",
-        "inspect_subagent",
-        "wait_subagent",
-        "resume_subagent",
-        "cancel_subagent"
+        "continue_subagent"
       ],
       "helper_text": null,
       "icon": "Users",

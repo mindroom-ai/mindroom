@@ -143,8 +143,8 @@ from .orchestration.runtime import (
     wait_for_matrix_homeserver,
 )
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
-from .orchestration.subagent_runtime import SubagentRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
+from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -398,7 +398,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
-    _subagent_runtime: SubagentRuntimeCoordinator = field(init=False, repr=False)
+    _tool_job_runtime: ToolJobRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
@@ -460,7 +460,7 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
         )
-        self._subagent_runtime = SubagentRuntimeCoordinator(
+        self._tool_job_runtime = ToolJobRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
@@ -1014,7 +1014,7 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
-        await self._subagent_runtime.sync()
+        await self._tool_job_runtime.sync()
         self._thread_export_runner.start()
         if self.running:
             # Startup queues its own pass once the bots are up; a reload
@@ -1684,7 +1684,7 @@ class _MultiAgentOrchestrator:
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
         self._bind_started_runtime_support_services(started_bots)
-        await self._subagent_runtime.sync()
+        await self._tool_job_runtime.sync()
         await self._script_runtime.start()
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
@@ -2461,7 +2461,7 @@ class _MultiAgentOrchestrator:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
             logger.exception("Background script runtime shutdown failed")
-        await _run_shutdown_step("subagent_runtime", self._subagent_runtime.stop())
+        await _run_shutdown_step("tool_job_runtime", self._tool_job_runtime.stop())
         await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
         await _run_shutdown_step("config_reload", self.config_reload.cancel())
         owner = self._mcp_catalog_change_task_owner

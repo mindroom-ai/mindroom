@@ -109,7 +109,7 @@ async def test_old_delivery_ack_cannot_consume_replacement_generation(tmp_path: 
     pending = await runtime.pending_deliveries()
     assert len(pending) == 1
     assert pending[0].generation > claim.generation
-    assert not await runtime.is_current_outcome(job.job_id, claim.generation)
+    assert await runtime.delivery_outcome(job.job_id, claim.generation, claim.transaction_id) is None
     replacement = await runtime.claim_delivery(job.job_id, content={"body": "cancelled"}, transaction_id="second")
     assert replacement is not None
     assert replacement.transaction_id == "second"
@@ -277,7 +277,7 @@ async def test_reads_are_copies_and_blocked_delivery_does_not_hide_results(
     monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
     waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     await runtime.acknowledge_wait(job.job_id, waited.token)
-    assert not await runtime.is_current_outcome(job.job_id, job.generation)
+    assert await runtime.delivery_outcome(job.job_id, job.generation, claim.transaction_id) is None
     await runtime.shutdown()
 
 

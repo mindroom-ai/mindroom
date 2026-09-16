@@ -11,7 +11,6 @@ import pytest
 from agno.agent import Agent
 from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
-from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom.agent_storage import create_session_storage
@@ -21,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.model_control import install_subagent_model_control
@@ -28,6 +28,7 @@ from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.tool_jobs import runtime as background_module
+from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
     JobControl,
@@ -137,22 +138,6 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
         storage.close()
 
 
-def test_native_wait_is_external_execution() -> None:
-    """Wait must transfer exact child approvals through the native driver."""
-
-    async def wait_subagent(job_id: str) -> str:
-        return job_id
-
-    toolkit = Toolkit(name="delegate", tools=[wait_subagent])
-    apply_tool_approval_capability(
-        toolkit,
-        Config(),
-        supports_native_tool_approval=True,
-        registered_tool_name="delegate",
-    )
-    assert toolkit.async_functions["wait_subagent"].external_execution is True
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("detach", "human"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize(("approval", "cancel_approval"), [(False, False), (True, False), (True, True)])
@@ -260,14 +245,16 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             agent.db.close()
 
     def parent(call: dict[str, object]) -> Agent:
+        model = DelegationModel(
+            id="test",
+            responses=[ModelResponse(tool_calls=[call]), ModelResponse(content="Parent free")],
+        )
+        install_tool_job_execution(model)
         return Agent(
             name="leader",
             db=storage,
-            tools=[toolkit],
-            model=DelegationModel(
-                id="test",
-                responses=[ModelResponse(tool_calls=[call]), ModelResponse(content="Parent free")],
-            ),
+            tools=[toolkit, JobTools(paths, identity)],
+            model=model,
         )
 
     async def drive(agent: Agent) -> object:
@@ -300,12 +287,16 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert not completed.is_set()
                 assert DelegationState.from_metadata(result.metadata).children == []
                 if human:
-                    assert "Status: running" in await toolkit.inspect_subagent(child.delegation_id)
-                    assert "Status: running" in await toolkit.resume_subagent(child.delegation_id)
+                    assert '"status": "running"' in str(
+                        await JobTools(paths, identity).job("inspect", child.delegation_id),
+                    )
+                    assert '"status": "running"' in str(
+                        await JobTools(paths, identity).job("resume", child.delegation_id),
+                    )
                 release.set()
                 await asyncio.wait_for(completed.wait(), 5)
                 monkeypatch.setattr("mindroom.delegation.execution._FOREGROUND_WAIT_SECONDS", 10)
-                current_parent = parent(_call("wait_subagent", "wait", job_id=child.delegation_id))
+                current_parent = parent(_call("job", "wait", action="wait", job_id=child.delegation_id))
                 result = await drive(current_parent)
                 if not approval:
                     message = next(message.content for message in result.messages if message.tool_call_id == "wait")
@@ -323,7 +314,9 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert call.invoking_agent == "code"
                 assert call.tool_call_id == f"{child.delegation_id}:write-once"
                 if cancel_approval:
-                    assert "Status: cancelled" in await toolkit.cancel_subagent(child.delegation_id)
+                    assert '"status": "cancelled"' in str(
+                        await JobTools(paths, identity).job("cancel", child.delegation_id),
+                    )
                     cancelled = await read_child_run(child, config, paths)
                     assert cancelled is not None
                     assert cancelled.status == RunStatus.cancelled
@@ -469,11 +462,11 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
     agent = Agent(
         name="leader",
         db=storage,
-        tools=[toolkit],
+        tools=[toolkit, JobTools(paths, identity)],
         model=DelegationModel(
             id="test",
             responses=[
-                ModelResponse(tool_calls=[_call("wait_subagent", "missing-call", job_id="missing")]),
+                ModelResponse(tool_calls=[_call("job", "missing-call", action="wait", job_id="missing")]),
                 ModelResponse(content="Job unavailable"),
             ],
         ),

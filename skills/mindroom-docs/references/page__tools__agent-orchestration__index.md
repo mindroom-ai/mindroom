@@ -237,21 +237,42 @@ Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions
 
 ### Background jobs
 
-`job_id` identifies one exact delegation turn; `subagent_id` identifies the reusable child conversation.
-Use `inspect_subagent(job_id)` to read status and saved results, `wait_subagent(job_id)` to reattach, `resume_subagent(job_id)` to release a human pause, and `cancel_subagent(job_id)` to stop work.
-Waiting never starts another child or replays its tools.
-These controls require the original requester, caller, transport, conversation, and current delegation permissions.
-Nested delegation remains owned by the top-level job.
+Every model-invoked application tool uses a shared managed job owner when a conversation runtime is present.
+Original tool names and argument schemas stay unchanged.
+Fast calls return their original results; a call that outlasts its foreground wait returns a `job_id` while the accepted work continues.
+The automatically added `job(action, job_id=None, limit=20, offset=0)` function manages both ordinary tools and native delegation.
+The management function never backgrounds itself.
 
-A queued human follow-up releases the foreground wait and pauses the child before its next tool call.
+| Action | Behavior |
+| --- | --- |
+| `list` | Discover accessible jobs, active first, with bounded pagination and retained terminal outcomes. |
+| `inspect` | Read an exact job's status and saved summary without consuming it. |
+| `wait` | Wait up to ten seconds and retrieve the original result, including supported structured data and media. |
+| `resume` | Release a cooperative human hold; never grant approval. |
+| `cancel` | Cancel the exact job and wait for owned execution and cleanup to settle. |
+
+For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
+Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
+Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
+A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
+Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
+Removing a toolkit, changing its execution scope or provenance, or excluding a function revokes access.
+Remote service availability alone does not revoke access to a saved result.
+
+A queued human follow-up releases the foreground wait and holds the next cooperative application-tool boundary.
 An external operation already in progress may finish.
-Resuming a human pause does not grant tool approval.
-Background approval requests notify the owning conversation to call `wait_subagent`, which presents the exact native approval requirements.
+Provider-hosted internal tools cannot be individually detached or interrupted by the application-tool boundary.
+Native child approval requirements are presented only through the exact reserved `job(action="wait", job_id=...)` call and the persisted approval continuation.
+Resuming a human hold never approves a tool, and current execution authority is rechecked before the next retained callable runs.
+Nested work remains owned by its accepted outer job.
+Unmanaged detached API execution keeps its existing synchronous lifetime and approval restrictions.
 
-Completed background jobs send a notification to the original Matrix conversation and exact parent agent or team.
-Notifications enter normal conversation ordering and do not start a parallel parent response.
-A live waiter suppresses the notification; once notification delivery is claimed, another wait reports that delivery is queued.
-Failed sends retry the same saved payload and Matrix transaction ID.
+Completed background jobs notify the original Matrix conversation and exact agent or team.
+Notifications enter normal conversation ordering; the response checks the immutable delivery claim and current outcome after acquiring the conversation lock.
+A result is consumed only after exact persisted parent tool-result evidence is verified.
+Inspecting, listing, or merely sending a notification does not consume it.
+Stale and consumed notifications settle without another model response.
+Failed sends retry the same frozen payload and Matrix transaction ID; an account mismatch blocks that delivery while preserving authorized result access.
 Completed outcomes survive restart; abandoned work becomes interrupted and is never restarted automatically.
 
 Each child writes `run.json`, `events.jsonl`, and `transcript.md` under the resolved workspace at `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/`.

@@ -20,6 +20,7 @@ from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent a
 from mindroom.agent_knowledge_descriptions import knowledge_source_descriptions
 from mindroom.claude_prompt_cache import install_claude_deferred_tool_search, native_tool_search_supported
 from mindroom.credentials import get_runtime_credentials_manager
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.model_control import install_subagent_model_control
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
@@ -36,6 +37,7 @@ from mindroom.system_prompt import render_date_context, render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1231,7 +1233,6 @@ def apply_tool_approval_capability(
             if registered_tool_name == "delegate" and function.name in {
                 "run_subagent",
                 "continue_subagent",
-                "wait_subagent",
             }:
                 # The delegation driver owns the policy gate and exact child wait.
                 function.external_execution = True
@@ -1534,6 +1535,13 @@ def _assemble_agent_toolkits(
                 agent=agent_name,
                 error=str(exc),
             )
+    JobTools.install(
+        tools,
+        runtime_paths,
+        execution_identity,
+        depth=delegation_depth,
+        enabled=not disable_runtime_capabilities,
+    )
     return _AgentToolAssembly(
         tools=tools,
         loaded_tools=loaded_tools,
@@ -1931,6 +1939,7 @@ def create_agent(
     agent = _initialize_agent_instance(
         name=agent_config.display_name,
         id=agent_name,
+        metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, agent_name)},
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,

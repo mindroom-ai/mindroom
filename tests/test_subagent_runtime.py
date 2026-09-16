@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from agno.tools.function import Function
 
-import mindroom.orchestration.subagent_runtime as runtime_module
+import mindroom.orchestration.tool_job_runtime as runtime_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
@@ -19,21 +20,33 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.delegation.state import DelegationChild
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.identity import MatrixID
+from mindroom.mcp.registry import sync_mcp_tool_registry
+from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.message_target import MessageTarget
-from mindroom.orchestration.subagent_runtime import SubagentRuntimeCoordinator, _build_completion_content
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator, _build_completion_content
 from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
 from mindroom.tool_jobs.control import job_checkpoint
+from mindroom.tool_jobs.execution_authority import (
+    authorized_tool_call,
+    check_current_execution_authority,
+    set_execution_authorizer,
+)
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
+    JobAccessError,
     get_background_runtime,
     register_background_runtime,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.test_delegate_tools import _delegate_runtime_context
+from tests.test_mcp_toolkit import _oauth_server_config
 from tests.test_queued_message_notify import _envelope
 
 if TYPE_CHECKING:
@@ -101,17 +114,17 @@ def test_completion_preserves_owner_and_targets_only_team(tmp_path: Path) -> Non
     )
     assert content[ORIGINAL_SENDER_KEY] == "@human:localhost"
     assert content[SOURCE_KIND_KEY] == "hook_dispatch"
-    assert content[HOOK_SOURCE_KEY] == "subagent_completion"
+    assert content[HOOK_SOURCE_KEY] == "tool_job_completion"
     assert content["m.mentions"] == {"user_ids": ["@mindroom_team:localhost"]}
     assert content["m.relates_to"]["event_id"] == "$thread"
     assert "job_123" in content["body"]
-    assert "Finished" in content["body"]
+    assert 'job(action="wait"' in content["body"]
 
 
 def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: Path) -> None:
     """A config reload cannot leave completion delivery holding old authority."""
     config = _config(tmp_path)
-    coordinator = SubagentRuntimeCoordinator(
+    coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
         config_provider=lambda: config,
         bot_provider=lambda _: None,
@@ -129,7 +142,7 @@ def test_completion_authority_uses_latest_config_and_team_membership(tmp_path: P
 def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path: Path) -> None:
     """Current target or recipient access revocation blocks delivery."""
     config = _config(tmp_path)
-    coordinator = SubagentRuntimeCoordinator(
+    coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
         config_provider=lambda: config,
         bot_provider=lambda _: None,
@@ -141,13 +154,13 @@ def test_completion_authority_checks_requester_for_target_and_recipient(tmp_path
     assert not coordinator._authorized(job)
 
 
-def _delivery_coordinator(tmp_path: Path, config: Config) -> SubagentRuntimeCoordinator:
+def _delivery_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinator:
     bot = MagicMock(spec=AgentBot)
     bot.running = True
     bot.client = MagicMock(spec=nio.AsyncClient)
     bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
     bot.matrix_id = MatrixID.parse("@mindroom_team:localhost")
-    return SubagentRuntimeCoordinator(
+    return ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
         config_provider=lambda: config,
         bot_provider=lambda name: bot if name == "team" else None,
@@ -155,7 +168,7 @@ def _delivery_coordinator(tmp_path: Path, config: Config) -> SubagentRuntimeCoor
     )
 
 
-async def _finish_job(coordinator: SubagentRuntimeCoordinator) -> BackgroundJob:
+async def _finish_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
     fixture = _job()
 
     async def operation() -> BackgroundOutcome:
@@ -387,3 +400,188 @@ async def test_replaced_response_runner_pauses_retained_background_job(
     finally:
         await runtime.release_wait(job.job_id, paused.token)
         await coordinator.stop()
+
+
+def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) -> None:
+    """Ordinary job authority tracks tool grant and filters."""
+    config = _config(tmp_path)
+    config.agents["lead"].tools = ["calculator"]
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=test_runtime_paths(tmp_path),
+        config_provider=lambda: config,
+        bot_provider=lambda _: None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+    job = replace(
+        _job(),
+        kind="tool",
+        tool_name="add",
+        toolkit_name="calculator",
+        adapter={"origin": {"module": "agno.tools.calculator", "qualname": "CalculatorTools.add"}},
+    )
+    assert coordinator._authorized(job)
+    config.agents["lead"].tools = []
+    assert not coordinator._authorized(job)
+
+
+@pytest.mark.asyncio
+async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> None:
+    """Native admission reserves foreground delivery."""
+    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    fixture = _job()
+    done = asyncio.Event()
+    foreground_claim = "foreground"
+
+    async def operation() -> BackgroundOutcome:
+        done.set()
+        return BackgroundOutcome("completed", "answer")
+
+    try:
+        job = await start_delegation(
+            coordinator.runtime,
+            delegation_child(fixture),
+            owner=fixture.owner,
+            operation=operation,
+            initial_wait_token=foreground_claim,
+        )
+        await done.wait()
+        assert await coordinator.runtime.pending_deliveries() == []
+        waited = await coordinator.runtime.wait(
+            job.job_id,
+            owner=fixture.owner,
+            depth=0,
+            reserved_token=foreground_claim,
+        )
+        assert waited.token == foreground_claim
+        await coordinator.runtime.release_wait(job.job_id, waited.token)
+        assert len(await coordinator.runtime.pending_deliveries()) == 1
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_worker_sync_reuses_runtime_without_replaying_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivery scan bug surfaces, and the next lifecycle sync restarts only delivery."""
+    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    runtime = coordinator.runtime
+    job = await _finish_job(coordinator)
+    original = coordinator.deliver_pending
+    monkeypatch.setattr(coordinator, "deliver_pending", AsyncMock(side_effect=RuntimeError("scan failed")))
+    try:
+        await coordinator.sync()
+        failed = coordinator._task
+        assert failed is not None
+        with pytest.raises(RuntimeError, match="scan failed"):
+            await failed
+        monkeypatch.setattr(coordinator, "deliver_pending", original)
+        await coordinator.sync()
+        assert coordinator._task is not failed
+        assert coordinator.runtime is runtime
+        assert (await runtime.lookup(job.job_id, owner=job.owner, depth=0)).result == "Saved answer"
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_frozen_recipient_replacement_has_terminal_delivery_disposition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replaced Matrix account cannot keep an old frozen claim retrying forever."""
+    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    job = await _finish_job(coordinator)
+    sent = AsyncMock(return_value=None)
+    monkeypatch.setattr(runtime_module, "send_message_result", sent)
+    try:
+        await coordinator.deliver_pending()
+        assert sent.await_count == 1
+        bot = coordinator.bot_provider("team")
+        assert bot is not None
+        bot.matrix_id = MatrixID.parse("@replacement_team:localhost")
+        await coordinator.deliver_pending()
+        assert sent.await_count == 1
+        assert await coordinator.runtime.pending_deliveries() == []
+        assert (await coordinator.runtime.lookup(job.job_id, owner=job.owner, depth=0)).result == "Saved answer"
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_path: Path) -> None:
+    """A retained child keeps exact transport ancestry but loses execution after a grant is revoked."""
+    config = _config(tmp_path)
+    config.agents["worker"].tools = ["calculator"]
+    coordinator = _delivery_coordinator(tmp_path, config)
+    owner = replace(_job().owner, agent_name="worker", session_id="child_session")
+    child = delegation_child(_job())
+    child.execution_identity = serialize_tool_execution_identity(owner)
+    await start_child_turn(
+        child,
+        parent_run_id="parent",
+        config=config,
+        runtime_paths=coordinator.runtime_paths,
+        caller_execution_identity=_job().owner,
+    )
+    function = Function(name="add", entrypoint=lambda: None, owning_toolkit="calculator")
+    register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
+    try:
+        with tool_runtime_context(
+            _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
+        ):
+            with pytest.raises(JobAccessError):
+                coordinator._authorize_execution(owner, function)
+            async with child_run_context(child, config=config, runtime_paths=coordinator.runtime_paths):
+                coordinator._authorize_execution(owner, function)
+                config.agents["worker"].tools = []
+                with pytest.raises(JobAccessError):
+                    coordinator._authorize_execution(owner, function)
+                config.agents["worker"].tools = ["calculator"]
+                config.agents["lead"].delegate_to = []
+                with pytest.raises(JobAccessError):
+                    coordinator._authorize_execution(owner, function)
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: Path) -> None:
+    """The final leaf arguments cannot bypass current MCP filters through a catalog-free OAuth bridge."""
+    config = _config(tmp_path)
+    config.mcp_servers = {"demo": _oauth_server_config()}
+    config.agents["lead"].tools = ["mcp_demo"]
+    sync_mcp_tool_registry(config)
+    coordinator = _delivery_coordinator(tmp_path, config)
+    owner = _job().owner
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=None,
+        catalog=None,
+        tool_name="mcp_demo",
+        server_config=config.mcp_servers["demo"],
+    )
+    function = next(item for name, item in toolkit.async_functions.items() if name.endswith("_call_tool"))
+    function.source_toolkit = toolkit
+    function.owning_toolkit = "mcp_demo"
+    register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
+    set_execution_authorizer(coordinator._authorize_execution)
+    try:
+        with (
+            tool_runtime_context(
+                _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
+            ),
+            authorized_tool_call(owner, function, arguments={"tool_name": "read"}),
+        ):
+            check_current_execution_authority()
+            config.mcp_servers["demo"] = config.mcp_servers["demo"].model_copy(update={"exclude_tools": ["write"]})
+            check_current_execution_authority()
+            with pytest.raises(JobAccessError):
+                check_current_execution_authority(arguments={"tool_name": "write"})
+            config.mcp_servers["demo"] = config.mcp_servers["demo"].model_copy(update={"exclude_tools": ["read"]})
+            with pytest.raises(JobAccessError):
+                check_current_execution_authority()
+    finally:
+        await coordinator.stop()
+        sync_mcp_tool_registry(None)

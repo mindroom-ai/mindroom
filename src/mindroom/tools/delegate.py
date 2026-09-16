@@ -29,10 +29,6 @@ register_builtin_tool_metadata(
         function_names=(
             "run_subagent",
             "continue_subagent",
-            "inspect_subagent",
-            "wait_subagent",
-            "resume_subagent",
-            "cancel_subagent",
         ),
     ),
 )

@@ -49,6 +49,8 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| Application tools lack a public accepted-execution owner and per-call native wait projection. | Add ownership around approved FunctionCalls and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
+| Agent and Team cleanup closes connectable resources when detached work still owns them. | Add shared resource leases with task-affine async teardown. | `tool_jobs/agno_compat_resources.py`; physical connections close after the final execution owner releases them. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
