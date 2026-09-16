@@ -102,7 +102,12 @@ async def test_old_delivery_ack_cannot_consume_replacement_generation(tmp_path: 
     job = await runtime.start(JobSpec("approval", "delegate", 0), owner=_owner(), operation=approval)
     waiting = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     await runtime.release_wait(job.job_id, waiting.token)
-    claim = await runtime.claim_delivery(job.job_id, content={"body": "approval"}, transaction_id="first")
+    claim = await runtime.claim_delivery(
+        job.job_id,
+        expected_generation=waiting.job.generation,
+        content={"body": "approval"},
+        transaction_id="first",
+    )
     assert claim is not None
     await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
     await runtime.acknowledge_delivery(job.job_id, "first", event_id="$old")
@@ -110,10 +115,66 @@ async def test_old_delivery_ack_cannot_consume_replacement_generation(tmp_path: 
     assert len(pending) == 1
     assert pending[0].generation > claim.generation
     assert await runtime.delivery_outcome(job.job_id, claim.generation, claim.transaction_id) is None
-    replacement = await runtime.claim_delivery(job.job_id, content={"body": "cancelled"}, transaction_id="second")
+    replacement = await runtime.claim_delivery(
+        job.job_id,
+        expected_generation=pending[0].generation,
+        content={"body": "cancelled"},
+        transaction_id="second",
+    )
     assert replacement is not None
     assert replacement.transaction_id == "second"
     await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_claimed", [False, True])
+async def test_stale_snapshot_cannot_create_or_retrieve_current_delivery(
+    tmp_path: Path,
+    already_claimed: bool,
+) -> None:
+    """Generation matching precedes both first claim and immutable claim retries."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    try:
+        job = await runtime.start(JobSpec("approval", "delegate", 0), owner=_owner(), operation=approval)
+        waiting = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.release_wait(job.job_id, waiting.token)
+        await runtime.cancel(job.job_id, owner=_owner(), depth=0, await_completion=True)
+        current = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
+        assert current.generation > waiting.job.generation
+        if already_claimed:
+            await runtime.claim_delivery(
+                job.job_id,
+                expected_generation=current.generation,
+                content={"body": "cancelled"},
+                transaction_id="current",
+            )
+        before = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
+        assert (
+            await runtime.claim_delivery(
+                job.job_id,
+                expected_generation=waiting.job.generation,
+                content={"body": "approval"},
+                transaction_id="stale",
+            )
+            is None
+        )
+        assert await runtime.lookup(job.job_id, owner=_owner(), depth=0) == before
+        claim = await runtime.claim_delivery(
+            job.job_id,
+            expected_generation=current.generation,
+            content={"body": "cancelled"},
+            transaction_id="current",
+        )
+        assert claim is not None
+        assert claim.generation == current.generation
+        assert claim.transaction_id == "current"
+        assert claim.content == {"body": "cancelled"}
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -256,7 +317,12 @@ async def test_reads_are_copies_and_blocked_delivery_does_not_hide_results(
     job = await runtime.start(JobSpec("read", "tool", 0), owner=_owner(), operation=operation)
     result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     await runtime.release_wait(job.job_id, result.token)
-    claim = await runtime.claim_delivery(job.job_id, content={"body": "answer"}, transaction_id="frozen")
+    claim = await runtime.claim_delivery(
+        job.job_id,
+        expected_generation=result.job.generation,
+        content={"body": "answer"},
+        transaction_id="frozen",
+    )
     assert claim is not None
     assert await runtime.delivery_outcome(job.job_id, job.generation, claim.transaction_id) is not None
     await runtime.block_delivery(job.job_id, claim.transaction_id)

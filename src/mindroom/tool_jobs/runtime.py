@@ -712,17 +712,19 @@ class ToolJobRuntime:
         self,
         job_id: str,
         *,
+        expected_generation: int,
         content: dict[str, Any],
         transaction_id: str,
     ) -> _BackgroundDelivery | None:
-        """Freeze a notification before send, or return its exact retry payload."""
+        """Freeze or retry a notification only for the caller's current snapshot."""
         async with self._lock:
             if self._closed:
                 return None
             entry = self._entries[job_id]
             job = entry.job
             if (
-                entry.wait_token is not None
+                job.generation != expected_generation
+                or entry.wait_token is not None
                 or job.wait_acknowledged
                 or job.status not in _READY
                 or not self._allowed(job)

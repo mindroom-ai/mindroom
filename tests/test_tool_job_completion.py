@@ -52,6 +52,7 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         await runtime.release_wait("job", waited.token)
         await runtime.claim_delivery(
             "job",
+            expected_generation=waited.job.generation,
             content={"m.mentions": {"user_ids": ["@mindroom_general:localhost"]}},
             transaction_id="claim",
         )
@@ -125,6 +126,7 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         await runtime.release_wait("queued-job", waited.token)
         await runtime.claim_delivery(
             "queued-job",
+            expected_generation=waited.job.generation,
             content={"m.mentions": {"user_ids": ["@mindroom_general:localhost"]}},
             transaction_id="queued-claim",
         )

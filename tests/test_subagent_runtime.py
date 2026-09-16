@@ -35,12 +35,14 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator, _build_completion_content
 from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
+from mindroom.tool_job_completion import parse_tool_job_completion
 from mindroom.tool_jobs.authorization import (
     AUTHORITY_METADATA_KEY,
     authority_snapshot,
     bind_toolkit_authority,
     function_authority,
 )
+from mindroom.tool_jobs.completion import admit_job_completion
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import (
     authorized_tool_call,
@@ -199,6 +201,115 @@ async def _finish_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
     result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
     await coordinator.runtime.release_wait(job.job_id, result.token)
     return result.job
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["cancel", "continue"])
+async def test_delivery_rejects_generation_changed_during_room_lookup(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transition: str,
+) -> None:
+    """A stale scan cannot consume the next outcome with an inadmissible notification."""
+    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    runtime = coordinator.runtime
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$human")
+    fixture = _job()
+    fixture.owner = replace(fixture.owner, session_id=target.session_id)
+    lookup_started, release_lookup = asyncio.Event(), asyncio.Event()
+    sent: list[tuple[dict[str, Any], str]] = []
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "Approved answer")
+
+    async def cancel(child: DelegationChild) -> None:
+        child.status = "cancelled"
+        child.result = "Cancelled"
+
+    async def joined_rooms(_client: nio.AsyncClient) -> list[str]:
+        lookup_started.set()
+        await release_lookup.wait()
+        return ["!room:localhost"]
+
+    async def send(
+        _client: nio.AsyncClient,
+        _room_id: str,
+        content: dict[str, Any],
+        *,
+        transaction_id: str,
+    ) -> DeliveredMatrixEvent:
+        sent.append((deepcopy(content), transaction_id))
+        return DeliveredMatrixEvent("$notice", content)
+
+    monkeypatch.setattr(runtime_module, "get_joined_rooms", joined_rooms)
+    monkeypatch.setattr(runtime_module, "send_message_result", send)
+    register_background_runtime(coordinator.runtime_paths, runtime)
+    delivery_task = None
+    try:
+        job = await start_delegation(
+            runtime,
+            delegation_child(fixture),
+            owner=fixture.owner,
+            operation=approval,
+            cancel=cancel,
+        )
+        waiting = await runtime.wait(job.job_id, owner=job.owner, depth=0)
+        await runtime.release_wait(job.job_id, waiting.token)
+        delivery_task = asyncio.create_task(coordinator.deliver_pending())
+        await lookup_started.wait()
+        if transition == "cancel":
+            await runtime.cancel(job.job_id, owner=job.owner, depth=0, await_completion=True)
+        else:
+            await runtime.continue_job(job.job_id, owner=job.owner, depth=0, operation=completed)
+            resumed = await runtime.wait(job.job_id, owner=job.owner, depth=0)
+            await runtime.release_wait(job.job_id, resumed.token)
+        current = await runtime.lookup(job.job_id, owner=job.owner, depth=0)
+        assert current.generation > waiting.job.generation
+        release_lookup.set()
+        await delivery_task
+        assert sent == []
+        assert (await runtime.lookup(job.job_id, owner=job.owner, depth=0)).delivery is None
+        assert [pending.generation for pending in await runtime.pending_deliveries()] == [current.generation]
+
+        await coordinator.deliver_pending()
+        assert len(sent) == 1
+        content, transaction_id = sent[0]
+        reference = parse_tool_job_completion({"content": content})
+        assert reference is not None
+        assert reference.generation == current.generation
+        assert reference.transaction_id == transaction_id == f"tool_job_{job.job_id}_{current.generation}"
+        delivered = await runtime.lookup(job.job_id, owner=job.owner, depth=0)
+        assert delivered.delivery is not None
+        assert delivered.delivery.acknowledged
+        assert delivered.delivery.event_id == "$notice"
+        assert await runtime.pending_deliveries() == []
+        envelope = replace(
+            _envelope(
+                target=target,
+                source_event_id="$notice",
+                source_kind="hook_dispatch",
+                sender_id="@mindroom_team:localhost",
+                requester_id="@human:localhost",
+            ),
+            agent_name="team",
+            hook_source="tool_job_completion",
+            tool_job_completion=reference,
+        )
+        assert await admit_job_completion(envelope, target=target, runtime_paths=coordinator.runtime_paths)
+        assert not await admit_job_completion(
+            replace(envelope, tool_job_completion=replace(reference, generation=waiting.job.generation)),
+            target=target,
+            runtime_paths=coordinator.runtime_paths,
+        )
+    finally:
+        release_lookup.set()
+        if delivery_task is not None:
+            await delivery_task
+        register_background_runtime(coordinator.runtime_paths, None)
+        await coordinator.stop()
 
 
 @pytest.mark.asyncio

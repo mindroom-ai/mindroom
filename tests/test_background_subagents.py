@@ -115,12 +115,22 @@ async def test_wait_claim_released_without_ack_keeps_delivery_pending(tmp_path: 
     assert await runtime.pending_deliveries() == []
     await runtime.release_wait(job.job_id, result.token)
     assert [job.job_id for job in await runtime.pending_deliveries()] == [job.job_id]
-    delivery = await runtime.claim_delivery(job.job_id, content={"body": "done"}, transaction_id="stable")
+    delivery = await runtime.claim_delivery(
+        job.job_id,
+        expected_generation=result.job.generation,
+        content={"body": "done"},
+        transaction_id="stable",
+    )
     assert delivery is not None
     waiting = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     assert waiting.token is not None
     await runtime.release_wait(job.job_id, waiting.token)
-    retry = await runtime.claim_delivery(job.job_id, content={"body": "changed"}, transaction_id="different")
+    retry = await runtime.claim_delivery(
+        job.job_id,
+        expected_generation=result.job.generation,
+        content={"body": "changed"},
+        transaction_id="different",
+    )
     assert retry == delivery
     await runtime.acknowledge_delivery(job.job_id, "stable", event_id="$sent")
     assert await runtime.pending_deliveries() == []
@@ -667,7 +677,12 @@ async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, op
     second = await start_delegation(runtime, _child("c" * 32), owner=_owner(), operation=operation)
     second_wait = await runtime.wait(second.job_id, owner=_owner(), depth=0)
     await runtime.release_wait(second.job_id, second_wait.token)
-    await runtime.claim_delivery(second.job_id, content={"body": "Saved"}, transaction_id="delivery")
+    await runtime.claim_delivery(
+        second.job_id,
+        expected_generation=second_wait.job.generation,
+        content={"body": "Saved"},
+        transaction_id="delivery",
+    )
     await runtime.shutdown()
     restored = ToolJobRuntime(tmp_path)
     try:
@@ -682,7 +697,15 @@ async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, op
         }
         with pytest.raises(ValueError, match="closed"):
             await operations[operation_name]()
-        assert await runtime.claim_delivery(job.job_id, content={"body": "Stale"}, transaction_id="stale") is None
+        assert (
+            await runtime.claim_delivery(
+                job.job_id,
+                expected_generation=waiting.job.generation,
+                content={"body": "Stale"},
+                transaction_id="stale",
+            )
+            is None
+        )
         assert await runtime.pending_deliveries() == []
         assert len(await restored.pending_deliveries()) == 2
     finally:

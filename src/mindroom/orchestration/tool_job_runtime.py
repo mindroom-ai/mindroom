@@ -281,6 +281,7 @@ class ToolJobRuntimeCoordinator:
         recipient_user_id = bot.matrix_id.full_id
         delivery = await self.runtime.claim_delivery(
             job.job_id,
+            expected_generation=job.generation,
             content=_build_completion_content(job, recipient_user_id, config, self.runtime_paths),
             transaction_id=f"tool_job_{job.job_id}_{job.generation}",
         )
