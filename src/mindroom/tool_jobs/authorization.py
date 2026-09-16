@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from weakref import WeakKeyDictionary
 
 from agno.tools import Toolkit
 
 from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
+from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origins
 
@@ -23,19 +22,8 @@ if TYPE_CHECKING:
 AUTHORITY_METADATA_KEY = "mindroom_tool_authority"
 
 
-@dataclass(frozen=True)
-class _ToolkitConstruction:
-    name: str
-    factory_origin: tuple[str, ...] | None
-
-
-_CONSTRUCTIONS: WeakKeyDictionary[Toolkit, _ToolkitConstruction] = WeakKeyDictionary()
-
-
-def bind_toolkit_authority(toolkit: Toolkit, *, authored_name: str, concrete_name: str) -> None:
-    """Bind exact registry construction beside the authored approval owner."""
-    origin = tool_registry_origins().get(concrete_name)
-    _CONSTRUCTIONS[toolkit] = _ToolkitConstruction(concrete_name, tuple(origin) if origin is not None else None)
+def bind_toolkit_authority(toolkit: Toolkit, *, authored_name: str) -> None:
+    """Attach the authored approval owner while retaining the concrete source toolkit."""
     for function in toolkit.get_async_functions().values():
         function.owning_toolkit = authored_name
         function.source_toolkit = toolkit
@@ -56,7 +44,7 @@ def function_authority(function: Function) -> dict[str, Any]:
     actor = function._agent or function._team
     snapshot = (actor.metadata or {}).get(AUTHORITY_METADATA_KEY, {}) if actor is not None else {}
     toolkit = function.source_toolkit
-    construction = _CONSTRUCTIONS.get(toolkit) if isinstance(toolkit, Toolkit) else None
+    construction = get_toolkit_construction(toolkit) if isinstance(toolkit, Toolkit) else None
     return {
         "scope": snapshot.get("scope"),
         "construction": (

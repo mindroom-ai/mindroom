@@ -18,6 +18,7 @@ from mindroom.tool_jobs.authorization import (
     function_authority,
     locally_allowed,
 )
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.registry_state import TOOL_REGISTRY
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -36,7 +37,8 @@ def test_deferred_job_policy_survives_unloading_but_rejects_new_filters_and_orig
     toolkit = Toolkit(name="calculator", auto_register=False)
     function = Function(name="add", entrypoint=lambda: None)
     toolkit.functions["add"] = function
-    bind_toolkit_authority(toolkit, authored_name="calculator", concrete_name="calculator")
+    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
+    bind_toolkit_authority(toolkit, authored_name="calculator")
     function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
     snapshot = function_authority(function)
 

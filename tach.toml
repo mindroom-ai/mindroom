@@ -467,6 +467,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agents"
 depends_on = [
+    "mindroom.tool_system.construction",
     "mindroom.delegation.model_control",
     "mindroom.agent_descriptions",
     "mindroom.agent_knowledge_descriptions",
@@ -3823,6 +3824,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.metadata"
 depends_on = [
+    "mindroom.tool_system.construction",
     "mindroom.constants",
     "mindroom.mcp.registry",
     "mindroom.tool_system.declarations",
@@ -6587,7 +6589,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.tool_jobs.authorization"
-depends_on = ["mindroom.mcp.registry", "mindroom.tool_system.dynamic_toolkits", "mindroom.tool_system.registry_state", "mindroom.agent_policy"]
+depends_on = ["mindroom.tool_system.construction", "mindroom.mcp.registry", "mindroom.tool_system.dynamic_toolkits", "mindroom.tool_system.registry_state", "mindroom.agent_policy"]
 
 visibility = [
     "mindroom.agents",
@@ -6618,3 +6620,8 @@ visibility = [
 path = "mindroom.tool_jobs.provenance"
 depends_on = ["mindroom.mcp", "mindroom.mcp.toolkit"]
 visibility = ["mindroom.tool_jobs.agno_execution", "mindroom.orchestration.tool_job_runtime"]
+
+[[modules]]
+path = "mindroom.tool_system.construction"
+depends_on = []
+visibility = ["mindroom.agents", "mindroom.tool_jobs.authorization", "mindroom.tool_system.metadata"]

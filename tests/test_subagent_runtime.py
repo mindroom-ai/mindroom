@@ -16,6 +16,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
+import mindroom.tool_system.metadata as metadata_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.bot import AgentBot
@@ -54,6 +55,8 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     register_background_runtime,
 )
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
@@ -547,7 +550,8 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
     function = Function(name="add", entrypoint=lambda: None)
     toolkit = Toolkit(name="calculator", auto_register=False)
     toolkit.functions["add"] = function
-    bind_toolkit_authority(toolkit, authored_name="calculator", concrete_name="calculator")
+    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
+    bind_toolkit_authority(toolkit, authored_name="calculator")
     function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "worker")})
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
@@ -586,7 +590,8 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
         server_config=config.mcp_servers["demo"],
     )
     function = next(item for name, item in toolkit.async_functions.items() if name.endswith("_call_tool"))
-    bind_toolkit_authority(toolkit, authored_name="mcp_demo", concrete_name="mcp_demo")
+    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("mcp_demo", TOOL_REGISTRY["mcp_demo"]))
+    bind_toolkit_authority(toolkit, authored_name="mcp_demo")
     function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     set_execution_authorizer(coordinator._authorize_execution)
@@ -613,7 +618,11 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("authored", "function_name"),
-    [("matrix_message", "list_attachments"), ("openclaw_compat", "run_shell_command")],
+    [
+        ("matrix_message", "list_attachments"),
+        ("openclaw_compat", "run_shell_command"),
+        ("compact_context", "compact_context"),
+    ],
 )
 async def test_expanded_tool_authority_retains_exact_construction(
     tmp_path: Path,
@@ -673,5 +682,66 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 with pytest.raises(JobAccessError):
                     coordinator._authorize_execution(owner, function)
                 assert not coordinator._authorized(stored)
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wrapped: bool,
+) -> None:
+    """Registry mutation inside construction cannot authorize the old implementation as its replacement."""
+    config = _config(tmp_path)
+    config.agents["lead"].tools = ["calculator"]
+    coordinator = _delivery_coordinator(tmp_path, config)
+    owner = _job().owner
+
+    def replacement_factory() -> type[Toolkit]:
+        pytest.fail("Authority must not instantiate the replacement")
+
+    class SlowConstruction(Toolkit):
+        def __init__(self, **_kwargs: object) -> None:
+            super().__init__(name="calculator", auto_register=False)
+            self.functions["add"] = Function(name="add", entrypoint=lambda: None)
+            monkeypatch.setitem(TOOL_REGISTRY, "calculator", replacement_factory)
+
+    def original_factory() -> type[Toolkit]:
+        return SlowConstruction
+
+    def wrap(_name: str, toolkit: Toolkit, **_kwargs: object) -> Toolkit:
+        proxy = Toolkit(name="proxy", auto_register=False)
+        proxy.functions = toolkit.functions.copy()
+        return proxy
+
+    monkeypatch.setitem(TOOL_REGISTRY, "calculator", original_factory)
+    if wrapped:
+        monkeypatch.setattr(metadata_module, "maybe_wrap_toolkit_for_sandbox_proxy", wrap)
+    toolkit = get_tool_by_name(
+        "calculator",
+        coordinator.runtime_paths,
+        disable_sandbox_proxy=not wrapped,
+        worker_target=None,
+    )
+    bind_toolkit_authority(toolkit, authored_name="calculator")
+    function = toolkit.get_async_functions()["add"].model_copy(deep=True)
+    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
+    stored = replace(
+        _job(),
+        kind="tool",
+        tool_name="add",
+        toolkit_name="calculator",
+        adapter={"authority": function_authority(function), "origin": function_provenance(function)},
+    )
+    register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
+    try:
+        with tool_runtime_context(
+            _delegate_runtime_context(config, coordinator.runtime_paths, execution_identity=owner),
+        ):
+            with pytest.raises(JobAccessError):
+                coordinator._authorize_execution(owner, function)
+            assert not coordinator._authorized(stored)
     finally:
         await coordinator.stop()
