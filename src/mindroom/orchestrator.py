@@ -864,6 +864,11 @@ class _MultiAgentOrchestrator:
             if first_error is not None:
                 raise first_error
 
+    def request_interrupted_turn_recovery(self, entity_name: str, room_id: str) -> None:
+        """Coalesce settled interruption notifications with existing dispatch recovery."""
+        self._pending_replacement_recovery_room_ids.setdefault(entity_name, set()).add(room_id)
+        self._schedule_ready_turn_dispatch_recovery()
+
     def _schedule_ready_turn_dispatch_recovery(self) -> None:
         """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
         if not self._runtime_ready_event.is_set():
@@ -886,13 +891,22 @@ class _MultiAgentOrchestrator:
 
     async def _run_scheduled_turn_dispatch_recovery(self) -> None:
         """Drain readiness signals without blocking a Matrix sync callback."""
+
+        async def recover() -> None:
+            if not self._runtime_ready_event.is_set():
+                return
+            await self._recover_ready_turn_journal_events()
+            await self._response_admission_gate.wait_until_open()
+            if self._runtime_ready_event.is_set() and self.config is not None:
+                await self._recover_pending_replacement_rooms(self.config)
+
         current_task = asyncio.current_task()
         try:
             while self._dispatch_recovery_requested:
                 self._dispatch_recovery_requested = False
                 await run_with_retry(
                     "Recovering ready turn dispatch obligations",
-                    self._recover_ready_turn_journal_events,
+                    recover,
                     update_runtime_state=False,
                 )
         finally:
@@ -1841,8 +1855,8 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime.unbind_for_entity_changes(removed_entities)
         self._computer_runtime.unbind_for_entity_changes(removed_entities)
         for entity_name in removed_entities:
-            self._pending_replacement_recovery_room_ids.pop(entity_name, None)
             await self._cancel_bot_start_task(entity_name)
+            self._pending_replacement_recovery_room_ids.pop(entity_name, None)
 
             bot = self.agent_bots.get(entity_name)
             if bot is not None:
@@ -2439,6 +2453,7 @@ class _MultiAgentOrchestrator:
     async def stop(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Stop all agent bots."""
         self.running = False
+        self._runtime_ready_event.clear()
         for bot in self.agent_bots.values():
             bot.begin_process_shutdown()
         self.hook_registry = HookRegistry.empty()

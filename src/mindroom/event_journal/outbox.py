@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 from mindroom.legacy_delivery_payloads import decode_delivery_result
 
@@ -664,7 +665,7 @@ def recovery_initials(
     *,
     after: tuple[int, str] | None = None,
 ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-    """Enumerate owned visible INITIALs without a FINAL, not arbitrary room history."""
+    """Enumerate orphaned INITIALs and acknowledged error-FINAL candidates."""
     cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
     rows = transaction.fetchall(
         f"""
@@ -681,10 +682,13 @@ def recovery_initials(
             WHERE final.principal_id = delivery.principal_id AND final.delivery_id = delivery.delivery_id
               AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
                 OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
+              AND NOT (final.acknowledged_event_id IS NOT NULL AND final.result_json IS NULL
+                AND final.retired = 0 AND final.permanent_failure_reason IS NULL
+                AND final.payload_json LIKE ? ESCAPE '!')
           ){cursor_clause}
         ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
         """,  # noqa: S608 - fixed columns and cursor clause
-        (principal_id, *(after or ())),
+        (principal_id, f'%"{STREAM_STATUS_KEY.replace("_", "!_")}":"{STREAM_STATUS_ERROR}"%', *(after or ())),
     )
     return tuple(_recovery_delivery(row) for row in rows)
 

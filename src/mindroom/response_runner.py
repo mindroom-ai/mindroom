@@ -769,6 +769,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
+    register_approval_interruption: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -1660,12 +1661,19 @@ class ResponseRunner:
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        return await self._approval_responses.settle_failure(
+        settled = await self._approval_responses.settle_failure(
             failing,
             reason,
             visible_text=update,
             stream_status=STREAM_STATUS_ERROR,
         )
+        if settled and await self.deps.approval_store.approval_interruption_is_recoverable(
+            failing.source_event_ids[0],
+            visible_text=update,
+            failure_reason=failing.failure_reason,
+        ):
+            self.deps.register_approval_interruption(failing.source_event_ids[0], failing.room_id)
+        return settled
 
     async def _approval_interruption_update(
         self,
