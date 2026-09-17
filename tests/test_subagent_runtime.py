@@ -26,6 +26,7 @@ from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.delegation.state import DelegationChild
+from mindroom.matrix import state as matrix_state
 from mindroom.matrix.identity import MatrixID
 from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
@@ -398,29 +399,51 @@ async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_failed_worker_sync_reuses_runtime_without_replaying_jobs(
+@pytest.mark.parametrize("wake", ["signal", "timer"])
+async def test_completion_worker_retries_transient_authorization_scan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    wake: str,
 ) -> None:
-    """A delivery scan bug surfaces, and the next lifecycle sync restarts only delivery."""
+    """A failed Matrix-state read cannot strand accepted outcomes or require config reload."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
     runtime = coordinator.runtime
     job = await _finish_job(coordinator)
-    original = coordinator.deliver_pending
-    monkeypatch.setattr(coordinator, "deliver_pending", AsyncMock(side_effect=RuntimeError("scan failed")))
+    failed, delivered = asyncio.Event(), asyncio.Event()
+    read_state = matrix_state._load_matrix_state_file
+    matrix_state._load_matrix_state_file_cached.cache_clear()
+
+    def transient_state_read(*args: object, **kwargs: object) -> matrix_state.MatrixState:
+        if not failed.is_set():
+            failed.set()
+            message = "transient Matrix-state read"
+            raise OSError(message)
+        return read_state(*args, **kwargs)
+
+    async def completed(saved: BackgroundJob) -> None:
+        assert saved == job
+        delivered.set()
+
+    bot = coordinator.bot_provider("team")
+    assert bot is not None
+    bot.wake_tool_job_completion.side_effect = completed
+    monkeypatch.setattr(matrix_state, "_load_matrix_state_file", transient_state_read)
+    monkeypatch.setattr(runtime_module, "_RETRY_SECONDS", 0.01 if wake == "timer" else 60)
     try:
         await coordinator.sync()
-        failed = coordinator._task
-        assert failed is not None
-        with pytest.raises(RuntimeError, match="scan failed"):
-            await failed
-        monkeypatch.setattr(coordinator, "deliver_pending", original)
-        await coordinator.sync()
-        assert coordinator._task is not failed
+        worker = coordinator._task
+        assert worker is not None
+        await asyncio.wait_for(failed.wait(), 1)
+        if wake == "signal":
+            runtime.changed.set()
+        await asyncio.wait_for(delivered.wait(), 1)
+        assert coordinator._task is worker
+        assert not worker.done()
         assert coordinator.runtime is runtime
         assert (await runtime.lookup(job.job_id, owner=job.owner, depth=0)).result == "Saved answer"
+        assert await runtime.pending_outcomes() == [job]
     finally:
-        await coordinator.stop()
+        await asyncio.wait_for(coordinator.stop(), 1)
 
 
 @pytest.mark.asyncio

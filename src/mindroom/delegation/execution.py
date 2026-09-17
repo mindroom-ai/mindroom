@@ -770,10 +770,15 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 agent_name=agent_name,
                 on_event=on_event,
             )
-            wait_timeout = read_wait_timeout(
-                tool.tool_args,
-                owned_execution=(job_owns_execution() or delegation_depth > 0) and tool.tool_name != "job",
-            )
+            try:
+                wait_timeout = read_wait_timeout(
+                    tool.tool_args,
+                    owned_execution=(job_owns_execution() or delegation_depth > 0) and tool.tool_name != "job",
+                )
+            except ValueError as error:
+                tool.tool_call_error = True
+                resolve_result(str(error))
+                continue
             args = application_arguments(tool.tool_args) or {}
             retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             previous_child = None

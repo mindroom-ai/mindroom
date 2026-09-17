@@ -12,7 +12,6 @@ from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_
 from mindroom.tool_jobs.agno_execution import is_framework_function, wrap_tool_execution
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import get_background_runtime
-from mindroom.tool_jobs.wait_timeout import read_wait_timeout
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -114,13 +113,6 @@ def _wrap_job_wait_dispatch(
     depth: int,
 ) -> Callable[..., AsyncIterator[Any]]:
     async def dispatch(function_calls: list[FunctionCall], *args: object, **kwargs: object) -> AsyncIterator[Any]:
-        context = get_tool_runtime_context()
-        if context is not None and get_background_runtime(context.runtime_paths) is not None:
-            for call in function_calls:
-                read_wait_timeout(
-                    call.arguments,
-                    owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
-                )
         if not kwargs.get("skip_pause_check", False):
             for call in function_calls:
                 await project_native_job_wait(call, depth=depth)

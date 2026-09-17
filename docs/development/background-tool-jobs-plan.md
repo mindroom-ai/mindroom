@@ -4,7 +4,7 @@
 > This document is the shared scope and progress record for PR #2113.
 > Update checkboxes, decisions, and verification evidence as work lands; an unchecked item is not implemented or verified.
 
-**Current status (2026-09-17):** Add a restart-only, instance-wide `background_tool_jobs` option, disabled by default.
+**Current status (2026-09-17):** Implemented a restart-only, instance-wide `background_tool_jobs` option, disabled by default.
 The earlier proposal to remove automatic joining is withdrawn because staggered completions could create excessive replies.
 Keep the existing waiting and grouping behavior while making the feature opt-in.
 PR #2113 remains open and unmerged.
@@ -413,9 +413,9 @@ The first review found that removing an agent could let cleanup discard a saved 
 The passive reader now checks the finite supported canonical session locations when current configuration cannot locate the exact saved run, including shared, private per-user, and private per-user-agent storage.
 It preserves the exact requester, session, and run match, without scanning directories or reconstructing executable capabilities.
 The scoped re-review approved this fix and the corrected startup test fixtures.
-The gate changes 23 production files by +417/−51 lines, or net +366, including the passive recovery safeguards.
+The configuration gate and final review fixes change 26 production files by +448/−83 lines, or net +365, including the passive recovery safeguards.
 That exceeds the initial 100–200-line estimate because saved approvals and coalesced sources require protection even when no job runtime is created.
-The complete production feature against integrated main `3bfed6570` is now 58 files, +4,774/−112 lines, or net +4,662.
+The complete production feature against integrated main `3bfed6570` is now 58 files, +4,787/−126 lines, or net +4,661.
 
 ## Task 7: live verification, documentation, and PR update
 
@@ -440,17 +440,24 @@ The existing PR carries publication and hosted-review status.
 | Check | Result |
 | --- | --- |
 | Focused flag and startup regressions after review fixes | 316 passed, 5 skipped; all five initial full-suite fixture failures corrected |
-| Full non-Matrix suite | 21,470 passed, 12 skipped, 27 warnings in 310.80 seconds |
+| Full non-Matrix suite | 21,498 passed, 12 skipped, 27 warnings in 308.20 seconds |
 | Final repository checks | All-files pre-commit passed after regenerating documentation references; Tach dependencies/interfaces passed |
-| Independent review | Whole-branch review approved with no remaining findings after the scoped fixes |
+| Independent review | Whole-branch review and scoped publication-fix review approved with no remaining findings |
 | Default-off live calls | Actual synchronous, asynchronous, delegated, streaming, blocking, and approved tools execute without generic schemas, resource owners, or SDK resource bindings |
 | Live config reload | Both directions preserve the running mode and expose the existing restart-required API status |
 | Live disabled restart | Saved ordinary/delegated jobs and a pre-execution approval stay parked, including while a new message in the same thread executes |
 | Live enabled restart | Preserved jobs recover without replay; a pending approved call executes exactly once after re-enabling |
 | Removed-agent approval | Feature approval remains parked while disabled; ordinary unavailable-owner cleanup still runs; after restoration native membership revocation expires the stale card and a fresh approval executes once |
 | Enabled lifecycle regression | Timeout budgets, repeated human follow-ups, child continuity, long streaming, newer turns, cancellation, direct/delegated approvals, STOP, and restart remain covered |
-| Combined live evidence | 35 passing scenarios, 453 Matrix events, zero synthetic completion notices |
+| Live invalid waits | Ten streaming/blocking scenarios return tool errors, accept corrected calls, and execute each tool once without extra jobs |
+| Live shared-session approval | Two real requesters share a canonical conversation; the exact approval remains parked while disabled and executes once after re-enabling |
+| Publication fix regressions | 363 passed, 2 skipped for execution boundaries; 224 passed for session/config boundaries |
+| Combined live evidence | 48 passing scenarios, 545 Matrix events, zero synthetic completion notices |
 
 Live checks use a real local Matrix server, backend, and application tools with a deterministic local model endpoint.
 The full suite retains pre-existing dependency deprecations and mock-coroutine warnings; it is not warning-free.
 Private local test evidence and exact run identifiers remain in persistent worktree storage.
+
+Publication review identified four additional issues: invalid waits aborted model runs, scan failures stopped completion retries, one restart warning hid another, and shared-session row ownership could hide an exact saved approval run.
+The fixes use existing SDK tool failures, worker retries, canonical session lookup, and combined config feedback.
+They remove one net production line across seven files and passed scoped independent review.

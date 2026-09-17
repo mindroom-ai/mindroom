@@ -33,7 +33,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
 )
 from mindroom.handled_turns import TurnRecordCodec
-from mindroom.history.session_context import create_scope_session_storage
+from mindroom.history.session_context import create_scope_session_storage, read_scope_session_run
 from mindroom.history.types import HistoryScope
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
@@ -85,6 +85,8 @@ async def test_default_startup_does_not_create_job_runtime(tmp_path: Path) -> No
     [
         (False, None, "same"),
         (True, None, "same"),
+        (False, None, "shared_user"),
+        (True, None, "shared_user"),
         (False, None, "removed"),
         (False, "user", "removed"),
         (False, "user_agent", "removed"),
@@ -127,13 +129,20 @@ async def test_pre_execution_approval_is_parked_without_a_job_row(  # noqa: PLR0
         runtime_paths=paths,
         execution_identity=owner,
     )
+    session_user = "@history-owner:localhost" if storage_change == "shared_user" else owner.requester_id
     session = (
-        TeamSession(session_id=owner.session_id, team_id="general", user_id=owner.requester_id, runs=[run])
+        TeamSession(session_id=owner.session_id, team_id="general", user_id=session_user, runs=[run])
         if team
-        else AgentSession(session_id=owner.session_id, agent_id="general", user_id=owner.requester_id, runs=[run])
+        else AgentSession(session_id=owner.session_id, agent_id="general", user_id=session_user, runs=[run])
     )
     storage.upsert_session(session)
     storage.upsert_run(run, session_id=owner.session_id, user_id=owner.requester_id)
+    decoy = replace(
+        run,
+        run_id="another-run",
+        tools=[ToolExecution(tool_call_id="another-call", tool_name="report", tool_args={"wait_timeout": 0})],
+    )
+    storage.upsert_run(decoy, session_id=owner.session_id, user_id=owner.requester_id)
     storage.close()
     store = bot._journal_store.principal(bot._journal_principal_id)
     await store.admit(
@@ -234,6 +243,48 @@ async def test_pre_execution_approval_is_parked_without_a_job_row(  # noqa: PLR0
             assert claimed.run_id == continuation.run_id
         finally:
             await restarted.stop()
+
+
+@pytest.mark.parametrize("private_scope", ["user", "user_agent"])
+def test_passive_run_reader_preserves_private_root_isolation(
+    tmp_path: Path,
+    private_scope: Literal["user", "user_agent"],
+) -> None:
+    """Canonical row users never override exact run selection or requester-private storage roots."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={"general": AgentConfig(display_name="General", private=AgentPrivateConfig(per=private_scope))},
+    )
+    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
+    scope = HistoryScope(kind="agent", scope_id="general")
+    storage = create_scope_session_storage(
+        agent_name="general",
+        scope=scope,
+        config=config,
+        runtime_paths=paths,
+        execution_identity=owner,
+    )
+    run = RunOutput(run_id="exact-run", agent_id="general", session_id=owner.session_id, user_id=None, content="saved")
+    storage.upsert_session(
+        AgentSession(session_id=owner.session_id, agent_id="general", user_id="@history-owner:localhost"),
+    )
+    storage.upsert_run(run, session_id=owner.session_id, user_id=None)
+    storage.close()
+    before = {path: path.read_bytes() for path in paths.storage_root.rglob("*.db")}
+    read_run = partial(
+        read_scope_session_run,
+        agent_name="general",
+        scope=scope,
+        config=config,
+        runtime_paths=paths,
+        session_id=owner.session_id,
+    )
+    saved = read_run(execution_identity=owner, run_id="exact-run")
+    assert isinstance(saved, RunOutput)
+    assert (saved.run_id, saved.content, saved.user_id) == (run.run_id, "saved", None)
+    assert read_run(execution_identity=owner, run_id="missing-run") is None
+    assert read_run(execution_identity=replace(owner, requester_id="@another:localhost"), run_id="exact-run") is None
+    assert {path: path.read_bytes() for path in paths.storage_root.rglob("*.db")} == before
 
 
 def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> None:

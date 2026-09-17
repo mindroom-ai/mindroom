@@ -13,6 +13,7 @@ import pytest
 from agno.agent import Agent
 from agno.models.fallback import FallbackConfig
 from agno.models.response import ModelResponse
+from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.tools.function import Function
 
@@ -38,6 +39,7 @@ from mindroom.tool_jobs.control import (
     HumanMessageSignal,
     human_message_signal_context,
 )
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -51,6 +53,7 @@ from tests.test_delegation_execution import (
 from tests.test_delegation_execution import (
     test_child_approval_survives_parent_reconstruction as _native_approval_scenario,
 )
+from tests.test_subagent_runtime import _job
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -58,6 +61,107 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persisted", [False, True])
+@pytest.mark.parametrize(
+    ("tool_name", "budget", "depth"),
+    [("run_subagent", "bad", 0), ("run_subagent", 0, 1), ("continue_subagent", -1, 0), ("job", True, 0)],
+)
+async def test_invalid_native_wait_resolves_exact_requirement_without_child_execution(  # noqa: PLR0915
+    tmp_path: Path,
+    persisted: bool,
+    tool_name: str,
+    budget: object,
+    depth: int,
+) -> None:
+    """Fresh and restored external requirements return correctable tool failures before admission."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+            "code": AgentConfig(display_name="Code"),
+        },
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+    )
+    owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
+    apply_tool_approval_capability(
+        delegate,
+        config,
+        supports_native_tool_approval=True,
+        registered_tool_name="delegate",
+    )
+    jobs = JobTools(paths, owner)
+    arguments = {"task": "must-not-run", "agent_name": "code", "wait_timeout": budget}
+    if tool_name == "continue_subagent":
+        arguments = {"subagent_id": "missing", "message": "must-not-run", "wait_timeout": budget}
+    elif tool_name == "job":
+
+        async def saved_outcome() -> BackgroundOutcome:
+            return BackgroundOutcome("completed", "retained")
+
+        child = replace(delegation_child(_job()), caller_agent_name="leader", child_agent_name="code")
+        retained = await start_delegation(runtime, child, owner=owner, operation=saved_outcome)
+        waited = await runtime.wait(retained.job_id, owner=owner, depth=0)
+        await runtime.release_wait(retained.job_id, waited.token)
+        arguments = {"action": "wait", "job_id": retained.job_id, "wait_timeout": budget}
+        if persisted:
+            jobs.async_functions["job"].external_execution = True
+            jobs.async_functions["job"].external_execution_silent = True
+            jobs.async_functions["job"].approval_type = "mindroom_job_wait"
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call(tool_name, "invalid", **arguments)]),
+            ModelResponse(content="corrected"),
+        ],
+    )
+    if not persisted:
+        install_tool_job_execution(model, depth=depth)
+    storage = create_session_storage("leader", config, paths, owner)
+    parent = Agent(id="leader", model=model, db=storage, tools=[delegate, jobs])
+
+    async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
+        pytest.fail("Invalid wait metadata must not execute a child")
+
+    try:
+        async with execution_resources():
+            with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+                paused = await parent.arun("delegate", session_id=owner.session_id, user_id=owner.requester_id)
+                assert paused.status == RunStatus.paused
+                if persisted:
+                    paused = RunOutput.from_dict(paused.to_dict())
+                    install_tool_job_execution(model, depth=depth)
+                response = await drive_delegations(
+                    parent,
+                    paused,
+                    run_child=run_child,
+                    agent_name="leader",
+                    config=config,
+                    runtime_paths=paths,
+                    execution_identity=owner,
+                    delegation_depth=depth,
+                )
+        assert response.status == RunStatus.completed
+        assert response.content == "corrected"
+        rejected = next(tool for tool in response.tools if tool.tool_call_id == "invalid")
+        assert rejected.tool_call_error
+        assert "wait_timeout" in rejected.result
+        assert rejected.tool_args == arguments
+        assert any(
+            message.tool_call_id == "invalid" and "wait_timeout" in message.content for message in model.seen_messages
+        )
+        assert DelegationState.from_metadata(response.metadata).children == []
+        assert len(await runtime.list_jobs(owner=owner, depth=0)) == (1 if tool_name == "job" else 0)
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+        storage.close()
 
 
 @pytest.mark.asyncio

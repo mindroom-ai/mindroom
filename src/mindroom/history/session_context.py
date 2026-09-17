@@ -342,9 +342,8 @@ def read_scope_session_run(
     execution_identity: ToolExecutionIdentity | None,
     session_id: str,
     run_id: str,
-    requester_id: str,
 ) -> RunOutput | TeamRunOutput | None:
-    """Inspect one saved run without preflight, schema migration, or writable handles."""
+    """Inspect an exact canonical conversation run without preflight or writable handles."""
     # Keep provider run types out of history helper import time.
     from agno.db.base import SessionType  # noqa: PLC0415
     from agno.db.sqlite import SqliteDb  # noqa: PLC0415
@@ -372,10 +371,10 @@ def read_scope_session_run(
         session_table=f"{name}_sessions",
     )
     try:
+        # Canonical conversation sessions can contain runs from multiple requesters.
         session = storage.get_session(
             session_id,
             session_type=SessionType.AGENT if scope.kind == "agent" else SessionType.TEAM,
-            user_id=requester_id,
         )
         run = session.get_run(run_id) if isinstance(session, (AgentSession, TeamSession)) else None
         return run if isinstance(run, (RunOutput, TeamRunOutput)) else None

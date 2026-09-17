@@ -17,7 +17,7 @@ from mindroom.config.main import (
     format_invalid_config_message,
     load_config_or_user_error,
 )
-from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
+from mindroom.event_journal_open import pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
@@ -362,28 +362,19 @@ async def apply_config_change(
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
-        # The event journal is opened once, at startup, and every bot shares
-        # that one store; saying the change affects new interactions would be
-        # untrue for this one field.
+        success = f"✅ **Configuration updated successfully!**\n\nChanges saved to {path}"
+        restart_notices = []
         if pending_background_tool_jobs_restart(saved, runtime_paths):
-            return (
-                f"✅ **Configuration updated successfully!**\n\n"
-                f"Changes saved to {path}.\n\n"
-                "⚠️ Background tool jobs keep their startup setting until MindRoom restarts. "
-                "Other hot-reloadable changes apply normally."
+            restart_notices.append(
+                "⚠️ Background tool jobs keep their startup setting until MindRoom restarts.",
             )
         if pending_event_journal_restart(saved, runtime_paths):
-            return (
-                f"✅ **Configuration updated successfully!**\n\n"
-                f"Changes saved to {path}.\n\n"
-                f"⚠️ The event journal in force is still "
-                f"{describe_event_journal(config.event_journal, runtime_paths)}; the new value applies "
-                f"after MindRoom restarts."
+            restart_notices.append(
+                "⚠️ The saved event journal change applies after MindRoom restarts; the current database remains in use.",
             )
-        return (  # noqa: TRY300
-            f"✅ **Configuration updated successfully!**\n\n"
-            f"Changes saved to {path} and will affect new agent interactions."
-        )
+        if restart_notices:
+            return success + ".\n\n" + "\n\n".join(restart_notices) + "\n\nOther hot-reloadable changes apply normally."
+        return success + " and will affect new agent interactions."
     except Exception as e:
         logger.exception("Failed to apply config change")
         return f"❌ Failed to apply configuration change: {e}"

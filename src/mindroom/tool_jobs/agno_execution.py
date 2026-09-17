@@ -260,7 +260,14 @@ async def _execute_inline(original: _Execute, call: FunctionCall) -> _CallResult
     return success, timer, call, result
 
 
-def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
+def _failed_call(call: FunctionCall, error: ValueError) -> _CallResult:
+    """Expose invalid framework arguments through Agno's ordinary tool failure contract."""
+    with Timer() as timer:
+        call.error = str(error)
+        return False, timer, call, FunctionExecutionResult(status="failure", error=call.error)
+
+
+def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
     async def execute(call: FunctionCall) -> _CallResult:
@@ -269,10 +276,13 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:
         resources = current_execution_resources()
         if runtime is None or context is None or resources is None or is_framework_function(call.function):
             return await original(call)
-        wait_timeout = read_wait_timeout(
-            call.arguments,
-            owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
-        )
+        try:
+            wait_timeout = read_wait_timeout(
+                call.arguments,
+                owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
+            )
+        except ValueError as error:
+            return _failed_call(call, error)
         owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
         actor = call.function._agent or call.function._team
         if actor is not None and actor.id:

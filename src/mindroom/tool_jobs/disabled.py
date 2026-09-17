@@ -104,7 +104,6 @@ def _approval_uses_jobs(continuation: ApprovalContinuation, config: Config, runt
         execution_identity=identity,
         session_id=continuation.session_id,
         run_id=continuation.run_id,
-        requester_id=continuation.requester_id,
     )
     run = read_run(config=config) if scope.kind != "agent" or continuation.entity_name in config.agents else None
     if run is None and scope.kind == "agent":

@@ -232,7 +232,10 @@ class ToolJobRuntimeCoordinator:
     async def _run(self) -> None:
         while True:
             self.runtime.changed.clear()
-            await self.deliver_pending()
+            try:
+                await self.deliver_pending()
+            except Exception:
+                logger.exception("Background tool job completion scan failed; retrying")
             with suppress(TimeoutError):
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 

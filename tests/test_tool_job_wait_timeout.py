@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool annotations at runtime.
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,7 +14,8 @@ from agno.media import Image
 from agno.models.fallback import FallbackConfig
 from agno.models.response import ModelResponse
 from agno.run import RunContext
-from agno.run.agent import RunContentEvent
+from agno.run.agent import RunContentEvent, RunErrorEvent, RunOutput
+from agno.run.base import RunStatus
 from agno.tools import Toolkit
 from agno.tools.function import Function, FunctionCall, ToolResult
 
@@ -140,11 +142,17 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
     try:
         async with execution_resources():
-            with tool_runtime_context(context), pytest.raises(ValueError, match="wait_timeout"):
-                await model.arun_function_call(
-                    FunctionCall(function=function, call_id="call", arguments={"wait_timeout": budget}),
-                )
+            with tool_runtime_context(context):
+                call = FunctionCall(function=function, call_id="call", arguments={"wait_timeout": budget})
+                success, _, returned_call, result = await model.arun_function_call(call)
+                assert success is False
+                assert returned_call is call
+                assert result.status == "failure"
+                assert "wait_timeout" in call.error
+                assert result.error == call.error
+                assert call.arguments == {"wait_timeout": budget}
         assert invoked == []
+        assert await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0) == []
     finally:
         register_background_runtime(paths, None)
         await runtime.shutdown()
@@ -293,11 +301,84 @@ async def test_owned_nested_application_cannot_create_detached_job(
                     assert result.result == "inline result"
                     assert called == [True]
                 else:
-                    with pytest.raises(ValueError, match="outer job"):
-                        await model.arun_function_call(call)
+                    success, _, returned_call, result = await model.arun_function_call(call)
+                    assert success is False
+                    assert returned_call is call
+                    assert result.status == "failure"
+                    assert "outer job" in call.error
                     assert called == []
         owner = build_execution_identity_from_runtime_context(context)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
+    tmp_path: Path,
+    streaming: bool,
+    nested: bool,
+) -> None:
+    """Real SDK batches report one tool failure and keep siblings and correction turns alive."""
+    invoked: list[str] = []
+
+    async def application(value: str) -> str:
+        invoked.append(value)
+        return value
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    invalid_budget = 0 if nested else "bad"
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(
+                tool_calls=[
+                    _call("application", "invalid", value="must-not-run", wait_timeout=invalid_budget),
+                    _call("application", "sibling", value="sibling", wait_timeout=None),
+                ],
+            ),
+            ModelResponse(tool_calls=[_call("application", "corrected", value="corrected", wait_timeout=None)]),
+            ModelResponse(content="done"),
+        ],
+    )
+    install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[application])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context), job_control_context(JobControl()) if nested else nullcontext():
+                if streaming:
+                    events = [
+                        event
+                        async for event in agent.arun(
+                            "start",
+                            session_id=context.session_id,
+                            stream=True,
+                            stream_events=True,
+                            yield_run_output=True,
+                        )
+                    ]
+                    assert not any(isinstance(event, RunErrorEvent) for event in events)
+                    response = next(event for event in reversed(events) if isinstance(event, RunOutput))
+                else:
+                    response = await agent.arun("start", session_id=context.session_id)
+        assert response.status == RunStatus.completed
+        assert invoked == ["sibling", "corrected"]
+        rejected = next(tool for tool in response.tools if tool.tool_call_id == "invalid")
+        assert rejected.tool_call_error
+        assert "wait_timeout" in rejected.result
+        assert rejected.tool_args == {"value": "must-not-run", "wait_timeout": invalid_budget}
+        assert any(
+            message.tool_call_id == "invalid" and "wait_timeout" in message.content for message in model.seen_messages
+        )
+        jobs = await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0)
+        assert len(jobs) == (0 if nested else 2)
+        assert all(job.adapter["tool_call_id"] != "invalid" for job in jobs)
     finally:
         register_background_runtime(paths, None)
         await runtime.shutdown()
