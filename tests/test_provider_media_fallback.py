@@ -18,7 +18,7 @@ from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.response import ModelResponse
 
-from mindroom import claude_stream_retry
+from mindroom import provider_stream_retry
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
@@ -486,7 +486,7 @@ async def test_loaded_claude_keeps_media_removed_during_transient_stream_retry(
             yield item
 
     vars(model)["ainvoke_stream"] = fake_ainvoke_stream
-    monkeypatch.setattr(claude_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(provider_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
     loaded = _load(model, tmp_path)
 
     chunks = [

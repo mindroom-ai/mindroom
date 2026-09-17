@@ -682,7 +682,7 @@ depends_on = [
     "mindroom.tool_system.dependencies",
     "mindroom.azure_openai_model",
     "mindroom.claude_prompt_cache",
-    "mindroom.claude_stream_retry",
+    "mindroom.provider_stream_retry",
     "mindroom.codex_model",
     "mindroom.kimi_model",
     "mindroom.openai_models",
@@ -3820,7 +3820,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.model_stream_output"
 depends_on = []
-visibility = ["mindroom.claude_stream_retry", "mindroom.provider_media_fallback"]
+visibility = ["mindroom.provider_stream_retry", "mindroom.provider_media_fallback"]
 
 [[interfaces]]
 from = ["mindroom.model_stream_output"]
@@ -6303,7 +6303,7 @@ visibility = [
     "mindroom.approval_receipt",
     "mindroom.llm_request_logging",
     "mindroom.provider_media_fallback",
-    "mindroom.claude_stream_retry",
+    "mindroom.provider_stream_retry",
     "mindroom.claude_prompt_cache",
 ]
 

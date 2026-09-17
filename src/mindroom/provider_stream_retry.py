@@ -1,20 +1,13 @@
-"""Transient-error retry for Claude streaming model requests.
+"""Bounded retries for transient errors in provider streaming requests.
 
-The Anthropic SDK retries HTTP-level failures (429/5xx, connection errors)
-before a stream is established, but once the response is committed as 200 the
-API reports server faults as an SSE ``error`` event instead. The SDK raises
-that event as an ``APIStatusError`` with status code 200 and never retries it,
-Agno converts it into a generic ``ModelProviderError``, and without this hook
-the whole agent run fails on a documented-retryable fault (observed in
-production as ``{'type': 'api_error', 'message': 'Internal server error'}``
-from Vertex).
+SDK HTTP retries cannot recover errors delivered inside an established SSE
+stream. Agno normalizes these failures to ModelProviderError before turning
+them into untyped run-error events, so retry at the invocation boundary while
+the response lifecycle still owns the turn. Reissue only the failed request;
+earlier tool calls and their results remain in the existing run.
 
-This hook wraps ``invoke_stream``/``ainvoke_stream`` on Anthropic-family Claude
-models (direct API, Vertex, and Bedrock share the Agno model class) and
-re-issues the request when an attempt fails with a transient error before
-producing any meaningful output. Attempts that already yielded content, tool
-calls, or reasoning cannot be replayed without duplicating what downstream
-consumers streamed to the user, so those errors propagate unchanged.
+Attempts that yielded content, tool calls, or reasoning cannot be replayed
+without duplicating output, so those errors propagate unchanged.
 """
 
 from __future__ import annotations
@@ -28,20 +21,24 @@ from typing import TYPE_CHECKING
 from agno.exceptions import ContextWindowExceededError, ModelProviderError
 
 from mindroom.agno_compat_model_hooks import install_stream_invocation_hooks
-from mindroom.claude_prompt_cache import as_anthropic_claude
-from mindroom.error_handling import TRANSIENT_PROVIDER_STATUS_CODES, ModelSafeguardRefusalError
+from mindroom.error_handling import (
+    TRANSIENT_PROVIDER_STATUS_CODES,
+    IncompleteResponsesStreamError,
+    ModelSafeguardRefusalError,
+)
 from mindroom.logging_config import get_logger
 from mindroom.model_stream_output import has_meaningful_stream_output
+from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
 
-    from agno.models.anthropic import Claude as AnthropicClaude
+    from agno.models.base import Model
     from agno.models.response import ModelResponse
 
 logger = get_logger(__name__)
 
-_STREAM_RETRY_HOOK_ATTR = "_mindroom_claude_stream_retry_hook_installed"
+_STREAM_RETRY_HOOK_ATTR = "_mindroom_provider_stream_retry_hook_installed"
 
 # One initial attempt plus this many re-issued requests. Provider overloads can
 # outlive the SDK's short HTTP retry window, especially when they arrive as
@@ -52,7 +49,7 @@ _RETRY_BASE_DELAY_SECONDS = 1.0
 
 def _is_transient_model_error(error: BaseException) -> bool:
     """Return whether one model-call failure is worth re-issuing the request."""
-    if isinstance(error, (ContextWindowExceededError, ModelSafeguardRefusalError)):
+    if isinstance(error, (ContextWindowExceededError, ModelSafeguardRefusalError, IncompleteResponsesStreamError)):
         return False
     return isinstance(error, ModelProviderError) and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
 
@@ -68,12 +65,12 @@ def _retry_delay_seconds(attempt: int) -> float:
     return _RETRY_BASE_DELAY_SECONDS * (2**attempt) * (1.0 + random.uniform(0.0, 0.25))  # noqa: S311
 
 
-def _log_retry(model: AnthropicClaude, error: ModelProviderError, *, attempt: int, delay: float) -> None:
+def _log_retry(model: Model, error: ModelProviderError, *, attempt: int, delay: float) -> None:
     logger.warning(
-        "Retrying Claude stream after transient model error",
+        "Retrying provider stream after transient model error",
         model_id=model.id,
         status_code=error.status_code,
-        error=str(error.message),
+        error=redact_sensitive_text(str(error.message), max_length=500),
         attempt=attempt + 1,
         max_retries=_MAX_TRANSIENT_RETRIES,
         delay_seconds=delay,
@@ -81,7 +78,7 @@ def _log_retry(model: AnthropicClaude, error: ModelProviderError, *, attempt: in
 
 
 def _invoke_stream_with_retry(
-    model: AnthropicClaude,
+    model: Model,
     original_invoke_stream: Callable[..., Generator[ModelResponse, None, None]],
     *args: object,
     **kwargs: object,
@@ -109,7 +106,7 @@ def _invoke_stream_with_retry(
 
 
 async def _ainvoke_stream_with_retry(
-    model: AnthropicClaude,
+    model: Model,
     original_ainvoke_stream: Callable[..., AsyncGenerator[ModelResponse, None]],
     *args: object,
     **kwargs: object,
@@ -137,19 +134,16 @@ async def _ainvoke_stream_with_retry(
             await stream.aclose()
 
 
-def install_claude_stream_retry_hook(model: object) -> None:
-    """Wrap a Claude model's stream invocations with transient-error retries.
+def install_provider_stream_retry_hook(model: Model) -> None:
+    """Wrap a model's stream invocations with transient-error retries.
 
     Idempotent per model instance. Only attempts that have not yet yielded
     meaningful output are retried; anything else re-raises immediately so
     partially streamed responses are never duplicated.
     """
-    claude_model = as_anthropic_claude(model)
-    if claude_model is None:
-        return
     install_stream_invocation_hooks(
-        claude_model,
+        model,
         marker=_STREAM_RETRY_HOOK_ATTR,
-        wrap_sync=lambda original: partial(_invoke_stream_with_retry, claude_model, original),
-        wrap_async=lambda original: partial(_ainvoke_stream_with_retry, claude_model, original),
+        wrap_sync=lambda original: partial(_invoke_stream_with_retry, model, original),
+        wrap_async=lambda original: partial(_ainvoke_stream_with_retry, model, original),
     )
