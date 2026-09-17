@@ -498,3 +498,130 @@ These tests use real SDK execution, durable job snapshots, SQLite sessions, and 
 They reconstruct runtimes in one process and do not exercise Matrix transport or simulate a process kill.
 The earlier 48 live Matrix scenarios remain the transport evidence for the unchanged production code.
 No new production defect was demonstrated, so this extension changes only tests and this plan.
+
+## Architecture audit: preserve the agreed behavior
+
+**Status:** Assessment completed on 2026-09-17; the three approved refactors are implemented and verified locally.
+The original assessment below records the reasoning; implementation measurements and verification follow it.
+The user confirmed that automatic result delivery across turns and durable recovery are essential.
+Keep those requirements, generic tool support, native approvals, rich results, requester isolation, interruption, quiet delivery, and the default-off configuration gate.
+
+The reviewed production Python diff against the integrated base is 57 files, +4,786/-125 lines, or net +4,661.
+It introduces 22 Python modules and changes 35 existing modules; the separate generated tool metadata file brings the production file count to 58.
+The focused `tool_jobs/` package accounts for 3,043 added lines.
+These measurements cover the entire PR, not just the latest integration-test commits.
+
+### Recommended changes, in priority order
+
+1. **Persist whether an approval requires background jobs when the approval is created.**
+   Before this refactor, `tool_jobs/disabled.py::_approval_uses_jobs` reconstructed this fact during disabled startup by locating a saved SDK run, trying canonical private storage layouts, and inspecting its tool arguments and delegation state.
+   Its dedicated `history/session_context.py::read_scope_session_run` reader had no other production caller.
+   Record a narrow, explicit feature-ownership marker in the approval continuation while the exact paused run is available, and use it to park the continuation after restart.
+   Preserve the current distinction between ordinary approvals and feature-dependent approvals, including explicit null wait metadata, delegated/member calls, and approvals created before any job record exists.
+   The original classifier, reconstruction, and dedicated reader occupied 97 lines across three functions; replacement metadata plumbing reduces the possible net saving.
+   This recommendation removes inference and storage-layout coupling from the normal disabled startup path.
+   Do not add migration handling for this PR's unreleased background-job records or development snapshots; update the new representation and feature-specific fixtures directly.
+   Existing ordinary approval records can default the new marker to false without database reconstruction or a migration pass.
+
+2. **Give tool filters one shared policy definition used by construction and retained-job authorization.**
+   `tool_jobs/authorization.py::_configured_tool_allowed` repeats inclusion/exclusion rules also implemented by `tool_system/metadata.py::_apply_implicit_toolkit_filters` and the MCP catalog/dispatch paths.
+   The intent is the same: determine whether a configured tool name belongs to the allowed surface.
+   Keep a small pure filter predicate beside the existing tool-policy code, with explicit normalization for each toolkit convention; use it in the active construction and authorization paths.
+   Preserve the semantic difference: an empty implicit toolkit include list allows no functions, while an empty MCP assignment/server include list is unrestricted.
+   Preserve inherited null exclusions, remote-name matching, and local OAuth helper exceptions.
+   Leave exact owner, factory provenance, membership, and current-configuration checks at their existing boundaries.
+   The main benefit is maintaining one definition of filter behavior; net line savings may be small or zero.
+
+3. **Consolidate delegation's shared approval/result postprocessing while retaining distinct execution ownership.**
+   `delegation/execution.py::drive_delegations` grew from 376 to 522 lines.
+   Its foreground and background paths repeat resolved-child event emission, approval projection, result formatting, and parent persistence.
+   In particular, the resolved-tool loops around lines 1034 and 1098 perform the same lookup and event emission; terminal result formatting also appears in `_background_child_outcome` and the foreground path.
+   Share the matching presentation/formatting operations and make the parent path express the three relevant outcomes clearly: still running, awaiting approval, or terminal.
+   Keep native child execution, liveness locks, reusable sessions, and approval continuation in the delegation adapter.
+   Preserve the order of durable parent persistence, result acknowledgement, and claim release; cancellation of a parent wait must still leave accepted child work owned.
+   Avoid generalizing the exception paths together: background cleanup preserves primary errors and retained execution ownership differently from foreground cleanup.
+   This is primarily a readability and duplicated-policy reduction; extracting a large block into another file alone is not a reduction in lifecycle complexity.
+
+### Machinery that should remain
+
+- The runtime's separation of execution ownership from individual waiters is required for interruption and later retrieval.
+- Exact persisted consumption evidence is required before suppressing a future completion response.
+  Removing readback or acknowledging at result creation would weaken recovery.
+- Resource leases and task-affine MCP connection cleanup are required when a tool outlives its originating SDK run.
+- Native delegation's approval bridge is required because a child can reach a new approval boundary after the parent has detached.
+- Internal completion admission already uses the ordinary journal and serialized response owner.
+  There is no independent Matrix delivery pipeline to delete.
+- Cancellation admission, execution drain, and durable settlement represent different boundaries.
+  Similar-looking flags are not sufficient evidence that these states can be merged safely.
+- Rich-result serialization preserves media, artifacts, and control outcomes across restarts.
+  Replacing it with plain text would change the agreed feature.
+
+### Approach and expected impact
+
+Prefer the targeted changes above over a rewrite of persistence, approvals, or the response lifecycle.
+A new unified store would still need to coordinate SDK session persistence and existing journal ownership, so a large reduction is not established.
+File-only reorganization can improve navigation but leaves the state transitions and interactions intact.
+
+The evidence supports modest deletion opportunities and a more useful reduction in duplicated decisions and implicit ownership.
+It does not support promising that thousands of production lines can be removed while keeping all agreed guarantees.
+The approval marker is the strongest simplification candidate; filter policy sharing is the clearest prevention of future drift; delegation cleanup is the main local readability opportunity.
+
+Suggested sequence:
+
+1. Specify marker creation and the false default for ordinary approvals, update feature-specific fixtures, and replace normal startup inference.
+2. Share filter policy with explicit tests for the differing empty/null conventions.
+3. Consolidate only equivalent delegation postprocessing, preserving the persistence/acknowledgement boundary.
+4. Run the affected integration suites and live interruption, streaming, approval, and restart scenarios before publishing any implementation.
+
+### Audit verification
+
+The existing tests in `test_background_tool_jobs_config.py`, `test_tool_job_authorization.py`, `test_background_delegation.py`, `test_tool_job_internal_completion.py`, and `test_tool_job_restart_integration.py` all passed during this audit.
+They establish the current behavior around the proposed boundaries; they do not validate refactors that have not been implemented.
+The audit itself changed only this living document; implementation verification is recorded below.
+
+### Implemented simplifications
+
+Approval continuations now record `requires_background_tool_jobs` when the exact pause is saved.
+Disabled startup reads that marker and saved job sources without opening SDK session databases.
+The marker remains true across later approval generations.
+Ordinary approvals default to false, with no migration pass for this unreleased feature.
+Wait metadata is interpreted as feature ownership only when the startup-pinned option is enabled; native job and internal completion ownership remain explicit.
+
+One small `tool_name_allowed` predicate now serves toolkit construction, MCP catalog/dispatch paths, and retained-job authorization.
+Callers preserve their distinct empty-list conventions through normalization.
+Delegation now shares resolved-child completion emission and terminal result/receipt formatting, with persistence, acknowledgement, approval, and execution ownership still explicit at their existing boundaries.
+
+| Refactor | Production additions | Production deletions | Net lines |
+| --- | ---: | ---: | ---: |
+| Persist approval ownership; remove SDK startup reconstruction | 66 | 122 | -56 |
+| Share tool filter policy | 51 | 22 | +29 |
+| Share delegation completion postprocessing | 51 | 28 | +23 |
+| Total | 168 | 172 | -4 |
+
+These changes affect 15 production Python files and leave production size effectively unchanged.
+The benefit comes from removing reconstruction dependencies and duplicated rules.
+The whole PR now changes 63 production Python files with +4,814/-157 lines, or net +4,657.
+The additional touched files include the existing MCP filter owners and approval journal forwarding path; the shared filter predicate is the only new Python module in this pass.
+
+### Refactor verification
+
+- Approval-focused suites, writer/generation cases, completion tests, repository hooks, and Tach passed; independent task review found no issues.
+- Filter construction/authorization/MCP suites passed 213 tests before and after extraction.
+  Review identified missing cross-owner exclusion coverage; two real manager/toolkit/authorization cases were added, both detected a deliberately removed exclusion clause, and the 185-test follow-up suite passed.
+  Scoped re-review accepted the fix.
+- Delegation-focused suites passed 85 tests before and after extraction, with targeted hooks passing and independent task review finding no issues.
+- The final live run exercised six scenarios and passed 21 assertions through real Matrix, backend, and tool execution.
+  These cover default blocking, completion during visible streaming, human follow-up into a newer turn, native approval across enabled/disabled/enabled restarts, delegated approval, and background delegation.
+  Assertions verify execution counts, visible partial Matrix edits, and exact tool/child results reaching the model and parent agent.
+- All repository pre-commit hooks and Tach dependencies/interfaces passed on the combined implementation.
+- The full non-Matrix suite passed 21,470 tests with 12 skips across two nonoverlapping groups: 21,467 tests in parallel, followed by three timing-sensitive cases sequentially.
+  The parallel group completed in 318.20 seconds with 26 warnings; the sequential group completed in 3.18 seconds.
+- Final independent review approved the combined implementation with no remaining findings.
+
+Two initial parallel suite attempts exposed timing failures in unchanged shutdown, shell PID-file readiness, and native knowledge-reader deadline tests.
+The failing tests and their relevant execution paths were checked against the original PR base; no feature change was implicated.
+All three passed unchanged in the final sequential group, and no tests were omitted from final verification.
+No unrelated production or test changes were added for these timing failures.
+
+Tests caught two implementation errors before the approval refactor was committed: filtering a streaming pause down to pending tools lost earlier wait metadata, and unconditional interpretation of a native `wait_timeout` argument falsely marked an ordinary disabled-mode approval.
+Both now have regression coverage.
