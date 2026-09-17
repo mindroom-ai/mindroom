@@ -232,19 +232,16 @@ def _google_token_parser(
             msg = "Google identity token verification did not return claims"
             raise OAuthClaimValidationError(msg)
 
-    scopes = provider.scopes
-    response_scope = token_response.get("scope")
-    if isinstance(response_scope, str) and response_scope.strip():
-        scopes = tuple(response_scope.split())
-
     token_data: dict[str, Any] = {
         "token": access_token,
         "token_uri": provider.token_url,
         "client_id": client_config.client_id,
-        "scopes": list(scopes),
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
+    response_scope = token_response.get("scope")
+    if isinstance(response_scope, str) and response_scope.strip():
+        token_data["scopes"] = response_scope.split()
     if isinstance(refresh_token, str) and refresh_token:
         token_data["refresh_token"] = refresh_token
     token_type = token_response.get("token_type")
