@@ -6,12 +6,13 @@ import asyncio
 from dataclasses import replace
 from itertools import count
 from typing import TYPE_CHECKING, Literal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
 from agno.models.response import ToolExecution
 
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
@@ -24,6 +25,7 @@ from mindroom.event_journal import (
 from mindroom.response_runner import _DeliveryProgress, _EarlyPlaceholderState
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
 
@@ -104,8 +106,60 @@ async def _seed_ready_continuation(runner: ResponseRunner) -> None:
         ),
         state="ready",
         show_tool_calls=False,
+        execution_identity=serialize_tool_execution_identity(
+            ToolExecutionIdentity(
+                channel="matrix",
+                agent_name="general",
+                requester_id="@user:localhost",
+                room_id="!room:localhost",
+                thread_id="$thread",
+                resolved_thread_id="$thread",
+                session_id="session-1",
+            ),
+        ),
     )
     assert await runner.deps.approval_store.create_approval_continuation(continuation) == continuation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recover", [False, True])
+@pytest.mark.parametrize("terminal_run_id", ["continued-run", None, "", 7])
+async def test_final_approval_links_the_delivered_attempt(
+    tmp_path: Path,
+    terminal_run_id: str | int | None,
+    *,
+    recover: bool,
+) -> None:
+    """Live and recovered finals persist the attempt identified by their durable metadata."""
+    runner = await _runner_with_source(tmp_path)
+    await _seed_ready_continuation(runner)
+    target = _target(thread_id="$thread", reply_to_event_id="$source")
+    claimed = await runner.deps.approval_store.claim_approval_continuation(
+        "approval-1",
+        runtime_generation=runner.deps.approval_runtime_generation,
+    )
+    assert claimed is not None
+    persist_event_id = AsyncMock()
+    completed = CompletedApprovalRun(
+        response_text="Finished after refreshing the tools.",
+        metadata_content={AI_RUN_METADATA_KEY: {"run_id": terminal_run_id, "status": "completed"}},
+    )
+    with (
+        patch.object(runner, "_continue_entity_call", new=AsyncMock(return_value=completed)),
+        patch.object(runner, "_approval_response_event_persistence", return_value=persist_event_id),
+    ):
+        if recover:
+            await runner._execute_claimed_approval(
+                claimed,
+                request=_plain_request(target, source_event_id="$source"),
+                target=target,
+            )
+            await runner._recover_claimed_approval_lifecycle(claimed, target=target)
+        else:
+            await runner._run_claimed_approval_lifecycle(claimed, target=target)
+
+    expected_run_id = terminal_run_id if isinstance(terminal_run_id, str) and terminal_run_id else "run-1"
+    persist_event_id.assert_awaited_once_with(expected_run_id, "$original-response")
 
 
 async def _drain_tasks(*tasks: asyncio.Task[object] | None) -> None:

@@ -4637,6 +4637,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     continuation = ApprovalContinuation(
         approval_id="approval-chain",
         run_id="run-1",
+        runtime_model_name="default",
         session_id="session-1",
         entity_kind="agent",
         entity_name="general",
@@ -4670,6 +4671,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-2",
+        runtime_model_name="large",
         tools=(
             ToolExecution(tool_call_id="call-read", tool_name="conditional_read", tool_args={}),
             ToolExecution(tool_call_id="call-write", tool_name="conditional_write", tool_args={}),
@@ -4716,6 +4718,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert persisted is not None
     assert persisted.generation == 1
     assert persisted.state == expected_state
+    assert persisted.runtime_model_name == "large"
     assert persisted.response_text == paused.response_text
     assert persisted.response_presentation_state == committed_state
     assert presentation.response_text == paused.response_text

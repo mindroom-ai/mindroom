@@ -447,7 +447,7 @@ visibility = ["mindroom.response_turn"]
 [[modules]]
 path = "mindroom.dynamic_tool_continuation"
 depends_on = []
-visibility = ["mindroom.response_turn", "mindroom.delegation.execution"]
+visibility = ["mindroom.response_turn", "mindroom.delegation.execution", "mindroom.approval_execution"]
 
 [[modules]]
 path = "mindroom.file_memory_knowledge"
@@ -764,6 +764,8 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.approval_execution"
 depends_on = [
+    "mindroom.constants",
+    "mindroom.dynamic_tool_continuation",
     "mindroom.delegation.state",
     "mindroom.agent_storage",
     "mindroom.agents",
@@ -4683,6 +4685,7 @@ expose = [
     "ai_response",
     "stream_agent_response",
     "run_delegated_child_response",
+    "collect_streamed_response_content",
 ]
 from = ["mindroom.ai"]
 

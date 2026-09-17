@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.run.agent import (
@@ -22,7 +23,7 @@ from agno.session.agent import AgentSession
 from mindroom import ai_runtime
 from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
-from mindroom.ai import run_delegated_child_response
+from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.approval_receipt import install_approval_receipt_hooks
 from mindroom.approval_tools import (
@@ -31,8 +32,10 @@ from mindroom.approval_tools import (
     toolkit_owners_for_agents,
     validate_approval_tool_owners,
 )
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import DelegationState
+from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
 from mindroom.history.session_context import close_agent_runtime_state_dbs
@@ -40,11 +43,17 @@ from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
     CompletedApprovalRun,
     PausedAttempt,
+    ResponsePausedForApproval,
+    ResponseTurnContext,
     apply_local_approval_decisions,
     paused_attempt_from_response,
 )
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
-from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
+from mindroom.tool_system.runtime_context import (
+    ToolRuntimeModelBinding,
+    get_tool_runtime_context,
+    runtime_context_from_dispatch_context,
+)
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -52,6 +61,8 @@ if TYPE_CHECKING:
 
     import nio
     from agno.agent import Agent
+    from agno.knowledge.knowledge import Knowledge
+    from agno.models.response import ToolExecution
     from agno.run.requirement import RunRequirement
 
     from mindroom.config.main import Config
@@ -75,15 +86,18 @@ def _append_terminal_agent_content(
         presentation.append_text(terminal_content)
 
 
-async def _collect_agent_continuation(
+async def _collect_agent_continuation(  # noqa: C901
     events: AsyncIterator[object],
     presentation: CollectedStreamPresentation,
+    *,
+    completed_tools: list[ToolExecution] | None = None,
 ) -> RunOutput:
     """Collect one ordered continuation stream and return its terminal run."""
     response: RunOutput | None = None
     error_event: RunErrorEvent | None = None
     terminal_content: str | None = None
     saw_content_delta = False
+    current_tools: list[ToolExecution] = []
     async for event in events:
         if isinstance(event, RunOutput):
             response = event
@@ -99,16 +113,33 @@ async def _collect_agent_continuation(
             presentation.start_tool(event.tool)
         elif isinstance(event, ToolCallCompletedEvent):
             presentation.complete_tool(event.tool)
+            if event.tool is not None and event.parent_run_id is None:
+                current_tools.append(event.tool)
     if error_event is not None and (response is None or response.status == RunStatus.error):
         raise RuntimeError(run_error_event_text(error_event))
     if response is None:
         msg = "Agent continuation did not yield its final run"
         raise RuntimeError(msg)
-    _append_terminal_agent_content(
-        presentation,
-        terminal_content,
-        saw_content_delta=saw_content_delta,
+    # Child approval results are also projected into the root presentation.
+    # Only calls owned by the parent run can change its next tool schema.
+    parent_call_ids = {tool.tool_call_id for tool in response.tools or ()}
+    current_tools = [tool for tool in current_tools if tool.tool_call_id in parent_call_ids]
+    dynamic_continuation = (
+        response.status == RunStatus.completed
+        and continuation_decision_from_tools(
+            current_tools,
+            original_prompt="",
+            continuation_count=0,
+        ).should_continue
     )
+    if not dynamic_continuation:
+        _append_terminal_agent_content(
+            presentation,
+            terminal_content,
+            saw_content_delta=saw_content_delta,
+        )
+    if completed_tools is not None:
+        completed_tools.extend(current_tools)
     _reconcile_agent_tools(presentation, response)
     return response
 
@@ -143,7 +174,10 @@ async def _continue_persisted_agent(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     decisions: dict[str, bool],
     denial_reasons: dict[str, str | None],
-) -> tuple[RunOutput, CollectedStreamPresentation]:
+    knowledge: Knowledge | None,
+    tool_trace_collector: list[ToolTraceEntry],
+    run_id_callback: Callable[[str], None] | None,
+) -> CompletedApprovalRun | PausedAttempt:
     """Resume a persisted agent with event streaming so presentation order is retained."""
 
     async def persisted_event() -> AsyncIterator[RunOutput]:
@@ -183,8 +217,126 @@ async def _continue_persisted_agent(
         tool_trace=deserialize_tool_trace(continuation.response_tool_trace),
         track_hidden_tools=True,
     )
-    response = await _collect_agent_continuation(events, presentation)
-    return response, presentation
+    completed_tools: list[ToolExecution] = []
+    response = await _collect_agent_continuation(events, presentation, completed_tools=completed_tools)
+    paused = paused_attempt_from_response(
+        response,
+        fallback_session_id=continuation.session_id,
+        fallback_run_id=continuation.run_id,
+        toolkit_owners=toolkit_owners_for_agents([agent]),
+    )
+    if paused is not None:
+        return replace(paused, response_text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace))
+    if response.status != RunStatus.completed:
+        raise RuntimeError(str(response.content or "Approval continuation did not complete"))
+    model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
+    decision = continuation_decision_from_tools(
+        completed_tools,
+        original_prompt=continuation.request_body,
+        continuation_count=0,
+    )
+    if decision.next_prompt is not None:
+        return await _continue_dynamic_agent_response(
+            continuation,
+            presentation,
+            prompt=decision.next_prompt,
+            model_name=decision.model_switch_name if decision.model_switch_when == "after-toolcall" else model_name,
+            metadata=response.metadata,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            knowledge=knowledge,
+            refresh_scheduler=refresh_scheduler,
+            tool_trace_collector=tool_trace_collector,
+            run_id_callback=run_id_callback,
+        )
+    if continuation.show_tool_calls:
+        tool_trace_collector.extend(presentation.tool_trace)
+    return CompletedApprovalRun(
+        response_text=presentation.final_text() or str(response.content or "Tool approval continuation completed"),
+        metadata_content=build_ai_run_metadata_content(
+            config=config,
+            model_name=model_name,
+            run_id=response.run_id,
+            session_id=response.session_id or continuation.session_id,
+            status=response.status,
+            model=response.model,
+            model_provider=response.model_provider,
+            metrics=response.metrics,
+            context_metrics=response.metrics,
+            tool_count=len(response.tools or ()),
+        ),
+    )
+
+
+async def _continue_dynamic_agent_response(
+    continuation: ApprovalContinuation,
+    presentation: CollectedStreamPresentation,
+    *,
+    prompt: str,
+    model_name: str | None,
+    metadata: dict[str, Any] | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+    knowledge: Knowledge | None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    tool_trace_collector: list[ToolTraceEntry],
+    run_id_callback: Callable[[str], None] | None,
+) -> CompletedApprovalRun | PausedAttempt:
+    """Rebuild the tool schema through the normal bounded response loop."""
+    ctx = ResponseTurnContext(
+        entity_label=continuation.entity_name,
+        session_id=continuation.session_id,
+        run_id=uuid4().hex,
+        correlation_id=continuation.correlation_id or uuid4().hex,
+        reply_to_event_id=continuation.sources.logical_source_event_ids[-1],
+        room_id=continuation.room_id,
+        thread_id=continuation.thread_id,
+        requester_id=continuation.requester_id,
+        matrix_run_metadata=deepcopy(metadata),
+        active_model_name=model_name,
+        active_event_ids=frozenset(continuation.source_event_ids),
+    )
+    tool_context = get_tool_runtime_context()
+    run_metadata: dict[str, Any] = {}
+    stream = stream_agent_response(
+        ctx,
+        prompt=prompt,
+        runtime_paths=runtime_paths,
+        config=config,
+        knowledge=knowledge,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        run_id_callback=run_id_callback,
+        run_metadata_collector=run_metadata,
+        show_tool_calls=continuation.show_tool_calls,
+        tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
+        supports_native_tool_approval=True,
+        attempt_model_runtime=ToolRuntimeModelBinding(),
+    )
+    try:
+        response_text, tool_trace = await collect_streamed_response_content(
+            stream,
+            show_tool_calls=continuation.show_tool_calls,
+            initial_response_text=presentation.final_text(),
+            initial_tool_trace=presentation.tool_trace,
+            track_hidden_tools=True,
+        )
+    except ResponsePausedForApproval as error:
+        if error.presentation is None:
+            raise
+        return replace(
+            error.paused,
+            response_text=error.presentation.response_text,
+            tool_trace=error.presentation.tool_trace,
+        )
+    metadata = run_metadata.get(AI_RUN_METADATA_KEY, {})
+    if metadata.get("status") != "completed":
+        raise RuntimeError(response_text or "Approval continuation did not complete")
+    if continuation.show_tool_calls:
+        tool_trace_collector.extend(tool_trace)
+    return CompletedApprovalRun(response_text=response_text, metadata_content=run_metadata)
 
 
 @dataclass(frozen=True)
@@ -208,6 +360,7 @@ class AgentApprovalExecution:
         denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
         typing_log_context: Mapping[str, object],
+        run_id_callback: Callable[[str], None] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
         """Apply exact decisions and continue the matching persisted Agno run."""
         config = self.config()
@@ -292,7 +445,7 @@ class AgentApprovalExecution:
                     continuation.room_id,
                     log_context=typing_log_context,
                 ):
-                    response, presentation = await self.tool_runtime.run_in_context(
+                    result = await self.tool_runtime.run_in_context(
                         tool_context=runtime_context_from_dispatch_context(tool_dispatch),
                         operation=lambda: run_with_tool_execution_identity(
                             tool_dispatch.execution_identity,
@@ -307,6 +460,9 @@ class AgentApprovalExecution:
                                 refresh_scheduler=self.refresh_scheduler(),
                                 decisions=decisions,
                                 denial_reasons=denial_reasons,
+                                knowledge=knowledge,
+                                tool_trace_collector=tool_trace_collector,
+                                run_id_callback=run_id_callback,
                             ),
                         ),
                     )
@@ -328,35 +484,4 @@ class AgentApprovalExecution:
                     close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
                 finally:
                     history_storage.close()
-        paused = paused_attempt_from_response(
-            response,
-            fallback_session_id=continuation.session_id,
-            fallback_run_id=continuation.run_id,
-            toolkit_owners=toolkit_owners_for_agents([agent]),
-        )
-        if paused is not None:
-            return replace(
-                paused,
-                response_text=presentation.final_text(),
-                tool_trace=tuple(presentation.tool_trace),
-            )
-        if response.status != RunStatus.completed:
-            raise RuntimeError(str(response.content or "Approval continuation did not complete"))
-        if continuation.show_tool_calls:
-            tool_trace_collector.extend(presentation.tool_trace)
-        model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
-        return CompletedApprovalRun(
-            response_text=presentation.final_text() or str(response.content or "Tool approval continuation completed"),
-            metadata_content=build_ai_run_metadata_content(
-                config=config,
-                model_name=model_name,
-                run_id=response.run_id,
-                session_id=response.session_id or continuation.session_id,
-                status=response.status,
-                model=response.model,
-                model_provider=response.model_provider,
-                metrics=response.metrics,
-                context_metrics=response.metrics,
-                tool_count=len(response.tools or ()),
-            ),
-        )
+        return result

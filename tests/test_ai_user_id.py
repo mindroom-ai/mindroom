@@ -34,13 +34,13 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
-    _collect_streamed_response_content,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
     ai_response,
     build_matrix_run_metadata,
+    collect_streamed_response_content,
     stream_agent_response,
 )
 from mindroom.ai_run_metadata import _serialize_metrics, build_ai_run_metadata_content
@@ -3179,7 +3179,7 @@ class TestUserIdPassthrough:
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             with pytest.raises(ResponsePausedForApproval) as raised:
-                await _collect_streamed_response_content(
+                await collect_streamed_response_content(
                     stream_agent_response(
                         make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
                         prompt="Run the action",
@@ -3231,7 +3231,7 @@ class TestUserIdPassthrough:
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             with pytest.raises(ResponsePausedForApproval) as raised:
-                await _collect_streamed_response_content(
+                await collect_streamed_response_content(
                     stream_agent_response(
                         make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
                         prompt="Run the action",
@@ -3343,7 +3343,7 @@ class TestUserIdPassthrough:
             raise pause
 
         with pytest.raises(ResponsePausedForApproval) as raised:
-            await _collect_streamed_response_content(paused_stream(), show_tool_calls=True)
+            await collect_streamed_response_content(paused_stream(), show_tool_calls=True)
 
         assert raised.value is pause
         assert pause.presentation is not None

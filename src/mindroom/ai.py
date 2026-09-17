@@ -144,6 +144,7 @@ __all__ = [
     "ResponseTurnContext",
     "ai_response",
     "build_matrix_run_metadata",
+    "collect_streamed_response_content",
     "run_delegated_child_response",
     "stream_agent_response",
 ]
@@ -500,18 +501,20 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
-async def _collect_streamed_response_content(
+async def collect_streamed_response_content(
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     show_tool_calls: bool,
     initial_response_text: str = "",
     initial_tool_trace: Sequence[ToolTraceEntry] = (),
+    track_hidden_tools: bool = False,
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Collect a streaming response into one final body without Matrix edits."""
     state = CollectedStreamPresentation(
         show_tool_calls=show_tool_calls,
         response_text=initial_response_text,
         tool_trace=deepcopy(list(initial_tool_trace)),
+        track_hidden_tools=track_hidden_tools,
     )
 
     try:
@@ -544,7 +547,7 @@ async def _collect_response_body_with_trace(
     tool_trace_collector: list[ToolTraceEntry] | None,
 ) -> str:
     """Collect a stream to one body, bridging the trace to an optional collector."""
-    body, tool_trace = await _collect_streamed_response_content(
+    body, tool_trace = await collect_streamed_response_content(
         response_stream,
         show_tool_calls=show_tool_calls,
     )

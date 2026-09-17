@@ -8,7 +8,7 @@ import pytest
 from agno.models.response import ToolExecution
 from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
-from mindroom.ai import _collect_streamed_response_content, ai_response
+from mindroom.ai import ai_response, collect_streamed_response_content
 from mindroom.config.main import Config
 from mindroom.tool_system.events import ToolTraceEntry
 from tests.conftest import make_turn_context
@@ -37,7 +37,7 @@ async def test_collect_streamed_response_preserves_tool_marker_order() -> None:
             ),
         )
 
-    body, trace = await _collect_streamed_response_content(
+    body, trace = await collect_streamed_response_content(
         stream(),
         show_tool_calls=True,
     )
@@ -65,7 +65,7 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
         )
         yield RunContentEvent(content=" After.")
 
-    body, trace = await _collect_streamed_response_content(
+    body, trace = await collect_streamed_response_content(
         stream(),
         show_tool_calls=False,
     )
@@ -104,7 +104,7 @@ async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> N
             ),
         )
 
-    body, trace = await _collect_streamed_response_content(
+    body, trace = await collect_streamed_response_content(
         stream(),
         show_tool_calls=True,
         initial_response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
@@ -131,7 +131,7 @@ async def test_collect_streamed_response_does_not_merge_equal_calls_with_distinc
                 ),
             )
 
-    body, trace = await _collect_streamed_response_content(stream(), show_tool_calls=True)
+    body, trace = await collect_streamed_response_content(stream(), show_tool_calls=True)
 
     assert body.count("🔧 `inspect`") == 2
     assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2"]
@@ -151,7 +151,7 @@ async def test_collect_streamed_response_ignores_repeated_start_for_restored_cal
             tool=ToolExecution(tool_call_id="call-1", tool_name="inspect", tool_args={}, result="done"),
         )
 
-    body, trace = await _collect_streamed_response_content(
+    body, trace = await collect_streamed_response_content(
         stream(),
         show_tool_calls=True,
         initial_response_text="🔧 `inspect` [1] ⏳",

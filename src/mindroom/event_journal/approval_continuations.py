@@ -666,6 +666,7 @@ def advance(
     run_id: str,
     session_id: str,
     calls: tuple[ApprovalCall, ...],
+    runtime_model_name: str | None = None,
     response_text: str | None = None,
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
@@ -686,6 +687,7 @@ def advance(
         run_id=run_id,
         session_id=session_id,
         calls=calls,
+        runtime_model_name=runtime_model_name or current.runtime_model_name,
         response_text=current.response_text if response_text is None else response_text,
         response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
         response_presentation_state=(
