@@ -30,6 +30,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
+from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.call_session import (
     CallJoinError,
     CallSession,
@@ -631,8 +632,7 @@ class CallManager:
         member = parse_membership_event(event.source) if event is not None else None
         if member is None or member.is_expired(self._clock_ms()) or member.user_id == self._client.user_id:
             return False
-        room_member = room.users.get(member.user_id)
-        return room_member is not None and not room_member.invited
+        return member.user_id in cached_joined_member_ids(room)
 
     def _is_configured_call_room_id(self, room_id: str) -> bool:
         """Return whether this agent is configured to join calls in ``room_id``."""
