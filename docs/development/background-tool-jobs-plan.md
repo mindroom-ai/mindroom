@@ -4,6 +4,10 @@
 > This document is the shared scope and progress record for PR #2113.
 > Update checkboxes, decisions, and verification evidence as work lands; an unchecked item is not implemented or verified.
 
+**Reassessment status (2026-09-17):** The published implementation below is a verified baseline, not proof of a substantially simpler architecture.
+The architecture audit at the end recommends removing automatic joining, subject to the explicit reply-timing decision described there.
+PR #2113 remains open and unmerged; this audit changes documentation only.
+
 **Goal:** Let tools keep working while the conversation moves forward, with predictable waiting and quiet result handling.
 
 **Architecture:** Each accepted tool call has one execution owner for its entire lifetime.
@@ -240,3 +244,114 @@ The final external review covered the implementation commit and found no outstan
 Other review services were limited by temporary review capacity, subscription status, or diff size; these are not additional approvals.
 Hosted CI was still running at publication, with no failures reported at that checkpoint.
 The completed local full suite, hooks, task reviews, whole-branch review, and live evidence are recorded above.
+
+## Architecture reassessment: 2026-09-17
+
+**Status:** Audited implementation `7dd9a9359`; the following is a proposal, not implemented behavior.
+The core question is whether we can remove competing completion paths while retaining the agreed tool-execution contract.
+The existing verification record applies to the published implementation, not to this proposed reduction.
+
+### Measured complexity
+
+The production diff against integrated main `3bfed6570` is +4,388/−92 lines across 49 files, or net +4,296.
+The following groups assign each changed production file once by its main responsibility; shared modules contain some work from other groups.
+Counts include comments and blank lines and do not measure complexity by themselves.
+
+| Code group | Files | Net added lines |
+| --- | ---: | ---: |
+| Runtime and job controls | 5 | 1,145 |
+| SDK and resource ownership | 7 | 959 |
+| Completion and lifecycle wiring | 20 | 948 |
+| Native delegation integration | 7 | 473 |
+| Result storage and consumption | 2 | 433 |
+| Authorization and tool provenance | 8 | 338 |
+| Total | 49 | 4,296 |
+
+Removing automatic pause/resume simplified execution states but did not remove most of these responsibilities.
+The previous revision added 653 net production lines beyond the original feature.
+We should not describe it as a substantially smaller implementation.
+
+### What overlaps, and what should stay separate
+
+1. Foreground calls and explicit `job(wait)` acquire an exclusive result claim and return through the native tool path.
+   This path is necessary for blocking calls, rich results, approvals, and explicit waiting.
+2. `tool_jobs/completion.py::join_conversation_jobs` waits for the same outcomes after the model finishes, briefly acquires and releases native result claims, then prompts the model to acquire them again through `job(wait)`.
+   Its separate `join_approval_jobs` loop repeats the continuation policy for reconstructed approval runs.
+   `response_turn.py` implements blocking and streaming join integration; `approval_execution.py` and `teams.py` add native approval retrieval paths.
+3. `orchestration/tool_job_runtime.py::deliver_pending` and `response_runner.py::_resume_tool_job_completion` already deliver unconsumed outcomes through a serialized internal journal source when the conversation becomes idle.
+   Foreground retrieval, automatic joining, and idle completion therefore need coordination around one saved outcome.
+
+The removable overlap is between automatic joining and idle completion, not between execution and waiting.
+Moving all of these branches into `ResponseRunner` would change their location without proving that their states or dependencies disappear.
+
+Two apparent duplications should remain for this reduction.
+`ConsumptionOwner` confirms ordinary Agno tool-result persistence, while native delegation explicitly persists its external requirement and approval state before acknowledging a result.
+Their persistence owners differ, so replacing both with a generic callback interface would add a new abstraction without a demonstrated saving.
+The job store, Agno result receipt, and event journal respectively own execution outcome, model consumption, and response scheduling; they are not interchangeable copies of the same record.
+
+### Alternatives
+
+| Option | Behavior | Expected reduction | Assessment |
+| --- | --- | --- | --- |
+| Preserve automatic joining; simplify readiness observation | Same reply remains open automatically; all existing completion paths remain | Small; no substantial line reduction established | Safe fallback, but does not deliver the requested architectural reduction |
+| Remove automatic joining; retain one detached-completion path | A detached call may finish in a later assistant reply; explicit `job(wait)` still supports same-turn waiting | About 250–350 net production lines | Recommended if the reply-timing change is accepted |
+| Remove durable consumption and recovery, or reduce supported tool types | Lost or repeated reporting after crashes, or fewer compatible tools | Not estimated as an eligible change | Conflicts with retained requirements; do not implement implicitly |
+
+The recommended option retains blocking by default, zero/positive wait budgets, interruption by human follow-up, list/inspect/wait/cancel, rich results, native approvals, current authorization, and stored outcome discovery after restart.
+It removes the promise that the runtime keeps a finished model response open until outstanding jobs finish.
+It also removes the runtime-generated waiting paragraph and the extra model continuations used solely for automatic joining.
+The agent can still explicitly wait when it needs a result before answering.
+A completion that arrives during streaming waits for the existing serialized owner to become available, then generates a useful later reply.
+This can mean an additional visible assistant reply, even though synthetic completion notices remain absent.
+Ready outcomes for the same authorized conversation should be collected together at the locked completion boundary; outcomes that become ready later may require later replies.
+
+### Recommended reduction, pending the reply-timing decision
+
+Keep this flow:
+
+```text
+application tool -> one accepted job -> foreground wait
+    -> ready: ordinary native result and persisted receipt
+    -> timeout or human follow-up: return handle; execution continues
+
+ready detached outcome -> existing internal journal source
+    -> serialized conversation owner -> native job result retrieval
+    -> persisted receipt -> later scheduled copies become no-ops
+```
+
+The completion scheduler must only schedule work; it must not execute tools, acknowledge unread results, or start a competing response.
+Collect authorized ready generations under the existing lifecycle lock, preserving each job's identity and receipt.
+Continue using the existing native `job(wait)` path for rich results and approval projection; this proposal does not invent direct SDK message injection.
+If the model declines retrieval, the outcome remains discoverable; do not add an unbounded retry loop.
+Keep original-source recovery and its coordination with idle completion so the same accepted work does not acquire two response owners after a restart.
+Keep cancellation settlement, synchronous-thread draining, and task-affine connection ownership.
+
+| Removal area | Concrete code | Estimated gross deletion |
+| --- | --- | ---: |
+| Automatic join helpers and wait-notice plumbing | `tool_jobs/completion.py`: `join_conversation_jobs`, `_wait_for_job`, `_wait_for_ready_jobs`, `join_approval_jobs`, `_ReadyJobContinuation`, `background_wait_notice`, `report_background_wait` | 110–125 lines |
+| Response-turn join branches | `response_turn.py`: attempted-outcome set, joined blocking settlement, streaming continuation branch | 60–75 lines |
+| Reconstructed approval retrieval | `approval_execution.py::retrieve_results`, `teams.py::_retrieve_team_job_results`, and their join calls | 85–100 lines |
+| Wait-only presentation plumbing | `response_runner.py` callbacks, `BackgroundWaitChunk`, and its streaming/API collectors | 45–65 lines |
+| Total gross deletion | Before replacement queue batching and revised prompt policy | 300–365 lines |
+
+Allow roughly 20–50 new production lines for collecting ready results at the existing completion boundary and expressing the revised waiting policy.
+Use 250–350 net removed lines as a planning range, not a measured patch or acceptance target.
+That leaves approximately 3,950–4,050 net production lines against the same main baseline.
+A claim that this becomes a few-hundred-line feature is unsupported while generic resource lifetimes, native approvals, rich results, and recovery remain requirements.
+The principal benefit is removing one completion mechanism and its approval/streaming branches, not shrinking the whole feature dramatically.
+
+### Next work and acceptance criteria
+
+The user's reply-timing decision is required before changing automatic joining, because that changes the agreed behavior above.
+Until that decision arrives, these steps are proposed work only.
+
+- [ ] Record whether a detached result may arrive in a later assistant reply.
+- [ ] Implement one completion-path change with tests covering ordinary Agent/Team calls and resumed approvals; remove obsolete join-only tests and keep all retained guarantees covered.
+- [ ] Exercise simultaneous ready results, completion during a long stream, a newer human turn, and a result consumed before its queued completion acquires the lock.
+- [ ] Verify explicit waiting still returns rich results and approval requirements, and that manual cancellation stays quiet after its result is consumed.
+- [ ] Repeat strict restart checks for one execution, original-source recovery, retained outcomes, and no redundant completion response.
+- [ ] Run focused regressions, the full non-Matrix suite, repository hooks, and the existing live Matrix scenarios adapted to the selected reply behavior.
+- [ ] Report measured production additions and deletions separately from tests and generated documentation before claiming simplification.
+
+A cross-model consultation was attempted once for the architectural alternatives, but the external model's OAuth session had expired and no advice was returned.
+The recommendation is based on the repository inspection and existing regression/live evidence, not on an independent consultation approval.
