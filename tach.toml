@@ -4684,6 +4684,7 @@ expose = [
     "ai_response",
     "stream_agent_response",
     "run_delegated_child_response",
+    "collect_streamed_response_content",
 ]
 from = ["mindroom.ai"]
 

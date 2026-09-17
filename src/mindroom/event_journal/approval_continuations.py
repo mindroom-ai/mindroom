@@ -180,6 +180,7 @@ class ApprovalContinuation:
     failure_reason: str | None = None
     generation: int = 0
     prepared_edit_record: TurnRecord | None = None
+    continuation_count: int = 0
 
     @property
     def source_event_ids(self) -> tuple[str, ...]:
@@ -191,6 +192,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
     """Return the opaque response snapshot stored beside normalized routing facts."""
     return {
         "run_id": continuation.run_id,
+        "continuation_count": continuation.continuation_count,
         "session_id": continuation.session_id,
         "entity_kind": continuation.entity_kind,
         "thread_id": continuation.thread_id,
@@ -314,6 +316,7 @@ def _from_rows(
     return ApprovalContinuation(
         approval_id=str(row["approval_id"]),
         run_id=cast("str", stored["run_id"]),
+        continuation_count=int(stored.get("continuation_count", 0)),
         session_id=cast("str", stored["session_id"]),
         entity_kind=cast("Literal['agent', 'team']", stored["entity_kind"]),
         entity_name=attempt.entity_name,
@@ -667,10 +670,12 @@ def advance(
     run_id: str,
     session_id: str,
     calls: tuple[ApprovalCall, ...],
+    runtime_model_name: str | None = None,
     response_text: str | None = None,
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
+    continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
@@ -687,6 +692,8 @@ def advance(
         run_id=run_id,
         session_id=session_id,
         calls=calls,
+        runtime_model_name=runtime_model_name or current.runtime_model_name,
+        continuation_count=current.continuation_count if continuation_count is None else continuation_count,
         response_text=current.response_text if response_text is None else response_text,
         response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
         response_presentation_state=(

@@ -513,7 +513,12 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: C901, PLR
                     failed_run = await rebuilt.aget_run_output(response.run_id, session_id="parent")
                     assert failed_run.status == RunStatus.error
                     return
-                resumed = await continuation
+                collected = await continuation
+                if team_parent:
+                    resumed = collected
+                else:
+                    resumed = collected.response
+                    presentation.append_text(collected.terminal_content)
                 visible_trace = team_presentation.tool_trace if team_parent else presentation.tool_trace
                 assert any(
                     entry.tool_call_id == call_id and entry.type == "tool_call_completed" for entry in visible_trace
