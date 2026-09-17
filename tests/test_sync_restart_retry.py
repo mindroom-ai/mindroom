@@ -338,11 +338,13 @@ def test_notify_uses_only_the_canonical_final_delivery_outcome() -> None:
 
 def test_interrupted_turn_rooms_record_each_source_once() -> None:
     """One interrupted source must claim exactly one room-scoped recovery slot."""
-    rooms = InterruptedTurnRooms()
+    notifications: list[str] = []
+    rooms = InterruptedTurnRooms(on_registered=notifications.append)
 
     with capture_logs() as logs:
         assert rooms.register("$event", room_id="!room:localhost") is True
     assert rooms.register("$event", room_id="!other:localhost") is False
+    assert notifications == ["!room:localhost"]
     assert rooms.contains("$event") is True
     assert rooms.contains("$missing") is False
     assert rooms.pending_room_ids == {"!room:localhost"}

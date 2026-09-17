@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -27,6 +28,7 @@ from mindroom.handled_turns import TurnRecordCodec
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _target
@@ -235,7 +237,31 @@ async def test_terminal_ownership_blocks_approval_recovery(
         assert not permitted
 
 
-async def _assert_replacement_resumes(bot: AgentBot, tmp_path: Path, body: str, policy: str) -> None:
+@pytest.mark.asyncio
+async def test_replacement_stale_claim_after_first_scan_retries_after_claim_release(
+    approval: tuple[AgentBot, ApprovalContinuation],
+    tmp_path: Path,
+) -> None:
+    """A replacement-born interruption must wake recovery after the reload scan and live claim."""
+    bot, _claimed = approval
+    assert not bot.pending_sync_restart_retry_room_ids
+    await _assert_replacement_resumes(
+        bot,
+        tmp_path,
+        "partial answer\n\n" + RESTART_INTERRUPTED_RESPONSE_NOTE,
+        "resume",
+        late_claim=True,
+    )
+
+
+async def _assert_replacement_resumes(
+    bot: AgentBot,
+    tmp_path: Path,
+    body: str,
+    policy: str,
+    *,
+    late_claim: bool = False,
+) -> None:
     """Capture the retiring bot's registration and scan real outbox debt on its replacement."""
     config = bot.config
     config.defaults.auto_resume_after_restart = policy != "disabled"
@@ -308,10 +334,25 @@ async def _assert_replacement_resumes(bot: AgentBot, tmp_path: Path, body: str, 
                     ),
                 ],
             ),
-        ),
+        ) as source_history,
         capture_logs() as logs,
     ):
-        await orchestrator._recover_pending_replacement_rooms(config)
+        if late_claim:
+            await _settle_after_reload_scan(orchestrator, replacement, router_client)
+            resume_content = router_client.room_send.await_args.kwargs["content"]
+            source_history.return_value.append(
+                ResolvedVisibleMessage.synthetic(
+                    event_id="$resume",
+                    sender="@mindroom_router:localhost",
+                    body=resume_content["body"],
+                    content=resume_content,
+                    timestamp=3,
+                ),
+            )
+            orchestrator._capture_replacement_recovery_rooms({"general": replacement})
+            await orchestrator._recover_pending_replacement_rooms(config)
+        else:
+            await orchestrator._recover_pending_replacement_rooms(config)
     assert router_client.room_send.await_count == int(policy == "resume"), logs
     if policy == "resume":
         content = router_client.room_send.await_args.kwargs["content"]
@@ -403,3 +444,94 @@ async def _alter_delivery_ownership(bot: AgentBot, delivery_state: str) -> None:
                 redacts_event_id="$source",
             ),
         )
+
+
+async def _settle_after_reload_scan(  # noqa: PLR0915 - Keep the ordered reload and claim-release regression together.
+    orchestrator: _MultiAgentOrchestrator,
+    replacement: AgentBot,
+    router_client: AsyncMock,
+) -> None:
+    """Use the actual approval admission path, retaining its live claim past registration."""
+    replacement.orchestrator = orchestrator
+    replacement.admission_gate = gate = orchestrator._response_admission_gate
+    orchestrator._runtime_ready_event.set()
+    gate.close()
+    await orchestrator._recover_pending_replacement_rooms(replacement.config)
+    runner = unwrap_extracted_collaborator(replacement._response_runner)
+    waiting = asyncio.Event()
+    settled = asyncio.Event()
+    release_claim = asyncio.Event()
+    wait_for_admission = gate.wait_until_open
+    claim = TurnRecord.create(
+        ("$source",),
+        completed=False,
+        response_owner="general",
+        response_event_id="$waiting",
+        conversation_target=_target(thread_id="$thread", reply_to_event_id="$source"),
+    )
+    await replacement._turn_store.record_pending_turn(claim)
+
+    async def wait() -> None:
+        waiting.set()
+        await wait_for_admission()
+
+    async def edit_notice(request: EditTextRequest) -> bool:
+        return await _acknowledge(replacement, request)
+
+    async def resume() -> None:
+        assert replacement._turn_store.try_claim_turn(claim)
+        try:
+            await runner._resume_approval_source("$source")
+            settled.set()
+            await release_claim.wait()
+        finally:
+            replacement._turn_store.release_pending_turn_claim(claim)
+
+    with (
+        patch.object(gate, "wait_until_open", new=wait),
+        patch.object(DeliveryGateway, "edit_text", new=AsyncMock(side_effect=edit_notice)),
+        patch("mindroom.response_runner.fetch_latest_visible_body", new=AsyncMock(return_value="partial answer")),
+        patch(
+            "mindroom.approval_response.approval_manager.get_approval_store",
+            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
+        ),
+    ):
+        response_task = asyncio.create_task(resume())
+        try:
+            await asyncio.wait_for(waiting.wait(), 5)
+            assert not replacement.pending_sync_restart_retry_room_ids
+            gate.reopen()
+            await asyncio.wait_for(settled.wait(), 5)
+            assert replacement.pending_sync_restart_retry_room_ids == {"!room:localhost"}
+            # An early capture cannot resume the still-owned turn, and consumes its room.
+            orchestrator._capture_replacement_recovery_rooms({"general": replacement})
+            await orchestrator._recover_pending_replacement_rooms(replacement.config)
+            assert not orchestrator._pending_replacement_recovery_room_ids
+            router_client.room_send.assert_not_awaited()
+            waiting.clear()
+            gate.close()
+        finally:
+            if not settled.is_set():
+                gate.reopen()
+            release_claim.set()
+            await asyncio.wait_for(response_task, 5)
+        recovery_task = orchestrator._dispatch_recovery_task
+        assert recovery_task is not None
+        try:
+            await asyncio.wait_for(waiting.wait(), 5)
+            assert gate.closed
+            assert not recovery_task.done()
+            router_client.room_send.assert_not_awaited()
+        finally:
+            gate.reopen()
+        await asyncio.wait_for(recovery_task, 5)
+
+
+def test_interruption_registration_without_running_loop_retains_room(tmp_path: Path) -> None:
+    """Synchronous registry callers retain capture state without starting async work."""
+    bot = _bot(tmp_path)
+    orchestrator = MagicMock()
+    bot.orchestrator = orchestrator
+    assert bot._interrupted_turn_rooms.register("$source", room_id="!room:localhost")
+    assert bot.pending_sync_restart_retry_room_ids == {"!room:localhost"}
+    orchestrator.request_interrupted_turn_recovery.assert_not_called()

@@ -426,7 +426,7 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
-        self._interrupted_turn_rooms = InterruptedTurnRooms()
+        self._interrupted_turn_rooms = InterruptedTurnRooms(on_registered=self._request_interrupted_turn_recovery)
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -1033,6 +1033,23 @@ class AgentBot:
     def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
         """Return rooms with interrupted turns awaiting replacement recovery."""
         return self._interrupted_turn_rooms.pending_room_ids
+
+    def _request_interrupted_turn_recovery(self, room_id: str) -> None:
+        """Wake fleet recovery after the registering turn releases its claims."""
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            return
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            # Synchronous registration stays available to later fleet capture.
+            return
+        if task is None:
+            orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id)
+            return
+        task.add_done_callback(
+            lambda _done: orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id),
+        )
 
     @property
     def approval_room_ids(self) -> frozenset[str]:

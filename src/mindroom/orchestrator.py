@@ -864,6 +864,11 @@ class _MultiAgentOrchestrator:
             if first_error is not None:
                 raise first_error
 
+    def request_interrupted_turn_recovery(self, entity_name: str, room_id: str) -> None:
+        """Coalesce settled interruption notifications with existing dispatch recovery."""
+        self._pending_replacement_recovery_room_ids.setdefault(entity_name, set()).add(room_id)
+        self._schedule_ready_turn_dispatch_recovery()
+
     def _schedule_ready_turn_dispatch_recovery(self) -> None:
         """Coalesce bot-ready signals into one orchestrator-owned recovery task."""
         if not self._runtime_ready_event.is_set():
@@ -895,6 +900,9 @@ class _MultiAgentOrchestrator:
                     self._recover_ready_turn_journal_events,
                     update_runtime_state=False,
                 )
+                await self._response_admission_gate.wait_until_open()
+                if self.config is not None:
+                    await self._recover_pending_replacement_rooms(self.config)
         finally:
             if self._dispatch_recovery_task is current_task:
                 self._dispatch_recovery_task = None
