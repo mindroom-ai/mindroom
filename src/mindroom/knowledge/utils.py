@@ -376,6 +376,7 @@ def _merge_agent_knowledge_resolutions(
     resolved_bases: list[tuple[Knowledge | None, KnowledgeAvailability, str | None]],
 ) -> _KnowledgeResolution:
     """Merge per-base resolution results into one agent knowledge handle."""
+    initializing_base_ids: list[str] = []
     missing_base_ids: list[str] = []
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     knowledges: list[Knowledge] = []
@@ -387,15 +388,25 @@ def _merge_agent_knowledge_resolutions(
                 last_error=last_error,
             )
         if knowledge is None:
-            missing_base_ids.append(base_id)
+            if availability is KnowledgeAvailability.INITIALIZING:
+                initializing_base_ids.append(base_id)
+            else:
+                missing_base_ids.append(base_id)
             continue
         knowledges.append(knowledge)
 
+    if initializing_base_ids:
+        logger.info(
+            "Knowledge bases awaiting first publication for agent",
+            agent_name=agent_name,
+            knowledge_bases=initializing_base_ids,
+        )
     if missing_base_ids:
         logger.warning(
             "Knowledge bases not available for agent",
             agent_name=agent_name,
             knowledge_bases=missing_base_ids,
+            availability={base_id: unavailable_bases[base_id].availability.value for base_id in missing_base_ids},
         )
     return _KnowledgeResolution(
         knowledge=_merge_knowledge(agent_name, knowledges),
