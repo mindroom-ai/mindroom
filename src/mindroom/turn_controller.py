@@ -75,7 +75,7 @@ from mindroom.inbound_turn_normalizer import (
     TextNormalizationRequest,
     VoiceNormalizationRequest,
 )
-from mindroom.ingress_lanes import ReceiptLaneKey
+from mindroom.ingress_lanes import IngressRetryError, ReceiptLaneKey
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.conversation_reads import ThreadReadMode
 from mindroom.matrix.event_info import EventInfo
@@ -2613,12 +2613,11 @@ class TurnController:
 
             await self.deps.visible_voice_echo.finish(visible_echo, normalized_event)
 
-            if not await self.deps.visible_voice_echo.await_publication(
+            await self._require_voice_echo_publication(
                 room=room,
                 source_event_id=event.event_id,
                 requester_user_id=prechecked_event.requester_user_id,
-            ):
-                return None
+            )
 
             normalized_target = self.deps.resolver.build_message_target(
                 room_id=room.room_id,
@@ -2659,6 +2658,10 @@ class TurnController:
                     ),
                 ),
             )
+        except IngressRetryError:
+            # Publication delay is not a normalization failure. Preserve the
+            # transcript and let lane cleanup release ownership before retry.
+            raise
         except asyncio.CancelledError:
             self.deps.visible_voice_echo.finish_after_cancellation(
                 visible_echo,
@@ -2685,18 +2688,15 @@ class TurnController:
                 )
                 raise
             await self.deps.visible_voice_echo.finish(visible_echo, fallback.event)
-            publication_allowed = False
             try:
-                publication_allowed = await self.deps.visible_voice_echo.await_publication(
+                await self._require_voice_echo_publication(
                     room=room,
                     source_event_id=event.event_id,
                     requester_user_id=prechecked_event.requester_user_id,
                 )
-            finally:
-                if not publication_allowed:
-                    close_pending_event_metadata_once([fallback.ready.pending_event])
-            if not publication_allowed:
-                return None
+            except BaseException:
+                close_pending_event_metadata_once([fallback.ready.pending_event])
+                raise
             fallback.ready.pending_event.dispatch_metadata += (claim_metadata,)
             claim_transferred = True
             return fallback.ready
@@ -2706,6 +2706,34 @@ class TurnController:
                 queued_notice_reservation.cancel()
             if not claim_transferred:
                 self.deps.turn_store.release_pending_turn_claim(turn_claim)
+
+    async def _require_voice_echo_publication(
+        self,
+        *,
+        room: nio.MatrixRoom,
+        source_event_id: str,
+        requester_user_id: str,
+    ) -> None:
+        """Preserve the durable reply obligation until its visible echo exists."""
+        try:
+            published = await self.deps.visible_voice_echo.await_publication(
+                room=room,
+                source_event_id=source_event_id,
+                requester_user_id=requester_user_id,
+            )
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Visible voice echo publication check failed; deferring this voice turn",
+                event_id=source_event_id,
+                room_id=room.room_id,
+                exception_type=exc.__class__.__name__,
+                error=str(exc),
+            )
+            raise IngressRetryError from exc
+        if not published:
+            # Returning None from readiness intentionally consumes a lane source.
+            # Publication delay must instead return it to the journal retry owner.
+            raise IngressRetryError
 
     async def _prepare_raw_voice_fallback_event(
         self,

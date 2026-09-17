@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +17,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.visible_voice_echo import (
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+    from mindroom.event_journal import TurnRecordStore
     from mindroom.ingress_validation import IngressValidator
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.turn_store import TurnStore
@@ -66,6 +68,12 @@ class _EchoTurnStore:
 
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         return self.visible_event_ids.get(source_event_id)
+
+    async def load(self, source_event_id: str) -> TurnRecord | None:
+        event_id = self.visible_event_ids.get(source_event_id)
+        if event_id is None:
+            return None
+        return replace(TurnRecord.create([source_event_id], completed=False), visible_echo_event_id=event_id)
 
     async def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         self.visible_event_ids[source_event_id] = echo_event_id
@@ -159,6 +167,7 @@ def _echo_harness(
                 agent_name=agent_name,
                 delivery_gateway=cast("DeliveryGateway", gateway),
                 turn_store=cast("TurnStore", turn_store),
+                router_turn_records=cast("TurnRecordStore", turn_store),
                 ingress=cast("IngressValidator", ingress),
                 wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
             ),
@@ -291,10 +300,14 @@ async def test_unclaimed_expected_echo_fails_closed_after_grace(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_responder_skips_barrier_when_visible_echo_is_disabled(tmp_path: Path) -> None:
-    """A disabled echo must not add ordering delay."""
+async def test_responder_skips_barrier_when_visible_echo_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled echo must not add ordering delay or require a journal lookup."""
     harness = _echo_harness(tmp_path)
     harness.config.voice.visible_router_echo = False
+    monkeypatch.setattr(_EchoTurnStore, "load", AsyncMock(side_effect=RuntimeError("Journal unavailable")))
 
     assert await _await_responder(harness, "$voice-disabled") is True
 

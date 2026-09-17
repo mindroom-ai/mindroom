@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.event_journal import TurnRecordStore
     from mindroom.ingress_validation import IngressValidator
     from mindroom.message_target import MessageTarget
     from mindroom.turn_store import TurnStore
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
 _VOICE_TRANSCRIPTION_PLACEHOLDER = "Router agent is transcribing…"
 
 # How long a responder waits for a ready router to enter its echo lifecycle
-# before abandoning the turn. This only covers per-bot sync skew: inactive
+# before returning the turn to durable retry. This covers per-bot sync skew: inactive
 # routers skip the barrier, while an active router that misses the grace cannot
 # let a response overtake a later echo.
 _ECHO_CLAIM_GRACE_SECONDS = 0.25
@@ -111,7 +112,7 @@ def _publish_echo_barrier(barrier: _EchoBarrier, event_id: str) -> None:
 
 
 def _fail_echo_barrier(barrier: _EchoBarrier) -> None:
-    """Release waiters with no published echo so they abandon their turn."""
+    """Release waiters with no published echo so they can retry their turn."""
     if barrier.settled.is_set():
         return
     barrier.claimed.set()
@@ -200,6 +201,7 @@ class VisibleVoiceEchoDeps:
     agent_name: str
     delivery_gateway: DeliveryGateway
     turn_store: TurnStore
+    router_turn_records: TurnRecordStore
     ingress: IngressValidator
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
@@ -244,15 +246,21 @@ class VisibleVoiceEchoLifecycle:
             return True
         key = self._barrier_key(room.room_id, source_event_id)
         barrier = _echo_barriers.get(key)
-        if barrier is not None:
-            _echo_barriers.move_to_end(key)
-        elif self.deps.turn_store.visible_echo_for_source(source_event_id) is not None:
-            return True
         if (barrier is None or not barrier.claimed.is_set()) and not self._router_echo_expected(
             room,
             requester_user_id,
         ):
             return True
+        if barrier is None or barrier.published_event_id is None:
+            # A router that published before restart will not replay its source.
+            # Its receipt belongs to the router ledger, not the responder's.
+            router_record = await self.deps.router_turn_records.load(source_event_id)
+            if router_record is not None and router_record.visible_echo_event_id is not None:
+                return True
+            # Publication or a replacement claim may have arrived during the read.
+            barrier = _echo_barriers.get(key)
+        if barrier is not None:
+            _echo_barriers.move_to_end(key)
         if barrier is None:
             barrier = _echo_barrier(key)
         if not barrier.claimed.is_set():
@@ -260,7 +268,7 @@ class VisibleVoiceEchoLifecycle:
                 await asyncio.wait_for(barrier.claimed.wait(), _ECHO_CLAIM_GRACE_SECONDS)
             except TimeoutError:
                 self.deps.logger.warning(
-                    "No visible voice echo claimed; abandoning this voice turn",
+                    "No visible voice echo claimed; deferring this voice turn",
                     event_id=source_event_id,
                     room_id=room.room_id,
                     grace_seconds=_ECHO_CLAIM_GRACE_SECONDS,
@@ -269,7 +277,7 @@ class VisibleVoiceEchoLifecycle:
         await barrier.settled.wait()
         if barrier.published_event_id is None:
             self.deps.logger.warning(
-                "Visible voice echo never published; abandoning this voice turn",
+                "Visible voice echo never published; deferring this voice turn",
                 event_id=source_event_id,
                 room_id=room.room_id,
             )

@@ -46,6 +46,7 @@ from mindroom.hooks import (
     MessageEnvelope,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.ingress_lanes import IngressRetryError
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
@@ -208,8 +209,9 @@ class TestAgentBot(AgentBotTestBase):
                 "await_publication",
                 new=AsyncMock(return_value=False),
             ) as await_publication,
+            pytest.raises(IngressRetryError),
         ):
-            result = await controller._ready_voice_event(
+            await controller._ready_voice_event(
                 room=room,
                 prechecked_event=_PrecheckedEvent(
                     event=voice_event,
@@ -220,7 +222,6 @@ class TestAgentBot(AgentBotTestBase):
                 turn_claim=turn_claim,
             )
 
-        assert result is None
         await_publication.assert_awaited_once_with(
             room=room,
             source_event_id=voice_event.event_id,
