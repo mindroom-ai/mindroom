@@ -73,7 +73,7 @@ from mindroom.response_runner import (
     _paused_with_committed_presentation,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedAttempt, PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
@@ -981,6 +981,38 @@ class TestUserIdPassthrough:
 
         assert mock_prepare.await_args.kwargs["prompt"] == "raw prompt"
         assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("content", "status"), [(None, RunStatus.error), ("Answer", RunStatus.completed)])
+    async def test_stream_completion_status_does_not_require_metadata_collector(
+        self,
+        tmp_path: Path,
+        content: str | None,
+        status: RunStatus,
+    ) -> None:
+        """A typed terminal callback classifies empty output even without wire metadata."""
+        agent = MagicMock()
+        completed: list[CompletedAttempt] = []
+
+        async def events(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunCompletedEvent(content=content, run_id="run-final", session_id="session1")
+
+        agent.arun = MagicMock(side_effect=events)
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as prepare:
+            prepare.return_value = _prepared_prompt_result(agent)
+            await collect_streamed_response_content(
+                stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    on_completed=completed.append,
+                ),
+                presentation=CollectedStreamPresentation(show_tool_calls=False),
+            )
+        assert len(completed) == 1
+        assert completed[0].status is status
+        assert completed[0].metadata_content is None
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -3186,7 +3218,7 @@ class TestUserIdPassthrough:
                         runtime_paths=_runtime_paths(tmp_path),
                         config=_config(),
                     ),
-                    show_tool_calls=True,
+                    presentation=CollectedStreamPresentation(show_tool_calls=True),
                 )
 
         assert raised.value.paused.run_id == "run-paused"
@@ -3239,7 +3271,7 @@ class TestUserIdPassthrough:
                         config=_config(),
                         show_tool_calls=False,
                     ),
-                    show_tool_calls=False,
+                    presentation=CollectedStreamPresentation(show_tool_calls=False),
                 )
 
         paused = _paused_with_committed_presentation(raised.value, show_tool_calls=False)
@@ -3343,7 +3375,10 @@ class TestUserIdPassthrough:
             raise pause
 
         with pytest.raises(ResponsePausedForApproval) as raised:
-            await collect_streamed_response_content(paused_stream(), show_tool_calls=True)
+            await collect_streamed_response_content(
+                paused_stream(),
+                presentation=CollectedStreamPresentation(show_tool_calls=True),
+            )
 
         assert raised.value is pause
         assert pause.presentation is not None

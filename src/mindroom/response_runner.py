@@ -29,7 +29,6 @@ from mindroom.approval_response import (
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
     ORIGINAL_SENDER_KEY,
@@ -1348,6 +1347,7 @@ class ResponseRunner:
                     show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
+                    continuation_count=paused.continuation_count,
                     team_member_names=team_member_names,
                     team_member_model_names=paused.team_member_model_names,
                     team_mode=team_mode,
@@ -1803,12 +1803,8 @@ class ResponseRunner:
             continuation.execution_identity,
             error_prefix="Approval continuation execution_identity",
         )
-        metadata = (final.extra_content or {}).get(AI_RUN_METADATA_KEY)
-        terminal_run_id = metadata.get("run_id") if isinstance(metadata, dict) else None
         return ResponseOutcome(
-            response_run_id=(
-                terminal_run_id if isinstance(terminal_run_id, str) and terminal_run_id else continuation.run_id
-            ),
+            response_run_id=final.response_run_id or continuation.run_id,
             session_id=continuation.session_id,
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,

@@ -381,6 +381,7 @@ class ApprovalResponseCoordinator:
             session_id=paused.session_id,
             calls=plan.calls,
             runtime_model_name=paused.runtime_model_name,
+            continuation_count=max(current.continuation_count, paused.continuation_count),
             response_text=paused.response_text,
             response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
             response_presentation_state=paused.response_presentation_state,

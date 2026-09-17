@@ -19,6 +19,12 @@ It should resolve explicit thread identity, history, mentions, and normalized in
 `DeliveryGateway` owns Matrix transport.
 It should send, edit, redact, and finalize already-generated responses.
 
+`response_turn.py` owns continuation and terminal settlement for fresh and resumed agent attempts.
+`AgentApprovalExecution` restores saved execution, validates exact approved calls, and supplies the resumed attempt to that shared driver.
+The driver distinguishes a completed model attempt from a completed response and reports typed execution status independently of display metadata.
+Approval pauses retain the response's continuation count and active model in `ApprovalContinuation`, so resuming does not reset the remaining budget.
+`FinalDeliveryOutcome` exposes terminal run identity from the frozen delivery payload through its typed contract, keeping live and recovered history linkage consistent.
+
 `ResponseSources` captures immutable pending events, logical sources, discovery aliases, and the selected edit receipt for one request.
 The journal registers `ResponseAttempt` identity atomically with approval creation or response delivery enqueue, and binds the visible response on acknowledgement.
 Normalized attempt rows survive approval deletion; `approval_continuation_sources` alone owns pending approval settlement.

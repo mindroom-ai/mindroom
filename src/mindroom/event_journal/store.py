@@ -1457,6 +1457,7 @@ class PrincipalStore:
         response_tool_trace: tuple[dict[str, object], ...] | None = None,
         response_presentation_state: dict[str, object] | None = None,
         delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
+        continuation_count: int | None = None,
     ) -> ApprovalContinuation | None:
         """Replace one claimed generation with the next exact Agno pause."""
         return await self._backend.write(
@@ -1473,6 +1474,7 @@ class PrincipalStore:
                 response_tool_trace=response_tool_trace,
                 response_presentation_state=response_presentation_state,
                 delegation_storage_bindings=delegation_storage_bindings,
+                continuation_count=continuation_count,
             ),
         )
 

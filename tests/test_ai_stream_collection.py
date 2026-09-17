@@ -10,7 +10,7 @@ from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStar
 
 from mindroom.ai import ai_response, collect_streamed_response_content
 from mindroom.config.main import Config
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import CollectedStreamPresentation, ToolTraceEntry
 from tests.conftest import make_turn_context
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ async def test_collect_streamed_response_preserves_tool_marker_order() -> None:
 
     body, trace = await collect_streamed_response_content(
         stream(),
-        show_tool_calls=True,
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
     )
 
     assert body.index("Before tool.") < body.index("run_shell_command") < body.index("After tool.")
@@ -67,7 +67,7 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
 
     body, trace = await collect_streamed_response_content(
         stream(),
-        show_tool_calls=False,
+        presentation=CollectedStreamPresentation(show_tool_calls=False),
     )
 
     assert body == "Before. After."
@@ -106,9 +106,11 @@ async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> N
 
     body, trace = await collect_streamed_response_content(
         stream(),
-        show_tool_calls=True,
-        initial_response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
-        initial_tool_trace=prior_trace,
+        presentation=CollectedStreamPresentation(
+            show_tool_calls=True,
+            response_text="Before approval.\n\n🔧 `inspect` [1] ⏳",
+            tool_trace=prior_trace,
+        ),
     )
 
     assert body == ("Before approval.\n\n🔧 `inspect` [1]\nAfter approval.\n\n🔧 `inspect` [2] ⏳\n\n")
@@ -131,7 +133,10 @@ async def test_collect_streamed_response_does_not_merge_equal_calls_with_distinc
                 ),
             )
 
-    body, trace = await collect_streamed_response_content(stream(), show_tool_calls=True)
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
 
     assert body.count("🔧 `inspect`") == 2
     assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2"]
@@ -153,9 +158,11 @@ async def test_collect_streamed_response_ignores_repeated_start_for_restored_cal
 
     body, trace = await collect_streamed_response_content(
         stream(),
-        show_tool_calls=True,
-        initial_response_text="🔧 `inspect` [1] ⏳",
-        initial_tool_trace=prior_trace,
+        presentation=CollectedStreamPresentation(
+            show_tool_calls=True,
+            response_text="🔧 `inspect` [1] ⏳",
+            tool_trace=prior_trace,
+        ),
     )
 
     assert body == "🔧 `inspect` [1]"

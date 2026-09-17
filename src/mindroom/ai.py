@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing, asynccontextmanager
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -133,7 +132,13 @@ if TYPE_CHECKING:
     from mindroom.history.types import CompactionLifecycle
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_turn import EmptyRunDiscard, PausedAttempt, StandaloneReplaySnapshot, TurnRunState
+    from mindroom.response_turn import (
+        EmptyRunDiscard,
+        PausedAttempt,
+        ResumedAttempt,
+        StandaloneReplaySnapshot,
+        TurnRunState,
+    )
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -504,40 +509,30 @@ class _NonStreamingAttemptResult:
 async def collect_streamed_response_content(
     response_stream: AsyncIterator[AIStreamChunk],
     *,
-    show_tool_calls: bool,
-    initial_response_text: str = "",
-    initial_tool_trace: Sequence[ToolTraceEntry] = (),
-    track_hidden_tools: bool = False,
+    presentation: CollectedStreamPresentation,
 ) -> tuple[str, list[ToolTraceEntry]]:
-    """Collect a streaming response into one final body without Matrix edits."""
-    state = CollectedStreamPresentation(
-        show_tool_calls=show_tool_calls,
-        response_text=initial_response_text,
-        tool_trace=deepcopy(list(initial_tool_trace)),
-        track_hidden_tools=track_hidden_tools,
-    )
-
+    """Collect a stream into its presentation owner, retaining pending text and tool state."""
     try:
         async for chunk in response_stream:
             if isinstance(chunk, str):
-                state.append_text(chunk)
+                presentation.append_text(chunk)
             elif isinstance(chunk, RunContentEvent):
-                state.append_text(chunk.content)
+                presentation.append_text(chunk.content)
             elif isinstance(chunk, RunCompletedEvent):
                 if chunk.content is not None:
-                    state.canonical_final_body_candidate = str(chunk.content)
+                    presentation.canonical_final_body_candidate = str(chunk.content)
             elif isinstance(chunk, ToolCallStartedEvent):
-                state.start_tool(chunk.tool)
+                presentation.start_tool(chunk.tool)
             elif isinstance(chunk, ToolCallCompletedEvent):
-                state.complete_tool(chunk.tool)
+                presentation.complete_tool(chunk.tool)
     except ResponsePausedForApproval as error:
         error.capture_collected_presentation(
-            response_text=state.final_text().rstrip(),
-            tool_trace=state.tool_trace,
+            response_text=presentation.final_text().rstrip(),
+            tool_trace=presentation.tool_trace,
         )
         raise
 
-    return state.final_text(), state.tool_trace
+    return presentation.final_text(), presentation.tool_trace
 
 
 async def _collect_response_body_with_trace(
@@ -549,7 +544,7 @@ async def _collect_response_body_with_trace(
     """Collect a stream to one body, bridging the trace to an optional collector."""
     body, tool_trace = await collect_streamed_response_content(
         response_stream,
-        show_tool_calls=show_tool_calls,
+        presentation=CollectedStreamPresentation(show_tool_calls=show_tool_calls),
     )
     if tool_trace_collector is not None:
         tool_trace_collector.extend(tool_trace)
@@ -1691,6 +1686,7 @@ async def ai_response(  # noqa: C901, PLR0915
                 metadata_content=metadata_content,
             )
         return CompletedAttempt(
+            status=response.status,
             response_text=_extract_response_content(response, show_tool_calls=show_tool_calls),
             replayable_text=_extract_replayable_response_text(response),
             has_visible_content=bool(response.content),
@@ -1939,6 +1935,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     supports_native_tool_approval: bool = False,
     attempt_model_runtime: ai_runtime.AttemptModelRuntime | None = None,
     reusable_agent: Agent | None = None,
+    resumed_attempt: ResumedAttempt | None = None,
+    on_completed: Callable[[CompletedAttempt], None] | None = None,
 ) -> AsyncIterator[AIStreamChunk]:
     """Generate streaming AI response using Agno's streaming API.
 
@@ -1980,6 +1978,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         attempt_model_runtime: Optional composition-root boundary that exposes each attempt's model to tools.
         reusable_agent: Optional caller-owned agent materialized for repeated sequential turns.
             The caller must serialize uses and close its runtime database handles.
+        resumed_attempt: Restored attempt to settle before preparing a fresh model request.
+        on_completed: Optional sink for the terminal typed attempt, independent of display metadata.
 
     Yields:
         Streaming chunks/events as they become available
@@ -2276,13 +2276,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             return
 
         metadata_content: dict[str, Any] | None = None
+        final_status = RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
         if run_metadata_collector is not None:
             fallback_metrics = build_model_request_metrics_fallback(
                 state.request_metric_totals,
                 state.first_token_latency,
                 state.observed_request_metric_fields,
             )
-            final_status = RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
             usage_metrics, usage_metrics_fallback = _select_streaming_usage_metrics(
                 state.completed_run_event.metrics if state.completed_run_event is not None else None,
                 fallback_metrics,
@@ -2315,6 +2315,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
         yield AttemptResolved(
             CompletedAttempt(
+                status=final_status,
                 replayable_text=state.assistant_text or state.canonical_final_body_candidate or "",
                 has_visible_content=bool(state.assistant_text or state.canonical_final_body_candidate),
                 is_empty=_stream_completed_without_visible_output(state) and not state.completed_tool_executions,
@@ -2344,7 +2345,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     response_stream = stream_response_turn(
         ctx,
         adapter,
-        TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
+        TurnSinks(
+            turn_recorder=turn_recorder,
+            run_metadata_collector=run_metadata_collector,
+            on_completed=on_completed,
+        ),
+        resumed_attempt=resumed_attempt,
         continuation=_initial_agent_continuation(
             prompt=prompt,
             model_prompt=model_prompt,

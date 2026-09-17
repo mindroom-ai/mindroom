@@ -84,6 +84,7 @@ def _pause(call_id: str) -> PausedAttempt:
 async def _seed_ready_continuation(runner: ResponseRunner) -> None:
     continuation = ApprovalContinuation(
         approval_id="approval-1",
+        continuation_count=2,
         run_id="run-1",
         session_id="session-1",
         entity_kind="agent",
@@ -220,6 +221,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(
     ) -> CompletedApprovalRun | PausedAttempt:
         del request, tool_trace_collector
         generations.append(continuation.generation)
+        assert continuation.continuation_count == 2
         if checkpoint == "chained" and len(generations) == 1:
             order.append("first batch")
             batch_started.set()
@@ -241,7 +243,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(
         batch_started.set()
         await release_batch.wait()
         await runner._suspend_for_approval(
-            _pause("call-1"),
+            replace(_pause("call-1"), continuation_count=2),
             request=request,
             target=resolved_target,
             progress=_DeliveryProgress(),
@@ -356,6 +358,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
     assert waiting is not None
     assert waiting.state == "waiting"
     assert waiting.generation == 1
+    assert waiting.continuation_count == 2
     assert waiting.calls[0].decision is None
     assert await runner.deps.approval_store.is_pending("$source")
     assert not runner.has_active_response_for_target(target)
