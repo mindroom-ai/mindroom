@@ -292,6 +292,18 @@ docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
 
 In a live validation, separate `code` and `research` requests produced separate worker containers, and a second `code` request reused the original `code` container.
 
+## Headless browser sessions
+
+Dedicated Docker and Kubernetes workers with `worker_scope: shared`, `user`, or `user_agent` retain headless browser sessions across calls when the visible worker computer is disabled.
+Include `browser` in the agent's `worker_tools` to use this behavior.
+Calls within one worker are serialized and reuse its open tabs and browser profile; each call still prepares its current authorization, output settings, and execution environment.
+A change to the browser configuration or prepared process environment closes the retained session before the next call.
+Cancellation and worker shutdown also clean up browser resources.
+
+Generic and unscoped runners continue to isolate browser calls in separate subprocesses.
+Browser tools configured to use a separate desktop retain their existing routing.
+For a visible browser and Chat viewer, use [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
+
 ## Environment variable reference
 
 ### Interactive worker computers

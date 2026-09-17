@@ -1732,7 +1732,7 @@ class BrowserTools(Toolkit):
         page.on("console", lambda message: self._record_console(tab, message))
         page.on("dialog", lambda dialog: asyncio.create_task(self._handle_dialog(tab, dialog)))
         page.on("close", lambda _: self._remove_tab(state, target_id))
-        if self._worker_display is not None:
+        if self._worker_workspace is not None:
             page.on("download", self._save_worker_download)
         return target_id
 

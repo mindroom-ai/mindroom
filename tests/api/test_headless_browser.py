@@ -142,6 +142,39 @@ async def test_concurrent_headless_calls_share_profile_and_keep_tabs(
 
 
 @pytest.mark.asyncio
+async def test_headless_downloads_survive_session_transfer_and_browser_stop(
+    headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
+    browser_processes: list[BrowserProcess],
+) -> None:
+    """Retained and native tabs save unique workspace copies without a visible display."""
+    client, payload, root, _config = headless_client
+    await _call(client, payload, action="open", targetUrl="https://1.1.1.1/first")
+    process = browser_processes[0]
+    retained_page = process.pages[-1]
+    await _call(client, payload, action="tabs")
+    native_page = process.add_native_page("https://1.1.1.1/native")
+
+    class Download:
+        """Supply completed bytes through the native page event boundary."""
+
+        suggested_filename = "../../document.txt"
+
+        async def save_as(self, destination: Path) -> None:
+            """Persist the externally supplied download at the browser's destination."""
+            destination.write_text("download contents")
+
+    await retained_page.emit("download", Download())
+    await native_page.emit("download", Download())
+    await _call(client, payload, action="stop")
+    saved = list((root / "workspace" / "browser").iterdir())
+    assert len(saved) == 2
+    assert all(path.name.endswith("-document.txt") for path in saved)
+    assert all(path.read_text() == "download contents" for path in saved)
+    assert not (root / "document.txt").exists()
+    assert not process.live_resources
+
+
+@pytest.mark.asyncio
 async def test_current_request_output_policy_keeps_existing_tabs(
     headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
     browser_processes: list[BrowserProcess],
