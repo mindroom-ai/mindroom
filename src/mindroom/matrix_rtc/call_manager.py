@@ -279,7 +279,11 @@ class CallManager:
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""
-        if event.type not in _CALL_EVENT_TYPES or self._shutting_down or not self._is_configured_call_room(room):
+        if (
+            event.type not in _CALL_EVENT_TYPES
+            or self._shutting_down
+            or not self._is_configured_call_room(room, call_event=event)
+        ):
             return
         self._observed_rooms[room.room_id] = room
         await self._reconcile(room)
@@ -604,7 +608,7 @@ class CallManager:
             self._replay_pending_keys(room.room_id, session)
             self._clear_reconcile_retry(room.room_id)
 
-    def _is_configured_call_room(self, room: nio.MatrixRoom) -> bool:
+    def _is_configured_call_room(self, room: nio.MatrixRoom, *, call_event: nio.UnknownEvent | None = None) -> bool:
         """Return whether this agent is configured to join calls in ``room``."""
         room_alias = room.canonical_alias
         room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
@@ -617,9 +621,18 @@ class CallManager:
                 invited_rooms_by_agent=self._get_invited_rooms_by_agent(),
             )
         except ValueError as error:
-            logger.warning("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
+            log = logger.warning if self._has_live_remote_call_signal(room, call_event) else logger.debug
+            log("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
             return False
         return configured_agent == self._agent_name
+
+    def _has_live_remote_call_signal(self, room: nio.MatrixRoom, event: nio.UnknownEvent | None) -> bool:
+        """Check delivered call state without fetching idle rooms just for diagnostics."""
+        member = parse_membership_event(event.source) if event is not None else None
+        if member is None or member.is_expired(self._clock_ms()) or member.user_id == self._client.user_id:
+            return False
+        room_member = room.users.get(member.user_id)
+        return room_member is not None and not room_member.invited
 
     def _is_configured_call_room_id(self, room_id: str) -> bool:
         """Return whether this agent is configured to join calls in ``room_id``."""
