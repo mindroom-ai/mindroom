@@ -1487,11 +1487,7 @@ class _MultiAgentOrchestrator:
         recovery_bots = {bot.agent_name: bot for bot in bots if bot.client is not None}
 
         def response_recovery_scope(agent_name: str, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
-            return recovery_bots[agent_name].response_recovery_scope(
-                room_id,
-                event_id,
-                allow_interrupted_final=target_room_ids is not None,
-            )
+            return recovery_bots[agent_name].response_recovery_scope(room_id, event_id)
 
         result = await recover_stale_streaming_messages(
             actors,
@@ -1859,8 +1855,8 @@ class _MultiAgentOrchestrator:
         self._external_trigger_runtime.unbind_for_entity_changes(removed_entities)
         self._computer_runtime.unbind_for_entity_changes(removed_entities)
         for entity_name in removed_entities:
-            self._pending_replacement_recovery_room_ids.pop(entity_name, None)
             await self._cancel_bot_start_task(entity_name)
+            self._pending_replacement_recovery_room_ids.pop(entity_name, None)
 
             bot = self.agent_bots.get(entity_name)
             if bot is not None:

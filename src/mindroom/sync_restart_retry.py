@@ -22,7 +22,7 @@ from mindroom.history_run_visibility import is_model_history_visible_run
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     from mindroom.history.types import HistoryScope
 
@@ -87,7 +87,6 @@ def interrupted_source_needs_retry(
 class InterruptedTurnRooms:
     """Track rooms containing exact-source terminal interruption proofs."""
 
-    on_registered: Callable[[str], None] | None = None
     _pending: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -104,7 +103,5 @@ class InterruptedTurnRooms:
         if key in self._pending:
             return False
         self._pending[key] = room_id
-        if self.on_registered is not None:
-            self.on_registered(room_id)
         logger.info("interrupted_turn_recovery_recorded", source_event_id=key, pending_count=len(self._pending))
         return True

@@ -205,10 +205,7 @@ async def _recovery_room_targets(
     failed_room_ids: set[str] = set()
     for bot_user_id, principal in principals.items():
         cursor: tuple[int, str] | None = None
-        while batch := await principal.recovery_initial_deliveries(
-            after=cursor,
-            include_interrupted_finals=target_room_ids is not None,
-        ):
+        while batch := await principal.recovery_initial_deliveries(after=cursor):
             cursor = (batch[-1].created_at_ns, batch[-1].delivery_id)
             for delivery in batch:
                 if target_room_ids is not None and delivery.room_id not in target_room_ids:

@@ -426,7 +426,7 @@ class AgentBot:
         self.config_path = config_path
         self.logger = logger.bind(agent=self.agent_name)
         self.stop_manager = StopManager()
-        self._interrupted_turn_rooms = InterruptedTurnRooms(on_registered=self._request_interrupted_turn_recovery)
+        self._interrupted_turn_rooms = InterruptedTurnRooms()
         self.running = False
         self.last_sync_time = None
         self._last_sync_monotonic = None
@@ -438,6 +438,7 @@ class AgentBot:
         # every claim; before login there is no answer, and `None` says so.
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
+        self._entity_removed = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
@@ -737,7 +738,7 @@ class AgentBot:
                 approval_store=self._journal_store.principal(self._journal_principal_id),
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
-                interrupted_turn_rooms=self._interrupted_turn_rooms,
+                register_approval_interruption=self._register_approval_interruption,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -1034,22 +1035,27 @@ class AgentBot:
         """Return rooms with interrupted turns awaiting replacement recovery."""
         return self._interrupted_turn_rooms.pending_room_ids
 
-    def _request_interrupted_turn_recovery(self, room_id: str) -> None:
-        """Wake fleet recovery after the registering turn releases its claims."""
+    def _register_approval_interruption(self, source_event_id: str, room_id: str) -> None:
+        """Wake fleet recovery after the settled approval's owner releases its claims."""
+        if self._entity_removed or not self._interrupted_turn_rooms.register(source_event_id, room_id=room_id):
+            return
         orchestrator = self.orchestrator
         if orchestrator is None:
             return
+
+        def notify(_done: asyncio.Task | None = None) -> None:
+            if not self._entity_removed:
+                orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id)
+
         try:
             task = asyncio.current_task()
         except RuntimeError:
             # Synchronous registration stays available to later fleet capture.
             return
         if task is None:
-            orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id)
-            return
-        task.add_done_callback(
-            lambda _done: orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id),
-        )
+            notify()
+        else:
+            task.add_done_callback(notify)
 
     @property
     def approval_room_ids(self) -> frozenset[str]:
@@ -1920,19 +1926,9 @@ class AgentBot:
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
 
-    def response_recovery_scope(
-        self,
-        room_id: str,
-        event_id: str,
-        *,
-        allow_interrupted_final: bool = False,
-    ) -> AbstractAsyncContextManager[bool]:
+    def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
         """Expose the delivery owner's startup operation to fleet discovery."""
-        return self._delivery_gateway.response_recovery_scope(
-            room_id,
-            event_id,
-            allow_interrupted_final=allow_interrupted_final,
-        )
+        return self._delivery_gateway.response_recovery_scope(room_id, event_id)
 
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""
@@ -2326,6 +2322,8 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
+        if shutdown_intent.stop_reason == "entity_removed":
+            self._entity_removed = True
         if not self._sync_shutting_down:
             self.logger.info(
                 "matrix_agent_response_runtime_shutdown",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 import pytest_asyncio
-from structlog.testing import capture_logs
 
+from mindroom.approval_manager import initialize_approval_store
 from mindroom.constants import ROUTER_AGENT_NAME, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest
 from mindroom.event_journal import (
@@ -28,6 +29,7 @@ from mindroom.handled_turns import TurnRecordCodec
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from mindroom.turn_record import TurnRecord
 from tests.conftest import unwrap_extracted_collaborator
@@ -35,10 +37,11 @@ from tests.response_runner_helpers import _bot, _target
 from tests.test_response_runner_focused import _admit_approval_source
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.runtime_shutdown import RuntimeShutdownIntent
 
 
 @pytest.fixture(params=["active_cancel", "stale_claim"])
@@ -51,6 +54,7 @@ def entry(request: pytest.FixtureRequest) -> str:
 async def approval(tmp_path: Path, entry: str) -> tuple[AgentBot, ApprovalContinuation]:
     """Create real journal ownership and an acknowledged visible INITIAL."""
     bot = _bot(tmp_path)
+    initialize_approval_store(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
     store = runner.deps.approval_store
     await _admit_approval_source(store)
@@ -120,15 +124,11 @@ async def _settle(
     *,
     body: str | None = "partial answer",
 ) -> None:
-    """Run real settlement with only Matrix/body and approval-card I/O replaced."""
+    """Run real journal/card settlement with Matrix transport and body reads replaced."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit),
         patch("mindroom.response_runner.fetch_latest_visible_body", new=AsyncMock(return_value=body)),
-        patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
-            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
-        ),
     ):
         if entry == "active_cancel":
             await runner._settle_failed_approval_outcome(
@@ -167,11 +167,19 @@ async def test_approval_interruption_hands_off_to_replacement(
     assert await store.approval_continuation(claimed.approval_id) is None
     assert not await store.is_pending("$source")
     assert bot.pending_sync_restart_retry_room_ids == {"!room:localhost"}
-    assert await store.recovery_initial_deliveries() == ()
-    assert len(await store.recovery_initial_deliveries(include_interrupted_finals=True)) == 1
+    assert len(await store.recovery_initial_deliveries()) == 1
     async with bot.response_recovery_scope("!room:localhost", "$waiting") as permitted:
-        assert not permitted
-    await _assert_replacement_resumes(bot, tmp_path, edit.await_args.args[0].new_text, policy)
+        assert permitted
+    with _recovery_runtime(bot, tmp_path, edit.await_args.args[0].new_text, policy) as (fleet, replacement, client):
+        fleet._capture_replacement_recovery_rooms({"general": bot})
+        await fleet._recover_pending_replacement_rooms(fleet.config)
+        assert client.room_send.await_count == int(policy == "resume")
+        if policy == "resume":
+            assert (
+                client.room_send.await_args.kwargs["content"]["m.relates_to"]["m.in_reply_to"]["event_id"] == "$waiting"
+            )
+        assert not replacement.pending_sync_restart_retry_room_ids
+        assert not fleet._pending_replacement_recovery_room_ids
 
 
 @pytest.mark.asyncio
@@ -233,7 +241,7 @@ async def test_terminal_ownership_blocks_approval_recovery(
 
     await _settle(bot, claimed, entry, AsyncMock(side_effect=edit_notice))
     assert not bot.pending_sync_restart_retry_room_ids
-    async with bot.response_recovery_scope("!room:localhost", "$waiting", allow_interrupted_final=True) as permitted:
+    async with bot.response_recovery_scope("!room:localhost", "$waiting") as permitted:
         assert not permitted
 
 
@@ -245,36 +253,58 @@ async def test_replacement_stale_claim_after_first_scan_retries_after_claim_rele
     """A replacement-born interruption must wake recovery after the reload scan and live claim."""
     bot, _claimed = approval
     assert not bot.pending_sync_restart_retry_room_ids
-    await _assert_replacement_resumes(
-        bot,
-        tmp_path,
-        "partial answer\n\n" + RESTART_INTERRUPTED_RESPONSE_NOTE,
-        "resume",
-        late_claim=True,
-    )
+    with _recovery_runtime(bot, tmp_path, "partial answer\n\n" + RESTART_INTERRUPTED_RESPONSE_NOTE) as (
+        fleet,
+        replacement,
+        client,
+    ):
+        await _settle_after_reload_scan(fleet, replacement, client)
+        fleet._capture_replacement_recovery_rooms({"general": replacement})
+        await fleet._recover_pending_replacement_rooms(fleet.config)
+        assert client.room_send.await_count == 1
 
 
-async def _assert_replacement_resumes(
+@pytest.mark.asyncio
+async def test_startup_recovers_approval_interruption_without_memory_markers(
+    approval: tuple[AgentBot, ApprovalContinuation],
+    entry: str,
+    tmp_path: Path,
+) -> None:
+    """Fresh runtime discovers committed interruption debt and resumes it only once."""
+    bot, claimed = approval
+
+    async def edit_notice(request: EditTextRequest) -> bool:
+        return await _acknowledge(bot, request)
+
+    edit = AsyncMock(side_effect=edit_notice)
+    await _settle(bot, claimed, entry, edit)
+    with _recovery_runtime(bot, tmp_path, edit.await_args.args[0].new_text) as (fleet, replacement, client):
+        assert not fleet._pending_replacement_recovery_room_ids
+        assert not replacement.pending_sync_restart_retry_room_ids
+        await fleet._recover_stale_streams_after_restart([replacement], fleet.config, None, set())
+        assert client.room_send.await_count == 1
+        await fleet._recover_stale_streams_after_restart([replacement], fleet.config, None, set())
+        assert client.room_send.await_count == 1
+
+
+@contextmanager
+def _recovery_runtime(
     bot: AgentBot,
     tmp_path: Path,
     body: str,
-    policy: str,
-    *,
-    late_claim: bool = False,
-) -> None:
-    """Capture the retiring bot's registration and scan real outbox debt on its replacement."""
+    policy: str = "resume",
+) -> Iterator[tuple[_MultiAgentOrchestrator, AgentBot, AsyncMock]]:
+    """Recreate runtime from the journal, with Matrix transport and history at their I/O seam."""
     config = bot.config
     config.defaults.auto_resume_after_restart = policy != "disabled"
     orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
     orchestrator.config = config
-    orchestrator._capture_replacement_recovery_rooms({"general": bot})
     replacement = _bot(tmp_path)
     replacement.running = True
     assert not replacement.pending_sync_restart_retry_room_ids
     router_client = AsyncMock(spec=nio.AsyncClient)
     router_client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_router:localhost")}
     router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
-    router_client.room_send.return_value = nio.RoomSendResponse(event_id="$resume", room_id="!room:localhost")
     router = MagicMock(running=True, client=router_client)
     orchestrator.agent_bots = {"general": replacement, ROUTER_AGENT_NAME: router}
     source = nio.RoomMessageText.from_dict(
@@ -313,51 +343,46 @@ async def _assert_replacement_resumes(
             },
         },
     )
+    history = [visible]
+    if policy == "newer_human":
+        history.append(
+            ResolvedVisibleMessage.synthetic(
+                event_id="$new-human",
+                sender="@user:localhost",
+                body="new request",
+                timestamp=3,
+            ),
+        )
+
+    async def send(
+        *,
+        room_id: str,
+        message_type: str,
+        content: dict[str, object],
+        **_kwargs: object,
+    ) -> nio.RoomSendResponse:
+        assert room_id == "!room:localhost"
+        assert message_type == "m.room.message"
+        history.append(
+            ResolvedVisibleMessage.synthetic(
+                event_id="$resume",
+                sender="@mindroom_router:localhost",
+                body=str(content["body"]),
+                content=content,
+                timestamp=3,
+            ),
+        )
+        return nio.RoomSendResponse(event_id="$resume", room_id="!room:localhost")
+
+    router_client.room_send.side_effect = send
     with (
         patch("mindroom.matrix.stale_stream_cleanup.fetch_latest_visible_message", new=AsyncMock(return_value=visible)),
         patch(
             "mindroom.matrix.stale_stream_cleanup.fetch_thread_messages_from_source",
-            new=AsyncMock(
-                return_value=[
-                    visible,
-                    *(
-                        [
-                            ResolvedVisibleMessage.synthetic(
-                                event_id="$new-human",
-                                sender="@user:localhost",
-                                body="new request",
-                                timestamp=3,
-                            ),
-                        ]
-                        if policy == "newer_human"
-                        else []
-                    ),
-                ],
-            ),
-        ) as source_history,
-        capture_logs() as logs,
+            new=AsyncMock(return_value=history),
+        ),
     ):
-        if late_claim:
-            await _settle_after_reload_scan(orchestrator, replacement, router_client)
-            resume_content = router_client.room_send.await_args.kwargs["content"]
-            source_history.return_value.append(
-                ResolvedVisibleMessage.synthetic(
-                    event_id="$resume",
-                    sender="@mindroom_router:localhost",
-                    body=resume_content["body"],
-                    content=resume_content,
-                    timestamp=3,
-                ),
-            )
-            orchestrator._capture_replacement_recovery_rooms({"general": replacement})
-            await orchestrator._recover_pending_replacement_rooms(config)
-        else:
-            await orchestrator._recover_pending_replacement_rooms(config)
-    assert router_client.room_send.await_count == int(policy == "resume"), logs
-    if policy == "resume":
-        content = router_client.room_send.await_args.kwargs["content"]
-        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$waiting"
-    assert not orchestrator._pending_replacement_recovery_room_ids
+        yield orchestrator, replacement, router_client
 
 
 async def _alter_delivery_ownership(bot: AgentBot, delivery_state: str) -> None:
@@ -491,10 +516,6 @@ async def _settle_after_reload_scan(  # noqa: PLR0915 - Keep the ordered reload 
         patch.object(gate, "wait_until_open", new=wait),
         patch.object(DeliveryGateway, "edit_text", new=AsyncMock(side_effect=edit_notice)),
         patch("mindroom.response_runner.fetch_latest_visible_body", new=AsyncMock(return_value="partial answer")),
-        patch(
-            "mindroom.approval_response.approval_manager.get_approval_store",
-            return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
-        ),
     ):
         response_task = asyncio.create_task(resume())
         try:
@@ -532,7 +553,7 @@ def test_interruption_registration_without_running_loop_retains_room(tmp_path: P
     bot = _bot(tmp_path)
     orchestrator = MagicMock()
     bot.orchestrator = orchestrator
-    assert bot._interrupted_turn_rooms.register("$source", room_id="!room:localhost")
+    bot._register_approval_interruption("$source", "!room:localhost")
     assert bot.pending_sync_restart_retry_room_ids == {"!room:localhost"}
     orchestrator.request_interrupted_turn_recovery.assert_not_called()
 
@@ -562,7 +583,7 @@ async def test_late_interruption_completion_during_shutdown_does_not_start_recov
     await _begin_shutdown(orchestrator)
 
     async def settle() -> None:
-        bot._interrupted_turn_rooms.register("$source", room_id="!room:localhost")
+        bot._register_approval_interruption("$source", "!room:localhost")
 
     with patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as scan:
         await asyncio.create_task(settle())
@@ -595,7 +616,6 @@ async def test_shutdown_while_recovery_waits_for_admission_preserves_pending_roo
 
     with (
         patch.object(gate, "wait_until_open", new=wait),
-        patch.object(orchestrator, "_recover_ready_turn_journal_events", new=AsyncMock()),
         patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as scan,
     ):
         orchestrator.request_interrupted_turn_recovery("general", "!room:localhost")
@@ -620,7 +640,7 @@ async def test_interruption_scan_error_retries_without_second_notification(tmp_p
     orchestrator.config = bot.config
     orchestrator.running = True
     orchestrator._runtime_ready_event.set()
-    orchestrator.agent_bots = {"general": bot, ROUTER_AGENT_NAME: MagicMock(running=True)}
+    orchestrator.agent_bots = {"general": bot, ROUTER_AGENT_NAME: MagicMock(running=True, first_sync_complete=False)}
     calls = 0
 
     async def scan(*args: object, **_kwargs: object) -> None:
@@ -634,7 +654,6 @@ async def test_interruption_scan_error_retries_without_second_notification(tmp_p
         scanned_room_ids.add("!room:localhost")
 
     with (
-        patch.object(orchestrator, "_recover_ready_turn_journal_events", new=AsyncMock()),
         patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock(side_effect=scan)),
         patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay,
     ):
@@ -646,3 +665,163 @@ async def test_interruption_scan_error_retries_without_second_notification(tmp_p
     retry_delay.assert_called_once()
     assert orchestrator._pending_replacement_recovery_room_ids == {}
     assert orchestrator._dispatch_recovery_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collaborator", ["_turn_controller", "_edit_regenerator"])
+async def test_ordinary_interruption_registry_does_not_schedule_recovery(tmp_path: Path, collaborator: str) -> None:
+    """Ordinary and edit cancellation markers retain their passive capture-only behavior."""
+    bot = _bot(tmp_path)
+    fleet = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    bot.orchestrator = fleet
+    owner = bot._turn_controller if collaborator == "_turn_controller" else bot._edit_regenerator
+    rooms = unwrap_extracted_collaborator(owner).deps.interrupted_turn_rooms
+
+    async def register() -> None:
+        assert rooms.register("$source", room_id="!room:localhost")
+
+    await asyncio.create_task(register())
+    await asyncio.sleep(0)
+    assert bot.pending_sync_restart_retry_room_ids == {"!room:localhost"}
+    assert not fleet._pending_replacement_recovery_room_ids
+    assert fleet._dispatch_recovery_task is None
+
+
+async def _fence_bot(bot: AgentBot, intent: RuntimeShutdownIntent) -> None:
+    """Enter the real bot shutdown boundary before unrelated response drains."""
+    with (
+        patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(side_effect=RuntimeError("drain boundary"))),
+        pytest.raises(RuntimeError, match="drain boundary"),
+    ):
+        await bot.prepare_for_sync_shutdown(shutdown_intent=intent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readd", [False, True])
+async def test_removed_lifecycle_deferred_approval_notification_is_ignored(
+    approval: tuple[AgentBot, ApprovalContinuation],
+    entry: str,
+    tmp_path: Path,
+    readd: bool,
+) -> None:
+    """A removed bot cannot target either an absent name or a later bot reusing it."""
+    bot, claimed = approval
+    fleet = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    bot.orchestrator = fleet
+    fleet.agent_bots = {"general": bot}
+    settled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def edit(request: EditTextRequest) -> bool:
+        return await _acknowledge(bot, request)
+
+    async def settle() -> None:
+        await _settle(bot, claimed, entry, AsyncMock(side_effect=edit))
+        settled.set()
+        await release.wait()
+
+    task = asyncio.create_task(settle())
+    try:
+        await asyncio.wait_for(settled.wait(), 5)
+        await _fence_bot(bot, ENTITY_REMOVED_SHUTDOWN)
+        fleet.agent_bots.pop("general")
+        if readd:
+            fleet.agent_bots["general"] = _bot(tmp_path)
+    finally:
+        release.set()
+        await task
+        await asyncio.sleep(0)
+    assert not fleet._pending_replacement_recovery_room_ids
+
+
+@pytest.mark.asyncio
+async def test_approval_settlement_after_removal_keeps_only_durable_proof(
+    approval: tuple[AgentBot, ApprovalContinuation],
+    entry: str,
+) -> None:
+    """Already removed lifecycles cannot create new recovery markers."""
+    bot, claimed = approval
+    fleet = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    bot.orchestrator = fleet
+    await _fence_bot(bot, ENTITY_REMOVED_SHUTDOWN)
+
+    async def edit(request: EditTextRequest) -> bool:
+        return await _acknowledge(bot, request)
+
+    await _settle(bot, claimed, entry, AsyncMock(side_effect=edit))
+    assert not bot.pending_sync_restart_retry_room_ids
+    assert not fleet._pending_replacement_recovery_room_ids
+
+
+@pytest.mark.asyncio
+async def test_replaced_bot_can_notify_approval_recovery_after_its_task_finishes(
+    approval: tuple[AgentBot, ApprovalContinuation],
+    entry: str,
+    tmp_path: Path,
+) -> None:
+    """A normal replacement retains the old bot's late approved recovery handoff."""
+    bot, claimed = approval
+    fleet = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    bot.orchestrator = fleet
+    await _fence_bot(bot, SYNC_RESTART_SHUTDOWN)
+    fleet.agent_bots = {"general": _bot(tmp_path)}
+
+    async def edit(request: EditTextRequest) -> bool:
+        return await _acknowledge(bot, request)
+
+    await asyncio.create_task(_settle(bot, claimed, entry, AsyncMock(side_effect=edit)))
+    await asyncio.sleep(0)
+    assert fleet._pending_replacement_recovery_room_ids == {"general": {"!room:localhost"}}
+
+
+@pytest.mark.asyncio
+async def test_removal_clears_callback_delivered_while_cancelling_startup(
+    approval: tuple[AgentBot, ApprovalContinuation],
+    entry: str,
+) -> None:
+    """Removal clears late notifications before installing the bot's monotonic fence."""
+    bot, claimed = approval
+    fleet = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    fleet.agent_bots = {"general": bot}
+    bot.orchestrator = fleet
+    settled = asyncio.Event()
+    release = asyncio.Event()
+
+    async def edit(request: EditTextRequest) -> bool:
+        return await _acknowledge(bot, request)
+
+    async def settle() -> None:
+        await _settle(bot, claimed, entry, AsyncMock(side_effect=edit))
+        settled.set()
+        await release.wait()
+
+    task = asyncio.create_task(settle())
+
+    starting = asyncio.Event()
+
+    async def startup() -> None:
+        starting.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            release.set()
+            await task
+            await asyncio.sleep(0)
+            assert fleet._pending_replacement_recovery_room_ids == {"general": {"!room:localhost"}}
+
+    startup_task = asyncio.create_task(startup())
+    fleet._bot_start_tasks["general"] = startup_task
+    try:
+        await asyncio.wait_for(settled.wait(), 5)
+        await asyncio.wait_for(starting.wait(), 5)
+        with (
+            patch("mindroom.bot.wait_for_background_tasks", new=AsyncMock(side_effect=RuntimeError("drain boundary"))),
+            pytest.raises(RuntimeError, match="drain boundary"),
+        ):
+            await fleet._remove_deleted_entities({"general"})
+    finally:
+        release.set()
+        startup_task.cancel()
+        await asyncio.gather(startup_task, return_exceptions=True)
+        await task
+    assert not fleet._pending_replacement_recovery_room_ids

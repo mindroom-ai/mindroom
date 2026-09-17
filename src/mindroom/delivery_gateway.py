@@ -991,13 +991,7 @@ class DeliveryGateway:
         )
 
     @asynccontextmanager
-    async def response_recovery_scope(
-        self,
-        room_id: str,
-        event_id: str,
-        *,
-        allow_interrupted_final: bool = False,
-    ) -> AsyncIterator[bool]:
+    async def response_recovery_scope(self, room_id: str, event_id: str) -> AsyncIterator[bool]:
         """Keep startup decision and visible effect under normal FINAL delivery ownership."""
         recovery = self.deps.response_recovery
         if recovery is None:
@@ -1021,7 +1015,7 @@ class DeliveryGateway:
                 yield False
                 return
             await recovery.cleanup(worker, turn_id)
-            yield await recovery.permits_continuation(initial, allow_interrupted_final=allow_interrupted_final)
+            yield await recovery.permits_continuation(initial)
 
     def _recovery_worker(self) -> MatrixDeliveryWorker:
         """Use the same writer and exact locks for recovery and normal delivery."""

@@ -140,6 +140,7 @@ visibility = [
 [[modules]]
 path = "mindroom.event_journal"
 depends_on = [
+    "mindroom.constants",
     "mindroom.event_journal.legacy_response_attempts",
     "mindroom.response_sources",
     "mindroom.event_journal.legacy_approval_recovery",

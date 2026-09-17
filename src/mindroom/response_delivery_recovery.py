@@ -72,16 +72,11 @@ class ResponseDeliveryRecovery:
             for record in state.turn_records
         )
 
-    async def permits_continuation(
-        self,
-        delivery: MatrixDelivery,
-        *,
-        allow_interrupted_final: bool = False,
-    ) -> bool:
-        """Only genuinely orphaned work may acquire synthetic startup continuation."""
+    async def permits_continuation(self, delivery: MatrixDelivery) -> bool:
+        """Resume orphaned or journal-proven interrupted work under existing ownership guards."""
         state = await self.state(delivery)
         interrupted_final = False
-        if allow_interrupted_final and (final := state.final_delivery) is not None:
+        if (final := state.final_delivery) is not None:
             content = final.payload.get("m.new_content", final.payload)
             content = cast("dict[str, object]", content) if isinstance(content, dict) else {}
             body = content.get("body")

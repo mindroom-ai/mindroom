@@ -1077,16 +1077,10 @@ class PrincipalStore:
         self,
         *,
         after: tuple[int, str] | None = None,
-        include_interrupted_finals: bool = False,
     ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-        """Page exact acknowledged INITIALs still lacking FINAL delivery ownership."""
+        """Page acknowledged INITIAL candidates, including potentially interrupted FINALs."""
         return await self._backend.read(
-            lambda transaction: outbox.recovery_initials(
-                transaction,
-                self._principal_id,
-                after=after,
-                include_interrupted_finals=include_interrupted_finals,
-            ),
+            lambda transaction: outbox.recovery_initials(transaction, self._principal_id, after=after),
         )
 
     async def retire_deleted_initial(self, *, delivery_id: str) -> None:
