@@ -29,6 +29,7 @@ from mindroom.tool_approval import (
     resolve_tool_approval_approver,
 )
 from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import serialize_tool_trace, tool_markers_match_trace
 from mindroom.turn_origin import TurnIntent
 
@@ -387,6 +388,14 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
+            requires_background_tool_jobs=(
+                current.requires_background_tool_jobs
+                or (
+                    paused.requires_background_tool_jobs
+                    and background_tool_jobs_enabled(self.config(), self.runtime_paths)
+                )
+                or any(call.toolkit_name == "job" for call in plan.calls)
+            ),
             response_text=paused.response_text,
             response_tool_trace=serialize_tool_trace(paused.tool_trace, include_internal=True),
             response_presentation_state=paused.response_presentation_state,

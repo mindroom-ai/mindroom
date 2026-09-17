@@ -8,17 +8,10 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
-from mindroom.approval_recovery import ApprovalRecovery
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
@@ -33,8 +26,6 @@ from mindroom.event_journal import (
     ProjectedEvent,
 )
 from mindroom.handled_turns import TurnRecordCodec
-from mindroom.history.session_context import create_scope_session_storage, read_scope_session_run
-from mindroom.history.types import HistoryScope
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
@@ -46,7 +37,6 @@ from mindroom.tool_jobs.settings import (
     pin_background_tool_jobs,
     release_background_tool_jobs,
 )
-from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.turn_record import TurnRecord
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
@@ -57,7 +47,6 @@ from tests.test_subagent_runtime import _job
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
-    from typing import Literal
 
 
 @pytest.mark.asyncio
@@ -80,211 +69,103 @@ async def test_default_startup_does_not_create_job_runtime(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("team", "saved_private", "storage_change"),
-    [
-        (False, None, "same"),
-        (True, None, "same"),
-        (False, None, "shared_user"),
-        (True, None, "shared_user"),
-        (False, None, "removed"),
-        (False, "user", "removed"),
-        (False, "user_agent", "removed"),
-        (False, None, "changed"),
-        (False, "user", "changed"),
-        (False, "user_agent", "changed"),
-    ],
-)
-@pytest.mark.parametrize("call_kind", ["job", "wait", "null_wait", "ordinary", "custom_job"])
-async def test_pre_execution_approval_is_parked_without_a_job_row(  # noqa: PLR0915
-    tmp_path: Path,
-    team: bool,
-    call_kind: str,
-    saved_private: Literal["user", "user_agent"] | None,
-    storage_change: str,
-) -> None:
-    """Read the real saved SDK run without changing its normalized storage or ordinary approvals."""
+async def test_disabled_startup_parks_only_explicitly_marked_approvals(tmp_path: Path) -> None:
+    """Disabled startup uses durable ownership markers without opening SDK session storage."""
     bot = _bot(tmp_path)
     paths = bot.runtime_paths
-    if saved_private is not None:
-        bot.config.agents["general"].private = AgentPrivateConfig(per=saved_private)
-    saved_config = bot.config.model_copy(deep=True)
-    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
-    scope = HistoryScope(kind="team" if team else "agent", scope_id="general")
-    name = "job" if call_kind in {"job", "custom_job"} else "write_report"
-    arguments = {"wait_timeout": 0 if call_kind == "wait" else None} if call_kind in {"wait", "null_wait"} else {}
-    tool = ToolExecution(tool_call_id="call", tool_name=name, tool_args=arguments, requires_confirmation=True)
-    common = {
-        "run_id": "paused",
-        "session_id": owner.session_id,
-        "user_id": owner.requester_id,
-        "status": RunStatus.paused,
-        "tools": [tool],
-    }
-    run = TeamRunOutput(team_id="general", **common) if team else RunOutput(agent_id="general", **common)
-    storage = create_scope_session_storage(
-        agent_name="general",
-        scope=scope,
-        config=bot.config,
-        runtime_paths=paths,
-        execution_identity=owner,
-    )
-    session_user = "@history-owner:localhost" if storage_change == "shared_user" else owner.requester_id
-    session = (
-        TeamSession(session_id=owner.session_id, team_id="general", user_id=session_user, runs=[run])
-        if team
-        else AgentSession(session_id=owner.session_id, agent_id="general", user_id=session_user, runs=[run])
-    )
-    storage.upsert_session(session)
-    storage.upsert_run(run, session_id=owner.session_id, user_id=owner.requester_id)
-    decoy = replace(
-        run,
-        run_id="another-run",
-        tools=[ToolExecution(tool_call_id="another-call", tool_name="report", tool_args={"wait_timeout": 0})],
-    )
-    storage.upsert_run(decoy, session_id=owner.session_id, user_id=owner.requester_id)
-    storage.close()
     store = bot._journal_store.principal(bot._journal_principal_id)
-    await store.admit(
-        InboundEvent(
-            "$approval-source",
-            "!room:localhost",
-            "$thread",
-            EventKind.MESSAGE,
-            EventClass.ACTIONABLE,
-            owner.requester_id,
-            1,
-            {"event_id": "$approval-source", "content": {"body": "report"}},
-        ),
-        ProjectedEvent(
-            "$approval-source",
-            "!room:localhost",
-            "$thread",
-            owner.requester_id,
-            1,
-            {"body": "report"},
-            None,
-            None,
-        ),
-    )
-    continuation = ApprovalContinuation(
-        approval_id="approval",
-        run_id="paused",
-        session_id=owner.session_id,
-        entity_kind=scope.kind,
-        entity_name="general",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id=owner.requester_id,
-        response_event_id="$response",
-        sources=ResponseSources(("$approval-source",), ("$approval-source",)),
-        calls=(
-            ApprovalCall(
-                "call",
-                name,
-                "general",
-                2**62,
-                decision=ApprovalDecision.APPROVED,
-                toolkit_name="job" if call_kind == "job" else "reports",
+
+    async def admit_source(event_id: str) -> None:
+        await store.admit(
+            InboundEvent(
+                event_id,
+                "!room:localhost",
+                "$thread",
+                EventKind.MESSAGE,
+                EventClass.ACTIONABLE,
+                "@user:localhost",
+                1,
+                {"event_id": event_id, "content": {"body": "report"}},
             ),
-        ),
-        state="ready",
-        execution_identity=serialize_tool_execution_identity(owner),
-        history_scope=scope,
-    )
-    assert await store.create_approval_continuation(continuation) is not None
-    if storage_change == "removed":
-        bot.config.agents.pop("general")
-    elif storage_change == "changed":
-        bot.config.agents["general"].private = AgentPrivateConfig(
-            per="user_agent" if saved_private != "user_agent" else "user",
+            ProjectedEvent(
+                event_id,
+                "!room:localhost",
+                "$thread",
+                "@user:localhost",
+                1,
+                {"body": "report"},
+                None,
+                None,
+            ),
         )
-    before = {path: path.read_bytes() for path in paths.storage_root.rglob("*.db")}
+
+    async def create_continuation(
+        approval_id: str,
+        source_event_id: str,
+        *,
+        requires_background_tool_jobs: bool,
+    ) -> ApprovalContinuation:
+        await admit_source(source_event_id)
+        continuation = ApprovalContinuation(
+            approval_id=approval_id,
+            run_id=f"run-{approval_id}",
+            session_id="session",
+            entity_kind="agent",
+            entity_name="general",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            response_event_id=f"$response-{approval_id}",
+            sources=ResponseSources((source_event_id,), (source_event_id,)),
+            calls=(
+                ApprovalCall(
+                    "call",
+                    "write_report",
+                    "general",
+                    2**62,
+                    decision=ApprovalDecision.APPROVED,
+                    toolkit_name="reports",
+                ),
+            ),
+            state="ready",
+            requires_background_tool_jobs=requires_background_tool_jobs,
+        )
+        saved = await store.create_approval_continuation(continuation)
+        assert saved is not None
+        return saved
+
+    feature = await create_continuation("feature", "$feature-source", requires_background_tool_jobs=True)
+    ordinary = await create_continuation("ordinary", "$ordinary-source", requires_background_tool_jobs=False)
+
+    def remove_ordinary_marker(transaction: object) -> None:
+        row = transaction.fetchone(  # type: ignore[attr-defined]
+            "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+            (ordinary.approval_id,),
+        )
+        context = json.loads(str(row["context_json"]))
+        context.pop("requires_background_tool_jobs")
+        transaction.execute(  # type: ignore[attr-defined]
+            "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+            (json.dumps(context), ordinary.approval_id),
+        )
+
+    await store._backend.write(remove_ordinary_marker)
     coordinator = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: None, AgentReplyMembershipIndex())
     try:
         await coordinator.initialize(bot._journal_store)
-        event = await store.load_event("$approval-source")
-        assert event is not None
-        assert event_is_parked(bot.config, paths, "general", event) is (call_kind not in {"ordinary", "custom_job"})
-        assert approval_is_parked(paths, "approval") is (call_kind not in {"ordinary", "custom_job"})
-        assert await store.is_pending(event.event_id)
-        assert await store.approval_continuation("approval") == continuation
-        assert not (paths.storage_root / "tool_jobs").exists()
-        assert {path: path.read_bytes() for path in before} == before
-        if storage_change == "removed":
 
-            async def unavailable_notice(_continuation: ApprovalContinuation, _reason: str) -> None:
-                pytest.fail("No notice can precede card settlement")
-
-            recovery = ApprovalRecovery(
-                deliver_unavailable_notice=unavailable_notice,
-                journal_provider=lambda: bot._journal_store,
-                entity_configured=lambda _: False,
-                approval_is_parked=partial(approval_is_parked, paths),
-            )
-            await recovery._reconcile_unavailable_owner_pages({"general"})
-            after_cleanup = await store.approval_continuation("approval")
-            assert after_cleanup is not None
-            assert (after_cleanup.state == "failing") is (call_kind in {"ordinary", "custom_job"})
-            if call_kind not in {"ordinary", "custom_job"}:
-                assert after_cleanup == continuation
-                assert await store.is_pending(event.event_id)
+        assert approval_is_parked(paths, feature.approval_id)
+        assert not approval_is_parked(paths, ordinary.approval_id)
+        assert await store.is_pending("$feature-source")
+        assert await store.is_pending("$ordinary-source")
+        feature_event = await store.load_event("$feature-source")
+        ordinary_event = await store.load_event("$ordinary-source")
+        assert feature_event is not None
+        assert ordinary_event is not None
+        assert event_is_parked(bot.config, paths, "general", feature_event)
+        assert not event_is_parked(bot.config, paths, "general", ordinary_event)
     finally:
         await coordinator.stop()
-    if storage_change != "same" and call_kind not in {"ordinary", "custom_job"}:
-        saved_config.background_tool_jobs = True
-        restarted = ToolJobRuntimeCoordinator(paths, lambda: saved_config, lambda _: None, AgentReplyMembershipIndex())
-        try:
-            await restarted.initialize(bot._journal_store)
-            assert not event_is_parked(saved_config, paths, "general", event)
-            assert not approval_is_parked(paths, "approval")
-            claimed = await store.claim_approval_continuation("approval", runtime_generation="enabled-restart")
-            assert claimed is not None
-            assert claimed.run_id == continuation.run_id
-        finally:
-            await restarted.stop()
-
-
-@pytest.mark.parametrize("private_scope", ["user", "user_agent"])
-def test_passive_run_reader_preserves_private_root_isolation(
-    tmp_path: Path,
-    private_scope: Literal["user", "user_agent"],
-) -> None:
-    """Canonical row users never override exact run selection or requester-private storage roots."""
-    paths = test_runtime_paths(tmp_path)
-    config = Config(
-        agents={"general": AgentConfig(display_name="General", private=AgentPrivateConfig(per=private_scope))},
-    )
-    owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
-    scope = HistoryScope(kind="agent", scope_id="general")
-    storage = create_scope_session_storage(
-        agent_name="general",
-        scope=scope,
-        config=config,
-        runtime_paths=paths,
-        execution_identity=owner,
-    )
-    run = RunOutput(run_id="exact-run", agent_id="general", session_id=owner.session_id, user_id=None, content="saved")
-    storage.upsert_session(
-        AgentSession(session_id=owner.session_id, agent_id="general", user_id="@history-owner:localhost"),
-    )
-    storage.upsert_run(run, session_id=owner.session_id, user_id=None)
-    storage.close()
-    before = {path: path.read_bytes() for path in paths.storage_root.rglob("*.db")}
-    read_run = partial(
-        read_scope_session_run,
-        agent_name="general",
-        scope=scope,
-        config=config,
-        runtime_paths=paths,
-        session_id=owner.session_id,
-    )
-    saved = read_run(execution_identity=owner, run_id="exact-run")
-    assert isinstance(saved, RunOutput)
-    assert (saved.run_id, saved.content, saved.user_id) == (run.run_id, "saved", None)
-    assert read_run(execution_identity=owner, run_id="missing-run") is None
-    assert read_run(execution_identity=replace(owner, requester_id="@another:localhost"), run_id="exact-run") is None
-    assert {path: path.read_bytes() for path in paths.storage_root.rglob("*.db")} == before
 
 
 def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> None:

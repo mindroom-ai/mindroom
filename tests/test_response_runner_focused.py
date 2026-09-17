@@ -3392,6 +3392,78 @@ async def test_team_approval_persists_pinned_member_models(tmp_path: Path) -> No
     assert continuation.team_member_model_names == (("general", "large"),)
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "toolkit_name", "hook_source", "paused_marker", "feature_enabled", "expected"),
+    [
+        ("job", "job", None, False, False, True),
+        ("job", "custom", None, False, False, False),
+        ("inspect", "test_toolkit", "tool_job_recovery", False, False, True),
+        ("inspect", "test_toolkit", None, False, False, False),
+        ("report", "reports", None, True, False, False),
+        ("report", "reports", None, True, True, True),
+    ],
+    ids=[
+        "native-job-toolkit",
+        "same-named-custom-tool",
+        "recovery-source",
+        "ordinary",
+        "wait-argument-feature-disabled",
+        "wait-argument-feature-enabled",
+    ],
+)
+@pytest.mark.asyncio
+async def test_pause_writer_persists_background_tool_job_ownership(
+    tmp_path: Path,
+    tool_name: str,
+    toolkit_name: str,
+    hook_source: str | None,
+    paused_marker: bool,
+    feature_enabled: bool,
+    expected: bool,
+) -> None:
+    """The suspension writer freezes exact feature ownership before restart."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.background_tool_jobs = feature_enabled
+    await _admit_approval_source(runner.deps.approval_store)
+    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    request = replace(
+        request,
+        response_envelope=replace(request.response_envelope, hook_source=hook_source),
+    )
+    paused = _ordered_pause(
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            tools=(ToolExecution(tool_call_id="call-1", tool_name=tool_name),),
+            toolkit_owners={("general", tool_name): toolkit_name},
+            requires_background_tool_jobs=paused_marker,
+        ),
+    )
+    identity = runner.deps.tool_runtime.build_execution_identity(
+        target=request.response_envelope.target,
+        user_id=request.user_id,
+    )
+
+    with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$waiting")),
+        patch.object(runner._approval_responses, "publish_generation", new=AsyncMock()),
+    ):
+        await runner._suspend_for_approval(
+            paused,
+            request=request,
+            target=request.response_envelope.target,
+            progress=response_runner._DeliveryProgress(),
+            execution_identity=identity,
+            entity_kind="agent",
+            history_scope=runner.deps.state_writer.history_scope(),
+            show_tool_calls=True,
+        )
+
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert continuation.requires_background_tool_jobs is expected
+
+
 @pytest.mark.parametrize(("approved", "reason"), [(True, None), (False, "too dangerous")])
 @pytest.mark.asyncio
 async def test_agent_continuation_executes_real_agno_confirmation(
@@ -4632,6 +4704,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
 ) -> None:
     """Every chained generation must durably expose only its unresolved calls."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.background_tool_jobs = True
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = ApprovalContinuation(
@@ -4681,6 +4754,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
             ("general", "conditional_read"): "test_toolkit",
             ("general", "conditional_write"): "test_toolkit",
         },
+        requires_background_tool_jobs=True,
     )
     edit_text = AsyncMock(return_value=True)
     approval_store = MagicMock(
@@ -4716,6 +4790,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert persisted is not None
     assert persisted.generation == 1
     assert persisted.state == expected_state
+    assert persisted.requires_background_tool_jobs is True
     assert persisted.response_text == paused.response_text
     assert persisted.response_presentation_state == committed_state
     assert presentation.response_text == paused.response_text

@@ -134,6 +134,7 @@ from mindroom.tool_jobs.completion import (
 )
 from mindroom.tool_jobs.control import HumanMessageSignal
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.events import deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.runtime_context import ToolDispatchContext, runtime_context_from_dispatch_context
@@ -1371,6 +1372,15 @@ class ResponseRunner:
                     request_body=request.response_envelope.body,
                     transport_sender_id=request.response_envelope.sender_id,
                     source_kind=request.response_envelope.source_kind,
+                    requires_background_tool_jobs=(
+                        (
+                            paused.requires_background_tool_jobs
+                            and background_tool_jobs_enabled(self.deps.runtime.config, self.deps.runtime_paths)
+                        )
+                        or any(call.toolkit_name == "job" for call in plan.calls)
+                        or request.response_envelope.source_kind in {"tool_job_completion", "tool_job_recovery"}
+                        or request.response_envelope.hook_source in {"tool_job_completion", "tool_job_recovery"}
+                    ),
                     attachment_ids=tuple(request.attachment_ids or ()),
                     mentioned_agents=request.response_envelope.mentioned_agents,
                     hook_source=request.response_envelope.hook_source,

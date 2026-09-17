@@ -30,6 +30,7 @@ from uuid import uuid4
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
+from agno.run.team import TeamRunOutput
 
 from mindroom import ai_runtime
 from mindroom.ai_turn_state import AITurnState
@@ -58,7 +59,6 @@ if TYPE_CHECKING:
 
     from agno.run.agent import RunOutput, RunPausedEvent
     from agno.run.team import RunPausedEvent as TeamRunPausedEvent
-    from agno.run.team import TeamRunOutput
 
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.history.session_context import ScopeSessionContext
@@ -401,6 +401,7 @@ class PausedAttempt:
     response_presentation_state: dict[str, object] = field(default_factory=dict)
     approval_agent_name: str | None = None
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
+    requires_background_tool_jobs: bool = False
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
@@ -455,6 +456,7 @@ def paused_attempt_from_response(
     if response.status != RunStatus.paused:
         return None
     delegation = DelegationState.from_metadata(response.metadata)
+    requires_background_tool_jobs = _run_uses_background_tool_jobs(response)
     if delegation.pending_tools:
         if delegation.pending_child_id is not None:
             toolkit_owners = {
@@ -468,6 +470,7 @@ def paused_attempt_from_response(
             requirements=[RunRequirement.from_dict(requirement) for requirement in delegation.pending_requirements],
             session_id=response.session_id or fallback_session_id,
             run_id=response.run_id or fallback_run_id,
+            requires_background_tool_jobs=requires_background_tool_jobs,
         )
         return (
             replace(
@@ -484,6 +487,7 @@ def paused_attempt_from_response(
         requirements=response.requirements or (),
         session_id=response.session_id or fallback_session_id,
         run_id=response.run_id or fallback_run_id,
+        requires_background_tool_jobs=requires_background_tool_jobs,
     )
 
 
@@ -511,8 +515,13 @@ def _paused_attempt(
     toolkit_owners: dict[tuple[str, str], str | None],
     session_id: str | None,
     run_id: str | None,
+    requires_background_tool_jobs: bool = False,
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
+    requires_background_tool_jobs = requires_background_tool_jobs or _tools_use_background_tool_jobs(
+        tools,
+        requirements,
+    )
     if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
         msg = "Paused run contains an unsupported non-confirmation requirement"
         raise RuntimeError(msg)
@@ -565,6 +574,33 @@ def _paused_attempt(
             None,
         ),
         toolkit_owners=toolkit_owners,
+        requires_background_tool_jobs=requires_background_tool_jobs,
+    )
+
+
+def _tools_use_background_tool_jobs(
+    tools: Sequence[ToolExecution],
+    requirements: Sequence[RunRequirement],
+) -> bool:
+    """Recognize feature wait metadata across the complete paused run."""
+    executions = [
+        *tools,
+        *(requirement.tool_execution for requirement in requirements if requirement.tool_execution),
+    ]
+    return any("wait_timeout" in (tool.tool_args or {}) for tool in executions)
+
+
+def _run_uses_background_tool_jobs(response: RunOutput | TeamRunOutput) -> bool:
+    """Classify exact feature ownership while the paused SDK run is available."""
+    if _tools_use_background_tool_jobs(response.tools or (), response.requirements or ()):
+        return True
+    delegation = DelegationState.from_metadata(response.metadata)
+    if any("wait_timeout" in hook.arguments for hook in delegation.hooks.values()):
+        return True
+    if any("wait_timeout" in (tool.get("tool_args") or {}) for tool in delegation.pending_tools):
+        return True
+    return isinstance(response, TeamRunOutput) and any(
+        _run_uses_background_tool_jobs(member) for member in response.member_responses
     )
 
 

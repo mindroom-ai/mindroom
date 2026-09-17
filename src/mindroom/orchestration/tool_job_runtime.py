@@ -66,7 +66,7 @@ class ToolJobRuntimeCoordinator:
         if config is None:
             return
         if not pin_background_tool_jobs(config, self.runtime_paths):
-            await index_parked_work(config, self.runtime_paths, journal)
+            await index_parked_work(self.runtime_paths, journal)
         self._initialized = True
 
     @property

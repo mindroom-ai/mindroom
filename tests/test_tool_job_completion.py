@@ -167,6 +167,7 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(tmp_p
             runtime_generation=runner.deps.approval_runtime_generation,
             origin=completion_envelope(completion_wait.job, sender_id="@mindroom_general:localhost").origin,
             hook_source="tool_job_completion",
+            requires_background_tool_jobs=True,
         )
         assert continuation_target(continuation, reply_to_event_id=source_event_id).reply_to_event_id is None
         await _persist_waiting_continuation(
