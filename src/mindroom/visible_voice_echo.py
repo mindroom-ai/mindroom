@@ -243,7 +243,8 @@ class VisibleVoiceEchoLifecycle:
         always settled, including when the claiming task is cancelled.
         """
         if self.deps.agent_name == ROUTER_AGENT_NAME:
-            return True
+            published = self.deps.turn_store.visible_echo_for_source(source_event_id) is not None
+            return published or not self._publication_required(room.room_id, requester_user_id)
         key = self._barrier_key(room.room_id, source_event_id)
         barrier = _echo_barriers.get(key)
         if (barrier is None or not barrier.claimed.is_set()) and not self._router_echo_expected(
@@ -275,7 +276,7 @@ class VisibleVoiceEchoLifecycle:
                 )
                 return False
         await barrier.settled.wait()
-        if barrier.published_event_id is None:
+        if barrier.published_event_id is None and self._router_echo_expected(room, requester_user_id):
             self.deps.logger.warning(
                 "Visible voice echo never published; deferring this voice turn",
                 event_id=source_event_id,
@@ -310,10 +311,10 @@ class VisibleVoiceEchoLifecycle:
         self,
         handle: _VisibleVoiceEchoHandle | None,
         normalized_event: PreparedIngress,
-    ) -> None:
-        """Best-effort settle one started lifecycle without blocking canonical dispatch."""
+    ) -> bool:
+        """Report initial publication, allowing failed edits of an existing placeholder."""
         if handle is None:
-            return
+            return True
         task = self._spawn_settle(
             handle,
             normalized_event,
@@ -323,14 +324,24 @@ class VisibleVoiceEchoLifecycle:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Visible voice echo failed; continuing canonical voice dispatch",
-                event_id=handle.request.source_event_id,
-                room_id=handle.request.target.room_id,
-                exception_type=exc.__class__.__name__,
-                error=str(exc),
-            )
+        except Exception:  # noqa: S110 - the background task logs the traceback once
+            # The runtime-owned task logs its exception, including the traceback.
+            # Readiness still depends on whether an initial publication exists.
+            pass
+        request = handle.request
+        published = handle.barrier.published_event_id is not None
+        return published or not self._publication_required(request.target.room_id, request.requester_user_id)
+
+    def _publication_required(self, room_id: str, requester_user_id: str) -> bool:
+        """Recheck configuration and authorization when an initial publication fails."""
+        return self.deps.runtime.config.voice.visible_router_echo and is_sender_allowed_for_agent_reply_in_room(
+            requester_user_id,
+            ROUTER_AGENT_NAME,
+            self.deps.runtime.config,
+            room_id,
+            self.deps.runtime.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+        )
 
     def finish_after_cancellation(
         self,
@@ -452,9 +463,14 @@ class VisibleVoiceEchoLifecycle:
     ) -> str | None:
         request = handle.request
         is_fallback = _is_raw_audio_fallback(normalized_event)
-        placeholder_event_id = (
-            await asyncio.shield(handle.placeholder_task) if handle.placeholder_task is not None else None
-        )
+        try:
+            placeholder_event_id = (
+                await asyncio.shield(handle.placeholder_task) if handle.placeholder_task is not None else None
+            )
+        except Exception:
+            # The placeholder task already logged the failure. Do not duplicate
+            # its traceback through the settlement task; finish reports not ready.
+            return None
         async with (
             _serialize_update(self._update_key(request)),
             admitted_response_decision(
@@ -492,6 +508,8 @@ class VisibleVoiceEchoLifecycle:
                     return None
                 await self.deps.turn_store.record_visible_echo(request.source_event_id, event_id)
             else:
+                # Publication survived a prior attempt, even if this edit fails.
+                _publish_echo_barrier(handle.barrier, event_id)
                 edited = await self.deps.delivery_gateway.edit_text(
                     EditTextRequest(
                         target=request.target,

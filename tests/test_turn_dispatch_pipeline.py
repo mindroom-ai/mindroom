@@ -31,7 +31,7 @@ from mindroom.delivery_gateway import (
     ResponseIdentity,
     SendTextRequest,
 )
-from mindroom.dispatch_handoff import PendingDispatchMetadata, PreparedIngress
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     AUTO_RESUME_MESSAGE,
     EXTERNAL_TRIGGER_SOURCE_KIND,
@@ -45,7 +45,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import (
     MessageEnvelope,
 )
-from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, _VoiceNormalizationResult
 from mindroom.ingress_lanes import IngressRetryError
 from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -64,8 +64,9 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.teams import TeamIntent, TeamMode, TeamResolution
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent, _ReadyVoiceFallback
+from mindroom.turn_controller import _IngressAdmissionOutcome, _PrecheckedEvent
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, _DispatchPlan
+from mindroom.voice_readiness import VoiceReadiness
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -93,7 +94,6 @@ from tests.conftest import (
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
-    make_pending_event,
     message_origin,
     patch_response_runner_module,
     prepared_dispatch_result,
@@ -170,39 +170,19 @@ class TestAgentBot(AgentBotTestBase):
             body="🎤 [Attached voice message]",
             source=voice_event.source,
         )
-        fallback_cleanup = MagicMock()
-        fallback = _ReadyVoiceFallback(
-            event=fallback_event,
-            ready=ReadyPendingEvent(
-                pending_event=make_pending_event(
-                    fallback_event,
-                    room,
-                    source_kind=VOICE_SOURCE_KIND,
-                    requester_user_id=voice_event.sender,
-                    dispatch_metadata=(
-                        PendingDispatchMetadata(
-                            kind="fallback_cleanup",
-                            payload=None,
-                            close=fallback_cleanup,
-                        ),
-                    ),
-                ),
-            ),
-        )
-
         turn_claim = TurnRecord.create([voice_event.event_id], completed=False)
         assert controller.deps.turn_store.try_claim_turn(turn_claim)
 
         with (
             patch.object(
-                controller,
-                "_normalize_voice_event_or_fallback",
+                InboundTurnNormalizer,
+                "prepare_voice_event",
                 new=AsyncMock(side_effect=RuntimeError("normalization failed")),
             ),
             patch.object(
-                controller,
-                "_ready_voice_fallback_event",
-                new=AsyncMock(return_value=fallback),
+                InboundTurnNormalizer,
+                "prepare_raw_voice_fallback_event",
+                new=AsyncMock(return_value=_VoiceNormalizationResult(event=fallback_event)),
             ),
             patch.object(
                 controller.deps.visible_voice_echo,
@@ -218,6 +198,13 @@ class TestAgentBot(AgentBotTestBase):
                     requester_user_id=voice_event.sender,
                 ),
                 voice_target=target,
+                readiness=VoiceReadiness(
+                    normalizer=controller.deps.normalizer,
+                    turn_store=controller.deps.turn_store,
+                    visible_echo=controller.deps.visible_voice_echo,
+                    logger=controller.deps.logger,
+                ),
+                coalescing_thread_id="$thread-root",
                 dispatch_timing=None,
                 turn_claim=turn_claim,
             )
@@ -227,8 +214,10 @@ class TestAgentBot(AgentBotTestBase):
             source_event_id=voice_event.event_id,
             requester_user_id=voice_event.sender,
         )
-        fallback_cleanup.assert_called_once_with()
-        assert fallback.ready.pending_event.dispatch_metadata == ()
+        checkpoint = controller.deps.turn_store.prepared_voice_for_source(voice_event.event_id)
+        assert checkpoint is not None
+        assert checkpoint.body == "🎤 [Attached voice message]"
+        assert checkpoint.coalescing_thread_id == "$thread-root"
         assert controller.deps.turn_store.try_claim_turn(turn_claim)
         controller.deps.turn_store.release_pending_turn_claim(turn_claim)
 

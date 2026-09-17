@@ -51,7 +51,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_runner import ResponseRequest, ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.text_ingress_dispatch import _run_claimed_response
-from mindroom.turn_record import EditPreparation, RevisionReplay
+from mindroom.turn_record import EditPreparation, PreparedVoiceSource, RevisionReplay
 from mindroom.turn_store import TurnStore, TurnStoreDeps
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -3794,3 +3794,133 @@ async def test_legacy_compacted_revision_uses_retained_owner_on_cold_reopen(
     assert owner.replay_source_event_ids == ("$user_msg",)
     assert owner.revision_replay["$physical-edit"].legacy_summary_provenance is historical_summary_owner
     storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("coalescing_thread_id", [None, "$thread"])
+async def test_prepared_voice_survives_cold_load_and_keeps_first_content(
+    journal_store: EventJournalStore,
+    coalescing_thread_id: str | None,
+) -> None:
+    """A replay checkpoint freezes nested content and survives both journal backends."""
+    store = await _store(journal_store)
+    content = {"body": "Transcript", "m.mentions": {"user_ids": ["@alice:example.org"]}, "attachments": [{"id": "one"}]}
+    snapshot = PreparedVoiceSource.from_content(
+        "Transcript",
+        content,
+        thread_id="$thread",
+        coalescing_thread_id=coalescing_thread_id,
+    )
+    content["m.mentions"]["user_ids"].append("@other:example.org")
+    content["attachments"][0]["id"] = "changed"
+    assert await store.record_prepared_voice("$voice", snapshot) == snapshot
+    later = PreparedVoiceSource.from_content("Wrong transcript", {})
+    assert await store.record_prepared_voice("$voice", later) == snapshot
+    restored_content = snapshot.to_content()
+    restored_content["attachments"][0]["id"] = "also changed"
+    _reset_handled_turn_ledger_runtime()
+    restored = await _store(journal_store)
+    saved = restored.prepared_voice_for_source("$voice")
+    assert saved == snapshot
+    assert saved.to_content() == {
+        "body": "Transcript",
+        "m.mentions": {"user_ids": ["@alice:example.org"]},
+        "attachments": [{"id": "one"}],
+    }
+    assert saved.thread_id == "$thread"
+    assert saved.coalescing_thread_id == coalescing_thread_id
+    assert restored.prepared_voice_for_source("$unknown") is None
+    assert "prepared_voice_sources" not in (TurnRecordCodec.to_run_metadata(restored.get_turn_record("$voice")) or {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "redacted", "alias_redacted"])
+async def test_prepared_voice_dropped_by_terminal_authority(journal_store: EventJournalStore, terminal: str) -> None:
+    """Settlement and physical or discovery redaction erase checkpoints permanently."""
+    store = await _store(journal_store)
+    await store.record_pending_turn(
+        TurnRecord.create(
+            ["$voice"],
+            completed=False,
+            discovery_event_ids=["$alias"],
+            source_event_metadata={"$voice": SourceEventMetadata("@alice:example.org", discovery_event_id="$alias")},
+        ),
+    )
+    snapshot = PreparedVoiceSource.from_content("Transcript", {"body": "Transcript"})
+    await store.record_prepared_voice("$voice", snapshot)
+    if terminal == "completed":
+        await store.record_turn(TurnRecord.create(["$voice"]))
+    else:
+        await store.mark_source_redacted("$alias" if terminal == "alias_redacted" else "$voice")
+    assert store.prepared_voice_for_source("$voice") is None
+    assert await store.record_prepared_voice("$voice", snapshot) is None
+    _reset_handled_turn_ledger_runtime()
+    restored = await _store(journal_store)
+    assert restored.prepared_voice_for_source("$voice") is None
+
+
+@pytest.mark.asyncio
+async def test_pending_voice_checkpoint_survives_record_merges(journal_store: EventJournalStore) -> None:
+    """Later pending facts cannot replace a saved transcript or drop its sibling."""
+    store = await _store(journal_store)
+    first = PreparedVoiceSource.from_content("First", {"body": "First"})
+    second = PreparedVoiceSource.from_content("Second", {"body": "Second"})
+    await store.record_prepared_voice("$one", first)
+    await store.record_pending_turn(TurnRecord.create(["$one", "$two"], completed=False))
+    await store.record_prepared_voice("$two", second)
+    await store.record_pending_turn(
+        TurnRecord.create(
+            ["$one", "$two"],
+            completed=False,
+            prepared_voice_sources={"$one": second},
+        ),
+    )
+    _reset_handled_turn_ledger_runtime()
+    restored = await _store(journal_store)
+    assert restored.prepared_voice_for_source("$one") == first
+    assert restored.prepared_voice_for_source("$two") == second
+
+
+def test_prepared_voice_codec_drops_only_malformed_or_unowned_entries() -> None:
+    """One malformed snapshot cannot poison other live sources when loading a ledger."""
+    loaded = TurnRecordCodec._from_ledger_record(
+        "$good",
+        {
+            "source_event_ids": ["$good", "$bad"],
+            "completed": False,
+            "anchor_event_id": "$good",
+            "timestamp": 1.0,
+            "prepared_voice_sources": {
+                "$good": {"body": "Kept", "content_json": '{"body": "Kept"}', "thread_id": "$root"},
+                "$bad": {"body": "Bad", "content_json": "[]"},
+                "$foreign": {"body": "Foreign", "content_json": "{}"},
+            },
+        },
+    )
+    assert loaded is not None
+    assert set(loaded.prepared_voice_sources) == {"$good"}
+    assert loaded.prepared_voice_sources["$good"].to_content() == {"body": "Kept"}
+    with pytest.raises(ValueError, match="Prepared voice requires"):
+        PreparedVoiceSource("Bad", "[]")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["pending", "settled", "command"])
+async def test_prepared_voice_checkpoint_retention_follows_unsettled_sources(
+    journal_store: EventJournalStore,
+    state: str,
+) -> None:
+    """Only journal-owned checkpoints and genuine unfinished work escape ordinary GC."""
+    store = await _store(journal_store)
+    snapshot = PreparedVoiceSource.from_content("Transcript", {"body": "Transcript"})
+    await store.record_prepared_voice("$voice", snapshot)
+    if state == "command":
+        await store.record_pending_turn(TurnRecord.create(["$voice"], completed=False, command_execution_started=True))
+    await store._ledger._cleanup_old_events(
+        max_events=0,
+        max_age_days=0,
+        unsettled_source_event_ids=("$voice",) if state == "pending" else (),
+    )
+    _reset_handled_turn_ledger_runtime()
+    restored = await _store(journal_store)
+    assert (restored.prepared_voice_for_source("$voice") is not None) == (state != "settled")

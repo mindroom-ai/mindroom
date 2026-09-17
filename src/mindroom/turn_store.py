@@ -26,6 +26,7 @@ from mindroom.legacy_revision_replay import summary_depends_on_source, summary_s
 from mindroom.session_ids import create_session_id
 from mindroom.turn_record import (
     EditPreparation,
+    PreparedVoiceSource,
     RevisionReplay,
     RevisionSnapshotChangedError,
     SourceEventRevision,
@@ -170,6 +171,31 @@ class TurnStore:
                 ),
                 lambda existing, source=record.source_event_ids[0]: self._sanitize_candidate(existing[source]),
             )
+
+    def prepared_voice_for_source(self, source_event_id: str) -> PreparedVoiceSource | None:
+        """Read an exact physical source's checkpoint from the warmed ledger."""
+        record = self.get_turn_record(source_event_id)
+        return (record.prepared_voice_sources or {}).get(source_event_id) if record is not None else None
+
+    async def record_prepared_voice(
+        self,
+        source_event_id: str,
+        prepared: PreparedVoiceSource,
+    ) -> PreparedVoiceSource | None:
+        """Durably preserve the first normalization unless terminal truth forbids it."""
+
+        def checkpoint(existing: Mapping[str, TurnRecord]) -> TurnRecord | None:
+            record = existing.get(source_event_id)
+            if record is None:
+                record = TurnRecord.create([source_event_id], completed=False)
+            if record.completed or source_event_id not in record.replay_source_event_ids:
+                return None
+            snapshots = dict(record.prepared_voice_sources or {})
+            snapshots.setdefault(source_event_id, prepared)
+            return canonicalize_turn_record(record, prepared_voice_sources=snapshots, timestamp=0.0)
+
+        record = await self._ledger.update_handled_turn((source_event_id,), checkpoint)
+        return (record.prepared_voice_sources or {}).get(source_event_id) if record is not None else None
 
     async def register_edit_revision(
         self,
@@ -592,6 +618,14 @@ class TurnStore:
             return canonicalize_turn_record(
                 merged_record,
                 completed=False,
+                prepared_voice_sources={
+                    **(merged_record.prepared_voice_sources or {}),
+                    **{
+                        event_id: prepared
+                        for existing in compatible_existing_records
+                        for event_id, prepared in (existing.prepared_voice_sources or {}).items()
+                    },
+                },
                 redacted_source_event_ids=redacted_source_event_ids,
                 pending_redaction_cleanup_event_ids=pending_redaction_cleanup_event_ids,
                 timestamp=0.0,
@@ -1325,6 +1359,7 @@ def _backfill_missing_turn_facts(authority: TurnRecord, recovery: TurnRecord) ->
             if authority.source_event_prompts is not None
             else recovery.source_event_prompts
         ),
+        prepared_voice_sources={**(recovery.prepared_voice_sources or {}), **(authority.prepared_voice_sources or {})},
         source_event_revisions=authority.source_event_revisions or recovery.source_event_revisions,
         latest_edit_receipt_order=_latest_edit_receipt_order(authority, recovery),
         user_stop_receipt_order=_latest_user_stop_receipt_order(authority, recovery),

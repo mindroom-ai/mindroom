@@ -33,6 +33,7 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
+from mindroom.inbound_turn_normalizer import _VoiceNormalizationResult
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
@@ -1111,12 +1112,12 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
         source_kind_override=VOICE_SOURCE_KIND,
     )
 
-    async def normalize_voice(*_args: object, **_kwargs: object) -> tuple[PreparedIngress, str]:
+    async def normalize_voice(*_args: object, **_kwargs: object) -> _VoiceNormalizationResult:
         nonlocal normalization_count
         normalization_count += 1
         normalization_started.set()
         await allow_normalization.wait()
-        return normalized_event, event.event_id
+        return _VoiceNormalizationResult(event=normalized_event)
 
     async def send_placeholder(_request: object) -> str:
         placeholder_send_started.set()
@@ -1125,8 +1126,8 @@ async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_pat
 
     with (
         patch.object(
-            bot._turn_controller,
-            "_normalize_voice_event_or_fallback",
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
             new=AsyncMock(side_effect=normalize_voice),
         ),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
@@ -1380,15 +1381,15 @@ async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None
 
 
 @pytest.mark.asyncio
-async def test_voice_readiness_failure_replaces_placeholder_with_fallback(tmp_path) -> None:  # noqa: ANN001
-    """A readiness failure after placeholder delivery should leave terminal fallback text."""
+async def test_voice_preparation_failure_replaces_placeholder_with_fallback(tmp_path) -> None:  # noqa: ANN001
+    """A preparation failure after placeholder delivery should leave terminal fallback text."""
     bot, room, event = _make_visible_router_echo_scenario(tmp_path)
 
     with (
         patch.object(
-            bot._turn_controller.deps.resolver,
-            "build_ingress_envelope",
-            side_effect=RuntimeError("readiness failed"),
+            bot._turn_controller.deps.normalizer,
+            "prepare_voice_event",
+            side_effect=RuntimeError("transcription failed"),
         ),
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
     ):

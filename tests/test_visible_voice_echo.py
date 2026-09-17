@@ -254,8 +254,8 @@ async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path
     with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
     harness.runtime.config = replacement_config
     admission_gate.reopen()
-    await harness.router.finish(handle, _normalized_event(source_event_id))
-
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
+    assert await _await_responder(harness, source_event_id) is True
     assert not harness.gateway.send_started.is_set()
 
 
@@ -350,14 +350,14 @@ async def test_abandoned_router_lifecycle_releases_responder(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_router_canonical_turn_does_not_wait_on_its_own_echo(tmp_path: Path) -> None:
-    """Gating the router on a failed best-effort echo would suppress canonical dispatch."""
+async def test_router_required_initial_echo_failure_is_not_ready(tmp_path: Path) -> None:
+    """The router must retain its publication obligation when no echo exists."""
     harness = _echo_harness(tmp_path)
     source_event_id = "$voice-router"
     harness.gateway.send_result = None
     handle = harness.router.start(_request(source_event_id))
     assert handle is not None
-    await harness.router.finish(handle, _normalized_event(source_event_id))
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is False
 
     assert (
         await harness.router.await_publication(
@@ -365,7 +365,7 @@ async def test_router_canonical_turn_does_not_wait_on_its_own_echo(tmp_path: Pat
             source_event_id=source_event_id,
             requester_user_id=_REQUESTER_ID,
         )
-        is True
+        is False
     )
 
 
@@ -457,3 +457,40 @@ async def test_claimed_echo_stays_ordered_after_config_disable(tmp_path: Path) -
     harness.gateway.release_send.set()
     await finish
     assert await asyncio.wait_for(responder_wait, timeout=1) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit_raises", [False, True])
+async def test_failed_edit_of_durable_placeholder_still_releases_responders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit_raises: bool,
+) -> None:
+    """A preexisting echo remains published when replay cannot finalize its text."""
+    harness = _echo_harness(tmp_path)
+    source_event_id = "$voice-edit-failed"
+    await harness.router.deps.turn_store.record_visible_echo(source_event_id, "$existing-echo")
+    edit = AsyncMock(side_effect=RuntimeError("Edit unavailable")) if edit_raises else AsyncMock(return_value=False)
+    monkeypatch.setattr(harness.gateway, "edit_text", edit)
+    handle = harness.router.start(_request(source_event_id))
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
+    assert await _await_responder(harness, source_event_id) is True
+    assert not harness.gateway.send_started.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unavailable", ["disabled", "absent", "not_ready"])
+async def test_failed_claim_stops_blocking_when_echo_is_unavailable(tmp_path: Path, unavailable: str) -> None:
+    """A failed claim must not retain an echo requirement after its router becomes unavailable."""
+    harness = _echo_harness(tmp_path)
+    source_event_id = "$voice-disabled-after-failure"
+    harness.gateway.send_result = None
+    handle = harness.router.start(_request(source_event_id))
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is False
+    if unavailable == "disabled":
+        harness.config.voice.visible_router_echo = False
+    elif unavailable == "absent":
+        harness.room.remove_member(cast("_RouterIngress", harness.router.deps.ingress).router_user_id)
+    else:
+        harness.runtime.orchestrator = cast("OrchestratorRuntime", _RouterReadiness(False))
+    assert await _await_responder(harness, source_event_id) is True

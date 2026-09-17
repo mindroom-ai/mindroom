@@ -4710,7 +4710,7 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
 ) -> None:
     """Actual two-human context delays text and reaches response execution as adaptive."""
     config.room_participation = {
-        _ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=1.0 if mention else 0.1),
+        _ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=30.0 if mention else 0.1),
     }
     history = thread_history_result(
         [
@@ -4728,7 +4728,7 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
         explicit = _text_event("please answer", event_id="$mention:localhost", thread_id=_THREAD_ROOT)
         explicit.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
         await harness.controller.handle_text_event(room, explicit)
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(harness.runner.response_started.wait(), timeout=5)
     await harness.runner.settle_inbox_responses()
     assert len(harness.runner.requests) == 1
     if mention:

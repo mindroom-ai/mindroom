@@ -9,7 +9,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from mindroom import interactive
-from mindroom.attachments import parse_attachment_ids_from_event_source
 from mindroom.authorization import ensure_room_membership_synced
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.coalescing import CoalescingGate, ReadyPendingEvent
@@ -20,21 +19,15 @@ from mindroom.coalescing_batch import (
     build_prepared_turn,
     requester_coalescing_key,
 )
-from mindroom.coalescing_cleanup import close_pending_event_metadata_once
 from mindroom.commands.parsing import command_parser
 from mindroom.constants import (
-    ATTACHMENT_IDS_KEY,
-    ORIGINAL_SENDER_KEY,
     ROUTER_AGENT_NAME,
     SCHEDULED_MODEL_KEY,
-    SOURCE_KIND_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
-    VOICE_PREFIX,
-    VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
 )
 from mindroom.delivery_gateway import EditTextRequest, SendTextRequest
@@ -73,7 +66,6 @@ from mindroom.inbound_turn_normalizer import (
     DispatchPayloadWithAttachmentsRequest,
     InboundTurnNormalizer,
     TextNormalizationRequest,
-    VoiceNormalizationRequest,
 )
 from mindroom.ingress_lanes import IngressRetryError, ReceiptLaneKey
 from mindroom.logging_config import bound_log_context
@@ -83,7 +75,6 @@ from mindroom.matrix.media import (
     AudioMessageEvent,
     FileMessageEvent,
     MatrixMediaEvent,
-    extract_media_caption,
     is_audio_message_event,
     is_file_message_event,
     is_image_message_event,
@@ -126,7 +117,7 @@ from mindroom.turn_origin import (
 from mindroom.turn_policy import IngressHookRunner, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import record_deferred_outcome_response, record_user_stop_terminal
-from mindroom.visible_voice_echo import VisibleVoiceEchoRequest
+from mindroom.voice_readiness import VoiceReadiness
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -245,41 +236,6 @@ def _consume_queued_notice_reservations_from_metadata(
         item.finish_once(reservation.consume if item.target_key == target_key else reservation.cancel)
 
 
-def _raw_voice_fallback_event(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedIngress:
-    """Return a dispatchable fallback when voice normalization itself fails."""
-    body = f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
-    source = dict(event.source) if isinstance(event.source, dict) else {}
-    source_content = source.get("content")
-    original_content = source_content if isinstance(source_content, dict) else {}
-    content: dict[str, Any] = {
-        "msgtype": "m.text",
-        "body": body,
-        ORIGINAL_SENDER_KEY: event.sender,
-        SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
-        VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-    }
-    inherited_mentions = original_content.get("m.mentions")
-    if isinstance(inherited_mentions, dict):
-        content["m.mentions"] = inherited_mentions
-    attachment_ids = parse_attachment_ids_from_event_source(source)
-    if attachment_ids:
-        content[ATTACHMENT_IDS_KEY] = attachment_ids
-    inherited_relation = original_content.get("m.relates_to")
-    if isinstance(inherited_relation, dict):
-        content["m.relates_to"] = inherited_relation
-    if thread_id is not None:
-        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
-    source["content"] = content
-    return PreparedIngress(
-        sender=event.sender,
-        event_id=event.event_id,
-        body=body,
-        source=source,
-        server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        source_kind_override=VOICE_SOURCE_KIND,
-    )
-
-
 class _EditRegenerator(Protocol):
     """Minimal edit-regeneration surface needed by turn sequencing."""
 
@@ -325,14 +281,6 @@ class _DispatchPreparation:
 
     dispatch: PreparedDispatch
     replay_guard: _ReplayGuardContext
-
-
-@dataclass(frozen=True)
-class _ReadyVoiceFallback:
-    """Fallback event plus its ready ingress wrapper."""
-
-    event: PreparedIngress
-    ready: ReadyPendingEvent
 
 
 @dataclass(frozen=True)
@@ -2527,17 +2475,35 @@ class TurnController:
         """Resolve the audio conversation key once, then defer voice normalization."""
         event = prechecked_event.event
 
-        voice_target, admission_key = await self._resolve_ready_voice_target(
-            room,
-            event,
-            requester_user_id=prechecked_event.requester_user_id,
+        readiness = VoiceReadiness(
+            normalizer=self.deps.normalizer,
+            turn_store=self.deps.turn_store,
+            visible_echo=self.deps.visible_voice_echo,
+            logger=self.deps.logger,
         )
+        prepared = readiness.prepared_source(event.event_id)
+        coalescing_thread_id = (
+            prepared.coalescing_thread_id
+            if prepared is not None
+            else await self.deps.resolver.coalescing_thread_id(room, event)
+        )
+        voice_target = self.deps.resolver.build_message_target(
+            room_id=room.room_id,
+            thread_id=coalescing_thread_id,
+            reply_to_event_id=event.event_id,
+            event_source=event.source,
+        )
+        if prepared is not None:
+            voice_target = voice_target.with_thread_root(prepared.thread_id)
+        admission_key = requester_coalescing_key(room.room_id, coalescing_thread_id, prechecked_event.requester_user_id)
 
         ready_task = asyncio.create_task(
             self._ready_voice_event(
                 room=room,
                 prechecked_event=prechecked_event,
                 voice_target=voice_target,
+                readiness=readiness,
+                coalescing_thread_id=coalescing_thread_id,
                 dispatch_timing=dispatch_timing,
                 turn_claim=turn_claim,
             ),
@@ -2550,42 +2516,20 @@ class TurnController:
             source_kind=VOICE_SOURCE_KIND,
         )
 
-    async def _resolve_ready_voice_target(
-        self,
-        room: nio.MatrixRoom,
-        event: AudioMessageEvent,
-        *,
-        requester_user_id: str,
-    ) -> tuple[MessageTarget, CoalescingKey]:
-        coalescing_thread_id = await self.deps.resolver.coalescing_thread_id(room, event)
-        voice_target = self.deps.resolver.build_message_target(
-            room_id=room.room_id,
-            thread_id=coalescing_thread_id,
-            reply_to_event_id=event.event_id,
-            event_source=event.source,
-        )
-        return voice_target, requester_coalescing_key(room.room_id, coalescing_thread_id, requester_user_id)
-
     async def _ready_voice_event(
         self,
         *,
         room: nio.MatrixRoom,
         prechecked_event: _PrecheckedEvent[AudioMessageEvent],
         voice_target: MessageTarget,
+        readiness: VoiceReadiness,
+        coalescing_thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
         turn_claim: TurnRecord,
-    ) -> ReadyPendingEvent | None:
+    ) -> ReadyPendingEvent:
         """Normalize a raw voice event after its conversation key is fixed."""
         event = prechecked_event.event
         queued_notice_reservation = None
-        visible_echo = self.deps.visible_voice_echo.start(
-            VisibleVoiceEchoRequest(
-                source_event_id=event.event_id,
-                target=voice_target,
-                requester_user_id=prechecked_event.requester_user_id,
-                raw_source=event.source,
-            ),
-        )
         reservation_released_or_handed_off = False
         claim_transferred = False
         claim_metadata = PendingDispatchMetadata(
@@ -2604,27 +2548,15 @@ class TurnController:
                 target=voice_target,
                 envelope=envelope,
             )
-            normalized_event, effective_thread_id = await self._normalize_voice_event_or_fallback(
+            normalized_event = await readiness.prepare(
                 room=room,
                 event=event,
-                thread_id=voice_target.resolved_thread_id,
+                target=voice_target,
+                coalescing_thread_id=coalescing_thread_id,
+                requester_user_id=prechecked_event.requester_user_id,
                 dispatch_timing=dispatch_timing,
             )
-
-            await self.deps.visible_voice_echo.finish(visible_echo, normalized_event)
-
-            await self._require_voice_echo_publication(
-                room=room,
-                source_event_id=event.event_id,
-                requester_user_id=prechecked_event.requester_user_id,
-            )
-
-            normalized_target = self.deps.resolver.build_message_target(
-                room_id=room.room_id,
-                thread_id=effective_thread_id,
-                reply_to_event_id=normalized_event.event_id,
-                event_source=normalized_event.source,
-            )
+            normalized_target = voice_target
             envelope = self.deps.resolver.build_ingress_envelope(
                 event=normalized_event,
                 requester_user_id=prechecked_event.requester_user_id,
@@ -2637,9 +2569,7 @@ class TurnController:
                 envelope=envelope,
                 queued_notice_reservation=queued_notice_reservation,
             )
-            reservation_released_or_handed_off = True
-            claim_transferred = True
-            return ReadyPendingEvent(
+            ready = ReadyPendingEvent(
                 pending_event=PendingEvent(
                     event=replace(
                         normalized_event,
@@ -2659,241 +2589,23 @@ class TurnController:
                 ),
             )
         except IngressRetryError:
-            # Publication delay is not a normalization failure. Preserve the
-            # transcript and let lane cleanup release ownership before retry.
-            raise
-        except asyncio.CancelledError:
-            self.deps.visible_voice_echo.finish_after_cancellation(
-                visible_echo,
-                _raw_voice_fallback_event(event, thread_id=voice_target.resolved_thread_id),
-            )
             raise
         except Exception as exc:
-            if queued_notice_reservation is not None:
-                queued_notice_reservation.cancel()
-                queued_notice_reservation = None
-            try:
-                fallback = await self._ready_voice_fallback_event(
-                    room=room,
-                    event=event,
-                    requester_user_id=prechecked_event.requester_user_id,
-                    thread_id=voice_target.resolved_thread_id,
-                    dispatch_timing=dispatch_timing,
-                    error=exc,
-                )
-            except asyncio.CancelledError:
-                self.deps.visible_voice_echo.finish_after_cancellation(
-                    visible_echo,
-                    _raw_voice_fallback_event(event, thread_id=voice_target.resolved_thread_id),
-                )
-                raise
-            await self.deps.visible_voice_echo.finish(visible_echo, fallback.event)
-            try:
-                await self._require_voice_echo_publication(
-                    room=room,
-                    source_event_id=event.event_id,
-                    requester_user_id=prechecked_event.requester_user_id,
-                )
-            except BaseException:
-                close_pending_event_metadata_once([fallback.ready.pending_event])
-                raise
-            fallback.ready.pending_event.dispatch_metadata += (claim_metadata,)
+            self.deps.logger.exception(
+                "Voice dispatch metadata failed; deferring this voice turn",
+                event_id=event.event_id,
+                room_id=room.room_id,
+            )
+            raise IngressRetryError from exc
+        else:
+            reservation_released_or_handed_off = True
             claim_transferred = True
-            return fallback.ready
+            return ready
         finally:
-            self.deps.visible_voice_echo.abandon_unsettled(visible_echo)
             if not reservation_released_or_handed_off and queued_notice_reservation is not None:
                 queued_notice_reservation.cancel()
             if not claim_transferred:
                 self.deps.turn_store.release_pending_turn_claim(turn_claim)
-
-    async def _require_voice_echo_publication(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        source_event_id: str,
-        requester_user_id: str,
-    ) -> None:
-        """Preserve the durable reply obligation until its visible echo exists."""
-        try:
-            published = await self.deps.visible_voice_echo.await_publication(
-                room=room,
-                source_event_id=source_event_id,
-                requester_user_id=requester_user_id,
-            )
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Visible voice echo publication check failed; deferring this voice turn",
-                event_id=source_event_id,
-                room_id=room.room_id,
-                exception_type=exc.__class__.__name__,
-                error=str(exc),
-            )
-            raise IngressRetryError from exc
-        if not published:
-            # Returning None from readiness intentionally consumes a lane source.
-            # Publication delay must instead return it to the journal retry owner.
-            raise IngressRetryError
-
-    async def _prepare_raw_voice_fallback_event(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        event: AudioMessageEvent,
-        thread_id: str | None,
-    ) -> PreparedIngress:
-        try:
-            fallback = await self.deps.normalizer.prepare_raw_voice_fallback_event(
-                VoiceNormalizationRequest(
-                    room=room,
-                    event=event,
-                    thread_id=thread_id,
-                ),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Voice raw-audio fallback preparation failed; dispatching text-only fallback",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                exception_type=exc.__class__.__name__,
-                error=str(exc),
-            )
-            return _raw_voice_fallback_event(event, thread_id=thread_id)
-        return fallback.event
-
-    async def _ready_voice_fallback_event(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        event: AudioMessageEvent,
-        requester_user_id: str,
-        thread_id: str | None,
-        dispatch_timing: DispatchPipelineTiming | None,
-        error: Exception,
-    ) -> _ReadyVoiceFallback:
-        """Return a raw-audio fallback when voice readiness fails before STT."""
-        self.deps.logger.warning(
-            "Voice readiness failed; dispatching raw-audio fallback",
-            event_id=event.event_id,
-            room_id=room.room_id,
-            exception_type=error.__class__.__name__,
-            error=str(error),
-        )
-        fallback_event = await self._prepare_raw_voice_fallback_event(room=room, event=event, thread_id=thread_id)
-        attach_dispatch_pipeline_timing(fallback_event.source, dispatch_timing)
-        queued_notice_reservation = None
-        dispatch_policy_source_kind = None
-        hook_source = None
-        message_received_depth = 0
-        target = None
-        try:
-            target = self.deps.resolver.build_message_target(
-                room_id=room.room_id,
-                thread_id=thread_id,
-                reply_to_event_id=fallback_event.event_id,
-                event_source=fallback_event.source,
-            )
-            envelope = self.deps.resolver.build_ingress_envelope(
-                event=fallback_event,
-                requester_user_id=requester_user_id,
-                target=target,
-                source_kind=VOICE_SOURCE_KIND,
-            )
-            queued_notice_reservation = self._voice_queued_notice_reservation(
-                preliminary_target=target,
-                target=target,
-                envelope=envelope,
-                queued_notice_reservation=None,
-            )
-            dispatch_policy_source_kind = envelope.dispatch_policy_source_kind
-            hook_source = envelope.hook_source
-            message_received_depth = envelope.message_received_depth
-        except Exception as metadata_error:
-            self.deps.logger.warning(
-                "Voice fallback metadata failed; dispatching without active-turn reservation",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                exception_type=metadata_error.__class__.__name__,
-                error=str(metadata_error),
-            )
-        return _ReadyVoiceFallback(
-            event=fallback_event,
-            ready=ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=replace(
-                        fallback_event,
-                        source_kind=VOICE_SOURCE_KIND,
-                        requester_user_id=requester_user_id,
-                        dispatch_policy_source_kind=dispatch_policy_source_kind,
-                        hook_source=hook_source,
-                        message_received_depth=message_received_depth,
-                        trust_internal_payload_metadata=True,
-                        turn_dispatch_recovery=turn_dispatch_recovery_active(),
-                    ),
-                    room=room,
-                    dispatch_metadata=_queued_notice_dispatch_metadata(queued_notice_reservation, target),
-                ),
-            ),
-        )
-
-    async def _normalize_voice_event_or_fallback(
-        self,
-        *,
-        room: nio.MatrixRoom,
-        event: AudioMessageEvent,
-        thread_id: str | None,
-        dispatch_timing: DispatchPipelineTiming | None,
-    ) -> tuple[PreparedIngress, str | None]:
-        """Normalize voice or return a raw-audio fallback event for unexpected failures."""
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_start")
-        try:
-            normalized_voice = await self.deps.normalizer.prepare_voice_event(
-                VoiceNormalizationRequest(
-                    room=room,
-                    event=event,
-                    thread_id=thread_id,
-                ),
-            )
-        except Exception as exc:
-            self.deps.logger.warning(
-                "Voice normalization failed; dispatching raw-audio fallback",
-                event_id=event.event_id,
-                room_id=room.room_id,
-                exception_type=exc.__class__.__name__,
-                error=str(exc),
-            )
-            normalized_event = await self._prepare_raw_voice_fallback_event(
-                room=room,
-                event=event,
-                thread_id=thread_id,
-            )
-            effective_thread_id = thread_id
-        else:
-            if normalized_voice is None:
-                self.deps.logger.warning(
-                    "Voice normalization returned no event; dispatching raw-audio fallback",
-                    event_id=event.event_id,
-                    room_id=room.room_id,
-                    thread_id=thread_id,
-                )
-                normalized_event = await self._prepare_raw_voice_fallback_event(
-                    room=room,
-                    event=event,
-                    thread_id=thread_id,
-                )
-            else:
-                normalized_event = normalized_voice.event
-            effective_thread_id = thread_id
-        if dispatch_timing is not None:
-            dispatch_timing.mark("ingress_normalize_ready")
-        attach_dispatch_pipeline_timing(
-            normalized_event.source,
-            dispatch_timing,
-        )
-        return normalized_event, effective_thread_id
 
     async def _dispatch_file_sidecar_text_preview(
         self,

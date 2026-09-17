@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -16,6 +17,75 @@ from mindroom.timestamp_formatting import normalize_timestamp_ms
 
 if typing.TYPE_CHECKING:
     from collections.abc import Sequence
+
+
+@dataclass(frozen=True)
+class PreparedVoiceSource:
+    """Immutable, short-lived normalization checkpoint for one physical voice source."""
+
+    body: str
+    content_json: str
+    thread_id: str | None = None
+    coalescing_thread_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate direct construction so every snapshot can restore Matrix content."""
+        content = json.loads(self.content_json)
+        if (
+            not isinstance(self.body, str)
+            or not isinstance(content, dict)
+            or (self.thread_id is not None and not isinstance(self.thread_id, str))
+            or (self.coalescing_thread_id is not None and not isinstance(self.coalescing_thread_id, str))
+        ):
+            msg = "Prepared voice requires text, object content, and an optional thread ID"
+            raise ValueError(msg)
+        object.__setattr__(self, "content_json", json.dumps(content, allow_nan=False))
+
+    @classmethod
+    def from_content(
+        cls,
+        body: str,
+        content: Mapping[str, object],
+        *,
+        thread_id: str | None = None,
+        coalescing_thread_id: str | None = None,
+    ) -> PreparedVoiceSource:
+        """Freeze nested Matrix content without retaining live ingress objects."""
+        return cls(body, json.dumps(dict(content), allow_nan=False), thread_id, coalescing_thread_id)
+
+    def to_content(self) -> dict[str, typing.Any]:
+        """Return an independent mutable content tree for this dispatch attempt."""
+        return typing.cast("dict[str, typing.Any]", json.loads(self.content_json))
+
+    def to_record(self) -> dict[str, object]:
+        """Encode the checkpoint only in the handled-turn ledger."""
+        return {
+            "body": self.body,
+            "content_json": self.content_json,
+            "thread_id": self.thread_id,
+            "coalescing_thread_id": self.coalescing_thread_id,
+        }
+
+    @classmethod
+    def _from_raw(cls, raw: object) -> PreparedVoiceSource | None:
+        """Discard malformed checkpoints independently of their turn and siblings."""
+        if isinstance(raw, cls):
+            return raw
+        if not isinstance(raw, Mapping):
+            return None
+        raw = typing.cast("Mapping[str, object]", raw)
+        body, content_json, thread_id = raw.get("body"), raw.get("content_json"), raw.get("thread_id")
+        if not isinstance(body, str) or not isinstance(content_json, str):
+            return None
+        coalescing_thread_id = raw.get("coalescing_thread_id")
+        if (thread_id is not None and not isinstance(thread_id, str)) or (
+            coalescing_thread_id is not None and not isinstance(coalescing_thread_id, str)
+        ):
+            return None
+        try:
+            return cls(body, content_json, thread_id, coalescing_thread_id)
+        except (TypeError, ValueError):
+            return None
 
 
 @dataclass(frozen=True)
@@ -123,6 +193,7 @@ class _CanonicalSourceState:
     source_event_revisions: Mapping[str, SourceEventRevision] | None
     suppressed_source_event_revisions: Mapping[str, SourceEventRevision] | None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None
+    prepared_voice_sources: Mapping[str, PreparedVoiceSource] | None
 
 
 @dataclass(frozen=True)
@@ -183,6 +254,7 @@ class TurnRecord:
     user_stop_receipt_order: int | None = None
     user_stop_settled_receipt_order: int | None = None
     source_event_metadata: Mapping[str, SourceEventMetadata] | None = None
+    prepared_voice_sources: Mapping[str, PreparedVoiceSource] | None = None
     response_owner: str | None = None
     requester_id: str | None = None
     correlation_id: str | None = None
@@ -214,6 +286,7 @@ class TurnRecord:
         user_stop_receipt_order: int | None = None,
         user_stop_settled_receipt_order: int | None = None,
         source_event_metadata: Mapping[str, object] | None = None,
+        prepared_voice_sources: Mapping[str, object] | None = None,
         response_owner: str | None = None,
         requester_id: str | None = None,
         correlation_id: str | None = None,
@@ -235,6 +308,7 @@ class TurnRecord:
             source_event_revisions=source_event_revisions,
             suppressed_source_event_revisions=suppressed_source_event_revisions,
             source_event_metadata=source_event_metadata,
+            prepared_voice_sources=prepared_voice_sources if not completed else None,
         )
         delivery = _canonical_delivery_state(
             response_event_id,
@@ -272,6 +346,7 @@ class TurnRecord:
             user_stop_receipt_order=dispatch.user_stop_receipt_order,
             user_stop_settled_receipt_order=dispatch.user_stop_settled_receipt_order,
             source_event_metadata=source.source_event_metadata,
+            prepared_voice_sources=source.prepared_voice_sources,
             response_owner=context.response_owner,
             requester_id=context.requester_id,
             correlation_id=context.correlation_id,
@@ -368,6 +443,7 @@ class _TurnRecordChanges(typing.TypedDict, total=False):
     user_stop_receipt_order: int | None
     user_stop_settled_receipt_order: int | None
     source_event_metadata: Mapping[str, object] | None
+    prepared_voice_sources: Mapping[str, object] | None
     response_owner: str | None
     requester_id: str | None
     correlation_id: str | None
@@ -403,6 +479,7 @@ def canonicalize_turn_record(
         user_stop_receipt_order=candidate.user_stop_receipt_order,
         user_stop_settled_receipt_order=candidate.user_stop_settled_receipt_order,
         source_event_metadata=candidate.source_event_metadata,
+        prepared_voice_sources=candidate.prepared_voice_sources,
         response_owner=candidate.response_owner,
         requester_id=candidate.requester_id,
         correlation_id=candidate.correlation_id,
@@ -426,6 +503,7 @@ def _canonical_source_state(
     source_event_revisions: Mapping[str, object] | None,
     suppressed_source_event_revisions: Mapping[str, object] | None,
     source_event_metadata: Mapping[str, object] | None,
+    prepared_voice_sources: Mapping[str, object] | None,
 ) -> _CanonicalSourceState:
     """Return canonical source identity and source-owned facts."""
     canonical_sources = canonical_source_event_ids(source_event_ids)
@@ -476,6 +554,16 @@ def _canonical_source_state(
             excluded_event_ids=redacted_ids,
         ),
         source_event_metadata=canonical_metadata,
+        prepared_voice_sources=MappingProxyType(
+            {
+                event_id: prepared
+                for event_id, raw in (prepared_voice_sources or {}).items()
+                if event_id in source_ids
+                and event_id not in redacted_prompt_sources
+                and (prepared := PreparedVoiceSource._from_raw(raw)) is not None
+            },
+        )
+        or None,
     )
 
 
