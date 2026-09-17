@@ -12,6 +12,7 @@ import httpx
 import pytest
 from agno.agent import Agent
 from agno.exceptions import ModelProviderError
+from agno.media import Image
 from agno.models.message import Message
 from agno.run.agent import RunCompletedEvent, RunErrorEvent
 from openai import AsyncOpenAI
@@ -112,9 +113,23 @@ def retry_delays(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 @pytest.mark.asyncio
-async def test_proxy_overload_retries_after_delay(tmp_path: Path, retry_delays: list[float]) -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _overload(),
+        httpx.Response(502, json={"error": {"message": "Upstream unavailable"}}),
+        'data: {"error":{"type":"overloaded_error","message":"Temporarily unavailable"}}\n\n',
+        'data: {"error":{"type":"api_error","message":"Our servers are currently overloaded"}}\n\n',
+    ],
+    ids=["proxy-code", "http-502", "overloaded-type", "api-overload"],
+)
+async def test_proxy_overload_retries_after_delay(
+    failure: str | httpx.Response,
+    tmp_path: Path,
+    retry_delays: list[float],
+) -> None:
     """An SDK overload after HTTP success retries the same provider request."""
-    provider = _Provider([_overload(), _answer("Recovered")])
+    provider = _Provider([failure, _answer("Recovered")])
     async with _model(provider, tmp_path) as model:
         chunks = [
             chunk
@@ -141,6 +156,47 @@ async def test_proxy_overload_retry_budget_is_bounded(tmp_path: Path, retry_dela
     assert len(retry_delays) == 4
     assert all(base <= delay <= base * 1.25 for base, delay in zip((1, 2, 4, 8), retry_delays, strict=True))
     assert all(response.is_closed for response in provider.responses)
+
+
+@pytest.mark.asyncio
+async def test_media_does_not_restart_exhausted_provider_retry_budget(
+    tmp_path: Path,
+    retry_delays: list[float],
+) -> None:
+    """Provider outages retain media and exhaust one budget across both wrappers."""
+    provider = _Provider([_overload() for _ in range(10)])
+    messages = [Message(role="user", content="Describe", images=[Image(url="https://example.org/image.png")])]
+    async with _model(provider, tmp_path) as model:
+        with pytest.raises(ModelProviderError, match="overloaded"):
+            _ = [chunk async for chunk in model.ainvoke_stream(messages, Message(role="assistant"))]
+
+    assert len(provider.requests) == 5
+    assert all(request == provider.requests[0] for request in provider.requests)
+    assert len(retry_delays) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"type": "invalid_request_error", "code": "400", "message": "Our servers are currently overloaded"},
+        {"type": "api_error", "message": "Unclassified provider error"},
+        {"type": {}, "message": "Malformed provider error"},
+    ],
+)
+async def test_unclassified_or_permanent_sse_error_is_not_retried(
+    body: dict[str, object],
+    tmp_path: Path,
+    retry_delays: list[float],
+) -> None:
+    """Agno's default 502 must not turn every SDK stream error into a retry."""
+    provider = _Provider(["data: " + json.dumps({"error": body}) + "\n\n", _answer("Must not run")])
+    async with _model(provider, tmp_path) as model:
+        with pytest.raises(ModelProviderError):
+            _ = [chunk async for chunk in model.ainvoke_stream([], Message(role="assistant"))]
+
+    assert len(provider.requests) == 1
+    assert not retry_delays
 
 
 @pytest.mark.asyncio

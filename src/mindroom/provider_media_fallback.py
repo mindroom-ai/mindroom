@@ -19,6 +19,7 @@ from mindroom.error_handling import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_stream_output import has_meaningful_stream_output
+from mindroom.provider_error_compat import is_transient_stream_error
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import close_async_stream
 
@@ -251,7 +252,12 @@ async def _stream_with_fallback(
                 _learn_from_request_fallback(route, request_state)
                 return
             except Exception as error:
-                if request_state.stream_output_produced or not remaining_kinds or not _should_retry(error):
+                if (
+                    request_state.stream_output_produced
+                    or not remaining_kinds
+                    or is_transient_stream_error(error)
+                    or not _should_retry(error)
+                ):
                     raise
                 failure = error
                 break

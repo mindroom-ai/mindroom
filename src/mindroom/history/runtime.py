@@ -16,7 +16,6 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
-from mindroom.history.provider_error_compat import is_provider_timeout
 from mindroom.history.replay import (
     configured_replay_plan,
     estimate_prompt_visible_history_tokens,
@@ -55,6 +54,7 @@ from mindroom.history.types import (
     ResolvedHistorySettings,
 )
 from mindroom.logging_config import get_logger
+from mindroom.provider_error_compat import is_provider_timeout
 from mindroom.team_scope import ad_hoc_team_has_private_member
 from mindroom.timing import timed
 from mindroom.token_budget import estimate_text_tokens

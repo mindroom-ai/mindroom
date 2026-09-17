@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, ModelRateLimitError
 from agno.models.anthropic import Claude
@@ -315,3 +316,31 @@ async def test_unsafe_or_untyped_errors_are_not_retried(error: Exception) -> Non
 
     assert raised.value is error
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", [None, ValueError("overloaded")])
+async def test_default_status_without_typed_transient_cause_is_not_retried(cause: Exception | None) -> None:
+    """A cause-less or permanently caused default 502 must fail immediately."""
+    error = ModelProviderError(message="unknown provider failure")
+    error.__cause__ = cause
+    model, calls = _hooked_model_with_async_attempts([[error], [ModelResponse(content="Must not run")]])
+
+    with pytest.raises(ModelProviderError) as raised:
+        await _collect(model.ainvoke_stream([], object()))
+
+    assert raised.value is error
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_default_status_with_typed_network_cause_is_retried() -> None:
+    """A typed network cause authorizes recovery even when Agno loses its status."""
+    error = ModelProviderError(message="unknown provider failure")
+    error.__cause__ = httpx.ReadError("connection interrupted")
+    model, calls = _hooked_model_with_async_attempts([[error], [ModelResponse(content="Recovered")]])
+
+    chunks = await _collect(model.ainvoke_stream([], object()))
+
+    assert [chunk.content for chunk in chunks] == ["Recovered"]
+    assert len(calls) == 2

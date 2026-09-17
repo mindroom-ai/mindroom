@@ -18,16 +18,12 @@ import time
 from functools import partial
 from typing import TYPE_CHECKING
 
-from agno.exceptions import ContextWindowExceededError, ModelProviderError
+from agno.exceptions import ModelProviderError
 
 from mindroom.agno_compat_model_hooks import install_stream_invocation_hooks
-from mindroom.error_handling import (
-    TRANSIENT_PROVIDER_STATUS_CODES,
-    IncompleteResponsesStreamError,
-    ModelSafeguardRefusalError,
-)
 from mindroom.logging_config import get_logger
 from mindroom.model_stream_output import has_meaningful_stream_output
+from mindroom.provider_error_compat import is_transient_stream_error
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -47,16 +43,9 @@ _MAX_TRANSIENT_RETRIES = 4
 _RETRY_BASE_DELAY_SECONDS = 1.0
 
 
-def _is_transient_model_error(error: BaseException) -> bool:
-    """Return whether one model-call failure is worth re-issuing the request."""
-    if isinstance(error, (ContextWindowExceededError, ModelSafeguardRefusalError, IncompleteResponsesStreamError)):
-        return False
-    return isinstance(error, ModelProviderError) and error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
-
-
 def _should_reraise(error: ModelProviderError, *, yielded_meaningful_output: bool, attempt: int) -> bool:
     """Return whether one failed attempt must propagate instead of retrying."""
-    return yielded_meaningful_output or attempt >= _MAX_TRANSIENT_RETRIES or not _is_transient_model_error(error)
+    return yielded_meaningful_output or attempt >= _MAX_TRANSIENT_RETRIES or not is_transient_stream_error(error)
 
 
 def _retry_delay_seconds(attempt: int) -> float:

@@ -23,7 +23,7 @@ Paths are relative to `src/mindroom/`.
 
 | Agno weakness | Upstream issue / PR | Local workaround and remaining scope |
 | --- | --- | --- |
-| Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `history/provider_error_compat.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
+| Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `provider_error_compat.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
 | Deleted runs survive in legacy blobs or deletion spans separate transactions. | [Issue #9934](https://github.com/agno-agi/agno/issues/9934), [PR #9939](https://github.com/agno-agi/agno/pull/9939), both open. | `agno_compat_sqlite.py`; preserve owner descendant deletion when the atomic upstream fix ships. |
 | New runs can sort before surviving runs after deletion. | [Issue #9936](https://github.com/agno-agi/agno/issues/9936), [PR #9938](https://github.com/agno-agi/agno/pull/9938), both open. | `agno_compat_sqlite.py`; verify insertion after existing indexes with the local override disabled. |
 | Team input flattens roleful messages. | [Issue #9942](https://github.com/agno-agi/agno/issues/9942), [PR #9943](https://github.com/agno-agi/agno/pull/9943), both open. | `history/agno_compat_message_builder.py`; historical-media filtering needs a separate extension point. |
@@ -87,7 +87,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
-| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, prompt caching, and participation decisions remain in their owning modules. |
+| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
@@ -107,7 +107,7 @@ Small owner-adjacent boundaries use the same source records:
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
-| `history/provider_error_compat.py` | Typed cause-chain inspection for ambiguous default-502 errors. | Compaction retry limits and budget decisions. |
+| `provider_error_compat.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
 

@@ -18,7 +18,6 @@ from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
 from mindroom.cancellation import request_task_cancel
-from mindroom.history.provider_error_compat import is_legacy_summary_size_error, is_transient_summary_error
 from mindroom.history.summary_provider_compat import (
     configure_summary_model,
     effective_summary_timeout_seconds,
@@ -28,6 +27,7 @@ from mindroom.history.summary_provider_compat import (
 )
 from mindroom.history.types import COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS
 from mindroom.logging_config import get_logger
+from mindroom.provider_error_compat import is_legacy_summary_size_error, is_transient_summary_error
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
