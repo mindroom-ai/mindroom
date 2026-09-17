@@ -503,6 +503,30 @@ async def _resolved_child_tool(
     return None
 
 
+async def _emit_resolved_child_tools(
+    response: RunOutput | TeamRunOutput,
+    pending_tools: list[dict[str, object]],
+    pending_tool_sources: dict[str, DelegationPendingTool],
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    on_event: Callable[[object], None] | None,
+) -> None:
+    """Emit completed child tools after resolving a projected approval."""
+    if on_event is None:
+        return
+    for pending_tool in pending_tools:
+        call_id = str(pending_tool["tool_call_id"])
+        completed_tool = await _resolved_child_tool(
+            pending_tool_sources[call_id],
+            call_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        if completed_tool is not None:
+            on_event(_child_completion_event(response, completed_tool))
+
+
 def _settle_pending_child_tools(
     response: RunOutput | TeamRunOutput,
     pending_tools: list[dict[str, object]],
@@ -588,6 +612,13 @@ def _resolve_delegation_requirement(
     return result
 
 
+def _child_result_text(child: DelegationChild, receipt: str) -> str:
+    result = child.result or "Agent completed the task but returned no content."
+    if child.status != "completed":
+        result = f"Delegation to '{child.child_agent_name}' {child.status}: {result}"
+    return f"{result}\n\n{receipt}"
+
+
 async def _background_child_outcome(
     child: DelegationChild,
     *,
@@ -669,13 +700,10 @@ async def _background_child_outcome(
                     f"Delegation settlement did not complete; recovery may still be required: {settlement_error}"
                 ),
             )
-        result = child.result or "Agent completed the task but returned no content."
-        if child.status != "completed":
-            result = f"Delegation to '{child.child_agent_name}' {child.status}: {result}"
         status = child.status
         assert status != "running"
         assert status != "paused"
-        return BackgroundOutcome(status=status, result=f"{result}\n\n{receipt}")
+        return BackgroundOutcome(status=status, result=_child_result_text(child, receipt))
 
 
 async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -1031,16 +1059,15 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         background_job = waited.job
                         child = retained_child(background, background_job)
                         try:
-                            if child_decisions is not None and on_event is not None:
-                                for pending_tool in prior_pending_tools:
-                                    completed_tool = await _resolved_child_tool(
-                                        prior_tool_sources[str(pending_tool["tool_call_id"])],
-                                        str(pending_tool["tool_call_id"]),
-                                        config=config,
-                                        runtime_paths=runtime_paths,
-                                    )
-                                    if completed_tool is not None:
-                                        on_event(_child_completion_event(response, completed_tool))
+                            if child_decisions is not None:
+                                await _emit_resolved_child_tools(
+                                    response,
+                                    prior_pending_tools,
+                                    prior_tool_sources,
+                                    config=config,
+                                    runtime_paths=runtime_paths,
+                                    on_event=on_event,
+                                )
                             if background_job.status == "awaiting_approval" and not waited.delivery_queued:
                                 saved = background_job.approval_state
                                 child_outcome = _ChildOutcome(
@@ -1095,16 +1122,15 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             approval_calls=child_calls,
                             fresh=fresh,
                         )
-                    if child_decisions is not None and on_event is not None:
-                        for pending_tool in prior_pending_tools:
-                            completed_tool = await _resolved_child_tool(
-                                prior_tool_sources[str(pending_tool["tool_call_id"])],
-                                str(pending_tool["tool_call_id"]),
-                                config=config,
-                                runtime_paths=runtime_paths,
-                            )
-                            if completed_tool is not None:
-                                on_event(_child_completion_event(response, completed_tool))
+                    if child_decisions is not None:
+                        await _emit_resolved_child_tools(
+                            response,
+                            prior_pending_tools,
+                            prior_tool_sources,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            on_event=on_event,
+                        )
                     if child_outcome.response.status == RunStatus.paused:
                         _pending_child(state, child, child_outcome)
                         await _persist(entity, response, state)
@@ -1145,10 +1171,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=str(error))
                 await _persist(entity, response, state)
             receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
-            result = child.result or "Agent completed the task but returned no content."
-            if child.status != "completed":
-                result = f"Delegation to '{child_name}' {child.status}: {result}"
-            result = resolve_result(f"{result}\n\n{receipt}")
+            result = resolve_result(_child_result_text(child, receipt))
             await after_delegation(
                 hook_state,
                 config=config,
