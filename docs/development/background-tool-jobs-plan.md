@@ -461,3 +461,39 @@ Private local test evidence and exact run identifiers remain in persistent workt
 Publication review identified four additional issues: invalid waits aborted model runs, scan failures stopped completion retries, one restart warning hid another, and shared-session row ownership could hide an exact saved approval run.
 The fixes use existing SDK tool failures, worker retries, canonical session lookup, and combined config feedback.
 They remove one net production line across seven files and passed scoped independent review.
+
+## Task 8: integration coverage for risky lifecycle boundaries
+
+**Status:** Complete; six integration cases verified locally.
+Add repeatable CI coverage for multi-step scenarios previously exercised mainly through isolated boundary tests or live checks.
+Keep the agreed behavior and production architecture unchanged unless a new regression demonstrates a concrete bug.
+
+**Files:** Focused integration tests under `tests/test_tool_job_turn_integration.py` and `tests/test_tool_job_restart_integration.py`, reusing existing typed fixtures where practical.
+Use real Agno Agent or Team execution, job controls, durable job snapshots, and SQLite session storage.
+Only the model provider and external transport need deterministic substitutes.
+Use event barriers to control ordering, finite failure deadlines, and explicit task/resource cleanup.
+
+- [x] Release a foreground wait through human input, let the original tool continue into a newer turn, rediscover it with `job(action="list")`, and retrieve its result without repeating the side effect.
+- [x] Complete a detached tool during an active stream and verify that retrieval waits for the response boundary, persists the exact consumption receipt, and leaves no redundant completion work.
+- [x] Interrupt a response after a tool result exists but before durable consumption is confirmed, then reconstruct the runtime and retrieve the retained result without replaying the tool.
+- [x] Produce a real native approval pause, restart disabled with the saved run and journal continuation, verify it stays parked without executing, and re-enable to approve or deny the exact call once.
+- [x] Exercise streaming and blocking entry points, success and tool failure where relevant, and a shared conversation whose saved session-row requester differs from the approval requester.
+- [x] Prove representative assertions detect broken guarantees with temporary fault injection or isolated mutation checks; preserve the production tree after each check.
+- [x] Run focused integration regressions, repository hooks, and independent review; record the results here for the existing PR.
+
+Tests must assert real side effects, persisted outcomes, model-visible tool results, and pending-work state rather than mocked callback counts.
+Do not add production test hooks, a new scheduling abstraction, or a reusable test framework for these scenarios.
+
+The six cases cover a human-released job crossing into a newer turn, success and failure during active streaming, interrupted consumption followed by runtime reconstruction, and approved or denied native continuations across disabled and enabled startup.
+The approval cases retain a shared session row owned by a different requester from the exact paused run.
+Assertions check actual side effects, provider-visible tool results, exact durable receipts, and pending outcomes.
+
+Final verification: `uv run pytest -m 'not requires_matrix' -n 10 --no-cov` passed 21,504 tests with 12 skips and 27 warnings in 316.10 seconds.
+All repository pre-commit hooks passed, including type checks and module boundaries.
+Independent review approved the tests after adding exact provider-message assertions and guaranteed response-task cleanup.
+Five subprocess-local mutations failed as intended when human release, response joining, receipt confirmation, parked-approval indexing, or provider-visible result delivery was broken.
+
+These tests use real SDK execution, durable job snapshots, SQLite sessions, and approval journals with deterministic model responses and local tool side effects.
+They reconstruct runtimes in one process and do not exercise Matrix transport or simulate a process kill.
+The earlier 48 live Matrix scenarios remain the transport evidence for the unchanged production code.
+No new production defect was demonstrated, so this extension changes only tests and this plan.
