@@ -178,6 +178,7 @@ Matrix sync callback
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
+| `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
