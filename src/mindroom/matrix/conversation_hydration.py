@@ -188,20 +188,25 @@ def readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event |
     "readable or not" rather than "decrypted or not": a caller needs to know an
     event was dropped unread, and none of them can do anything about why.
     """
-    if not isinstance(event, nio.Event):
-        return readable_legacy_file_edit(event)
-    if not isinstance(event, nio.MegolmEvent):
-        return event
-    if client.olm is None:
-        return None
-    try:
-        decrypted = client.decrypt_event(event)
-    except nio.EncryptionError:
-        return None
-    # A payload that decrypted into something malformed comes back as a
-    # `BadEvent`, which nio deliberately does not make an `Event`. Unreadable is
-    # the honest answer for it as well.
-    return decrypted if isinstance(decrypted, nio.Event) else readable_legacy_file_edit(decrypted)
+    return _readable_event(client, event)
+
+
+def _readable_event(
+    client: nio.AsyncClient,
+    event: nio.BaseEvent,
+    unreadable: _UnreadableHistory | None = None,
+) -> nio.Event | None:
+    """Classify unreadability after decryption, before discarding malformed data."""
+    if isinstance(event, nio.MegolmEvent) and client.olm is not None:
+        with contextlib.suppress(nio.EncryptionError):
+            event = client.decrypt_event(event)
+    if isinstance(event, nio.MegolmEvent):
+        readable = None
+    else:
+        readable = event if isinstance(event, nio.Event) else readable_legacy_file_edit(event)
+    if readable is None and unreadable is not None:
+        unreadable.add(event)
+    return readable
 
 
 def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -> ProjectedEvent | None:
@@ -380,9 +385,7 @@ def _project_room_page(
     events: list[ProjectedEvent] = []
     logical_messages = 0
     for event in page:
-        readable = readable_event(client, event)
-        if readable is None:
-            unreadable.add(event)
+        readable = _readable_event(client, event, unreadable)
         projected = None if readable is None else _projected_from_event(room_id, readable, self_sender=self_sender)
         if projected is None:
             continue
@@ -856,7 +859,8 @@ class ConversationHydrator:
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
             raise _HydrationError(msg)
         events: list[ProjectedEvent] = []
-        readable_root = readable_event(self._client(), root.event)
+        unreadable = _UnreadableHistory()
+        readable_root = _readable_event(self._client(), root.event, unreadable)
         root_projected = (
             None
             if readable_root is None
@@ -868,14 +872,12 @@ class ConversationHydrator:
             room_id,
             thread_id,
             window_messages=self.prompt_window_messages,
+            unreadable=unreadable,
         )
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
-        # The relation walk has already accounted for its own unread events in
-        # both fields, so the root is all there is left to add here.
-        if readable_root is None:
-            relations.unreadable.add(root.event)
+        # Root and relations share diagnostics, classified at their read seam.
         return _Walk(
             events=(*events, *relations.events),
             complete=relations.complete and readable_root is not None,
@@ -888,6 +890,7 @@ class ConversationHydrator:
         event_id: str,
         *,
         window_messages: int | None,
+        unreadable: _UnreadableHistory | None = None,
     ) -> _Walk:
         """Walk the relation tree newest first, without filtering by relation type.
 
@@ -918,7 +921,8 @@ class ConversationHydrator:
         admitted = 0
         fetched = 0
         complete = True
-        unreadable = _UnreadableHistory()
+        if unreadable is None:
+            unreadable = _UnreadableHistory()
         client = self._client()
         relations = client.room_get_event_relations(
             room_id=room_id,
@@ -934,7 +938,7 @@ class ConversationHydrator:
             async with contextlib.aclosing(relations):
                 async for event in relations:
                     fetched += 1
-                    readable = readable_event(client, event)
+                    readable = _readable_event(client, event, unreadable)
                     if readable is None:
                         # nio hands relations over exactly as they arrived, so
                         # in an encrypted room this is every one of them until
@@ -952,7 +956,6 @@ class ConversationHydrator:
                         # holding only its root, mark it whole for the entire
                         # membership epoch, and hand that to an export as the
                         # conversation.
-                        unreadable.add(event)
                         complete = False
                     else:
                         projected = _projected_from_event(room_id, readable, self_sender=self.self_sender)

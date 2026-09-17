@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
 
 import nio
 import pytest
@@ -1945,6 +1946,43 @@ class TestEncryptedRelations:
         assert "live E2EE counters" in diagnostic
         assert "ciphertext-of" not in diagnostic
         assert "sender-key" not in diagnostic
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+
+    @pytest.mark.parametrize("location", ["room", "root", "relation"])
+    async def test_decrypted_malformed_history_reports_invalid_events(
+        self,
+        alice: PrincipalStore,
+        monkeypatch: pytest.MonkeyPatch,
+        location: str,
+    ) -> None:
+        """Malformed plaintext must not suggest missing keys or decrypt twice."""
+        malformed = raw("$broken", "malformed body")
+        del malformed["content"]["msgtype"]
+        decrypted = nio.Event.parse_decrypted_event(malformed)
+        assert isinstance(decrypted, nio.BadEvent)
+        encrypted_event = encrypted("$broken")
+        thread_id = None if location == "room" else "$root"
+        client = FakeClient(
+            events={"$root": encrypted_event if location == "root" else raw("$root", "root")},
+            relations={"$root": [encrypted_event] if location == "relation" else []},
+            history=[encrypted_event] if location == "room" else [],
+            olm=object(),
+        )
+        decrypt = Mock(return_value=decrypted)
+        monkeypatch.setattr(client, "decrypt_event", decrypt)
+
+        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+            await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
+
+        diagnostic = str(failure.value)
+        assert "invalid_events=1" in diagnostic
+        assert "encrypted_events=0" in diagnostic
+        assert "encrypted_sessions=0" in diagnostic
+        assert "historical encryption keys" not in diagnostic
+        assert "malformed body" not in diagnostic
+        assert "ciphertext-of" not in diagnostic
+        assert "sender-key" not in diagnostic
+        decrypt.assert_called_once()
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
 
     async def test_history_session_diagnostics_are_bounded(self, alice: PrincipalStore) -> None:
