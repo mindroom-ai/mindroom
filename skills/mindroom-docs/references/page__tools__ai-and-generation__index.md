@@ -127,22 +127,43 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
 
-### Example
+### Examples
+
+Each `gemini` toolkit instance uses one client and one Vertex location for both generation methods.
+Google's current model cards list `global`, `us`, and `eu` for [Gemini 3.1 Flash Image](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-image) and `us-central1` for [Veo 3.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate).
+These models have no documented shared serving location, so configure separate agents and disable the unused method in each toolkit.
 
 ```yaml
 agents:
-  studio:
+  illustrator:
+    display_name: Illustrator
+    tools:
+      - gemini:
+          vertexai: true
+          project_id: my-gcp-project
+          location: global
+          image_generation_model: gemini-3.1-flash-image
+          enable_generate_video: false
+  filmmaker:
+    display_name: Filmmaker
     tools:
       - gemini:
           vertexai: true
           project_id: my-gcp-project
           location: us-central1
-          image_generation_model: gemini-3.1-flash-image
           video_generation_model: veo-3.1-generate-001
+          enable_generate_image: false
 ```
+
+The `illustrator` agent can call:
 
 ```python
 generate_image("A minimal poster for a Matrix developer conference.")
+```
+
+The `filmmaker` agent can call:
+
+```python
 generate_video("A slow cinematic flythrough of a neon data center.")
 ```
 
@@ -217,10 +238,13 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the upstream fallback. |
+| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the fallback. The resolved key is passed directly to the request client. |
 | `model` | `text` | `no` | `minimax/h3` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
+
+Stored `api_key` credentials take precedence over `REPLICATE_API_KEY`.
+`REPLICATE_API_TOKEN` alone does not configure this toolkit and cannot override its resolved key.
 
 ### Example
 
@@ -398,7 +422,7 @@ text_to_speech("The build succeeded.")
 ### What It Does
 
 `lumalabs` exposes `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-Both calls create a Luma generation job and poll until it completes or times out.
+Both calls create a Luma generation job with the configured model and, by default, poll until it completes or times out.
 `generate_video()` optionally accepts provider-style keyframes, while `image_to_video()` builds the required keyframe structure from one or two image URLs.
 Completed jobs return remote video URL attachments.
 If `wait_for_completion` is false, the current implementation returns `Async generation unsupported`.
@@ -408,6 +432,7 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Luma AI API key, with `LUMAAI_API_KEY` as the upstream fallback. |
+| `model` | `select` | `no` | `ray-2` | Dream Machine video model: `ray-2` or `ray-flash-2`; explicit `null` uses the default `ray-2`. |
 | `wait_for_completion` | `boolean` | `no` | `true` | Poll until the provider job completes. Setting it to `false` is not useful on this branch because async return is not implemented. |
 | `poll_interval` | `number` | `no` | `3` | Seconds between status polls. |
 | `max_wait_time` | `number` | `no` | `300` | Maximum wait time in seconds before timing out. |
@@ -422,6 +447,7 @@ agents:
   motion:
     tools:
       - lumalabs:
+          model: ray-2
           poll_interval: 5
           max_wait_time: 600
 ```
@@ -437,6 +463,7 @@ image_to_video(
 
 ### Notes
 
+- The available models follow the [Dream Machine video API](https://docs.lumalabs.ai/docs/video-generation).
 - `image_to_video()` requires remote image URLs, not local file paths.
 - `wait_for_completion: false` does not currently provide a job handle or async response.
 - Use [`gemini`] instead when you specifically want Google's Veo-backed video path.
@@ -451,7 +478,19 @@ image_to_video(
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
 For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
-If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
+If `wait_for_completion` is enabled and the response includes a finite numeric ETA (as a number or numeric string) and a provider job ID, the tool polls that job at the provider fetch endpoint.
+Confirmed completion returns the fetched output URLs, replacing queued placeholders when present.
+A terminal provider rejection returns its message without unavailable media artifacts.
+Retryable service and rate-limit errors use the remaining polling attempts; exhaustion retains queued media links and the last status-check error.
+A retryable fetch response with a nonempty `Retry-After` header ends the current wait early, returning queued links, the provider explanation, and the requested retry delay without another fetch or an additional sleep.
+A timeout does not mean the remote job failed.
+If a queued response lacks the ID or finite numeric ETA needed for polling, the tool reports that completion could not be checked.
+With completion waiting enabled, generation and fetch requests each use 60-second connect and read timeouts.
+These limit connection establishment and waiting for response bytes, not the overall wall-clock duration.
+HTTP request time remains additional to the polling-attempt budget.
+Positive fractional attempt budgets round up to a whole attempt; with a positive polling cap, a queued job gets one immediate check even when its ETA and `add_to_eta` are zero.
+Setting `max_wait_time: 0` skips status polling.
+The tool sleeps for one second between attempts, never after the final check.
 
 ### Configuration
 
@@ -463,8 +502,8 @@ If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint 
 | `width` | `number` | `no` | `512` | Image or video width. |
 | `height` | `number` | `no` | `512` | Image or video height. |
 | `wait_for_completion` | `boolean` | `no` | `false` | Poll the provider fetch endpoint until the output is ready. |
-| `add_to_eta` | `number` | `no` | `15` | Extra seconds added to the provider ETA before timing out. |
-| `max_wait_time` | `number` | `no` | `60` | Maximum total wait time in seconds. |
+| `add_to_eta` | `number` | `no` | `15` | Extra one-second polling attempts added to the provider ETA, capped by `max_wait_time`. |
+| `max_wait_time` | `number` | `no` | `60` | Cap on one-second polling attempts; HTTP request time is additional. |
 
 ### Example
 
@@ -486,7 +525,9 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 
 - Despite the broad provider branding, the current wrapper exposes one opinionated `generate_media()` path rather than a generic arbitrary-model interface.
 - MP4 and GIF generation use a provider-side video template whose model and dimensions can be overridden with `model_id`, `width`, and `height`.
-- Returned media are provider URLs, and the success message usually includes the provider ETA rather than immediate ready-to-view bytes.
+- Returned media are provider URLs.
+- Without completion waiting, the response retains the provider ETA; queued URLs may not be ready yet.
+- Local media artifact IDs remain separate from the provider job ID used for completion polling.
 
 ## Related Docs
 

@@ -32,6 +32,39 @@ def empty_request_metric_totals() -> dict[str, int]:
     }
 
 
+def accumulate_model_request_metrics(
+    totals: dict[str, int],
+    observed_fields: set[str],
+    *,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int | None,
+    reasoning_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    time_to_first_token: float | None,
+    first_token_latency: float | None,
+) -> float | None:
+    """Accumulate observed integer counters and retain the first numeric latency.
+
+    The caller owns counter initialization; missing counters are left untouched.
+    """
+    for field_name, value in (
+        ("input_tokens", input_tokens),
+        ("output_tokens", output_tokens),
+        ("total_tokens", total_tokens),
+        ("reasoning_tokens", reasoning_tokens),
+        ("cache_read_tokens", cache_read_tokens),
+        ("cache_write_tokens", cache_write_tokens),
+    ):
+        if isinstance(value, int):
+            observed_fields.add(field_name)
+            totals[field_name] = totals.get(field_name, 0) + value
+    if first_token_latency is None and isinstance(time_to_first_token, (int, float)):
+        return float(time_to_first_token)
+    return first_token_latency
+
+
 def _serialize_metrics(metrics: RunMetrics | dict[str, Any] | None) -> dict[str, Any] | None:
     def _sanitize_metrics_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
         sanitized: dict[str, Any] = {}
@@ -290,6 +323,8 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
         raw_status = status.value if isinstance(status, RunStatus) else str(status)
         payload["status"] = raw_status.lower()
     model_payload: dict[str, Any] = {"config": model_name}
+    if model_config is not None and model_config.display_name:
+        model_payload["display_name"] = model_config.display_name
     if model_id is not None:
         model_payload["id"] = model_id
     if provider is not None:

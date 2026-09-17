@@ -146,6 +146,8 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_reader=context.conversation_reader,
+        entity_name=context.agent_name,
+        membership_index=context.require_agent_reply_memberships(),
         pin=True,
     )
 
@@ -179,6 +181,8 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_reader=context.conversation_reader,
+        entity_name=context.agent_name,
+        membership_index=context.require_agent_reply_memberships(),
         pin=True,
     )
 
@@ -232,6 +236,8 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         config=context.config,
         runtime_paths=context.runtime_paths,
         conversation_reader=context.conversation_reader,
+        entity_name=context.agent_name,
+        membership_index=context.require_agent_reply_memberships(),
         pin=True,
     )
 

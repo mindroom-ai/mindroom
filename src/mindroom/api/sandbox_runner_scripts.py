@@ -22,7 +22,9 @@ from mindroom.api.sandbox_runner import (
     resolve_script_state_workspace,
     validate_runner_token,
 )
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.models import (
     script_run_id_from_worker_key,
@@ -50,7 +52,6 @@ _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_SOURCE_BYTES = 128 * 1024
 _MAX_TOKEN_BYTES = 4096
 _RUN_ID_PATTERN = r"script-[0-9a-f]{32}"
-_LAUNCH_HANDLE_RE = re.compile(r"^Handle: (shell:[0-9a-f]{32})$", re.MULTILINE)
 
 __all__ = [
     "SandboxScriptCancelResponse",
@@ -96,11 +97,10 @@ async def _bounded_replay_request(request: Request) -> Request:
         if content_length > _MAX_REQUEST_BYTES:
             raise HTTPException(status_code=413, detail="Script worker request is too large.")
 
-    body = bytearray()
-    async for chunk in request.stream():
-        if len(chunk) > _MAX_REQUEST_BYTES - len(body):
-            raise HTTPException(status_code=413, detail="Script worker request is too large.")
-        body.extend(chunk)
+    try:
+        body = await collect_bounded_bytes(request.stream(), max_bytes=_MAX_REQUEST_BYTES)
+    except ByteLimitExceededError as exc:
+        raise HTTPException(status_code=413, detail="Script worker request is too large.") from exc
 
     original_receive = request.receive
     replayed = False
@@ -109,7 +109,7 @@ async def _bounded_replay_request(request: Request) -> Request:
         nonlocal replayed
         if not replayed:
             replayed = True
-            return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return {"type": "http.request", "body": body, "more_body": False}
         return await original_receive()
 
     return Request(request.scope, replay_receive)
@@ -271,7 +271,14 @@ def _workspace_file(
         metadata = resolved.stat()
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"{label} is unavailable in the worker workspace.") from exc
-    if not resolved.is_relative_to(workspace.resolve()) or not stat.S_ISREG(metadata.st_mode):
+    try:
+        resolved = resolve_path_within_root(workspace, resolved, symlinks="internal", strict=True)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be a regular file inside the worker workspace.",
+        ) from None
+    if not stat.S_ISREG(metadata.st_mode):
         raise HTTPException(status_code=400, detail=f"{label} must be a regular file inside the worker workspace.")
     if metadata.st_size <= 0 or metadata.st_size > byte_limit:
         raise HTTPException(status_code=400, detail=f"{label} exceeds its supported size.")
@@ -354,13 +361,6 @@ def _validate_source_digest(source_path: Path, expected_digest: str) -> None:
         raise HTTPException(status_code=400, detail="Script source digest does not match the launch receipt.")
 
 
-def _parse_launch_message(message: str, *, expected_handle: str) -> SandboxScriptRunResponse:
-    match = _LAUNCH_HANDLE_RE.search(message)
-    if match is not None and match.group(1) == expected_handle:
-        return SandboxScriptRunResponse(ok=True)
-    return SandboxScriptRunResponse(ok=False, error=message, failure_kind="worker")
-
-
 def _parse_status_message(message: str) -> SandboxScriptStatusResponse:
     status = parse_shell_supervisor_status(message)
     if status.state == "running":
@@ -434,7 +434,8 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         socket_path = await asyncio.to_thread(ensure_shell_supervisor)
     except ShellSupervisorStartupError as exc:
         return SandboxScriptRunResponse(ok=False, error=str(exc), failure_kind="worker")
-    message = await run_command_via_supervisor(
+    supervisor_handle = supervisor_handle_for_run(payload.run_id)
+    result = await run_command_via_supervisor(
         socket_path,
         namespace=_script_namespace(payload.worker_key, payload.run_id),
         argv=[python_executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
@@ -442,10 +443,12 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         cwd=str(workspace),
         tail=200,
         timeout=0,
-        handle=supervisor_handle_for_run(payload.run_id),
+        handle=supervisor_handle,
         max_runtime_seconds=payload.max_runtime_seconds,
     )
-    return _parse_launch_message(message, expected_handle=supervisor_handle_for_run(payload.run_id))
+    if result.handle != supervisor_handle:
+        return SandboxScriptRunResponse(ok=False, error=result.message, failure_kind="worker")
+    return SandboxScriptRunResponse(ok=True)
 
 
 @router.get("/{run_id}", response_model=SandboxScriptStatusResponse)

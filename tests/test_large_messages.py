@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import nio
 import pytest
 from nio.crypto import OutboundGroupSession
+from nio.crypto.attachments import decrypt_attachment
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -32,6 +33,7 @@ from mindroom.matrix.large_messages import (
     _calculate_delivery_event_size,
     _create_preview,
     _oversized_nonterminal_streaming_edit_sent_at,
+    _upload_text_as_mxc,
     calculate_event_size,
     is_edit_message,
     prepare_large_message,
@@ -65,6 +67,66 @@ class _UploadClient:
 
 def _large_text_content(prefix: str) -> dict[str, str]:
     return {"body": prefix + ("x" * 100000), "msgtype": "m.text"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize(
+    ("mimetype", "filename"),
+    [("text/plain", "message.txt"), ("text/html", "message.html"), ("application/json", "message-content.json")],
+)
+async def test_text_upload_preserves_bytes_and_metadata(encrypted: bool, mimetype: str, filename: str) -> None:
+    """Sidecars retain plaintext size and type while uploading decryptable bytes under the right name."""
+    client = MagicMock(spec=nio.AsyncClient)
+    client.upload.return_value = (nio.UploadResponse("mxc://server/sidecar"), None)
+    text = "Sidecar with UTF-8: café"
+
+    uri, info = await _upload_text_as_mxc(client, text, mimetype=mimetype, room_encrypted=encrypted)
+
+    assert uri == "mxc://server/sidecar"
+    assert info is not None
+    assert info["url"] == uri
+    assert info["size"] == len(text.encode())
+    assert info["mimetype"] == mimetype
+    kwargs = client.upload.call_args.kwargs
+    uploaded = kwargs["data_provider"](None, None).read()
+    assert kwargs["filesize"] == len(uploaded)
+    assert kwargs["filename"] == (f"{filename}.enc" if encrypted else filename)
+    assert kwargs["content_type"] == ("application/octet-stream" if encrypted else mimetype)
+    if encrypted:
+        assert uploaded != text.encode()
+        assert info["v"] == "v2"
+        assert (
+            decrypt_attachment(
+                uploaded,
+                info["key"]["k"],
+                info["hashes"]["sha256"],
+                info["iv"],
+            )
+            == text.encode()
+        )
+    else:
+        assert uploaded == text.encode()
+        assert set(info) == {"url", "size", "mimetype"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ["key", "iv", "hashes"])
+async def test_text_upload_rejects_incomplete_encryption_metadata(missing_field: str) -> None:
+    """Sidecars handle malformed SDK metadata as an encryption failure before uploading."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    encryption = {
+        "v": "v2",
+        "key": {"kty": "oct", "alg": "A256CTR", "ext": True, "k": "key", "key_ops": ["encrypt", "decrypt"]},
+        "iv": "iv",
+        "hashes": {"sha256": "hash"},
+    }
+    del encryption[missing_field]
+
+    with patch("mindroom.matrix.media.crypto.attachments.encrypt_attachment", return_value=(b"encrypted", encryption)):
+        assert await _upload_text_as_mxc(client, "secret", room_encrypted=True) == (None, None)
+
+    assert client.uploaded_data is None
 
 
 def _actual_encrypted_event_size(

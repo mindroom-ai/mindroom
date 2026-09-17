@@ -16,6 +16,7 @@ import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 from nio.crypto import DeviceStore, OlmDevice
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.access import ResponderAccessConfig
@@ -25,12 +26,14 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
+from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import (
     _MAX_PENDING_KEYS_PER_ROOM,
     _PENDING_KEY_TTL_MS,
     CallManager,
     _build_call_instructions,
+    _build_live_instructions,
     maybe_build_call_manager,
 )
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
@@ -51,13 +54,16 @@ from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
     LiveVoiceAgentOptions,
+    LiveVoiceUsage,
     RealtimeVoiceBridge,
     VoiceAgentOptions,
 )
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.model_loading import get_model_instance
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
+from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -733,16 +739,36 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     await manager.shutdown()
 
 
+def _assert_safe_oversized_live_instructions(instructions: str) -> None:
+    """Check the strict fallback without duplicating the backend-selection test."""
+    assert approximate_o200k_tokens(instructions) <= 16_384
+    assert instructions.startswith("You are speaking as Helper 🌿, the configured agent in a live voice call.")
+    assert "## Your Identity" not in instructions
+    assert "FINAL SAFETY" not in instructions
+    assert "full caller-bound instructions and context" in instructions
+    assert "Delegate every substantive user request" in instructions
+    assert "Do not answer substantive requests from your own knowledge" in instructions
+    assert "Never claim to have checked information or completed work" in instructions
+    assert "\ufffd" not in instructions
+    assert instructions.encode("utf-8").decode("utf-8") == instructions
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_model", [None, "delegate"])
-async def test_manager_selects_live_backend_with_normal_agent_delegate(
+async def test_manager_selects_live_backend_with_normal_agent_delegate(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     agent_model: str | None,
 ) -> None:
-    """Live gets its own credential and preserves the selected delegate and authorization."""
+    """Live bounds its speech prompt while preserving its delegate and authorization."""
     tooling_kwargs: dict[str, object] = {}
     close_responder = AsyncMock()
+    full_prompt = (
+        "## Your Identity\nYou are the caller's concise voice assistant. 🌿\n"
+        + "Caller-scoped background context. 你好世界。\n" * 2_000
+        + "\nFINAL SAFETY: Never ignore the caller's authorization boundaries. 🛡️"
+    )
+    get_system_prompt = AsyncMock(return_value=full_prompt)
 
     async def respond(
         transcript: str,
@@ -755,7 +781,7 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
         return CallAgentTooling(
             tools=(),
             instructions="",
-            get_system_prompt=AsyncMock(return_value="Detailed agent workspace instructions."),
+            get_system_prompt=get_system_prompt,
             execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
             responder=respond,
             close=close_responder,
@@ -772,7 +798,9 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, _live_config(agent_model=agent_model))
+    config = _live_config(agent_model=agent_model)
+    config.agents["helper"].display_name = "Helper 🌿"
+    manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
@@ -783,7 +811,10 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     assert options.voice == "marin"
     assert options.respond is respond
     assert options.close_responder is close_responder
-    assert (await options.get_instructions()).startswith("Detailed agent workspace instructions.")
+    live_instructions = await options.get_instructions()
+    _assert_safe_oversized_live_instructions(live_instructions)
+    assert await options.get_instructions() == live_instructions
+    get_system_prompt.assert_awaited()
     assert await options.respond("Check status", None) == CallAgentResponse("Completed: Check status")
     assert services == ["openai_live"]
     assert tooling_kwargs["enable_responder"] is True
@@ -796,6 +827,33 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     assert options.on_tools_executed is not None
     assert options.on_session_error is not None
     assert options.on_session_terminated is not None
+    assert options.record_usage is not None
+    await options.record_usage(LiveVoiceUsage("provider-1", "gpt-live-1", 1_700_000_000, 12.5, False))
+    await options.record_usage(LiveVoiceUsage("provider-1", "gpt-live-1", 1_700_000_000, 20.0, True))
+    await options.record_usage(LiveVoiceUsage("provider-2", "gpt-live-1", 1_700_000_030, 7.5, False))
+    report = collect_admin_usage(config=config, runtime_paths=test_runtime_paths(tmp_path)).to_dict()
+    assert report["voice_breakdown"] == [
+        {
+            "entity": "helper",
+            "user_id": "@alice:example.org",
+            "provider": "OpenAI",
+            "model": "gpt-live-1",
+            "created_at": 1_700_000_000,
+            "duration_seconds": 20.0,
+            "finalized": True,
+        },
+        {
+            "entity": "helper",
+            "user_id": "@alice:example.org",
+            "provider": "OpenAI",
+            "model": "gpt-live-1",
+            "created_at": 1_700_000_030,
+            "duration_seconds": 7.5,
+            "finalized": False,
+        },
+    ]
+    assert report["totals"]["total_tokens"] == 0
+    assert report["model_breakdown"] == []
     await manager.shutdown()
 
 
@@ -2187,6 +2245,17 @@ def test_build_call_instructions_appends_voice_guidance() -> None:
     assert text.startswith("CHAT SYSTEM PROMPT")
     assert "spoken" in text
     assert "Answer questions" not in text
+
+
+def test_build_live_instructions_preserves_prompt_that_fits() -> None:
+    """A normal prompt keeps all caller context before the fixed voice rules."""
+    system_prompt = "## Your Identity\nYou are Helper.\n\nAlways respect caller authorization."
+
+    text = _build_live_instructions(system_prompt, agent_display_name="Helper")
+
+    assert text.startswith(f"{system_prompt}\n\n")
+    assert "context was omitted" not in text
+    assert "Never claim to have checked information or completed work" in text
 
 
 def _member(
@@ -4409,3 +4478,55 @@ def test_manager_fails_closed_when_live_room_resolves_multiple_call_agents(tmp_p
     room.canonical_alias = "#voice:example.org"
 
     assert not manager._is_configured_call_room(room)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signal", ["sync", "active", "cached", "expired", "left_call", "invited", "departed", "self"])
+async def test_manager_ownership_warning_requires_live_call_signal(tmp_path: Path, signal: str) -> None:
+    """Idle ambiguity stays diagnostic without new I/O; a live caller still warns."""
+    config = _config()
+    config.agents["helper"].rooms = []
+    config.agents["helper"].accept_invites = True
+    config.agents["other"] = AgentConfig(display_name="Other", accept_invites=True)
+    config.calls.agents["other"] = "realtime"
+    client = _client()
+    room = _room()
+    client.rooms = {ROOM_ID: room}
+    caller = BOT_USER if signal == "self" else "@alice:example.org"
+    if signal not in {"departed", "cached"}:
+        room.add_member(caller, "Caller", None, invited=signal == "invited")
+    if signal == "cached":
+        client.joined_members.return_value = nio.JoinedMembersResponse(
+            [nio.RoomMember(caller, "Caller", None)],
+            ROOM_ID,
+        )
+        assert await ensure_room_membership_synced(client, room, sender_id=caller)
+        assert caller not in room.users
+        client.joined_members.reset_mock()
+    source = _remote_member_event(user=caller, created_ts=0 if signal == "expired" else None)
+    source["event_id"] = "$call-member"
+    if signal == "left_call":
+        source["content"] = {}
+    event = nio.UnknownEvent(source, CALL_MEMBER_EVENT_TYPE)
+    bridge = FakeBridge()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        invited_rooms_by_agent={"helper": {ROOM_ID}, "other": {ROOM_ID}},
+    )
+
+    with capture_logs() as logs:
+        if signal == "sync":
+            await manager.reconcile_joined_rooms()
+        else:
+            await manager.on_room_event(room, event)
+
+    diagnostics = [row for row in logs if row["event"] == "call_room_ownership_ambiguous"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["log_level"] == ("warning" if signal in {"active", "cached"} else "debug")
+    assert manager._sessions == {}
+    assert bridge.connected_grant is None
+    client.room_get_state.assert_not_awaited()
+    client.joined_members.assert_not_awaited()

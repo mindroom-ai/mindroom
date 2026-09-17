@@ -553,12 +553,15 @@ async def test_unreadable_server_exhaustion_fails_without_installing(principal: 
             "device_id": "DEVICE",
         },
     }
-    client = PagedClient(pages=[([encrypted], None)])
+    client = PagedClient(pages=[([encrypted], "older"), ([encrypted], None)])
     recovery = await principal.record_room_history_recovery(ROOM)
 
-    with pytest.raises(_HydrationError, match="unreadable"):
+    with pytest.raises(_HydrationError, match="unreadable") as failure:
         await hydrator(principal, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
+    assert "encrypted_events=2" in str(failure.value)
+    assert "encrypted_sessions=1" in str(failure.value)
+    assert ROOM in str(failure.value)
     assert await principal.room_history_recovery(ROOM) == recovery
     assert await bodies(principal) == []
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
@@ -584,9 +587,12 @@ async def test_bad_event_at_server_exhaustion_stays_repairable(principal: Princi
 
     recovery = await principal.record_room_history_recovery(ROOM)
 
-    with pytest.raises(_HydrationError, match="unreadable"):
+    with pytest.raises(_HydrationError, match="unreadable") as failure:
         await hydrator(principal, BadEventClient(pages=[])).ensure_hydrated(room_id=ROOM, thread_id=None)
 
+    assert "invalid_events=1" in str(failure.value)
+    assert "encrypted_events=0" in str(failure.value)
+    assert "historical encryption keys" not in str(failure.value)
     assert await principal.room_history_recovery(ROOM) == recovery
     assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
 

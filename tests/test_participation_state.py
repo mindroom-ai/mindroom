@@ -53,6 +53,7 @@ async def test_late_approval_cannot_reopen_failed_turn() -> None:
 
     assert not await decision
     assert gate.is_silent
+    assert not gate.is_declined
     assert gate.decision is not None
     assert gate.decision.reason == "preparation_failed"
 
@@ -73,3 +74,16 @@ async def test_settled_approval_cannot_be_overwritten() -> None:
         pytest.fail("A settled turn must not ask another decider.")
 
     assert await gate.check(unexpected_decider)
+
+
+@pytest.mark.asyncio
+async def test_deliberate_decline_is_distinct_from_failure() -> None:
+    """A model's free-text reason must not determine whether its decline is intentional."""
+    gate = ParticipationGate()
+
+    async def decide() -> ParticipationDecision:
+        return ParticipationDecision(action="stay_silent", reason="decision_failed")
+
+    assert not await gate.check(decide)
+    assert gate.is_silent
+    assert gate.is_declined

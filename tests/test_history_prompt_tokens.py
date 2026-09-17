@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import gc
 import inspect
+import subprocess
+import sys
+import textwrap
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Thread
@@ -470,6 +473,53 @@ def test_tool_surface_cache_evicts_entries_when_agent_is_collected() -> None:
     gc.collect()
 
     assert cache_key not in _TOOL_SURFACE_CACHE
+
+
+def test_tool_surface_cache_collection_during_insertion_does_not_deadlock() -> None:
+    """Collecting an old agent during cache allocation must not block a new one."""
+    # Isolate a potential deadlock from pytest: weakref callbacks swallow the
+    # exception raised by pytest-timeout, which can leave a worker stuck forever.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent("""
+                import faulthandler
+                import gc
+                from agno.agent import Agent
+                from mindroom.history import prompt_tokens
+
+                faulthandler.dump_traceback_later(10, exit=True)
+                gc.disable()
+                agent = Agent(metadata={})
+                agent.metadata["cycle"] = agent
+                prompt_tokens.agent_tool_definition_payloads_for_logging(agent)
+                cache_key = id(agent)
+                del agent
+                assert cache_key in prompt_tokens._TOOL_SURFACE_CACHE
+
+                original_ref = prompt_tokens.ref
+
+                def collect_during_allocation(entity, callback):
+                    # Weakref/tuple allocation can trigger cyclic GC while the
+                    # insertion holds the cache lock. Force that exact ordering.
+                    gc.collect()
+                    return original_ref(entity, callback)
+
+                prompt_tokens.ref = collect_during_allocation
+                new_agent = Agent()
+                assert prompt_tokens.agent_tool_definition_payloads_for_logging(new_agent) == []
+                assert cache_key not in prompt_tokens._TOOL_SURFACE_CACHE
+                assert id(new_agent) in prompt_tokens._TOOL_SURFACE_CACHE
+                faulthandler.cancel_dump_traceback_later()
+            """),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_prompt_payloads_distinguish_strict_functions() -> None:

@@ -1,12 +1,12 @@
 """Test extra_kwargs functionality in model configuration."""
 
 import asyncio
-import gc
 import importlib
+import inspect
 import os
 import tempfile
 import threading
-import warnings
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 
 import httpx
@@ -1743,7 +1743,7 @@ async def test_prompt_cache_hook_constructs_async_stream_off_event_loop(*, use_b
 @pytest.mark.parametrize("cancel_before_setup", [False, True])
 @pytest.mark.parametrize("use_beta", [False, True])
 @pytest.mark.asyncio
-async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(  # noqa: PLR0915
+async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutine(
     monkeypatch: pytest.MonkeyPatch,
     *,
     cancel_before_setup: bool,
@@ -1751,8 +1751,6 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
     use_beta: bool,
 ) -> None:
     """Cancellation during worker setup must dispose the SDK request coroutine."""
-    # Collect prior tests' unreachable coroutines before observing this operation.
-    gc.collect()
     transport_calls = 0
 
     class _RecordingTransport(httpx.AsyncBaseTransport):
@@ -1765,11 +1763,24 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         api_key="test-key",
         http_client=httpx.AsyncClient(transport=_RecordingTransport()),
     )
+    request_coroutines: list[Coroutine[object, object, object]] = []
+    request_created = threading.Event()
+    original_post: Callable[..., Coroutine[object, object, object]] = client.post
+
+    def observed_post(*args: object, **kwargs: object) -> Coroutine[object, object, object]:
+        request = original_post(*args, **kwargs)
+        request_coroutines.append(request)
+        request_created.set()
+        return request
+
+    # Observe the real SDK request before the messages resource binds client.post.
+    # Its closed state proves cleanup directly, without collecting the whole
+    # pytest worker's object graph repeatedly to provoke an unawaited warning.
+    monkeypatch.setattr(client, "post", observed_post)
     model = Claude(id="claude-opus-5", api_key="test-key", cache_system_prompt=False)
     setup_started = threading.Event()
     allow_setup = threading.Event()
     setup_finished = threading.Event()
-    manager_created = threading.Event()
 
     def blocking_prepare(_model: object, request_kwargs: dict[str, object]) -> dict[str, object]:
         setup_started.set()
@@ -1777,17 +1788,7 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         setup_finished.set()
         return request_kwargs
 
-    messages_namespace = client.beta.messages if use_beta else client.messages
-    namespace_type = type(messages_namespace)
-    original_stream = namespace_type.stream
-
-    def observed_stream(self: object, **kwargs: object) -> object:
-        stream_manager = original_stream(self, **kwargs)
-        manager_created.set()
-        return stream_manager
-
     monkeypatch.setattr("mindroom.claude_prompt_cache.prepare_claude_request_kwargs", blocking_prepare)
-    monkeypatch.setattr(namespace_type, "stream", observed_stream)
     vars(model)["get_async_client"] = lambda: client
     vars(model)["_prepare_request_kwargs"] = lambda *_args, **_kwargs: {"max_tokens": 1}
     vars(model)["_has_beta_features"] = lambda **_kwargs: use_beta
@@ -1808,30 +1809,26 @@ async def test_cancelled_async_stream_setup_does_not_orphan_sdk_request_coroutin
         ]
 
     setup_task = asyncio.create_task(consume_stream())
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        try:
-            assert await asyncio.to_thread(setup_started.wait, 2.0)
-            if not cancel_before_setup:
-                for _ in range(cancel_count):
-                    setup_task.cancel()
-            allow_setup.set()
-            with pytest.raises(asyncio.CancelledError):
-                await setup_task
-        finally:
-            allow_setup.set()
+    try:
+        assert await asyncio.to_thread(setup_started.wait, 2.0)
+        if not cancel_before_setup:
+            for _ in range(cancel_count):
+                setup_task.cancel()
+        allow_setup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await setup_task
 
         assert await asyncio.to_thread(setup_finished.wait, 2.0)
-        assert await asyncio.to_thread(manager_created.wait, 2.0)
+        assert await asyncio.to_thread(request_created.wait, 2.0)
         assert setup_task.cancelling() == cancel_count
-        del setup_task
-        for _ in range(3):
-            gc.collect()
-            await asyncio.sleep(0)
-
-    await client.close()
-    assert transport_calls == 0
-    assert not any("was never awaited" in str(warning.message) for warning in caught)
+        assert len(request_coroutines) == 1
+        assert inspect.getcoroutinestate(request_coroutines[0]) == inspect.CORO_CLOSED
+        assert transport_calls == 0
+    finally:
+        allow_setup.set()
+        await client.close()
+        for request in request_coroutines:
+            request.close()
 
 
 def _dirty_replay_messages() -> list[Message]:

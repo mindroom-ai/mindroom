@@ -39,6 +39,8 @@ Set `new_thread=True` to start a separate conversation, an explicit `thread_id` 
 Cross-room calls never inherit the origin room's thread.
 `edit` and `react` require the target message's `event_id`.
 `read` returns recent messages and edit options, with `limit` clamped to 1–50 and defaulting to 20.
+Room-timeline reads decrypt encrypted messages with the agent's available keys and omit messages they cannot decrypt.
+The room read limit counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
 
 ### Configuration
 
@@ -277,6 +279,21 @@ The tool normalizes the target to the canonical thread root before sending a new
 Manual summaries are marked with `model_name="manual"` and pin the thread by default, which stops automatic summaries from overwriting the title.
 Pass `pin=False` to write a summary that later automatic summaries may replace; that also releases a thread pinned by an earlier call.
 A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
+Manual tool writes require complete projected thread history within the 2,000-message read window.
+If history is incomplete or unavailable, the tool returns an error before publishing the summary.
+A history read can be incomplete below that window limit.
+
+Manual edits from MindRoom Chat also pin the summary immediately using a version 1 `m.notice` with `model="manual"` and `pinned=true` in `io.mindroom.thread_summary` metadata.
+The sender must have responder access to the updating agent or another eligible responder in the room, so a shared thread title stays pinned across agents.
+Human notices can establish a pin, but their message counts and enrichment markers are never trusted.
+Pins are recovered from thread history after restart and checked again before an in-flight automatic summary is delivered.
+Unavailable shared-responder authorization or a failed final history recheck defers automatic delivery; completed generation attempts keep the normal retry interval.
+Ad-hoc rooms defer an unproven pin decision until member discovery is complete; an already proven grant still pins immediately.
+Pin decisions follow Matrix event time, including the edit time when replacement content reasserts a pin, so a later human pin can override an older release that a cold client has not loaded.
+MindRoom Chat orders displayed titles by Matrix event or edit time, with `generated_at` breaking equal-time ties.
+Older clients and cached summaries without event timestamps use `generated_at` ordering.
+Explicit tool writes and later automatic updates advance past authorized predecessor timestamps, including client clock skew.
+If an existing timestamp cannot be advanced within the supported date range, a manual write returns an error instead of silently failing to replace the title.
 
 ### Configuration
 
@@ -414,11 +431,27 @@ matrix_api(
 
 ### What It Does
 
-`attachments` exposes `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
+`attachments` exposes `view_file(path=None, attachment_id=None)`, `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
+`view_file(path="plots/result.png")` delivers an image directly to the calling model in one call.
+`view_file(attachment_id="att_...")` views an authorized conversation attachment without a registration/fetch sequence.
+Supply exactly one source; keep `read_file` for ordinary text and code.
+Workspace paths resolve inside the selected worker, or inside the configured workspace in local execution mode.
+Worker-routed viewing uses the same configured workspace as shell and file tools, even when the primary and worker mount storage at different paths.
+PNG, JPEG, GIF and WebP inputs are supported up to 20 MiB and 40 million pixels.
+The delivered image is bounded to 2048 pixels on its longest edge and 5 MiB; resizing, conversion, and first-frame-only animation handling are disclosed in metadata.
+Transparent images retain their transparency; images that cannot fit the payload limit return an explicit error while preserving the source artifact.
+Viewing preserves the source path and retains a reusable attachment handle when context storage is available.
+A retained handle identifies the delivered image copy and follows existing attachment authority: it is available during the current tool run, or when supplied by conversation metadata.
+For later turns, reopen the original workspace path; model history replays up to four recent viewed images within a 10 MiB aggregate limit.
+Older or oversized replay images are omitted with an explicit notice; their saved artifacts remain available.
+Viewing does not publish, upload to a separate vision service, open a user-facing panel, or post into Matrix.
+Adapters that cannot deliver tool images return an explicit limitation while retaining the artifact.
+Share only when requested, using `matrix_message(attachments=["att_..."])` with the returned handle.
 `list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
 Pass a context-available attachment ID as `target` to return only that attachment; an ID outside the current context returns an error.
 `get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
 `get_attachment(attachment_id, view=True)` sends image, audio, video, or document content (including PDF) to the model, including local files and attachments from earlier in the conversation.
+Image viewing uses the same preparation, size limits, transformation disclosures, and history replay as `view_file` and browser screenshots.
 Viewing requires a model and provider adapter that support the media type, and a readable, context-scoped file no larger than 20 MiB.
 Rejected media requests retry without the media and give the agent explicit guidance to use the attachment ID/path with other available tools; known adapter omissions receive the same guidance.
 It cannot be combined with `mindroom_output_path`.
@@ -469,7 +502,12 @@ MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opu
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
 The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
-The background task bypasses inherited per-turn history memoization so the model sees fresh authoritative full history including the delivered response.
+The background task reads fresh authoritative history for counting and includes the delivered response.
+The model prompt excludes trusted summary notices and messages with empty bodies.
+If more than 50 messages remain, it includes only the first three and last three plus an omission notice; at 50 or fewer, it includes all remaining messages.
+Automatic refreshes require complete projected thread history within the 2,000-message read window, just like manual tool writes.
+Incomplete or unavailable history skips an automatic refresh, and incompleteness can occur below the window limit.
+The read window counts projected messages, while prompt sampling counts body-bearing non-summary messages; neither is a raw Matrix event count.
 Existing tags win, including tags observed after the model call finishes.
 MindRoom serializes automatic and tool-driven tag mutations per thread within one running process, and persisted removal tombstones prevent a later automatic batch from repopulating a deliberately untagged thread.
 The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the refreshed summary.

@@ -69,3 +69,20 @@ def resolve_human_requester_alias(
     if not is_human_requester_id(canonical_user_id, config, runtime_paths):
         return user_id
     return canonical_user_id
+
+
+def equivalent_requester_ids(
+    user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> set[str]:
+    """Return the resolved requester and its permitted human bridge aliases."""
+    canonical_user_id = resolve_human_requester_alias(user_id, config, runtime_paths)
+    return {
+        canonical_user_id,
+        *(
+            alias
+            for alias in config.authorization.aliases.get(canonical_user_id, ())
+            if resolve_human_requester_alias(alias, config, runtime_paths) == canonical_user_id
+        ),
+    }

@@ -54,10 +54,12 @@ class TestUploadFileAsMxc:
     """Tests for _upload_file_as_mxc."""
 
     @pytest.mark.asyncio
-    async def test_unencrypted_upload_returns_mxc_and_info(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("tuple_response", [False, True])
+    async def test_unencrypted_upload_returns_mxc_and_info(self, tmp_path: Path, tuple_response: bool) -> None:
         """Unencrypted upload should return MXC URI and info payload without file key."""
         client = _mock_client(encrypted=False)
-        client.upload.return_value = (_upload_response("mxc://localhost/plain"), {})
+        response = _upload_response("mxc://localhost/plain")
+        client.upload.return_value = (response, {}) if tuple_response else response
 
         file = tmp_path / "doc.txt"
         file.write_text("hello", encoding="utf-8")
@@ -75,10 +77,15 @@ class TestUploadFileAsMxc:
         assert payload["info"]["mimetype"] == "text/plain"
         assert payload["info"]["size"] == 5
         assert "file" not in payload
+        kwargs = client.upload.call_args.kwargs
+        assert kwargs["data_provider"](None, None).read() == b"hello"
+        assert kwargs["content_type"] == "text/plain"
+        assert kwargs["filename"] == "doc.txt"
+        assert kwargs["filesize"] == 5
 
     @pytest.mark.asyncio
     async def test_encrypted_upload_returns_file_payload(self, tmp_path: Path) -> None:
-        """Encrypted upload should include encryption keys in the file payload."""
+        """Encrypted uploads retain complete SDK key and hash dictionaries, including extensions."""
         client = _mock_client(encrypted=True)
         client.upload.return_value = (_upload_response("mxc://localhost/enc"), {})
 
@@ -86,13 +93,21 @@ class TestUploadFileAsMxc:
         file.write_bytes(b"\x00" * 16)
 
         with patch(
-            "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
+            "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
             return_value=(
                 b"encrypted_bytes",
                 {
-                    "key": {"k": "test_key"},
+                    "v": "v2",
+                    "key": {
+                        "kty": "oct",
+                        "alg": "A256CTR",
+                        "ext": True,
+                        "k": "test_key",
+                        "key_ops": ["encrypt", "decrypt"],
+                        "kid": "sdk-key-id",
+                    },
                     "iv": "test_iv",
-                    "hashes": {"sha256": "test_hash"},
+                    "hashes": {"sha256": "test_hash", "sha512": "additional_hash"},
                 },
             ),
         ):
@@ -108,9 +123,16 @@ class TestUploadFileAsMxc:
         assert "file" in payload
         file_payload = payload["file"]
         assert file_payload["url"] == "mxc://localhost/enc"
-        assert file_payload["key"] == {"k": "test_key"}
+        assert file_payload["key"] == {
+            "kty": "oct",
+            "alg": "A256CTR",
+            "ext": True,
+            "k": "test_key",
+            "key_ops": ["encrypt", "decrypt"],
+            "kid": "sdk-key-id",
+        }
         assert file_payload["iv"] == "test_iv"
-        assert file_payload["hashes"] == {"sha256": "test_hash"}
+        assert file_payload["hashes"] == {"sha256": "test_hash", "sha512": "additional_hash"}
         assert file_payload["v"] == "v2"
         assert file_payload["mimetype"] == "application/octet-stream"
 
@@ -118,6 +140,40 @@ class TestUploadFileAsMxc:
         upload_call = client.upload.call_args
         assert upload_call.kwargs["content_type"] == "application/octet-stream"
         assert upload_call.kwargs["filename"] == "secret.bin.enc"
+        assert upload_call.kwargs["data_provider"](None, None).read() == b"encrypted_bytes"
+        assert upload_call.kwargs["filesize"] == len(b"encrypted_bytes")
+        assert file_payload["size"] == 16
+        assert payload["info"] == {"size": 16, "mimetype": "application/octet-stream"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_field", ["key", "iv", "hashes"])
+    async def test_incomplete_encryption_metadata_raises_before_upload(
+        self,
+        tmp_path: Path,
+        missing_field: str,
+    ) -> None:
+        """Delivery keeps malformed SDK metadata outside its encryption-failure handler."""
+        client = _mock_client(encrypted=True)
+        file = tmp_path / "secret.txt"
+        file.write_bytes(b"secret")
+        encryption = {
+            "v": "v2",
+            "key": {"kty": "oct", "alg": "A256CTR", "ext": True, "k": "key", "key_ops": ["encrypt", "decrypt"]},
+            "iv": "iv",
+            "hashes": {"sha256": "hash"},
+        }
+        del encryption[missing_field]
+
+        with (
+            patch(
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
+                return_value=(b"encrypted", encryption),
+            ),
+            pytest.raises(KeyError, match=missing_field),
+        ):
+            await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="text/plain")
+
+        client.upload.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_upload_returns_none_on_read_failure(self, tmp_path: Path) -> None:
@@ -136,9 +192,10 @@ class TestUploadFileAsMxc:
         assert payload is None
 
     @pytest.mark.asyncio
-    async def test_upload_returns_none_on_upload_error(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("encrypted", [False, True])
+    async def test_upload_returns_none_on_upload_error(self, tmp_path: Path, encrypted: bool) -> None:
         """Should return (None, None) when the Matrix upload fails."""
-        client = _mock_client()
+        client = _mock_client(encrypted=encrypted)
         error = MagicMock(spec=nio.UploadError)
         client.upload.return_value = (error, {})
 
@@ -154,6 +211,18 @@ class TestUploadFileAsMxc:
 
         assert mxc_uri is None
         assert payload is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_room_encryption_prevents_upload(self, tmp_path: Path) -> None:
+        """An inconclusive remote encryption lookup must never cause a plaintext upload."""
+        client = _mock_client()
+        client.rooms.clear()
+        client.room_get_state_event.return_value = nio.RoomGetStateEventError("Unavailable", "M_UNKNOWN")
+        file = tmp_path / "secret.txt"
+        file.write_bytes(b"secret")
+
+        assert await _upload_file_as_mxc(client, "!room:localhost", file, mimetype="text/plain") == (None, None)
+        client.upload.assert_not_awaited()
 
 
 class TestSendRuntimeEncryptedMediaMessage:
@@ -200,7 +269,15 @@ class TestSendRuntimeEncryptedMediaMessage:
         assert content["msgtype"] == "m.image"
         assert content["body"] == attachment.filename
         assert content["info"] == {"size": 321, "mimetype": "image/png"}
-        assert content["file"] == attachment.encrypted_file_content()
+        assert content["file"] == {
+            "url": "mxc://localhost/existing",
+            "key": {"alg": "A256CTR", "ext": True, "k": "key", "key_ops": ["encrypt", "decrypt"], "kty": "oct"},
+            "iv": "iv",
+            "hashes": {"sha256": "hash"},
+            "v": "v2",
+            "mimetype": "image/png",
+            "size": 321,
+        }
         assert content["m.relates_to"] == {
             "rel_type": "m.thread",
             "event_id": "$thread:localhost",
@@ -296,7 +373,7 @@ class TestSendFileMessage:
         with (
             patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
             patch(
-                "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
                 return_value=(
                     b"encrypted",
                     {
@@ -463,7 +540,7 @@ class TestSendFileMessage:
         with (
             patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
             patch(
-                "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
                 return_value=(
                     b"encrypted",
                     {
@@ -585,7 +662,7 @@ class TestSendAudioMessage:
         with (
             patch("mindroom.matrix.client_delivery.crypto.ENCRYPTION_ENABLED", True),
             patch(
-                "mindroom.matrix.client_delivery.crypto.attachments.encrypt_attachment",
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
                 return_value=(
                     b"encrypted",
                     {
@@ -1055,7 +1132,7 @@ class TestSendMessageResult:
         }
         with (
             patch(
-                "mindroom.matrix.large_messages.crypto.attachments.encrypt_attachment",
+                "mindroom.matrix.media.crypto.attachments.encrypt_attachment",
                 return_value=(encrypted_sidecar, encryption_keys),
             ) as encrypt_attachment,
             patch("mindroom.matrix.client_delivery.asyncio.sleep", new=restore_room_cache),

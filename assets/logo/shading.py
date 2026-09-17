@@ -34,7 +34,11 @@ class SurfaceGrid:
 
 def render(root: etree._Element, size: int = 1024) -> bytes:
     """Rasterize the entire canvas; preserve the viewBox and paint coordinates."""
-    return resvg_py.svg_to_bytes(svg_string=etree.tostring(root, encoding="unicode"), width=size, height=size)
+    return resvg_py.svg_to_bytes(
+        svg_string=etree.tostring(root, encoding="unicode"),
+        width=size,
+        height=size,
+    )
 
 
 def pixels(png: bytes) -> NDArray[np.uint8]:

@@ -71,7 +71,7 @@ class NativeDesktopConfig:
     browser: NativeBrowserConfig
 
     @classmethod
-    def from_payload(cls, raw: object) -> NativeDesktopConfig:
+    def from_payload(cls, raw: object, *, validate_browser_paths: bool = True) -> NativeDesktopConfig:
         """Parse a strict version-one configuration."""
         payload = _mapping(raw, "configuration")
         version = payload.get("v")
@@ -124,9 +124,9 @@ class NativeDesktopConfig:
                 maximum=120,
             ),
         )
-        if browser.executable_path is not None and not browser.executable_path.is_file():
+        if validate_browser_paths and browser.executable_path is not None and not browser.executable_path.is_file():
             raise NativeConfigError("invalid_request", "Native desktop browser executable_path must be a file.")
-        if browser.user_data_dir is not None and not browser.user_data_dir.is_dir():
+        if validate_browser_paths and browser.user_data_dir is not None and not browser.user_data_dir.is_dir():
             raise NativeConfigError("invalid_request", "Native desktop browser user_data_dir must be a directory.")
         return cls(
             revision=revision,
@@ -134,10 +134,14 @@ class NativeDesktopConfig:
             controller=controller,
             allowed_requester_ids=_text_tuple(payload.get("allowed_requester_ids"), "allowed requester"),
             allowed_agent_names=_text_tuple(payload.get("allowed_agent_names"), "allowed agent"),
-            allowed_app_ids=_text_tuple(payload.get("allowed_app_ids"), "allowed application"),
+            allowed_app_ids=_text_tuple(payload.get("allowed_app_ids"), "allowed application", allow_empty=True),
             capture=capture,
             browser=browser,
         )
+
+    def with_allowed_apps(self, raw: object) -> NativeDesktopConfig:
+        """Validate an app-only edit without revalidating unrelated browser paths."""
+        return replace(self, allowed_app_ids=_text_tuple(raw, "allowed application", allow_empty=True))
 
     def to_payload(self) -> dict[str, object]:
         """Serialize the complete non-secret configuration."""
@@ -195,7 +199,8 @@ def load_native_config(path: Path) -> NativeDesktopConfig:
         ) from exc
     except OSError as exc:
         raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
-    config = NativeDesktopConfig.from_payload(payload)
+    # Persisted paths may disappear; they must not prevent unrelated settings from being loaded or edited.
+    config = NativeDesktopConfig.from_payload(payload, validate_browser_paths=False)
     if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) & 0o077:
         raise NativeConfigError(
             "configuration_repair_required",
@@ -258,8 +263,10 @@ def _text(raw: object, label: str) -> str:
     return raw
 
 
-def _text_tuple(raw: object, label: str) -> tuple[str, ...]:
-    if not isinstance(raw, list) or not raw or len(raw) > 256:
+def _text_tuple(raw: object, label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if not isinstance(raw, list) or len(raw) > 256:
+        raise NativeConfigError("invalid_request", f"Native desktop {label} must be a list of at most 256 entries.")
+    if not raw and not allow_empty:
         raise NativeConfigError("invalid_request", f"Native desktop {label} list must not be empty.")
     values = tuple(_text(value, label) for value in raw)
     if len(set(values)) != len(values):

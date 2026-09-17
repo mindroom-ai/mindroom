@@ -31,12 +31,15 @@ final class DesktopControlStore: ObservableObject {
     @Published var browserProfile = ""
     @Published var controlMinutes = 15
 
-    let applications = InstalledApplicationCatalog.applications()
+    @Published private(set) var applications = InstalledApplicationCatalog.applications()
     private let helper: DesktopBridgeProcess
     private var subscriptions = Set<AnyCancellable>()
     private var countdownTimer: Timer?
     @Published private var confirmedIdentity: String?
     private var observedConfigRevision = 0
+    private var observedBrowserConfiguration: DesktopBrowserStatus?
+    private var addedApplicationURLs = Set<URL>()
+    private var didHydrateSession = false
     private var pendingOperationCount = 0
 
     init(helper: DesktopBridgeProcess? = nil) {
@@ -90,6 +93,7 @@ final class DesktopControlStore: ObservableObject {
     func saveConfiguration() {
         guard identityConfirmed else {
             errorMessage = "Confirm the displayed controller, requester, and agent before saving."
+            recovery = nil
             return
         }
         let config: [String: Any] = [
@@ -113,6 +117,48 @@ final class DesktopControlStore: ObservableObject {
             ],
         ]
         perform("configure", parameters: ["expected_revision": status.config.revision, "config": config])
+    }
+
+    var hasAppSelectionChanges: Bool {
+        selectedAppIDs != Set(status.config.allowedAppIDs ?? [])
+    }
+
+    func saveAllowedApplications() {
+        guard status.config.state == "ready" else {
+            errorMessage = "Complete connection setup before saving app access."
+            recovery = nil
+            return
+        }
+        perform(
+            "set_allowed_apps",
+            parameters: ["expected_revision": status.config.revision, "allowed_app_ids": selectedAppIDs.sorted()],
+            stopFirst: status.canStopBridge
+        )
+    }
+
+    func discardAppSelectionChanges() {
+        selectedAppIDs = Set(status.config.allowedAppIDs ?? [])
+    }
+
+    func refreshApplications() {
+        let imported = addedApplicationURLs.compactMap {
+            InstalledApplicationCatalog.application(at: $0)
+        }
+        var found: [String: InstalledDesktopApplication] = [:]
+        for application in imported + InstalledApplicationCatalog.applications() { found[application.id] = application }
+        applications = found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    func addApplication(at url: URL) -> String? {
+        guard let application = InstalledApplicationCatalog.application(at: url) else {
+            errorMessage = "Choose a macOS application with a bundle identifier."
+            recovery = nil
+            return nil
+        }
+        addedApplicationURLs.insert(url)
+        refreshApplications()
+        selectedAppIDs.insert(application.id)
+        return application.id
     }
 
     func importSetupDescriptor() {
@@ -226,6 +272,7 @@ final class DesktopControlStore: ObservableObject {
         parameters: [String: Any] = [:],
         timeout: Duration = .seconds(35),
         urgent: Bool = false,
+        stopFirst: Bool = false,
         completion: (([String: Any]) -> Void)? = nil
     ) {
         guard urgent || !isBusy else { return }
@@ -235,6 +282,9 @@ final class DesktopControlStore: ObservableObject {
         recovery = nil
         Task {
             do {
+                if stopFirst {
+                    _ = try await helper.request(action: "stop", timeout: .seconds(120))
+                }
                 let result = try await helper.request(action: action, parameters: parameters, timeout: timeout)
                 completion?(result)
             } catch let DesktopBridgeProcessError.helper(error) {
@@ -257,7 +307,14 @@ final class DesktopControlStore: ObservableObject {
     }
 
     func hydrateConfiguration(from value: DesktopStatus) {
-        let shouldHydrateBrowser = value.config.state == "ready" && observedConfigRevision != value.config.revision
+        if !didHydrateSession, value.pairing.sessionState == .ready {
+            didHydrateSession = true
+            if matrixUserID.isEmpty, homeserver == "https://mindroom.chat" {
+                homeserver = value.pairing.homeserver ?? homeserver
+                matrixUserID = value.pairing.userID ?? ""
+            }
+        }
+        let shouldHydrateConfiguration = value.config.state == "ready" && observedConfigRevision != value.config.revision
         if observedConfigRevision != value.config.revision {
             confirmedIdentity = nil
         }
@@ -266,14 +323,21 @@ final class DesktopControlStore: ObservableObject {
         if controllerDeviceID.isEmpty { controllerDeviceID = value.config.controllerDeviceID ?? "" }
         if requesterIDs.isEmpty { requesterIDs = value.config.allowedRequesterIDs?.joined(separator: ", ") ?? "" }
         if agentNames.isEmpty { agentNames = value.config.allowedAgentNames?.joined(separator: ", ") ?? "" }
-        if selectedAppIDs.isEmpty { selectedAppIDs = Set(value.config.allowedAppIDs ?? []) }
+        if shouldHydrateConfiguration { selectedAppIDs = Set(value.config.allowedAppIDs ?? []) }
         if controllerFingerprint.isEmpty {
             controllerFingerprint = value.pairing.controllerFingerprint ?? ""
         }
-        if shouldHydrateBrowser {
-            browserEnabled = value.browser.configured
-            browserExecutable = value.browser.executablePath ?? ""
-            browserProfile = value.browser.userDataDirectory ?? ""
+        if shouldHydrateConfiguration {
+            if observedBrowserConfiguration == nil || browserEnabled == observedBrowserConfiguration?.configured {
+                browserEnabled = value.browser.configured
+            }
+            if observedBrowserConfiguration == nil || browserExecutable == (observedBrowserConfiguration?.executablePath ?? "") {
+                browserExecutable = value.browser.executablePath ?? ""
+            }
+            if observedBrowserConfiguration == nil || browserProfile == (observedBrowserConfiguration?.userDataDirectory ?? "") {
+                browserProfile = value.browser.userDataDirectory ?? ""
+            }
+            observedBrowserConfiguration = value.browser
         }
     }
 

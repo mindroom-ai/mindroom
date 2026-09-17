@@ -28,7 +28,7 @@ This page describes the current sandboxed execution model.
 The static worker runtime authenticates requests with `MINDROOM_SANDBOX_PROXY_TOKEN`.
 Kubernetes dedicated workers derive a separate runner token for each worker from that control-plane token and the worker key.
 Compromising one dedicated worker token does not authorize requests to another dedicated worker runner.
-For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
+For worker-routed toolkits with declared credential configuration fields, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
 Credentials never become part of the normal tool arguments or the model prompt.
 
 MindRoom currently ships three worker backend shapes:
@@ -236,7 +236,8 @@ Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
 MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
-Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools unless you remove them or override `execution_env`.
+Proxied `shell` receives a filtered system environment plus explicitly allowed process-env passthrough; `python` receives only allowed runtime names from the process and config-adjacent `.env`.
+Neither inherits arbitrary `.env` values; see [Shell env and PATH](#shell-env-and-path) for explicit passthrough and request-environment controls.
 If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.
@@ -296,17 +297,33 @@ docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
 
 In a live validation, separate `code` and `research` requests produced separate worker containers, and a second `code` request reused the original `code` container.
 
+## Headless browser sessions
+
+Dedicated Docker and Kubernetes workers with `worker_scope: shared`, `user`, or `user_agent` retain headless browser sessions across calls when the visible worker computer is disabled.
+Include `browser` in the agent's `worker_tools` to use this behavior.
+Calls within one worker are serialized and reuse its open tabs and browser profile; each call still prepares its current authorization, output settings, and execution environment.
+A change to the browser configuration or prepared process environment closes the retained session before the next call.
+Cancellation and worker shutdown also clean up browser resources.
+
+Generic and unscoped runners continue to isolate browser calls in separate subprocesses.
+The `browser` tool keeps calls resolving to its Matrix desktop target in the primary runtime, without allocating a worker.
+An explicit `target: host` still uses the configured worker even when `default_target: desktop` is set.
+For a visible browser and Chat viewer, use [Worker Computer](../tools/worker-computer.md).
+
 ## Environment variable reference
 
 ### Interactive worker computers
 
 [Worker Computer](../tools/worker-computer.md) adds a persistent headed Chromium browser and a Chat viewer to dedicated Docker and Kubernetes workers.
-Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true` on the primary runtime, use `worker_scope: user_agent`, and include `browser` in the agent's `worker_tools`.
+For Docker, first select `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer` on the primary runtime.
+Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true`, use `worker_scope: user_agent`, and select exactly one worker-routed browser provider: `browser` or `browser_mcp`.
+If the agent sets `worker_tools`, include the selected provider; `browser_mcp` routes to workers by default when that override is absent.
 Set `MINDROOM_COMPUTER_ALLOWED_ORIGINS` to an explicit JSON list of trusted Chat origins and route the public computer HTTP/WebSocket gateway to the actual runtime API.
 The shared static-runner Compose sidecar does not support interactive computers.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MINDROOM_DOCKER_WORKER_SECURITY_POLICY` | Docker pool policy: `runtime_default` or `computer`; Computer requires `computer` | `runtime_default` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the dedicated worker's persistent browser/display | `false` |
 | `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | Explicit allowed Chat origins for computer HTTP and WebSocket requests | `[]` |
 
@@ -317,9 +334,9 @@ The shared static-runner Compose sidecar does not support interactive computers.
 | `MINDROOM_WORKER_BACKEND` | Worker backend name: `static_runner`, `docker`, or `kubernetes` | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | URL of the shared sandbox runner when using `static_runner` | _(none — plain static-runner installs execute locally)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Static-runner bearer token and Kubernetes control-plane secret used to derive per-worker runner tokens | _(required for worker-routed execution)_ |
-| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off` | _(unset — uses static proxy all-tools routing when `MINDROOM_SANDBOX_PROXY_URL` is set; otherwise uses default worker-routed execution tools)_ |
-| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when no agent-level `worker_tools` override is active | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
-| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit local execution of `coding`, `docker`, `file`, `python`, and `shell` when routing was explicitly requested but no worker/proxy backend is available | `false` |
+| `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, `off`; applies when neither agent nor defaults sets `worker_tools` | _(unset — static proxy URL routes eligible tools; dedicated backends route metadata defaults; plain static installs run locally)_ |
+| `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tool names to proxy when neither agent nor defaults sets `worker_tools` | `*` for all mode or unset static-proxy mode, empty for selective mode or unset no-proxy mode |
+| `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Permit tools whose default target is a worker to run locally when static routing is requested without a proxy URL; never bypasses dedicated workers | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | HTTP timeout for proxy calls | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Maximum attachment bytes the primary runtime will inline when saving context attachments into a worker workspace with `get_attachment(..., mindroom_output_path=...)` | `16777216` (16 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
@@ -366,14 +383,20 @@ If the warm template fails to start, dispatch falls back to spawn-per-call and r
 
 ## Execution modes
 
+Environment modes apply when both the agent's `worker_tools` and `defaults.worker_tools` are null or omitted.
+An explicit YAML list, including `[]`, takes precedence over these modes.
+Tools that require the primary runtime stay local, and runner processes never proxy their own tools.
+
 | Mode | Behavior |
 |------|----------|
-| `selective` | Only tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS` are proxied. Recommended. |
-| `all` / `sandbox_all` | Every tool call goes through the proxy |
-| `off` / `local` / `disabled` | Proxy disabled even if URL is set, and execution tools may run in the primary runtime |
-| _(unset)_ | With a configured static proxy URL, proxies all tools for legacy compatibility. With `MINDROOM_WORKER_BACKEND=docker` or `kubernetes`, routes default worker tools and fails closed if the backend is misconfigured. With plain `static_runner` and no proxy URL, tools execute locally. |
+| `selective` | Proxy eligible tools listed in `MINDROOM_SANDBOX_PROXY_TOOLS`, or all eligible tools for `*`. An empty selection routes nothing. |
+| `all` / `sandbox_all` | Proxy every eligible registry tool enabled for the agent |
+| `off` / `local` / `disabled` | Run tools in the primary runtime even if a proxy URL or dedicated backend is configured |
+| _(unset)_ | An explicit `MINDROOM_SANDBOX_PROXY_TOOLS` selection controls routing. Otherwise, a configured static proxy URL routes all eligible tools, dedicated Docker/Kubernetes backends route metadata defaults, and plain `static_runner` without a proxy URL runs locally. Requested dedicated routing fails closed when misconfigured. |
 
-`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is an explicit escape hatch for local development that restores primary-runtime execution for `coding`, `docker`, `file`, `python`, and `shell` after routing was explicitly requested without a working worker/proxy backend.
+`MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` permits local execution when routing was requested with `static_runner` but no proxy URL is configured.
+It applies only to tools whose metadata defaults to worker execution, currently `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
+It does not bypass dedicated Docker or Kubernetes workers, and a configured static proxy URL keeps calls routed.
 Do not set it in hosted or multi-tenant deployments.
 
 ## Shell env and PATH
@@ -511,7 +534,7 @@ The runner sources this script with `bash` after applying the workspace home con
 
 **Filtering:**
 
-`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.).
+`.mindroom/worker-env.sh` is sourced by bash with the prepared request environment and applicable worker/workspace defaults, rather than the runner’s full process environment.
 To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export.
 After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook.
@@ -531,19 +554,14 @@ For an example, see `docs/tools/execution-and-coding.md`.
 
 ## Credential leases
 
-Some proxied tools need credentials, such as a `shell` tool that runs `git push` and needs an SSH key.
-Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease**.
-That lease is a short-lived, single-use token that the runner exchanges for credentials during execution.
+A **credential lease** supplies short-lived credential values as constructor configuration overrides to a worker-routed toolkit.
+`MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` maps tool names, `tool.function` selectors, or `*` to lists of credential service names.
+Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
+Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
+The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 
-Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
-
-```bash
-export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
-```
-
-This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
-Credentials are never persisted by the runner; a lease holds them in memory until consumed or expired.
-Each lease is consumed on use and expires after the configured TTL.
+Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
+For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
 
 ## Security considerations
 
@@ -552,8 +570,13 @@ Each lease is consumed on use and expires after the configured TTL.
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
-- Helm-managed Kubernetes worker containers drop all capabilities and disable privilege escalation.
-- Dedicated Docker workers do not currently receive the same chart-managed `securityContext`; harden their Docker host and launch policy separately.
+- Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
+  `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block
+  Chromium's namespace sandbox is documented in [Worker Computer](../tools/worker-computer.md#browser-and-container-sandboxing).
+- With `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, dedicated Docker workers drop all capabilities, set `no-new-privileges`, and use the packaged Chromium-compatible seccomp profile.
+  This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
+  Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
+  With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.
@@ -597,7 +620,7 @@ agents:
     # inherits worker_tools from defaults → shell and file proxied
 
   research:
-    tools: [web_search, calculator]
+    tools: [duckduckgo, calculator]
     worker_tools: []                 # explicitly no proxying
 
   untrusted:
@@ -609,17 +632,37 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Use MindRoom's built-in default routing policy. Today that defaults to `coding`, `docker`, `file`, `python`, and `shell` when those tools are enabled for the agent |
+| `null` (omitted) | Inherit `defaults.worker_tools`; if that is also null or omitted, use the environment routing policy described under [Execution modes](#execution-modes), including toolkit metadata defaults for a dedicated backend with no explicit mode or tool selection |
 | `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
+Tools whose catalog metadata sets `requires_primary_runtime=True` or `requires_room_context=True` stay in the primary runtime even when listed.
+This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
+The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls.
+The generic worker runner creates a fresh toolkit for each request.
+`config_manager` stays primary to manage the authored configuration and live API snapshots; its roomless inspection functions remain available.
+`agent_vault_access` stays primary to read the owner token mounted for self-service Vault grants.
+The `browser` toolkit selects placement per call: desktop uses the primary Matrix context, while host follows the configured worker policy.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
-Without that URL, explicitly selected worker-routed tools fail closed unless `MINDROOM_SANDBOX_EXECUTION_MODE=off|local|disabled` or `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` is set.
-If `worker_tools` is omitted and no static proxy URL is configured, simple local installs run those tools in the primary MindRoom process.
+Without that URL, explicitly selected worker-routed tools fail closed, subject to the limited `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` fallback described above.
+The `off`, `local`, and `disabled` modes do not override an explicit YAML list.
+If both YAML worker lists are omitted, no environment setting requests routing, and no static proxy URL is configured, simple local installs run tools in the primary MindRoom process.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
+
+Worker-routed media tools return typed images, audio, video, and files.
+The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result.
+Audio preserves explicit formats and recognized filename extensions; when those are absent, known MP3/WAV MIME types supply the format for inline provider requests.
+Media downloads follow at most five redirects and close each intermediate response without reading its body.
+Downloads request `Accept-Encoding: identity`; a final response with another HTTP `Content-Encoding` fails as a tool error before its body is read.
+The final identity response is streamed within the media byte limits below.
+Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
+
+Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total.
+Result text is limited to 4,194,304 characters and JSON metadata to 64 KiB of serialized ASCII JSON.
+Unsupported resources or oversized results produce a tool error.
+Run matching MindRoom revisions in the primary and workers so both use the same result protocol.
 
 ## Worker Scope
 
@@ -681,6 +724,7 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, M
 
 ## Without configured worker routing
 
-With `MINDROOM_WORKER_BACKEND=static_runner` and no `MINDROOM_SANDBOX_PROXY_URL`, tool calls execute directly in the primary MindRoom runtime process.
+With `MINDROOM_WORKER_BACKEND=static_runner`, no `MINDROOM_SANDBOX_PROXY_URL`, and no YAML or environment settings requesting worker routing, tool calls execute directly in the primary MindRoom runtime process.
+Explicitly requested routing still requires the configured backend, subject to the limited static fallback described under [Execution modes](#execution-modes).
 This is fine for development but not recommended for production deployments where agents run untrusted code.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker-routed tool calls fail closed when the backend is misconfigured instead of silently running locally.

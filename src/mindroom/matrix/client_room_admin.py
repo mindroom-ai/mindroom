@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, MutableMapping
+from collections.abc import Callable, Iterable, MutableMapping
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import nio
 
@@ -63,6 +64,25 @@ async def invite_to_room(
     return False
 
 
+async def admin_join_room_user(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
+    """Join one user through the Synapse-compatible admin API without changing invites."""
+    if not client.access_token:
+        return False
+    path = f"/_synapse/admin/v1/join/{quote(room_id, safe='')}"
+    response = await client.send(
+        "POST",
+        path,
+        data=json.dumps({"user_id": user_id}),
+        headers={
+            "Authorization": f"Bearer {client.access_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    succeeded = 200 <= response.status < 300
+    response.release()
+    return succeeded
+
+
 def _create_room_initial_state(
     client: nio.AsyncClient,
     power_users: list[str] | None,
@@ -102,6 +122,7 @@ async def create_room(
     admin_users: list[str] | None = None,
     *,
     encrypted: bool = False,
+    initial_state: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Create a new Matrix room."""
     room_config: dict[str, Any] = {"name": name}
@@ -110,6 +131,8 @@ async def create_room(
     if topic:
         room_config["topic"] = topic
     room_config["initial_state"] = _create_room_initial_state(client, power_users, admin_users, encrypted=encrypted)
+    if initial_state:
+        room_config["initial_state"].extend(initial_state)
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
@@ -320,14 +343,15 @@ async def room_admin_power_user(
     return None
 
 
-async def ensure_room_admin_power_levels(
+async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix state is a separate fail-closed exit
     client: nio.AsyncClient,
     room_id: str,
     user_ids: Iterable[str],
     *,
     snapshot: RoomStateSnapshot | None = None,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> bool:
-    """Grant Matrix room admin power to users without revoking existing admins."""
+    """Grant Matrix room admin power while respecting a caller's live write authority."""
     concrete_user_ids = {user_id for user_id in user_ids if user_id}
     if not concrete_user_ids:
         return True
@@ -356,7 +380,10 @@ async def ensure_room_admin_power_levels(
         return True
 
     if snapshot is not None:
-        return await ensure_room_admin_power_levels(client, room_id, concrete_user_ids)
+        return await ensure_room_admin_power_levels(client, room_id, concrete_user_ids, write_allowed=write_allowed)
+
+    if write_allowed is not None and not write_allowed():
+        return False
 
     response = await client.room_put_state(
         room_id=room_id,
@@ -723,6 +750,7 @@ async def leave_room(client: nio.AsyncClient, room_id: str) -> bool:
 __all__ = [
     "RoomJoinOutcome",
     "add_room_to_space",
+    "admin_join_room_user",
     "create_room",
     "create_space",
     "ensure_managed_room_power_levels",

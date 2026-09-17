@@ -223,6 +223,7 @@ def test_resolve_service_environment_captures_active_runtime(monkeypatch: pytest
 
     assert service_environment["MINDROOM_CONFIG_PATH"] == str(config_path.resolve())
     assert service_environment["MINDROOM_STORAGE_PATH"] == str(storage_path.resolve())
+    assert service_environment["NO_COLOR"] == "1"
     path_entries = service_environment["PATH"].split(":")
     assert path_entries[0] == str(uv_path.parent)
     assert str(Path.home() / ".local" / "bin") in path_entries

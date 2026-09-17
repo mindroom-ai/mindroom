@@ -16,7 +16,7 @@ from livekit.plugins.openai.realtime import GPTLiveSession
 
 from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.live_voice_agent import LiveVoiceBridge
-from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions, RealtimeVoiceBridge
+from mindroom.matrix_rtc.voice_agent import LiveVoiceAgentOptions, LiveVoiceUsage, RealtimeVoiceBridge
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -34,6 +34,7 @@ class _ProviderSocket:
         self.sent: list[dict[str, Any]] = []
         self.closed = False
         self.closed_event = asyncio.Event()
+        self.final_usage_seconds = 0.0
 
     def feed(self, event: dict[str, Any]) -> None:
         """Deliver a raw provider event through the SDK's receive loop."""
@@ -51,7 +52,9 @@ class _ProviderSocket:
         if event["type"] == "session.start":
             self.feed({"type": "session.started", "session": {"id": "session-test"}})
         elif event["type"] == "session.close":
-            self.feed({"type": "session.closed", "reason": "close_requested"})
+            self.feed(
+                {"type": "session.closed", "reason": "close_requested", "usage": {"seconds": self.final_usage_seconds}},
+            )
 
     async def close(self) -> None:
         """Record that the SDK closed its socket."""
@@ -112,6 +115,82 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> _ProviderHTTP:
 
     monkeypatch.setattr(RealtimeVoiceBridge, "_start_session", start_headless)
     return client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_close", [False, True])
+@pytest.mark.parametrize("cancel_close", [False, True])
+@pytest.mark.parametrize("fail_final_write", [False, True])
+async def test_live_sdk_retains_cumulative_voice_usage_through_close(  # noqa: PLR0915
+    provider: _ProviderHTTP,
+    remote_close: bool,
+    cancel_close: bool,
+    fail_final_write: bool,
+) -> None:
+    """Repeated totals cannot inflate usage, and teardown must persist the provider's final seconds."""
+    updates: list[LiveVoiceUsage] = []
+    recorded = asyncio.Event()
+    final_write_started = asyncio.Event()
+    release_final_write = asyncio.Event()
+    terminated: list[bool] = []
+    final_write_failed = False
+
+    async def record_usage(usage: LiveVoiceUsage) -> None:
+        nonlocal final_write_failed
+        if usage.finalized:
+            final_write_started.set()
+            await release_final_write.wait()
+            if fail_final_write and not final_write_failed:
+                final_write_failed = True
+                msg = "Transient storage failure"
+                raise OSError(msg)
+        updates.append(usage)
+        recorded.set()
+
+    options = LiveVoiceAgentOptions(
+        get_instructions=AsyncMock(return_value="Delegate requests."),
+        model="gpt-live-1",
+        api_key="test-key",
+        voice="marin",
+        respond=AsyncMock(return_value=CallAgentResponse("Done.")),
+        record_usage=record_usage,
+        on_session_terminated=terminated.append,
+    )
+    bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
+    bridge._room = SimpleNamespace(disconnect=AsyncMock())
+    try:
+        await bridge.start_agent(options)
+        await provider.socket.next_event("session.start")
+        for seconds in (10**400, 12.0, 15.5, 15.5, 13.0, 18.0):
+            provider.socket.feed({"type": "session.usage.updated", "usage": {"seconds": seconds}})
+        await asyncio.wait_for(recorded.wait(), 2)
+        provider.socket.final_usage_seconds = 25.5
+        if remote_close:
+            provider.socket.feed({"type": "session.closed", "reason": "expired", "usage": {"seconds": 25.5}})
+            await asyncio.wait_for(provider.socket.closed_event.wait(), 2)
+    finally:
+        closing = asyncio.create_task(bridge.aclose())
+        await asyncio.sleep(0)
+        await asyncio.wait_for(final_write_started.wait(), 2)
+        assert not closing.done()
+        if cancel_close:
+            closing.cancel()
+            await asyncio.sleep(0)
+        release_final_write.set()
+        if cancel_close:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(closing, 3)
+        else:
+            await asyncio.wait_for(closing, 3)
+
+    assert updates
+    assert updates[-1].duration_seconds == 25.5
+    assert updates[-1].finalized is True
+    assert {item.provider_session_id for item in updates} == {"session-test"}
+    assert {item.model for item in updates} == {"gpt-live-1"}
+    assert len({item.created_at for item in updates}) == 1
+    assert [item.duration_seconds for item in updates] == sorted(item.duration_seconds for item in updates)
+    assert terminated == ([True] if remote_close else [])
 
 
 @pytest.mark.asyncio
@@ -331,6 +410,12 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
     finished = asyncio.Event()
     terminated = asyncio.Event()
     terminal_retries: list[bool] = []
+    usage_updates: list[LiveVoiceUsage] = []
+    usage_recorded = asyncio.Event()
+
+    async def record_usage(usage: LiveVoiceUsage) -> None:
+        usage_updates.append(usage)
+        usage_recorded.set()
 
     async def respond(_prompt: str, _on_tools: Callable[[list[str]], None] | None) -> CallAgentResponse:
         started.set()
@@ -352,6 +437,7 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
         voice="marin",
         respond=respond,
         on_session_terminated=on_terminated,
+        record_usage=record_usage,
     )
     bridge = LiveVoiceBridge(local_identity="@bot:example.org:DEVICE", e2ee_enabled=False)
     bridge._room = SimpleNamespace(disconnect=AsyncMock())
@@ -359,13 +445,15 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
     try:
         await bridge.start_agent(options)
         await provider.socket.next_event("session.start")
+        provider.socket.feed({"type": "session.usage.updated", "usage": {"seconds": 12.5}})
+        await asyncio.wait_for(usage_recorded.wait(), 2)
         provider.socket.feed({"type": "session.input_transcript.delta", "delta": "Check status."})
         provider.socket.feed(
             {"type": "session.delegation.created", "delegation": {"id": "obsolete", "target": "client"}},
         )
         await asyncio.wait_for(started.wait(), timeout=2)
         if service_closed:
-            provider.socket.feed({"type": "session.closed", "reason": "expired"})
+            provider.socket.feed({"type": "session.closed", "reason": "expired", "usage": {"seconds": 17.5}})
         provider.socket.incoming.put_nowait(aiohttp.WSMessage(aiohttp.WSMsgType.CLOSE, 1000, ""))
         await asyncio.wait_for(provider.socket.closed_event.wait(), timeout=2)
         release.set()
@@ -383,3 +471,8 @@ async def test_live_sdk_disconnect_returns_control_without_reusing_delegations(
             observer.cancel()
         await asyncio.gather(*observers, return_exceptions=True)
         await asyncio.wait_for(bridge.aclose(), timeout=3)
+
+    assert (usage_updates[-1].duration_seconds, usage_updates[-1].finalized) == (
+        17.5 if service_closed else 12.5,
+        service_closed,
+    )

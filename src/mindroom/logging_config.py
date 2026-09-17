@@ -175,7 +175,8 @@ def setup_logging(
         _redact_log_event_preserving_exc_info,
     ]
     log_format = os.getenv("MINDROOM_LOG_FORMAT", "text").strip().lower()
-    renderer_name = "json" if log_format == "json" else ("colored" if sys.stderr.isatty() else "text")
+    use_colors = sys.stderr.isatty() and not os.getenv("NO_COLOR")
+    renderer_name = "json" if log_format == "json" else ("colored" if use_colors else "text")
     handler_level, loggers = _build_logger_levels(
         global_level=level,
         override_config=os.getenv("MINDROOM_LOGGER_LEVELS"),

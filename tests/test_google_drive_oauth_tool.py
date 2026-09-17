@@ -10,8 +10,8 @@ import threading
 from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from agno.agent import Agent
 from agno.agent._tools import parse_tools
 from agno.models.base import Model
@@ -29,9 +29,6 @@ from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def _save_oauth_credentials(
@@ -1148,6 +1145,23 @@ def test_google_drive_download_media_supports_shared_drive_files(
     assert service.files_resource.export_media_kwargs is None
 
 
+def test_google_drive_download_returns_absolute_path_for_relative_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = Path("workspace")
+    workspace.mkdir()
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=workspace)
+    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": "text/plain"}
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert result["status"] == "downloaded"
+    assert Path(result["path"]) == tmp_path / "workspace" / "google-drive-downloads" / "notes.txt"
+    assert Path(result["path"]).read_bytes() == b"hello"
+
+
 def test_google_drive_download_rejects_parent_directory_traversal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1245,6 +1259,95 @@ def test_google_drive_download_rejects_symlink_escape(
     assert outside_path.read_text() == "outside"
     assert service.files_resource.get_media_kwargs is None
     assert service.files_resource.export_media_kwargs is None
+
+
+@pytest.mark.parametrize("before_construction", [True, False])
+@pytest.mark.parametrize("mime_type", ["text/plain", "application/vnd.google-apps.document"])
+def test_google_drive_download_rejects_symlinked_download_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before_construction: bool,
+    mime_type: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "notes.txt"
+    outside_file.write_bytes(b"outside")
+    download_root = workspace / "google-drive-downloads"
+    if before_construction:
+        download_root.symlink_to(outside, target_is_directory=True)
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=workspace)
+    if not before_construction:
+        download_root.symlink_to(outside, target_is_directory=True)
+    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": mime_type}
+    tool._download_bytes = lambda _request: b"exported"
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert outside_file.read_bytes() == b"outside"
+    assert "error" in result
+    assert service.files_resource.get_media_kwargs is None
+    assert service.files_resource.export_media_kwargs is None
+
+
+@pytest.mark.parametrize("mime_type", ["text/plain", "application/vnd.google-apps.document"])
+def test_google_drive_download_pins_directory_during_request_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mime_type: str,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": mime_type}
+    tool._download_bytes = lambda _request: b"exported"
+    download_root = tmp_path / "google-drive-downloads"
+    original_root = tmp_path / "original-downloads"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_file = outside / "notes.txt"
+    outside_file.write_bytes(b"outside")
+
+    def swap_download_root(**_kwargs: object) -> _FakeDriveRequest:
+        download_root.rename(original_root)
+        download_root.symlink_to(outside, target_is_directory=True)
+        return _FakeDriveRequest({})
+
+    method_name = "get_media" if mime_type == "text/plain" else "export_media"
+    monkeypatch.setattr(service.files_resource, method_name, swap_download_root)
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert outside_file.read_bytes() == b"outside"
+    assert "error" not in result
+    expected_bytes = b"hello" if mime_type == "text/plain" else b"exported"
+    assert (original_root / "notes.txt").read_bytes() == expected_bytes
+
+
+def test_google_drive_download_failure_preserves_existing_file_and_cleans_partial_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": "text/plain"}
+    download_root = tmp_path / "google-drive-downloads"
+    download_root.mkdir()
+    existing_file = download_root / "notes.txt"
+    existing_file.write_bytes(b"original")
+
+    class FailingDownload(_FakeMediaIoBaseDownload):
+        def next_chunk(self) -> tuple[None, bool]:
+            self._file_handle.write(b"partial")
+            msg = "Download interrupted"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.custom_tools.google_drive.MediaIoBaseDownload", FailingDownload)
+
+    result = json.loads(tool.download_file("shared-drive-file-id"))
+
+    assert "Download interrupted" in result["error"]
+    assert existing_file.read_bytes() == b"original"
+    assert list(download_root.iterdir()) == [existing_file]
 
 
 def test_google_drive_download_adds_export_extension_inside_download_dir(

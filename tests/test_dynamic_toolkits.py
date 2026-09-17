@@ -1647,3 +1647,25 @@ def test_dynamic_prompt_splits_static_catalog_from_volatile_loaded_state(tmp_pat
         suffix_after == "Dynamic tools currently loaded for this session: shell, sleep\n"
         "Sticky initial dynamic tools that cannot be unloaded: shell"
     )
+
+
+def test_browser_search_discovers_chat_ui_before_loading(tmp_path: Path) -> None:
+    """A browser query must expose the display tool and canonical call while both tools are deferred."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"browser": {"defer": True}},
+        {"chat_ui": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    manager = DynamicToolsToolkit(agent_name="code", config=config, session_id="browser-discovery")
+
+    payload = _tool_payload(manager.tool_search("browser"))
+    matches = {match["name"]: match for match in payload["matches"]}
+    assert set(matches) == {"browser", "chat_ui"}
+    assert payload["loaded_tools"] == []
+    assert all(not match["loaded"] for match in matches.values())
+    assert "chat_ui.open_panel(panel='computer')" in matches["browser"]["description"]
+    assert "Computer panel" in matches["chat_ui"]["description"]
+
+    prompt = _build_dynamic_tooling_instruction_block(config, "code", enable_dynamic_tools_manager=True)
+    assert "chat_ui.open_panel(panel='computer')" in prompt

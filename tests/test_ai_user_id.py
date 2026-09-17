@@ -34,16 +34,21 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
-    _collect_streamed_response_content,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _stream_completed_without_visible_output,
     _StreamingAttemptState,
+    _track_model_request_metrics,
     ai_response,
     build_matrix_run_metadata,
+    collect_streamed_response_content,
     stream_agent_response,
 )
-from mindroom.ai_run_metadata import _serialize_metrics, build_ai_run_metadata_content
+from mindroom.ai_run_metadata import (
+    _serialize_metrics,
+    build_ai_run_metadata_content,
+    build_model_request_metrics_fallback,
+)
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -73,7 +78,7 @@ from mindroom.response_runner import (
     _paused_with_committed_presentation,
     prepare_memory_and_model_context,
 )
-from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
+from mindroom.response_turn import CompletedAttempt, PausedAttempt, ResponsePausedForApproval
 from mindroom.synthetic_model import SyntheticModel
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
@@ -137,6 +142,46 @@ def _model_runtime_context(
         conversation_reader=MagicMock(),
         relations=MagicMock(),
         active_model_name=active_model_name,
+    )
+
+
+@pytest.mark.parametrize(
+    ("output_tokens", "expected_total", "expected_payload"),
+    [
+        (None, 0, None),
+        (0, 0, {"output_tokens": 0}),
+        (False, 0, {"output_tokens": 0}),
+        (True, 1, {"output_tokens": 1}),
+        (1.5, 0, None),
+        ("3", 0, None),
+    ],
+)
+def test_stream_request_metrics_preserve_zero_initialized_totals(
+    output_tokens: int | None,
+    expected_total: int,
+    expected_payload: dict[str, int] | None,
+) -> None:
+    """Unknown counters stay zero internally while only observed integers reach metadata."""
+    state = _StreamingAttemptState()
+
+    _track_model_request_metrics(state, ModelRequestCompletedEvent(output_tokens=output_tokens))
+    _track_model_request_metrics(state, ModelRequestCompletedEvent())
+
+    assert state.request_metric_totals == {
+        "input_tokens": 0,
+        "output_tokens": expected_total,
+        "total_tokens": 0,
+        "reasoning_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert (
+        build_model_request_metrics_fallback(
+            state.request_metric_totals,
+            state.first_token_latency,
+            state.observed_request_metric_fields,
+        )
+        == expected_payload
     )
 
 
@@ -981,6 +1026,38 @@ class TestUserIdPassthrough:
 
         assert mock_prepare.await_args.kwargs["prompt"] == "raw prompt"
         assert mock_prepare.await_args.kwargs["model_prompt"] == "model metadata"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("content", "status"), [(None, RunStatus.error), ("Answer", RunStatus.completed)])
+    async def test_stream_completion_status_does_not_require_metadata_collector(
+        self,
+        tmp_path: Path,
+        content: str | None,
+        status: RunStatus,
+    ) -> None:
+        """A typed terminal callback classifies empty output even without wire metadata."""
+        agent = MagicMock()
+        completed: list[CompletedAttempt] = []
+
+        async def events(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            yield RunCompletedEvent(content=content, run_id="run-final", session_id="session1")
+
+        agent.arun = MagicMock(side_effect=events)
+        with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as prepare:
+            prepare.return_value = _prepared_prompt_result(agent)
+            await collect_streamed_response_content(
+                stream_agent_response(
+                    make_turn_context("general", session_id="session1"),
+                    prompt="test",
+                    runtime_paths=_runtime_paths(tmp_path),
+                    config=_config(),
+                    on_completed=completed.append,
+                ),
+                presentation=CollectedStreamPresentation(show_tool_calls=False),
+            )
+        assert len(completed) == 1
+        assert completed[0].status is status
+        assert completed[0].metadata_content is None
 
     @pytest.mark.asyncio
     async def test_stream_agent_response_passes_config_path_to_prepare_agent(self, tmp_path: Path) -> None:
@@ -3179,14 +3256,14 @@ class TestUserIdPassthrough:
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             with pytest.raises(ResponsePausedForApproval) as raised:
-                await _collect_streamed_response_content(
+                await collect_streamed_response_content(
                     stream_agent_response(
                         make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
                         prompt="Run the action",
                         runtime_paths=_runtime_paths(tmp_path),
                         config=_config(),
                     ),
-                    show_tool_calls=True,
+                    presentation=CollectedStreamPresentation(show_tool_calls=True),
                 )
 
         assert raised.value.paused.run_id == "run-paused"
@@ -3231,7 +3308,7 @@ class TestUserIdPassthrough:
         ):
             mock_prepare.return_value = _prepared_prompt_result(mock_agent)
             with pytest.raises(ResponsePausedForApproval) as raised:
-                await _collect_streamed_response_content(
+                await collect_streamed_response_content(
                     stream_agent_response(
                         make_turn_context("general", session_id="session1", reply_to_event_id="$source"),
                         prompt="Run the action",
@@ -3239,7 +3316,7 @@ class TestUserIdPassthrough:
                         config=_config(),
                         show_tool_calls=False,
                     ),
-                    show_tool_calls=False,
+                    presentation=CollectedStreamPresentation(show_tool_calls=False),
                 )
 
         paused = _paused_with_committed_presentation(raised.value, show_tool_calls=False)
@@ -3343,7 +3420,10 @@ class TestUserIdPassthrough:
             raise pause
 
         with pytest.raises(ResponsePausedForApproval) as raised:
-            await _collect_streamed_response_content(paused_stream(), show_tool_calls=True)
+            await collect_streamed_response_content(
+                paused_stream(),
+                presentation=CollectedStreamPresentation(show_tool_calls=True),
+            )
 
         assert raised.value is pause
         assert pause.presentation is not None
@@ -3584,6 +3664,7 @@ class TestUserIdPassthrough:
 
         async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             yield RunContentEvent(content="ok")
+            yield ModelRequestCompletedEvent(model="earlier-model", model_provider="earlier-provider")
             yield ModelRequestCompletedEvent(
                 model="test-model",
                 model_provider="openai",
@@ -3591,6 +3672,7 @@ class TestUserIdPassthrough:
                 output_tokens=3,
                 time_to_first_token=0.12,
             )
+            yield ModelRequestCompletedEvent(model="", model_provider="", time_to_first_token=0.8)
 
         mock_agent.arun = MagicMock(return_value=fake_arun_stream())
 
@@ -3617,6 +3699,8 @@ class TestUserIdPassthrough:
         assert payload["usage"]["output_tokens"] == 3
         assert payload["usage"]["total_tokens"] == 15
         assert payload["usage"]["time_to_first_token"] == format(0.12, ".12g")
+        assert payload["model"]["id"] == "test-model"
+        assert payload["model"]["provider"] == "openai"
         assert payload["context"]["input_tokens"] == 12
         assert payload["context"]["window_tokens"] == 100
         assert "utilization_pct" not in payload["context"]
@@ -3736,10 +3820,13 @@ class TestUserIdPassthrough:
         assert payload["context"]["window_tokens"] == 1000
         assert payload["prepared_context"] == {"tokens": 900}
 
+    @pytest.mark.parametrize(("latest_input_tokens", "expected_context_tokens"), [(120, 120), (None, 700)])
     @pytest.mark.asyncio
     async def test_stream_agent_response_does_not_backfill_latest_context_cache_from_usage(
         self,
         tmp_path: Path,
+        latest_input_tokens: int | None,
+        expected_context_tokens: int,
     ) -> None:
         """Missing latest-request cache counters should stay unknown, not use cumulative totals."""
         mock_agent = MagicMock()
@@ -3758,12 +3845,13 @@ class TestUserIdPassthrough:
                 output_tokens=50,
                 total_tokens=750,
                 cache_read_tokens=512,
+                cache_write_tokens=32,
             )
             yield RunContentEvent(content="step two")
             yield ModelRequestCompletedEvent(
                 model="test-model",
                 model_provider="openai",
-                input_tokens=120,
+                input_tokens=latest_input_tokens,
                 output_tokens=20,
                 total_tokens=140,
             )
@@ -3789,7 +3877,8 @@ class TestUserIdPassthrough:
 
         payload = run_metadata["io.mindroom.ai_run"]
         assert payload["usage"]["cache_read_tokens"] == 512
-        assert payload["context"]["input_tokens"] == 120
+        assert payload["usage"]["cache_write_tokens"] == 32
+        assert payload["context"]["input_tokens"] == expected_context_tokens
         assert "cache_read_input_tokens" not in payload["context"]
         assert "cache_write_input_tokens" not in payload["context"]
         assert "uncached_input_tokens" not in payload["context"]

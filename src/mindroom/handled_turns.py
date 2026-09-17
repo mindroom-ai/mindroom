@@ -131,6 +131,10 @@ class TurnRecordCodec:
         }
         if record.discovery_event_ids:
             payload["discovery_event_ids"] = list(record.discovery_event_ids)
+        if record.prepared_voice_sources is not None:
+            payload["prepared_voice_sources"] = {
+                event_id: prepared.to_record() for event_id, prepared in record.prepared_voice_sources.items()
+            }
         if record.visible_echo_event_id is not None:
             payload["visible_echo_event_id"] = record.visible_echo_event_id
         if record.visible_echo_is_fallback is not None:
@@ -236,6 +240,7 @@ class TurnRecordCodec:
                 record.get("user_stop_settled_receipt_order"),
             ),
             source_event_metadata=_mapping_or_none(record.get("source_event_metadata")),
+            prepared_voice_sources=_mapping_or_none(record.get("prepared_voice_sources")),
             response_owner=canonical_optional_string(record.get("response_owner")),
             requester_id=canonical_optional_string(record.get("requester_id")),
             correlation_id=canonical_optional_string(record.get("correlation_id")),
@@ -986,6 +991,7 @@ def _merge_same_identity_records(candidate: TurnRecord, existing: TurnRecord) ->
             *newer.redacted_source_event_ids,
             *older.redacted_source_event_ids,
         ),
+        prepared_voice_sources={**(candidate.prepared_voice_sources or {}), **(existing.prepared_voice_sources or {})},
         visible_echo_event_id=newer.visible_echo_event_id or older.visible_echo_event_id,
         visible_echo_is_fallback=(
             newer.visible_echo_is_fallback
@@ -1040,6 +1046,16 @@ class _ResponseGroup:
     records: dict[str, TurnRecord]
 
 
+def _is_prepared_voice_checkpoint_only(record: TurnRecord) -> bool:
+    """Recognize transient preparation without overlooking other unfinished facts."""
+    return record.prepared_voice_sources is not None and record == TurnRecord.create(
+        record.source_event_ids,
+        completed=False,
+        prepared_voice_sources=record.prepared_voice_sources,
+        timestamp=record.timestamp,
+    )
+
+
 def _response_group_requires_retention(
     group: _ResponseGroup,
     unsettled_source_event_ids: frozenset[str],
@@ -1053,7 +1069,10 @@ def _response_group_requires_retention(
             or any(value.cleanup_pending for value in (record.revision_replay or {}).values())
             for record in group.records.values()
         )
-        or any(not record.completed and record.replay_source_event_ids for record in group.records.values())
+        or any(
+            not record.completed and record.replay_source_event_ids and not _is_prepared_voice_checkpoint_only(record)
+            for record in group.records.values()
+        )
         or any(
             record.user_stop_receipt_order is not None
             and (record.user_stop_settled_receipt_order or 0) < record.user_stop_receipt_order

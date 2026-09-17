@@ -44,19 +44,33 @@ Their saved outcomes remain on disk, and their original tools are not replayed.
 Re-enable the option and restart to recover that work; abandoned local execution is reported as interrupted.
 Recovery still checks current permissions and room membership, so an approval invalidated by an agent leaving a room cannot authorize a later tool call.
 
-## Adaptive Room Participation
+## Adaptive Agent Participation
 
 By default, threads with multiple human participants require explicit agent mentions.
-Opt a room into adaptive participation to let one designated agent decide whether an untagged message needs a response or should be left unanswered.
-The designated agent must be a configured individual agent with permission to reply to the sender.
-Room keys can be concrete room IDs, managed room keys, or persisted full aliases.
+Set `agents.<name>.participation` to let an agent already involved in a thread decide whether to respond to an untagged message or stay silent.
+The check runs only when all of these conditions hold:
+
+- Participation is enabled for that agent.
+- The message is in a thread with at least two human participants, including the current sender.
+- The message does not explicitly mention an agent or another human.
+- The particular individual agent has already replied in that thread and still has permission to reply to the sender.
+
+MindRoom must have the thread history available to establish these conditions.
+Agents that are merely present in the room do not judge or join the conversation.
+If several opted-in individual agents have replied in the thread, each makes its own participation decision.
+For example, with 50 agents in a room and two already involved in a thread, only those two are eligible to judge, and each must opt in.
+Explicit agent mentions follow normal reply rules; an explicit human mention bypasses adaptive participation too.
+The setting follows the agent into every room where it has permission to reply, including ad hoc rooms joined by invitation.
+The room does not need an entry in `rooms` or the agent's auto-join `rooms` list.
+Participation is configured only per agent; there are no room overrides.
 
 ```yaml
-room_participation:
-  lobby:
-    agent: assistant
-    debounce_seconds: 3.0
-    instructions: "Join when you can help; leave human conversation uninterrupted."
+agents:
+  assistant:
+    display_name: Assistant
+    participation:
+      debounce_seconds: 3.0
+      instructions: "Reply when you can help; leave human conversation uninterrupted."
 ```
 
 The pause applies only to eligible untagged text in threads with at least two human participants, including the current sender.
@@ -65,15 +79,185 @@ Registered agents, the internal service account, and configured `bot_accounts` d
 The pause defaults to three seconds and accepts finite values from zero to thirty seconds.
 A burst from one sender becomes one turn after the pause; explicit agent or human mentions bypass adaptive selection and end that sender's pending pause immediately.
 Single-human conversations keep their usual response behavior.
-A declined or failed decision stays quiet and does not record a completed assistant response.
-The check reuses the prepared conversation and tool definitions, but cannot execute tools.
+A decision to stay silent produces no text reply and does not record a completed assistant response.
+To acknowledge a deliberate decline, set `decline_reaction` to a reaction such as `"👍"` or `"👀"`:
+
+```yaml
+agents:
+  assistant:
+    display_name: Assistant
+    participation:
+      decline_reaction: "👍"
+```
+
+Omit `decline_reaction` or set it to `null` to keep declines invisible.
+The reaction must be a nonblank string of at most 64 characters; composite emoji are supported.
+Each declining agent reacts once to the latest message in the coalesced turn, using the same behavior for all judgment backends.
+Failed checks, preparation errors, and cancellation do not trigger a decline reaction.
+Reaction delivery is best effort: failed sends are logged without generating an error reply, and replays use a stable Matrix transaction ID.
+Choose an emoji appropriate for the agent's conversations: 👍 can imply agreement with the message.
+
+By default, the replying agent's own model makes the decision using its prepared conversation and tool definitions, with tool execution disabled.
+If that same-model check fails, the agent stays quiet.
+The following provider restrictions apply to this same-model check; a valid decision from a separate judgment backend bypasses the check.
 With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
 Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
 Cancellation before approval does not create an interruption notice.
 If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
 Commands and scheduled work do not opt into adaptive participation.
-Omit `room_participation` to keep the default behavior.
+Omit `participation` or set it to `null` to keep the default behavior for an agent.
+An empty mapping (`participation: {}`) enables adaptive participation with default settings.
+The former top-level `room_participation` setting is no longer accepted.
+
+### Participation judgment backends
+
+Participation can use a separate decision model while the configured agent model generates the reply.
+Set `judgment.provider` to `llm` for a configured model alias or `typesafe` for System One.
+Both backends receive the same participation question, criteria, agent participation guidance, and minimized conversation context, and return a yes/no decision or abstain.
+Their predictions can differ; switching providers preserves the decision contract and response lifecycle, not identical judgments.
+
+For a dedicated LLM, reference an existing alias in your `models:` configuration:
+
+```yaml
+agents:
+  assistant:
+    display_name: Assistant
+    participation:
+      instructions: "Reply when you can help; leave human conversation uninterrupted."
+      judgment:
+        provider: llm
+        model: fast
+        timeout_seconds: 5
+```
+
+The decision model uses that alias's normal provider credentials and can be cheaper than the replying agent's model.
+It receives no executable tools, agent system prompt, or agent memory.
+It must return a structured boolean decision; an explicit abstention or invalid response triggers the existing in-model fallback.
+No self-reported confidence score is requested or treated as a probability.
+Provider modes whose automatic native tools cannot be disabled are refused for decision calls.
+
+To switch to System One, change the judgment settings and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
+
+```yaml
+agents:
+  assistant:
+    display_name: Assistant
+    participation:
+      instructions: "Reply when you can help; leave human conversation uninterrupted."
+      judgment:
+        provider: typesafe
+        threshold: 0.8
+        timeout_seconds: 1.5
+```
+
+The TypeSafe client pins `jev-1.13.0` and accepts only the requested question's documented [Noul probability response](https://docs.typesafe.ai/api).
+A probability at or above `threshold` approves participation; a lower value stays quiet.
+The threshold accepts finite values from zero to one and defaults to `0.8`; this default has not been calibrated against a representative participation corpus.
+`threshold` is specific to TypeSafe and is rejected for the LLM backend.
+
+Omitting `judgment` (or setting it to `null`) preserves the existing reply-model decision, even when a TypeSafe key is present.
+Selecting either backend authorizes sending agent participation guidance and up to eight recent prepared user/assistant messages to that backend.
+System prompts, transient memory/hook context, tool definitions/results, and media are excluded; Matrix message metadata is replaced with request-local speaker aliases.
+Message bodies can still contain identifying or private text.
+Media, attachment references, compressed or non-text content, detected secrets, malformed Unicode, and oversized input trigger fallback without sending that context to the separate judge.
+Requests are bounded to 16 KB; TypeSafe responses are bounded while streaming, and LLM decision text is validated against a 64 KiB limit after the provider returns.
+
+Both backends share a process-wide limit of eight concurrent judgments and one per instance/agent owner, with no waiting queue.
+`timeout_seconds` accepts finite positive values up to thirty seconds; defaults are five seconds for LLMs and 1.5 seconds for TypeSafe.
+This is an additional deadline after participation debounce and includes model loading, inference, and parsing; it does not cover the fallback model call.
+There are no application-level judgment retries; configured LLM providers retain their SDK behavior within the deadline.
+Missing credentials, exhausted concurrency, timeout, provider errors, malformed output, or TypeSafe model drift fall back to the replying agent's own decision model.
+If that fallback also fails, the agent stays quiet.
+Cancellation propagates without starting a fallback call.
+Valid judgments bypass the reply provider's tool-free decision restrictions, so providers with automatic native tools can answer after approval.
+Only one decision settles per turn, including retries; recovery of an already-visible response retains its approval.
+
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category; TypeSafe also records probability and threshold.
+These outcome logs omit request text and credentials; separately enabled LLM request debug logging still follows the normal model configuration.
+Use these measurements alongside observed decision quality and provider pricing to compare backends; token counts alone do not establish cost or quality advantages.
+
+## Mid-Turn Coalescing
+
+When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
+Opt-in `agents.<name>.mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
+This is separate from participation eligibility and the debounce used to group incoming messages.
+Each agent can configure a required `judgment` object, optional `instructions` string (default `""`), and optional `defer_reaction` (default `null`).
+The `llm` judgment requires `provider: llm` and a `model` string naming an existing alias; its numeric `timeout_seconds` defaults to `5.0`.
+The `typesafe` judgment requires `provider: typesafe`; its numeric `threshold` defaults to `0.8` (range `0`–`1`) and `timeout_seconds` to `1.5`.
+Both backends require a positive timeout of at most `30` seconds and reject unknown fields.
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
+      defer_reaction: "👀"
+      judgment:
+        provider: llm
+        model: fast  # An existing alias under models
+        timeout_seconds: 5
+```
+
+To use TypeSafe instead, configure the same agent with:
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      judgment:
+        provider: typesafe
+        threshold: 0.8
+        timeout_seconds: 1.5
+```
+
+TypeSafe also requires `TYPESAFE_API_KEY`.
+The setting follows the agent's Matrix user across every authorized room, including ad hoc rooms, just like participation.
+Omitting `mid_turn` or setting it to `null` preserves the normal unconditional wrap-up notice.
+There are no room overrides; the retired `room_mid_turn` configuration is rejected.
+Set `defer_reaction` to acknowledge queued messages when the judge lets the active task finish first.
+For example, `"👀"` means the message was seen and deferred; it remains queued for a later turn.
+Omit the setting or use `null` to keep deferrals invisible.
+Like participation's `decline_reaction`, the key must be a nonblank string of at most 64 characters.
+Each message is acknowledged at most once per active response, and stable Matrix transaction IDs prevent duplicate reactions on replay.
+Judgments that request wrap-up, fail, time out, are cancelled, or are superseded do not trigger the reaction.
+Reaction delivery is best effort; failures do not change the judgment, and a correction arriving during delivery still requests wrap-up.
+
+The judge asks whether any queued message requires an immediate change, pause, or stop.
+Acknowledgements, praise, thanks, "continue," and "do not interrupt" allow continuing; corrections and relevant changes take priority, even alongside praise.
+Unrelated requests wait for a later turn unless the user requests an immediate switch.
+For TypeSafe, continuation requires `1 - P(interrupt) >= threshold`; the default `0.8` permits interruption probabilities up to `0.2`.
+For the LLM backend, an explicit `false` answer permits continuation.
+Abstentions, timeouts, missing credentials, exhausted capacity, and backend errors retain the normal wrap-up behavior.
+Judgments reuse the shared participation concurrency limits and backend deadlines.
+
+The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
+It receives the active request text, preceding public conversation text, up to eight pending human messages, and the configured guidance.
+Conversation history is refreshed after acquiring the response lock and stops before the active request, so resumed requests such as "continue" retain earlier task instructions and accepted corrections.
+Later messages remain separate queued input; private model history is not used.
+For interactive selections, the active request includes the original question and selected option.
+Each pending message includes a snapshot of the active reply text last acknowledged by Matrix when that message entered the queue.
+That snapshot includes published partial text and tool names when those names appear in the visible reply, but excludes buffered text and later edits.
+It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
+Private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
+Missing or partial conversation history, earlier media, more than 63 earlier messages, and context exceeding the 16 KB request limit retain wrap-up rather than silently dropping earlier instructions.
+Room-mode turns currently have no public conversation snapshot and retain normal wrap-up; empty history is sufficient only for a proven new thread.
+The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
+Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
+An existing reply whose visible text is unavailable retains wrap-up until a new Matrix update is acknowledged.
+Missing request text, unavailable progress, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.
+Message text can still contain identifying or private information.
+
+A finish decision is reused for the same pending messages within the active response.
+Subsequent streaming updates do not replace those messages' frozen progress snapshots.
+A later queued message requires a new decision, and a queue change during inference cannot inherit approval for unseen input.
+Once a wrap-up notice is sent, later messages cannot reverse that handoff.
+The queued messages remain queued and are handled through the existing dispatch path after the active response releases its lock.
+The notice requests a handoff from the model; it does not forcibly cancel tools, abort a response, or inject the queued text into the running model.
+Explicit stop handling and tool-approval requirements remain unchanged.
+Teams retain the normal wrap-up behavior and do not inherit a member agent's mid-turn settings.
 
 ## Splitting the Configuration Into Multiple Files
 
@@ -177,8 +361,9 @@ diff before.yaml after.yaml
 ```
 
 The dashboard config editor operates on whole-config structured saves, which cannot be mapped back to individual include files.
-When the loaded config resolved at least one include tag, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead.
+When the configuration uses include tags, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead, including empty directory includes and include sources that fail to load.
 Rejected structured saves return HTTP 409 with the machine-readable error code `config_composed_from_includes`, so clients can tell this permanent rejection apart from a retryable stale-write conflict.
+If an existing source cannot be read or tokenized well enough to establish whether it uses includes, structured saves return HTTP 422 and ask you to repair the source files; raw YAML editing remains available.
 `POST /api/config/load` reports the includes state in the `x-mindroom-config-uses-includes` response header, which the dashboard uses to show an up-front banner explaining that structured saves will be rejected.
 The raw config editor (`GET`/`PUT /api/config/raw`) keeps operating on the top-level file's literal text, and its response flags when includes are in use.
 `MINDROOM_CONFIG_TEMPLATE` seeding copies only the single template file, so bundled templates that use includes must ship the whole directory.
@@ -192,6 +377,7 @@ See [MCP](../mcp.md) for transport-specific config, tool naming, examples, and a
 
 Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations.
 Rules are evaluated in order and the first matching rule wins.
+`match` is a case-sensitive glob over exposed function names, not toolkit identifiers.
 Each rule must set exactly one of `action` or `script`.
 Use `action: require_approval` to always pause the tool call and send a Matrix approval card.
 Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`.
@@ -226,12 +412,17 @@ If an entity account was removed, the router posts a related terminal notice bec
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
+This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
+It does not gate every Slack operation, and the same function names in other toolkits also match.
+
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: slack_*
+    - match: send_message*
+      action: require_approval
+    - match: upload_file
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
@@ -251,6 +442,12 @@ tool_approval:
 | `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Optional base64-encoded 32-byte key for encrypted-at-rest credential files | unset |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `MINDROOM_LOGGER_LEVELS` | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING` | unset |
+| `MINDROOM_LOG_FORMAT` | `text` for readable logs or `json` for structured logs; file output never receives terminal styling | `text` |
+| `NO_COLOR` | Any nonempty value disables console colors and styled tracebacks, including in terminals; installed background services set this to `1` | unset |
+
+For native startup, export `LOG_LEVEL`, `MINDROOM_LOGGER_LEVELS`, `MINDROOM_LOG_FORMAT`, and `NO_COLOR` in the process environment; the config-adjacent `.env` does not supply these logging controls.
+The `mindroom run --log-level` option takes precedence over `LOG_LEVEL`.
+Container `env_file`/`--env-file` injection supplies process variables and can therefore set these controls.
 
 ### Matrix
 
@@ -282,6 +479,9 @@ Set the API key for each provider you use in `config.yaml`:
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |
 | `EMBEDDER_API_KEY` | Dedicated semantic-search embedder key (optional; falls back to the shared `OPENAI_API_KEY`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
+
+For `provider: openai` models, `OPENAI_BASE_URL` can come from the config-adjacent `.env` or the exported process environment; the exported value takes precedence.
+A model's `extra_kwargs.base_url` overrides this environment setting, and `extra_kwargs.client_params.base_url` overrides the model endpoint when constructing SDK clients.
 
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
 See [Model Configuration — File-based Secrets](models.md#file-based-secrets) for details.
@@ -484,6 +684,7 @@ defaults:
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
+  auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: false     # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
@@ -722,6 +923,10 @@ matrix_sync:
   max_response_bytes: 16777216      # Per-session HTTP response limit: 16 MiB
   max_pending_bytes: 67108864       # Per-session encoded pending output limit: 64 MiB
 
+# Durable Matrix event journal (optional; effective store changes require restart)
+event_journal:
+  backend: sqlite                 # Default: sqlite; uses <storage>/tracking/event_journal.db
+
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 scheduler_catch_up_grace_seconds: 3600  # Recurring catch-up window; 0 disables it
@@ -734,8 +939,40 @@ Access migration fails without changing files or creating a backup when any `!in
 See [Authorization](../authorization.md) for the current access model.
 
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
-Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+The runtime preserves existing Space admins without adding human admins; managing Space children in a Matrix client requires sufficient existing Matrix power in that Space.
 Demote stale Space admins manually in a Matrix client when needed.
+
+## Event Journal
+
+`event_journal.backend` defaults to `sqlite`, which stores the durable Matrix event journal at `<storage>/tracking/event_journal.db` (`mindroom_data/tracking/event_journal.db` with the default storage root).
+SQLite has no independent journal-path setting and ignores the PostgreSQL URL fields.
+The PostgreSQL backend requires the `postgres` extra, which supplies `psycopg`.
+For a Python install, use `uvx --from 'mindroom[postgres]' mindroom run`, or include `--extra postgres` when syncing a source checkout.
+Then select the backend explicitly and provide a connection URL:
+
+```yaml
+event_journal:
+  backend: postgres
+  database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL
+```
+
+`MINDROOM_EVENT_CACHE_DATABASE_URL` is the default environment variable name.
+Set it in the exported process environment or the config-adjacent `.env`; an exported value takes precedence over `.env`.
+Alternatively, `event_journal.database_url` supplies an inline URL, and a nonblank inline value takes precedence over environment lookup.
+Custom nonblank `database_url_env` names must be `DATABASE_URL` or end in `_DATABASE_URL` so runtime secret filters recognize them.
+PostgreSQL requires a nonblank URL; supplying a URL alone does not switch a SQLite journal to PostgreSQL.
+
+Changes to the effective store apply after restarting MindRoom.
+Changing URL fields while the backend remains `sqlite` does not change the opened file or require a journal restart.
+See the [journal binding and migration commands](../cli.md#journal) before moving, restoring, or adopting a journal.
+
+## Automatic Restart Resumption
+
+`defaults.auto_resume_after_restart` defaults to `true` and permits visible router resume prompts for eligible interrupted threaded conversations after startup or runtime replacement.
+Set it to `false` to suppress those automatic prompts and resume the work manually.
+Resumption still depends on current recovery ownership, room membership, a resolved original requester, and fresh history checks that reject superseded work.
+This setting does not globally disable ordinary durable event replay or stale-response cleanup.
+See [runtime recovery](../architecture/bot-runtime.md) for the surrounding lifecycle.
 
 ## Matrix Sync Limits
 
@@ -812,7 +1049,14 @@ Those records include prompts, messages, the final provider-prepared tool array 
 The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
 Tool-call rows include a `timing` object with result-ready, before-hook, and tool-body durations when those phases are measured.
-Set `MINDROOM_TIMING=1` to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
+Export `MINDROOM_TIMING=1` before native process startup to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
+The config-adjacent `.env` does not enable this flag, and timing decorators read it when modules load.
+For example:
+
+```bash
+LOG_LEVEL=DEBUG MINDROOM_LOG_FORMAT=json MINDROOM_TIMING=1 mindroom run
+```
+
 The same flag emits one `Dispatch pipeline timing` summary per turn at INFO level, including `time_to_model_request_ms` from message handling through local preparation to the first Agno run invocation (not the provider SDK's HTTP-send boundary), plus separate context, queue, payload, agent-build, and model timing spans when available.
 Audit logging remains enabled.
 Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted.
@@ -873,6 +1117,138 @@ Both stages require only `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE
 `mindroom avatars sync` only fills missing Matrix avatars by default.
 Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
 
+## Personal Agent Rooms
+
+The optional `personal_rooms` section creates one private, unlisted room for each eligible human who joins an onboarding room.
+The router observes those rooms; the selected agent does not need to join them.
+
+```yaml
+rooms:
+  lobby: {}
+agents:
+  helper:
+    display_name: Helper
+    rooms: []
+    access:
+      members_of_rooms: [lobby]
+personal_rooms:
+  agent: helper
+  onboarding_rooms: [lobby]
+  commands: ["!personal"]
+  alias_prefix: personal
+  name: "Personal room for {user}"
+  topic: "Private conversation with {agent}."
+  welcome: "Welcome {user}! This is your personal room with {agent}."
+  welcome_dispatch: false
+  confirmation: ""
+  backfill: false
+  auto_join_requester: false
+  requester_admin: false
+  # avatar: avatars/personal.png
+  avatar_from_requester: false
+```
+
+The top-level `personal_rooms` type is an object or `null`, with default `null`.
+When enabled, its fields are:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `agent` | string | Required | Configured agent that owns and answers in personal rooms. |
+| `onboarding_rooms` | list of strings | Required | Nonempty list of configured onboarding rooms observed by the router. |
+| `commands` | list of strings | `[]` | Exact self-onboarding commands beginning with `!`, without whitespace or arguments. |
+| `alias_prefix` | string | `"personal"` | Lowercase alias prefix, matching `[a-z0-9_-]{1,40}`. |
+| `name` | string | `"Personal room for {user}"` | New room name template, up to 1,000 characters. |
+| `topic` | string | `"Private conversation with {agent}."` | New room topic template, up to 1,000 characters. |
+| `welcome` | string | `"Welcome {user}! This is your personal room with {agent}."` | Welcome template, up to 10,000 characters; empty disables new welcome intent. |
+| `welcome_dispatch` | boolean | `false` | Dispatch the welcome to the selected agent after the human joins; otherwise send a notice. |
+| `confirmation` | string | `""` | Optional once-only notice template in the original onboarding room, up to 10,000 characters. |
+| `backfill` | boolean | `false` | Also reconcile current eligible onboarding-room members on startup and config reload. |
+| `auto_join_requester` | boolean | `false` | Use the homeserver admin API to join the requester during initial creation of a new personal room. |
+| `requester_admin` | boolean | `false` | Grant the human Matrix room administration. |
+| `avatar` | string or `null` | `null` | Room avatar file, relative to the configuration; fills only an empty avatar. |
+| `avatar_from_requester` | boolean | `false` | Copy the human's profile avatar into an empty room avatar when no avatar file is configured. |
+
+Omit the section to disable onboarding.
+Trigger rooms must already be configured.
+Commands are optional, exact messages in those rooms, and onboard only their authenticated human sender.
+Existing agent access rules still apply; agent and service accounts are excluded.
+`backfill: true` also reconciles current eligible members at startup and configuration reload.
+`auto_join_requester: true` requires a source Matrix account authorized to use the homeserver's Synapse-compatible admin join API.
+It enrolls only the requester of a newly created room.
+A failed initial join can retry after restart, but a requester who has already joined, left, or been banned is never force joined again.
+Existing and imported rooms do not gain automatic joining when this setting is enabled later.
+Restart reconciliation and backfill preserve a requester who left or was banned from a personal room.
+A fresh leave-to-join event in the onboarding room may re-invite a departed requester to a newly created personal room; it never overrides a ban or re-invites someone to an imported room.
+If room creation succeeds but its local room-ID receipt is lost, alias recovery conservatively skips automatic joining because it cannot prove the room was newly created by that attempt.
+
+Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
+Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
+Room ownership and membership are verified before reusing an alias.
+Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
+Disabling onboarding does not delete rooms or revoke their existing access.
+
+The default welcome is a notice.
+Set `welcome_dispatch: true` to initiate agent onboarding through the existing trusted hook-dispatch path after the human joins; requester identity and normal authorization remain intact.
+Dispatched welcomes explicitly mention the selected agent through Matrix mention metadata, so default and custom templates can mention the human without suppressing agent onboarding.
+Welcome delivery is durable and idempotent.
+A pending welcome bound to a replaced Matrix device fails closed instead of risking a duplicate.
+`requester_admin` explicitly grants the human Matrix room administration; otherwise the agent owns room state.
+An optional avatar file uses the existing Matrix upload service; `avatar_from_requester: true` instead copies the human's profile avatar.
+Both policies fill only an empty room avatar, with an explicit file taking priority.
+An optional `confirmation` template sends one durable notice in the original onboarding room after creation and invitation; its contents, including any room alias, are visible to that room.
+Pending confirmation and welcome text remain frozen across configuration changes.
+Welcome text and dispatch mode are saved before waiting for the human to join; changing the welcome template, including setting it to empty, does not replace pending intent.
+Disabling `personal_rooms` or revoking the human's access prevents pending welcome dispatch.
+No tools or workspace reset behavior are added.
+
+### Operator-seeded Existing Rooms
+
+Operators can preserve an existing room ID and history by writing a trusted `PersonalRoomRecord` before enabling onboarding.
+Stop the runtime before importing records.
+Use `personal_room_record_path(runtime_paths, agent_name, user_id)` and `write_personal_room(path, record)` from `mindroom.matrix.personal_room_store` to atomically persist validated current-format records.
+The storage location is `agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root.
+These files are trusted operator state, never user-submitted input.
+
+For a private room with shared history and one already permitted guest, a seed looks like this:
+
+```json
+{
+  "user_id": "@alice:example.test",
+  "alias": "#personal-alice:example.test",
+  "source_room_id": "!lobby:example.test",
+  "room_id": "!existing:example.test",
+  "welcome_completed": true,
+  "adoption": {
+    "creator_user_id": "@router:example.test",
+    "agent_user_id": "@helper:example.test",
+    "router_user_id": "@router:example.test",
+    "expected_history_visibility": "shared",
+    "additional_user_ids": ["@guest:example.test"]
+  }
+}
+```
+
+The filename must bind the exact full requester ID, and adoption requires an exact room ID; an alias alone never authorizes adoption.
+`creator_user_id` must match the immutable create-event sender, and `agent_user_id` must match the selected agent's authenticated Matrix identity.
+An optional `router_user_id` permits only this installation's persisted router account to remain in the room.
+Before import, arrange an agent-authored `org.mindroom.personal_room` state event with empty state key and exactly `{"user_id": "<requester>", "agent_user_id": "<agent>"}` as content.
+The target agent must already be joined with room admin power, the directory visibility must be private, and the join rule must be invite-only.
+`expected_history_visibility` must exactly match the room's current `invited`, `joined`, or `shared` history policy; `world_readable` is never accepted.
+If omitted, it defaults to `invited`.
+`additional_user_ids` lists concrete Matrix IDs for existing participants who may be joined, invited, or knocking; it defaults to an empty list.
+No other joined, invited, or knocking member is permitted beyond the requester, agent, explicitly seeded router, and these additional users.
+The list is a permission attestation only: it does not invite or rejoin anyone, grant room admin power, or retain a router during cleanup.
+Only `router_user_id` grants the separate router retention contract.
+Normal authorization and current onboarding-room membership still apply when reconciling the seed.
+The service verifies these conditions before inviting or sending; changed history or membership fails reconciliation.
+It does not rewrite existing room identity, name, topic, or history.
+Explicitly seeded router membership is retained during ordinary cleanup, including after onboarding is disabled.
+
+Set `welcome_completed: true` only when onboarding history is already complete; no historical event ID needs to be invented.
+Pending welcome content and device receipts should be omitted from completed imports.
+No historical-format converter, import CLI, forced self-rejoin, or workspace reset is provided.
+Operators must prepare Matrix ownership state and any historical-format conversion before writing this current-format seed.
+
 ## Internal User Username
 
 - Configure `mindroom_user.username` with the Matrix localpart to request before first startup.
@@ -899,7 +1275,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 ## Notes
 
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
-- A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
+- Keep `models.default` configured for built-in Matrix room topic generation, even when agents, teams, and the router select other models.
+- Automatic thread summaries also fall back to `models.default` unless `defaults.thread_summary_model` or an applicable room or entity entry in `room_thread_summary_models` selects another model.
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - Router, agent, and team `accept_invites` policies default to `true`; use `false` or `[]` to reject every invite, or a list of exact and wildcard Matrix user IDs matched after human-only alias resolution; non-human accounts retain their exact transport ID
 - Invitation acceptance is independent from conversation access, and accepted ad-hoc room IDs are persisted across restarts without adding them to the static `rooms` list
@@ -917,7 +1294,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `administrators`, room invitations, responder access, Matrix power, and `credential_managers` are independent capabilities
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` requires a platform administrator
 - Responder `access` can match static users, current-room members, or members of configured managed rooms
-- Responder access and room membership never grant dashboard credential or OAuth management
+- Responder access and room membership do not grant general dashboard or shared-credential management; eligible requesters may manage [their own OAuth connections](../oauth-framework.md)
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](../authorization.md))
 - `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
 - Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually

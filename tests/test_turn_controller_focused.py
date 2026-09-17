@@ -46,7 +46,7 @@ from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.participation import RoomParticipationConfig
+from mindroom.config.participation import ParticipationConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
@@ -164,6 +164,7 @@ class _RecordingResponseRunner:
     suspend_source: bool = False
     complete_without_response: bool = False
     requests: list[ResponseRequest] = field(default_factory=list)
+    response_started: asyncio.Event = field(default_factory=asyncio.Event)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
@@ -222,6 +223,7 @@ class _RecordingResponseRunner:
 
     async def generate_response(self, request: ResponseRequest) -> str | None:
         self.requests.append(request)
+        self.response_started.set()
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
@@ -620,6 +622,7 @@ def _build_harness(
                     agent_name=agent_name,
                     delivery_gateway=cast("DeliveryGateway", gateway),
                     turn_store=turn_store,
+                    router_turn_records=journal_store.turn_records(ROUTER_AGENT_NAME),
                     ingress=ingress_validator,
                     wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
                 ),
@@ -4705,13 +4708,17 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
     tmp_path: Path,
     mention: bool,
 ) -> None:
-    """Actual two-human context delays text and reaches response execution as adaptive."""
-    config.room_participation = {
-        _ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=1.0 if mention else 0.1),
-    }
+    """Agent participation delays ad hoc room text and follows it through response admission."""
+    config.agents["general"].rooms = []
+    config.rooms = {}
+    config.agents["general"].participation = ParticipationConfig(
+        debounce_seconds=30.0 if mention else 0.1,
+        decline_reaction="👍",
+    )
     history = thread_history_result(
         [
             make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="answer", event_id="$answer"),
         ],
         is_full_history=True,
     )
@@ -4725,14 +4732,15 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
         explicit = _text_event("please answer", event_id="$mention:localhost", thread_id=_THREAD_ROOT)
         explicit.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
         await harness.controller.handle_text_event(room, explicit)
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(harness.runner.response_started.wait(), timeout=5)
     await harness.runner.settle_inbox_responses()
     assert len(harness.runner.requests) == 1
     if mention:
         assert harness.runner.requests[0].participation is None
         assert "my thought" in harness.runner.requests[0].prompt
     else:
-        assert harness.runner.requests[0].participation.agent == "general"
+        assert harness.runner.requests[0].participation is config.agents["general"].participation
+        assert harness.runner.requests[0].participation.decline_reaction == "👍"
     await harness.gate.drain_all()
 
 
@@ -4744,7 +4752,7 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
     mode: str,
 ) -> None:
     """Active backlogs keep one ordered turn, selecting participation only for untagged multi-human context."""
-    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=30)}
+    config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
     first_sender = _SENDER if mode == "single_human" else "@other:localhost"
     history = thread_history_result(
         [

@@ -40,7 +40,6 @@ from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_s
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
-    default_worker_routed_tools,
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
@@ -892,7 +891,11 @@ def resolve_runtime_worker_tools(
 
     if not tool_registry_preloaded:
         ensure_tool_registry_loaded(runtime_paths, config)
-    return default_worker_routed_tools(runtime_tool_names)
+    return [
+        tool_name
+        for tool_name in runtime_tool_names
+        if sandbox_proxy_enabled_for_tool(tool_name, runtime_paths=runtime_paths)
+    ]
 
 
 def _render_tool_execution_environment(

@@ -15,7 +15,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
     private static let completeStatusData = """
     {
       "config":{"state":"ready","revision":2,"enabled":true,"controller_user_id":"@controller:example.org","controller_device_id":"CLOUD","allowed_requester_ids":["@me:example.org"],"allowed_agent_names":["assistant"],"allowed_app_ids":["com.example.Editor"]},
-      "pairing":{"state":"paired","homeserver":"https://example.org","user_id":"@me:example.org","device_id":"LOCAL","controller_fingerprint":"key"},
+      "pairing":{"state":"paired","session_state":"ready","homeserver":"https://example.org","user_id":"@me:example.org","device_id":"LOCAL","controller_fingerprint":"key"},
       "helper":{"state":"running","version":"1.2.3"},
       "bridge":{"state":"observe_only","active_action":null,"last_error":null},
       "authority":{"control_available":false,"lease_remaining_seconds":0,"lease_expires_at_ms":null,"emergency_stop_latched":false},
@@ -44,6 +44,109 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         XCTAssertTrue(store.browserEnabled)
         XCTAssertEqual(store.browserExecutable, "/Applications/Browser.app/Contents/MacOS/Browser")
         XCTAssertEqual(store.browserProfile, "/Users/test/Library/Application Support/Browser")
+    }
+
+    func testAppSelectionStopsBeforeSavingAndRetainsDraftWhenStopFails() async throws {
+        for stopFails in [false, true] {
+            let manager = FileManager.default
+            let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            defer { try? manager.removeItem(at: root) }
+            let bundle = root.appendingPathComponent("MindRoom.app", isDirectory: true)
+            let executable = bundle.appendingPathComponent(Self.helperExecutablePath)
+            try manager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let requestsURL = root.appendingPathComponent("requests.jsonl")
+            var savedStatus = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.completeStatusData) as? [String: Any])
+            var config = try XCTUnwrap(savedStatus["config"] as? [String: Any])
+            config["revision"] = 3
+            config["allowed_app_ids"] = ["com.example.Other"]
+            savedStatus["config"] = config
+            savedStatus["bridge"] = ["state": "stopped"]
+            let savedJSON = String(decoding: try JSONSerialization.data(withJSONObject: savedStatus), as: UTF8.self)
+            let stopResponse = stopFails
+                ? #""ok":false,"error":{"code":"busy","message":"Stop failed","retryable":true}"#
+                : #""ok":true,"result":{}"#
+            let script = """
+            #!/bin/sh
+            while IFS= read -r line; do
+              printf '%s\\n' "$line" >> '\(requestsURL.path)'
+              request_id=$(printf '%s\\n' "$line" | sed -n 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+              case "$line" in
+                *'"set_allowed_apps"'*) printf '{"v":1,"type":"response","request_id":"%s","ok":true,"result":{"status":%s}}\\n' "$request_id" '\(savedJSON)' ;;
+                *) printf '{"v":1,"type":"response","request_id":"%s",%s}\\n' "$request_id" '\(stopResponse)' ;;
+              esac
+            done
+            """
+            try script.write(to: executable, atomically: true, encoding: .utf8)
+            try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            let helper = DesktopBridgeProcess(runtime: MindRoomRuntime(homeURL: root, bundleURL: bundle, environment: [:]))
+            let store = DesktopControlStore(helper: helper)
+            let ready = expectation(description: "store received active connection")
+            let statusSubscription = store.$status.filter { $0.bridge.state == "observe_only" }.prefix(1)
+                .sink { _ in ready.fulfill() }
+            let initialStatus = String(decoding: Self.completeStatusData, as: UTF8.self)
+            _ = helper.decode(Data("{\"v\":1,\"type\":\"status\",\"sequence\":1,\"status\":\(initialStatus)}".utf8))
+            await fulfillment(of: [ready], timeout: 2)
+            store.selectedAppIDs = ["com.example.Other"]
+            // Unrelated form drafts must never be sent with an app-only save.
+            store.controllerUserID = "@unsaved:example.org"
+            store.browserProfile = "/unsaved"
+            let completed = expectation(description: "app save completed")
+            let busySubscription = store.$isBusy.dropFirst().filter { !$0 }.prefix(1)
+                .sink { _ in completed.fulfill() }
+
+            store.saveAllowedApplications()
+            await fulfillment(of: [completed], timeout: 3)
+
+            let records = try String(contentsOf: requestsURL, encoding: .utf8).split(separator: "\n").map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+            }
+            XCTAssertEqual(records.compactMap { $0["action"] as? String }, stopFails ? ["stop"] : ["stop", "set_allowed_apps"])
+            XCTAssertEqual(store.selectedAppIDs, ["com.example.Other"])
+            XCTAssertEqual(store.browserProfile, "/unsaved")
+            if stopFails {
+                XCTAssertEqual(store.errorMessage, "Stop failed")
+                XCTAssertTrue(store.hasAppSelectionChanges)
+            } else {
+                let parameters = try XCTUnwrap(records.last?["parameters"] as? [String: Any])
+                XCTAssertEqual(Set(parameters.keys), ["expected_revision", "allowed_app_ids"])
+                XCTAssertEqual(parameters["expected_revision"] as? Int, 2)
+                XCTAssertEqual(parameters["allowed_app_ids"] as? [String], ["com.example.Other"])
+                XCTAssertEqual(store.status.bridge.state, "stopped")
+                XCTAssertFalse(store.hasAppSelectionChanges)
+                XCTAssertNil(store.errorMessage)
+            }
+            let stopped = expectation(description: "fixture helper stopped")
+            XCTAssertTrue(helper.shutdown(gracePeriod: 1, forcedTerminationPeriod: 1) { stopped.fulfill() })
+            await fulfillment(of: [stopped], timeout: 3)
+            withExtendedLifetime((statusSubscription, busySubscription)) {}
+        }
+    }
+
+    func testHydratesSavedSessionWithoutOverwritingLaterLoginEdits() throws {
+        let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
+        let store = DesktopControlStore()
+
+        store.hydrateConfiguration(from: status)
+
+        XCTAssertEqual(store.homeserver, "https://example.org")
+        XCTAssertEqual(store.matrixUserID, "@me:example.org")
+        store.homeserver = "https://other.example.org"
+        store.matrixUserID = ""
+        store.hydrateConfiguration(from: status)
+        XCTAssertEqual(store.homeserver, "https://other.example.org")
+        XCTAssertEqual(store.matrixUserID, "")
+    }
+
+    func testSavedSessionDoesNotOverwritePreparedLoginIdentity() throws {
+        let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
+        let store = DesktopControlStore()
+        store.homeserver = "https://other.example.org"
+        store.matrixUserID = "@other:other.example.org"
+
+        store.hydrateConfiguration(from: status)
+
+        XCTAssertEqual(store.homeserver, "https://other.example.org")
+        XCTAssertEqual(store.matrixUserID, "@other:other.example.org")
     }
 
     func testProtocolVersionRejectsBooleanAndFloatingPointValues() {

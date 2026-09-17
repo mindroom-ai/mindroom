@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Mapping
 from functools import partial
@@ -13,6 +14,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token as google_id_token
 from requests import exceptions as requests_exceptions
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.oauth.providers import (
@@ -108,12 +110,12 @@ async def _google_runtime_bootstrapper(
     runtime_paths: RuntimePaths,
 ) -> OAuthRuntimeEndpoints:
     """Fetch the installed-app client config through an authenticated local pairing."""
-    resolution = provider.client_config_resolution(runtime_paths)
+    resolution = await asyncio.to_thread(provider.client_config_resolution, runtime_paths)
     if resolution is not None and resolution.custom:
         return _google_runtime_endpoints()
 
-    manager = get_runtime_credentials_manager(runtime_paths)
-    existing = manager.load_credentials(_GOOGLE_CLIENT_CONFIG_SERVICE)
+    manager = await asyncio.to_thread(get_runtime_credentials_manager, runtime_paths)
+    existing = await asyncio.to_thread(manager.load_credentials, _GOOGLE_CLIENT_CONFIG_SERVICE)
     if existing and existing.get(RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY) is not True:
         return _google_runtime_endpoints()
     if _provisioned_google_client_is_fresh(existing):
@@ -149,7 +151,7 @@ async def _google_runtime_bootstrapper(
         _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: time.time(),
     }
     if existing != credentials:
-        manager.save_credentials(_GOOGLE_CLIENT_CONFIG_SERVICE, credentials)
+        await run_blocking_until_complete(manager.save_credentials, _GOOGLE_CLIENT_CONFIG_SERVICE, credentials)
     return _google_runtime_endpoints()
 
 
@@ -232,19 +234,16 @@ def _google_token_parser(
             msg = "Google identity token verification did not return claims"
             raise OAuthClaimValidationError(msg)
 
-    scopes = provider.scopes
-    response_scope = token_response.get("scope")
-    if isinstance(response_scope, str) and response_scope.strip():
-        scopes = tuple(response_scope.split())
-
     token_data: dict[str, Any] = {
         "token": access_token,
         "token_uri": provider.token_url,
         "client_id": client_config.client_id,
-        "scopes": list(scopes),
         "_source": "oauth",
         "_oauth_provider": provider.id,
     }
+    response_scope = token_response.get("scope")
+    if isinstance(response_scope, str) and response_scope.strip():
+        token_data["scopes"] = response_scope.split()
     if isinstance(refresh_token, str) and refresh_token:
         token_data["refresh_token"] = refresh_token
     token_type = token_response.get("token_type")

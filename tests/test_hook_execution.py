@@ -20,8 +20,10 @@ from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     EVENT_MESSAGE_RECEIVED,
+    EVENT_SYSTEM_ENRICH,
     BeforeResponseContext,
     CustomEventContext,
+    EnrichmentItem,
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookRegistry,
@@ -30,6 +32,7 @@ from mindroom.hooks import (
     MessageEnvelope,
     MessageReceivedContext,
     ResponseDraft,
+    SystemEnrichContext,
     build_hook_matrix_admin,
     hook,
 )
@@ -333,6 +336,58 @@ async def test_emit_collect_merges_in_hook_order_and_isolates_per_hook_state(tmp
     items = await emit_collect(registry, EVENT_MESSAGE_ENRICH, context)
 
     assert [item.key for item in items] == ["first", "second"]
+    assert context._items == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_name", [EVENT_MESSAGE_ENRICH, EVENT_SYSTEM_ENRICH])
+@pytest.mark.parametrize("failure", ["exception", "timeout"])
+async def test_emit_collect_discards_failed_hook_items(
+    tmp_path: Path,
+    event_name: str,
+    failure: str,
+) -> None:
+    """A failed collector contributes nothing while successful collectors survive."""
+
+    @hook(event_name, priority=10, timeout_ms=10)
+    async def failing(ctx: MessageEnrichContext | SystemEnrichContext) -> None:
+        if isinstance(ctx, MessageEnrichContext):
+            ctx.add_metadata("partial", "must be discarded")
+            ctx.add_metadata("transient", "must also be discarded", persist=False)
+        else:
+            ctx.add_instruction("partial", "must be discarded")
+        if failure == "timeout":
+            await asyncio.Event().wait()
+        message = "collector failed after appending items"
+        raise RuntimeError(message)
+
+    @hook(event_name, priority=20)
+    async def healthy(ctx: MessageEnrichContext | SystemEnrichContext) -> EnrichmentItem:
+        if isinstance(ctx, MessageEnrichContext):
+            ctx.add_metadata("healthy", "keep appended item")
+        else:
+            ctx.add_instruction("healthy", "keep appended item")
+        return EnrichmentItem(key="returned", text="keep returned item")
+
+    registry = HookRegistry.from_plugins([_plugin("collectors", [failing, healthy])])
+    config = _config(tmp_path)
+    context_type = MessageEnrichContext if event_name == EVENT_MESSAGE_ENRICH else SystemEnrichContext
+    context = context_type(
+        event_name=event_name,
+        plugin_name="",
+        settings={},
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        logger=get_logger("tests.hooks").bind(event_name=event_name),
+        correlation_id="corr-failed-collector",
+        envelope=_envelope(),
+        target_entity_name="code",
+        target_member_names=None,
+    )
+
+    items = await emit_collect(registry, event_name, context)
+
+    assert [item.key for item in items] == ["healthy", "returned"]
     assert context._items == []
 
 

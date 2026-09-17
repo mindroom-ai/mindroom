@@ -256,7 +256,7 @@ export interface Team {
   rooms: string[];
   access?: ResponderAccessConfig;
   mode: "coordinate" | "collaborate";
-  model?: string; // Optional team-specific model
+  model?: string | null; // Optional team-specific model; explicit null is invalid at runtime
   compaction?: CompactionConfig | null; // Per-team required-compaction overrides
   num_history_runs?: number | null; // Number of prior scoped runs to include as team history
   num_history_messages?: number | null; // Max team-scoped history messages (mutually exclusive with num_history_runs)

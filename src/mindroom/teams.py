@@ -39,6 +39,7 @@ from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
+    accumulate_model_request_metrics,
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
     build_prepared_history_metadata_content,
@@ -67,6 +68,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
+from mindroom.helper_usage import helper_usage_context
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
@@ -1842,19 +1844,18 @@ class _TeamStreamUsage:
             self.latest_model_id = event.model
         if event.model_provider:
             self.latest_model_provider = event.model_provider
-        self._add("input_tokens", event.input_tokens)
-        self._add("output_tokens", event.output_tokens)
-        self._add("total_tokens", event.total_tokens)
-        self._add("reasoning_tokens", event.reasoning_tokens)
-        self._add("cache_read_tokens", event.cache_read_tokens)
-        self._add("cache_write_tokens", event.cache_write_tokens)
-        if self.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
-            self.first_token_latency = float(event.time_to_first_token)
-
-    def _add(self, field_name: str, value: int | None) -> None:
-        if isinstance(value, int):
-            self.observed_fields.add(field_name)
-            self.request_metric_totals[field_name] = self.request_metric_totals.get(field_name, 0) + value
+        self.first_token_latency = accumulate_model_request_metrics(
+            self.request_metric_totals,
+            self.observed_fields,
+            input_tokens=event.input_tokens,
+            output_tokens=event.output_tokens,
+            total_tokens=event.total_tokens,
+            reasoning_tokens=event.reasoning_tokens,
+            cache_read_tokens=event.cache_read_tokens,
+            cache_write_tokens=event.cache_write_tokens,
+            time_to_first_token=event.time_to_first_token,
+            first_token_latency=self.first_token_latency,
+        )
 
     def fallback_payload(self) -> dict[str, Any] | None:
         """Return the aggregate usage payload built from the tracked requests."""
@@ -2812,29 +2813,30 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
                 if call.invoking_agent == configured_team_name and not decisions.get(call.tool_call_id)
             ),
         )
-        continued = await _collect_team_continuation(
-            continuation_stream,
-            presentation,
-        )
+        with helper_usage_context(scope):
+            continued = await _collect_team_continuation(
+                continuation_stream,
+                presentation,
+            )
 
-        continued = await join_approval_jobs(
-            continued,
-            is_complete=lambda result: result.status == RunStatus.completed,
-            continue_response=partial(
-                _retrieve_team_job_results,
-                team=team,
-                presentation=presentation,
-                session_id=session_id,
-                user_id=user_id,
-                configured_team_name=configured_team_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-                refresh_scheduler=refresh_scheduler,
-                members=members,
-            ),
-            response_text=presentation.render_body,
-        )
+            continued = await join_approval_jobs(
+                continued,
+                is_complete=lambda result: result.status == RunStatus.completed,
+                continue_response=partial(
+                    _retrieve_team_job_results,
+                    team=team,
+                    presentation=presentation,
+                    session_id=session_id,
+                    user_id=user_id,
+                    configured_team_name=configured_team_name,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    execution_identity=execution_identity,
+                    refresh_scheduler=refresh_scheduler,
+                    members=members,
+                ),
+                response_text=presentation.render_body,
+            )
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,

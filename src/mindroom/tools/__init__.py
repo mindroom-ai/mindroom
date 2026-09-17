@@ -38,6 +38,7 @@ from mindroom.tools.bitbucket import bitbucket_tools
 from mindroom.tools.brandfetch import brandfetch_tools
 from mindroom.tools.brightdata import brightdata_tools
 from mindroom.tools.browser import browser_tools
+from mindroom.tools.browser_mcp import browser_mcp_tools
 from mindroom.tools.browserbase import browserbase_tools
 from mindroom.tools.cal_com import cal_com_tools
 from mindroom.tools.calculator import calculator_tools
@@ -170,6 +171,7 @@ __all__ = [
     "bitbucket_tools",
     "brandfetch_tools",
     "brightdata_tools",
+    "browser_mcp_tools",
     "browser_tools",
     "browserbase_tools",
     "cal_com_tools",
@@ -369,6 +371,7 @@ def _homeassistant_tools() -> type[Toolkit]:
 
 @register_tool_with_metadata(
     name="agent_vault_access",
+    requires_primary_runtime=True,
     display_name="Agent Vault Access",
     description="Get a link to manage this agent's passwords and API keys in Agent Vault",
     category=ToolCategory.INTEGRATIONS,

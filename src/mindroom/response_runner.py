@@ -18,6 +18,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
+from mindroom.ai_runtime import bind_mid_turn_conversation_context
 from mindroom.approval_execution import AgentApprovalExecution
 from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval_response import (
@@ -71,6 +72,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
+from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -81,6 +83,7 @@ from mindroom.orchestration.runtime import (
     request_task_cancel,
 )
 from mindroom.participation import ParticipationGate
+from mindroom.participation_judgment import create_participation_decider
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_shutdown_diagnostics import (
@@ -195,7 +198,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
-    from mindroom.config.participation import RoomParticipationConfig
+    from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
@@ -206,6 +209,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
@@ -482,7 +486,7 @@ class ResponseRequest:
     prompt: str
     response_envelope: MessageEnvelope
     sources: ResponseSources
-    participation: RoomParticipationConfig | None = None
+    participation: ParticipationConfig | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None
@@ -543,13 +547,62 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
-def _participation_for_request(request: ResponseRequest) -> ParticipationGate | None:
+def _mid_turn_for_request(
+    request: ResponseRequest,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    on_defer: Callable[[str, str], Awaitable[None]],
+) -> MidTurnGate | None:
+    """Treat deferred attachment registration as incomplete judgment context too."""
+    preparation = request.payload_preparation
+    has_media = bool(
+        request.attachment_ids
+        or (request.media is not None and request.media.has_any())
+        or (
+            preparation is not None
+            and (
+                preparation.payload_inputs.media_events
+                or preparation.payload_inputs.message_attachment_ids
+                or preparation.payload_inputs.trusted_attachment_ids
+                or preparation.payload_inputs.raw_audio_fallback
+            )
+        ),
+    )
+    gate = create_mid_turn_gate(
+        config,
+        runtime_paths,
+        request.response_envelope,
+        prompt=request.prompt,
+        has_media=has_media,
+        on_defer=on_defer,
+    )
+    if gate is not None:
+        # The ingress history may be stale until this response acquires the lock.
+        gate.bind_conversation_context(None)
+    if gate is not None and request.existing_event_id and not request.existing_event_is_placeholder:
+        gate.visible_response_text = None
+    return gate
+
+
+def _participation_for_request(
+    request: ResponseRequest,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ParticipationGate | None:
     """Own one participation decision from locked preparation through delivery."""
     if request.participation is None:
         return None
     gate = ParticipationGate(instructions=request.participation.instructions)
     if request.existing_event_id is not None:
         gate.approve_existing_response()
+    else:
+        gate.decider = create_participation_decider(
+            request.participation,
+            config,
+            runtime_paths,
+            agent_name=request.response_envelope.agent_name,
+        )
     return gate
 
 
@@ -780,6 +833,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
+    register_approval_interruption: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -1366,6 +1420,7 @@ class ResponseRunner:
                     show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
+                    continuation_count=paused.continuation_count,
                     team_member_names=team_member_names,
                     team_member_model_names=paused.team_member_model_names,
                     team_mode=team_mode,
@@ -1516,6 +1571,7 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Run one claimed pause through the normal stoppable response lifecycle."""
         request = self._approval_response_request(claimed, target=target)
+        await self._refresh_mid_turn_context_for_approval(request)
         progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
         progress.note_delivery_started(claimed.response_event_id)
         lifecycle = self._build_lifecycle(
@@ -1580,7 +1636,7 @@ class ResponseRunner:
             build_post_response_outcome=lambda final: self._approval_post_response_outcome(
                 post_effect_continuation,
                 target=target,
-                run_succeeded=final.terminal_status == "completed",
+                final=final,
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
         )
@@ -1695,12 +1751,19 @@ class ResponseRunner:
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        return await self._approval_responses.settle_failure(
+        settled = await self._approval_responses.settle_failure(
             failing,
             reason,
             visible_text=update,
             stream_status=STREAM_STATUS_ERROR,
         )
+        if settled and await self.deps.approval_store.approval_interruption_is_recoverable(
+            failing.source_event_ids[0],
+            visible_text=update,
+            failure_reason=failing.failure_reason,
+        ):
+            self.deps.register_approval_interruption(failing.source_event_ids[0], failing.room_id)
+        return settled
 
     async def _approval_interruption_update(
         self,
@@ -1762,10 +1825,10 @@ class ResponseRunner:
         )
         await lifecycle.finalize(
             recovered_outcome,
-            build_post_response_outcome=lambda _final: self._approval_post_response_outcome(
+            build_post_response_outcome=lambda final: self._approval_post_response_outcome(
                 claimed,
                 target=target,
-                run_succeeded=True,
+                final=final,
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
         )
@@ -1830,7 +1893,7 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
         *,
         target: MessageTarget,
-        run_succeeded: bool,
+        final: FinalDeliveryOutcome,
     ) -> ResponseOutcome:
         """Build normal post-response facts for one resumed native run."""
         execution_identity = parse_tool_execution_identity_payload(
@@ -1838,11 +1901,11 @@ class ResponseRunner:
             error_prefix="Approval continuation execution_identity",
         )
         return ResponseOutcome(
-            response_run_id=continuation.run_id,
+            response_run_id=final.response_run_id or continuation.run_id,
             session_id=continuation.session_id,
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,
-            run_succeeded=run_succeeded,
+            run_succeeded=final.terminal_status == "completed",
             response_target=target,
             thread_summary_room_id=continuation.room_id if target.resolved_thread_id is not None else None,
             thread_summary_thread_id=target.resolved_thread_id,
@@ -2050,6 +2113,10 @@ class ResponseRunner:
                     typing_log_context=_response_typing_log_context(
                         request,
                         response_run_id=continuation.run_id,
+                    ),
+                    run_id_callback=lambda run_id: self.deps.stop_manager.update_run_id(
+                        continuation.response_event_id,
+                        run_id,
                     ),
                 )
         return response_text
@@ -2495,6 +2562,16 @@ class ResponseRunner:
         )
         self._admission_gate.response_identities.add(identity)
         self._in_flight_response_count += 1
+
+        async def acknowledge_deferred(key: str, event_id: str) -> None:
+            await self.deps.delivery_gateway.send_judgment_reaction(
+                identity=self._response_identity(request, response_kind=response_kind),
+                room_id=request.room_id,
+                event_id=event_id,
+                key=key,
+                kind="mid_turn_defer",
+            )
+
         try:
             resolved_target = request.response_envelope.target
             early_placeholder = _EarlyPlaceholderState()
@@ -2503,6 +2580,12 @@ class ResponseRunner:
                     target=resolved_target,
                     response_envelope=request.response_envelope,
                     pipeline_timing=request.pipeline_timing,
+                    mid_turn_gate=_mid_turn_for_request(
+                        request,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                        on_defer=acknowledge_deferred,
+                    ),
                     locked_operation=lambda target: self._run_owned_or_locked_response(
                         request,
                         target=target,
@@ -3077,7 +3160,7 @@ class ResponseRunner:
                 thread_id=request.thread_id,
                 error=str(exc),
             )
-            return request
+            return replace(request, requires_model_history_refresh=True)
         if exclude_event_id is not None:
             filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
             if len(filtered_history) != len(refreshed_history):
@@ -3086,6 +3169,30 @@ class ResponseRunner:
             request,
             thread_history=refreshed_history,
             requires_model_history_refresh=False,
+        )
+
+    async def _refresh_mid_turn_context_for_approval(self, request: ResponseRequest) -> None:
+        """Approval resumptions bypass ordinary payload preparation."""
+        agent = self.deps.runtime.config.agents.get(request.response_envelope.agent_name)
+        if agent is not None and agent.mid_turn is not None:
+            # Refresh only the judge's public context; native continuation input stays unchanged.
+            refreshed = await self._refresh_model_history_after_lock(request)
+            self._bind_mid_turn_context(refreshed)
+
+    def _bind_mid_turn_context(self, request: ResponseRequest) -> None:
+        """Only successfully refreshed public history may authorize continuing tools."""
+        bind_mid_turn_conversation_context(
+            lambda: (
+                None
+                if request.requires_model_history_refresh
+                else conversation_context_for_mid_turn(
+                    request.thread_history,
+                    source_event_ids=request.sources.logical_source_event_ids,
+                    thread_id=request.thread_id,
+                    config=self.deps.runtime.config,
+                    runtime_paths=self.deps.runtime_paths,
+                )
+            ),
         )
 
     async def _prepare_request_after_lock(
@@ -3102,6 +3209,7 @@ class ResponseRunner:
                 request,
                 exclude_event_id=exclude_history_event_id,
             )
+            self._bind_mid_turn_context(request)
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
             request = replace(
@@ -4267,6 +4375,9 @@ class ResponseRunner:
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
+                                visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
+                                    delivery_target,
+                                ),
                             ),
                         )
                         event_id = transport_outcome.last_physical_stream_event_id
@@ -4587,7 +4698,9 @@ class ResponseRunner:
             active_model_name=active_model_name,
             show_tool_calls=self._show_tool_calls(),
             tool_dispatch=tool_dispatch,
-            participation=participation if participation is not None else _participation_for_request(request),
+            participation=participation
+            if participation is not None
+            else _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
         )
 
     @timed("non_streaming_response_generation")
@@ -4798,6 +4911,9 @@ class ResponseRunner:
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
+                        visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
+                            runtime.resolved_target,
+                        ),
                         allow_new_terminal_message=lambda: (
                             runtime.participation is None or runtime.participation.approved
                         ),
@@ -5189,7 +5305,7 @@ class ResponseRunner:
         early_placeholder_state: _EarlyPlaceholderState | None = None,
     ) -> str | None:
         """Own participation before any fallible locked request preparation."""
-        participation = _participation_for_request(request)
+        participation = _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths)
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         try:
             return await self._generate_response_with_participation_locked(
@@ -5358,6 +5474,20 @@ class ResponseRunner:
                     on_delivery_started=progress.note_delivery_started,
                     attempt_run_id_collector=attempt_run_ids,
                     runtime=runtime,
+                )
+            if (
+                participation is not None
+                and participation.is_declined
+                and request.participation is not None
+                and request.participation.decline_reaction is not None
+                and generation.delivery.failure_reason == "participation_declined"
+            ):
+                await self.deps.delivery_gateway.send_judgment_reaction(
+                    identity=response_identity,
+                    room_id=request.room_id,
+                    event_id=request.sources.logical_source_event_ids[-1],
+                    key=request.participation.decline_reaction,
+                    kind="participation_decline",
                 )
             progress.settle(generation.delivery)
 

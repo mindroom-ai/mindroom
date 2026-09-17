@@ -9,11 +9,12 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.replicate import ReplicateTools
+    from mindroom.custom_tools.agno_compat_replicate import MindRoomReplicateTools
 
 
 @register_tool_with_metadata(
     name="replicate",
+    worker_inert_agent_functions=("generate_media",),
     display_name="Replicate",
     description="Generate images and videos using AI models on the Replicate platform",
     category=ToolCategory.DEVELOPMENT,
@@ -55,8 +56,8 @@ if TYPE_CHECKING:
     docs_url="https://docs.agno.com/tools/toolkits/others/replicate",
     function_names=("generate_media",),
 )
-def replicate_tools() -> type[ReplicateTools]:
+def replicate_tools() -> type[MindRoomReplicateTools]:
     """Return Replicate tools for AI media generation."""
-    from agno.tools.replicate import ReplicateTools
+    from mindroom.custom_tools.agno_compat_replicate import MindRoomReplicateTools
 
-    return ReplicateTools
+    return MindRoomReplicateTools

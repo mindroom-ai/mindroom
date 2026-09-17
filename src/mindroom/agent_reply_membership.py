@@ -12,7 +12,7 @@ from mindroom.access_policy import resolve_responder_access
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.state import matrix_state_for_runtime
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -599,16 +599,7 @@ def _raw_membership_matches_sender(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Match one canonical human requester against the raw Matrix membership roster."""
-    canonical_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
-    equivalent_user_ids = {
-        canonical_sender,
-        *(
-            alias
-            for alias in config.authorization.aliases.get(canonical_sender, ())
-            if resolve_human_requester_alias(alias, config, runtime_paths) == canonical_sender
-        ),
-    }
-    return not raw_user_ids.isdisjoint(equivalent_user_ids)
+    return not raw_user_ids.isdisjoint(equivalent_requester_ids(sender_id, config, runtime_paths))
 
 
 def _unready_room(room_key: str | None, room_id: str | None, *, reason: str) -> _GrantRoomMembership:

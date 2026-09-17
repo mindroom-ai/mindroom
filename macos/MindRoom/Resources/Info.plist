@@ -10,8 +10,6 @@
 	<string>MindRoom</string>
 	<key>CFBundleIdentifier</key>
 	<string>chat.mindroom.menubar</string>
-	<key>CFBundleIconFile</key>
-	<string>MindRoom</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

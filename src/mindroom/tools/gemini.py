@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="gemini",
+    worker_inert_agent_functions=("generate_image", "generate_video"),
     display_name="Gemini",
     description="Google AI API services for generating images and videos using Gemini models",
     category=ToolCategory.DEVELOPMENT,

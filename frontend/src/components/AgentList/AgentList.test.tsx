@@ -52,7 +52,7 @@ describe("AgentList", () => {
     expect(screen.getByText("1 room")).toBeInTheDocument();
   });
 
-  it("should highlight selected agent", () => {
+  it("exposes the selected agent state", () => {
     (useConfigStore as any).mockReturnValue({
       agents: mockAgents,
       selectedAgentId: "agent1",
@@ -65,7 +65,11 @@ describe("AgentList", () => {
     const selectedAgent = screen
       .getByText("Test Agent 1")
       .closest('div[role="button"]');
-    expect(selectedAgent).toHaveClass("ring-2", "ring-orange-500");
+    const unselectedAgent = screen
+      .getByText("Test Agent 2")
+      .closest('div[role="button"]');
+    expect(selectedAgent).toHaveAttribute("aria-pressed", "true");
+    expect(unselectedAgent).toHaveAttribute("aria-pressed", "false");
   });
 
   it("should call selectAgent when clicking an agent", () => {

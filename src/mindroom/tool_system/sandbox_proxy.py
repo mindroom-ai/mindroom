@@ -7,6 +7,7 @@ import base64
 import binascii
 import functools
 import hashlib
+import inspect
 import json
 import os
 import secrets
@@ -21,7 +22,7 @@ import httpx
 
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.declarations import declare_tool_schema_source
+from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -32,6 +33,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
+    SANDBOX_PROXY_VIEW_FILE_PATH,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
     post_worker_proxy_json,
@@ -56,7 +58,7 @@ from mindroom.workers.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from agno.tools.function import Function
+    from agno.tools.function import Function, ToolResult
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
@@ -218,6 +220,10 @@ def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
     normalized = raw.strip().lower()
     if not normalized:
         return None
+    supported = _SANDBOX_ALL_EXECUTION_MODES | _SANDBOX_SELECTIVE_EXECUTION_MODES | _UNSAFE_LOCAL_EXECUTION_MODES
+    if normalized not in supported:
+        msg = f"Invalid MINDROOM_SANDBOX_EXECUTION_MODE {raw!r}; expected one of {', '.join(sorted(supported))}"
+        raise ValueError(msg)
     return normalized
 
 
@@ -241,7 +247,12 @@ def _read_proxy_tools(
 ) -> set[str] | None:
     default = (
         "*"
-        if execution_mode in _SANDBOX_ALL_EXECUTION_MODES or (execution_mode is None and proxy_url is not None)
+        if execution_mode in _SANDBOX_ALL_EXECUTION_MODES
+        or (
+            execution_mode is None
+            and proxy_url is not None
+            and primary_worker_backend_name(runtime_paths) == "static_runner"
+        )
         else ""
     )
     raw_value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default) or default).strip()
@@ -636,6 +647,110 @@ def save_attachment_to_worker(
         raise RuntimeError(str(error))
 
 
+def view_file_from_worker(
+    *,
+    runtime_paths: RuntimePaths,
+    worker_target: ResolvedWorkerTarget | None,
+    worker_tools_override: list[str] | None = None,
+    workspace_root: Path | None = None,
+    path: str,
+) -> ToolResult | None:
+    """View one file in the selected worker, returning None when no worker endpoint exists."""
+    if not attachment_save_uses_worker(
+        runtime_paths=runtime_paths,
+        worker_tools_override=worker_tools_override,
+    ):
+        return None
+
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    manager_context = _primary_worker_manager_context(runtime_paths)
+    with lease_primary_worker_manager(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=manager_context.storage_root,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
+        kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
+        worker_grantable_credentials=manager_context.worker_grantable_credentials,
+    ) as worker_manager:
+        worker_payload, worker_handle = _build_worker_routing_payload(
+            runtime_paths=runtime_paths,
+            tool_name="attachments",
+            function_name="view_file",
+            worker_target=worker_target,
+            progress_sink=None,
+            worker_manager=worker_manager,
+        )
+        if worker_handle is None and proxy_config.proxy_url is None:
+            return None
+
+        worker_key = worker_payload.get("worker_key")
+        tool_init_overrides = _portable_tool_init_overrides(
+            {"base_dir": str(workspace_root)} if workspace_root is not None else None,
+            shared_storage_root_path=manager_context.storage_root,
+            worker_key=worker_key if isinstance(worker_key, str) else None,
+        )
+        if tool_init_overrides:
+            worker_payload["tool_init_overrides"] = tool_init_overrides
+        if workspace_root is not None:
+            # Translate the mount spelling only; resolve and authorize the path inside the worker.
+            with suppress(ValueError):
+                path = Path(path).relative_to(workspace_root).as_posix()
+
+        data = post_worker_proxy_json(
+            config=_worker_proxy_client_config(proxy_config),
+            payload={**worker_payload, "path": path},
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            proxy_path=SANDBOX_PROXY_VIEW_FILE_PATH,
+            worker_operation="view-file",
+            client_factory=httpx.Client,
+        )
+        if not isinstance(data, dict):
+            msg = "Sandbox view-file returned a non-object response."
+            _record_worker_save_failure(
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+                error=msg,
+            )
+            raise TypeError(msg)
+        response_data = {str(key): value for key, value in data.items()}
+        if response_data.get("ok") is True:
+            from agno.tools.function import ToolResult  # noqa: PLC0415
+
+            from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+            try:
+                result = decode_media_result(response_data.get("result"))
+            except ValueError as exc:
+                _record_worker_save_failure(
+                    worker_handle=worker_handle,
+                    worker_manager=worker_manager,
+                    error=str(exc),
+                )
+                raise
+            if not isinstance(result, ToolResult):
+                msg = "Sandbox view-file returned a non-media result."
+                _record_worker_save_failure(
+                    worker_handle=worker_handle,
+                    worker_manager=worker_manager,
+                    error=msg,
+                )
+                raise TypeError(msg)
+            if worker_handle is not None:
+                worker_manager.touch_worker(worker_handle.worker_key)
+            return result
+
+        error = response_data.get("error") or "Sandbox file view failed."
+        record_proxy_response_failure_for_worker(
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            error=str(error),
+            failure_kind=response_data.get("failure_kind"),
+        )
+        raise RuntimeError(str(error))
+
+
 def _make_progress_sink(
     pump: WorkerProgressPump,
     *,
@@ -726,7 +841,9 @@ def sandbox_proxy_enabled_for_tool(
     """
     proxy_config = sandbox_proxy_config(runtime_paths)
     metadata = TOOL_METADATA.get(tool_name)
-    if proxy_config.runner_mode or (metadata is not None and metadata.requires_primary_runtime):
+    if proxy_config.runner_mode or (
+        metadata is not None and (metadata.requires_primary_runtime or metadata.requires_room_context)
+    ):
         return False
 
     if not _sandbox_proxy_requested_for_tool(
@@ -775,6 +892,7 @@ def _call_proxy_sync(
     args: tuple[object, ...],
     kwargs: dict[str, object],
     credentials_manager: CredentialsManager | None,
+    function_entrypoint: Callable[..., object] | None = None,
     shared_storage_root_path: Path | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
@@ -782,6 +900,15 @@ def _call_proxy_sync(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> object:
+    from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments  # noqa: PLC0415
+
+    metadata = TOOL_METADATA.get(tool_name)
+    wire_args, wire_kwargs = prepare_worker_call_arguments(
+        args,
+        kwargs,
+        entrypoint=function_entrypoint,
+        inert_agent=metadata is not None and function_name in metadata.worker_inert_agent_functions,
+    )
     proxy_config = sandbox_proxy_config(runtime_paths)
     pump = get_worker_progress_pump()
     progress_sink = (
@@ -796,8 +923,8 @@ def _call_proxy_sync(
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
-        "args": [to_json_compatible(arg) for arg in args],
-        "kwargs": {key: to_json_compatible(value) for key, value in kwargs.items()},
+        "args": wire_args,
+        "kwargs": wire_kwargs,
     }
     manager_context = _primary_worker_manager_context(runtime_paths)
     with lease_primary_worker_manager(
@@ -832,7 +959,7 @@ def _call_proxy_sync(
         )
         if portable_tool_init_overrides:
             payload["tool_init_overrides"] = to_json_compatible(portable_tool_init_overrides)
-        return execute_worker_proxy_request(
+        result = execute_worker_proxy_request(
             config=_worker_proxy_client_config(proxy_config),
             payload=payload,
             credentials_manager=credentials_manager,
@@ -843,6 +970,15 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
             client_factory=httpx.Client,
         )
+        from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
+        from mindroom.tool_system.media_transport import (  # noqa: PLC0415
+            decode_media_result,
+            is_media_result_envelope,
+        )
+
+        if tool_name == "browser_mcp" or is_media_result_envelope(result):
+            return finalize_tool_media(decode_media_result(result))
+        return result
 
 
 async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
@@ -865,13 +1001,21 @@ def _wrap_sync_function(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    primary_placement: SupportsPrimaryCallPlacement | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
-    assert function.entrypoint is not None
+    entrypoint = function.entrypoint
+    assert entrypoint is not None
 
-    @functools.wraps(function.entrypoint)
+    @functools.wraps(entrypoint)
     def proxy_entrypoint(*args: object, **kwargs: object) -> object:
+        if primary_placement is not None and primary_placement.runs_on_primary(
+            function_name,
+            inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
+        ):
+            return entrypoint(*args, **kwargs)
         return _call_proxy_sync(
+            function_entrypoint=entrypoint,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
@@ -886,7 +1030,7 @@ def _wrap_sync_function(
             worker_target=worker_target,
         )
 
-    declare_tool_schema_source(proxy_entrypoint, function.entrypoint)
+    declare_tool_schema_source(proxy_entrypoint, entrypoint)
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
@@ -904,14 +1048,22 @@ def _wrap_async_function(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    primary_placement: SupportsPrimaryCallPlacement | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
-    assert function.entrypoint is not None
+    entrypoint = function.entrypoint
+    assert entrypoint is not None
 
-    @functools.wraps(function.entrypoint)
+    @functools.wraps(entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
+        if primary_placement is not None and primary_placement.runs_on_primary(
+            function_name,
+            inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
+        ):
+            return await entrypoint(*args, **kwargs)
         call = functools.partial(
             _call_proxy_sync,
+            function_entrypoint=entrypoint,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
@@ -927,7 +1079,7 @@ def _wrap_async_function(
         )
         return await _run_in_worker_proxy_executor(call)
 
-    declare_tool_schema_source(proxy_entrypoint, function.entrypoint)
+    declare_tool_schema_source(proxy_entrypoint, entrypoint)
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
@@ -962,6 +1114,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         runtime_paths=runtime_paths,
         extra_env_passthrough=extra_env_passthrough,
     )
+    primary_placement = toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None
     original_functions = toolkit.functions
     original_async_functions = toolkit.async_functions
     toolkit.functions = {
@@ -977,6 +1130,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            primary_placement=primary_placement,
         )
         for function_name, function in original_functions.items()
     }
@@ -993,6 +1147,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            primary_placement=primary_placement,
         )
         for function_name, function in original_async_functions.items()
     }

@@ -706,10 +706,10 @@ class ScopedOAuthClientMixin(AgnoGoogleAuthBindingMixin):
             self.creds = None
             self.service = None
             raise self._connection_required(reason=OAUTH_RESET_REQUIRED_REASON) from exc
-        except OAuthProviderError as exc:
+        except OAuthProviderError:
             self.creds = None
             self.service = None
-            raise self._connection_required() from exc
+            raise _SanitizedGoogleRefreshError(_SANITIZED_GOOGLE_REFRESH_ERROR_MESSAGE) from None
         if self._google_credential_key != revision:
             self.creds = None
             self.service = None

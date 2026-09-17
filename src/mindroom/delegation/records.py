@@ -606,8 +606,8 @@ def _next_sequence(handle: DelegationRecordHandle) -> int:
 
 def _load_events(path: Path) -> list[dict[str, object]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-        events = [json.loads(line) for line in lines]
+        with path.open(encoding="utf-8") as stream:
+            events = [json.loads(line) for line in stream]
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         msg = f"Delegation event stream is unreadable: {path.parent.name}"
         raise ValueError(msg) from exc

@@ -54,7 +54,7 @@ Read and understand the MindRoom project structure:
    - **ALWAYS check for existing helper functions** before implementing new ones
    - Look in `matrix/` module for Matrix utilities
    - Check `thread_utils.py` for thread handling
-   - Review `commands.py` for command patterns
+   - Review `src/mindroom/commands/parsing.py` and `src/mindroom/commands/handler.py` for command parsing and dispatch patterns
    - Use **uv** (not conda) for package management
    - Install: `uv sync --all-extras`
    - Activate: `source .venv/bin/activate`
@@ -68,11 +68,12 @@ Read and understand the MindRoom project structure:
      - Use dataclasses over dictionaries
      - Keep it DRY - aggressively remove unused code
      - Don't wrap in try-except unless necessary
-     - Imports at top of file (except for circular imports)
+     - Keep imports at file top; function imports may avoid cycles or defer heavy/optional dependencies until first use, following [CLAUDE.md](../../CLAUDE.md#1-core-philosophy)
+     - Keep deferred imports explicit (`from x import Y`) with `# noqa: PLC0415` where needed, and preserve the `tests/test_import_graph.py` contract
 
 4. **Architecture**
    - Multi-agent system with separate Matrix accounts
-   - Agents respond in threads, not main room
+   - Agents default to thread replies; room mode replies in the main room, with per-turn and trusted automation exceptions
    - Mindroom's custom commands in chat are prefixed with "!" (e.g., "!help", "!schedule")
    - Asyncio for concurrent operations
    - Per-thread memory and conversation tracking
@@ -83,7 +84,8 @@ Read and understand the MindRoom project structure:
    - `src/mindroom/bot.py` - Main bot orchestration
    - `src/mindroom/agents.py` - Agent creation and management
    - `src/mindroom/routing.py` - Agent routing logic
-   - `src/mindroom/thread_invites.py` - Thread invitation system
+   - `src/mindroom/conversation_resolver.py` - Conversation and delivery-target resolution
+   - `src/mindroom/turn_policy.py` - Participation and response decisions
    - `src/mindroom/scheduling.py` - Task scheduling
    - `src/mindroom/background_tasks.py` - Background task management
    - `src/mindroom/memory/` - Memory persistence system
@@ -91,8 +93,10 @@ Read and understand the MindRoom project structure:
    - `src/mindroom/custom_tools/` - Custom tool implementations
 
 6. **Testing with Matty CLI**
-   - Matty is pre-installed in the project
+   - Matty is optional and is not installed by `uv sync --all-extras`; check its availability in the selected environment
+   - If Matty is absent, use the [authenticated raw Matrix API fallback](../skills/live-test/references/core-mindroom.md#read-and-send-messages-with-matty)
    - Use `matty` commands to interact with agents during testing
-   - Agents respond in threads - always check threads after sending messages
+   - Check `!thread_mode show` and configured `thread_mode` / `room_thread_modes`, then inspect replies and continue in the matching room or thread
+   - The room override wins over configured modes; inspect actual event relations for per-turn and trusted automation exceptions
    - Use @mentions to get agent attention
    - See CLAUDE.md section 4 for detailed Matty usage

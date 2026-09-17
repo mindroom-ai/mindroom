@@ -152,6 +152,8 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
+| `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
+| `mid_turn` | object or null | `null` | Judge whether queued messages can wait until this agent finishes its active task; see [Mid-Turn Coalescing](#mid-turn-coalescing) |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
@@ -161,7 +163,7 @@ agents:
 | `private` | object | `null` | Optional requester-private state for one shared agent definition |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](../authorization.md) |
-| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and OAuth connections. Independent of `access`: a credential manager gains no conversation access, and a responder user gains no credential authority |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and shared OAuth connections. Does not grant conversation access. Eligible requesters manage their own isolated OAuth connections separately; see [OAuth authorization](../oauth-framework.md) |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -180,7 +182,8 @@ agents:
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 See [Knowledge Bases](../knowledge.md) for `mode: semantic` and `mode: files`.
 
-Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
+Per-agent fields with a corresponding setting in `defaults` inherit that setting when `null`.
+`participation: null` disables adaptive participation; it does not inherit a global default.
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
@@ -243,6 +246,39 @@ Each part of the `Personality Context` section is headed by the resolved path of
 When the rendered section exceeds `defaults.max_preload_chars`, MindRoom drops earlier file bodies first, trims the final surviving body from its end, and leaves a per-file marker giving each affected path and omitted-character count, followed by a summary marker for the section.
 A dropped file therefore still appears with its path, so the agent can open it when it needs the omitted part.
 If the configured cap cannot contain the section heading plus all required per-file and summary markers, agent materialization fails explicitly instead of silently removing source paths.
+
+## Adaptive Participation
+
+Set `agents.<name>.participation: {}` to enable adaptive participation with the defaults below.
+Omitting it or setting it to `null` disables adaptive participation for that agent.
+These settings follow the agent into all authorized rooms, including ad hoc rooms; they do not grant room access or recruit an agent into a thread it has not joined.
+Only untagged messages in threads with multiple humans and an earlier reply from that agent are eligible.
+See [Adaptive Agent Participation](index.md#adaptive-agent-participation) for the full eligibility rules and judgment backend examples.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `debounce_seconds` | number | `3.0` | Quiet window for eligible text; must be finite and between `0` and `30` seconds, inclusive |
+| `instructions` | string | `""` | Additional guidance for deciding whether the agent should participate |
+| `decline_reaction` | string or null | `null` | Reaction to a deliberate decline; nonblank and at most 64 characters, such as `"👍"`; `null` keeps declines invisible |
+| `judgment` | object or null | `null` | Optional separate judgment backend; `provider: llm` requires a configured `model` alias, while `provider: typesafe` selects System One; `null` uses the agent's reply model |
+
+The [judgment backend reference](index.md#participation-judgment-backends) documents provider-specific thresholds, timeouts, credentials, and fallback behavior.
+The retired top-level `room_participation` configuration is rejected; there are no room-level overrides.
+
+## Mid-Turn Coalescing
+
+Set `agents.<name>.mid_turn` to let a judge decide whether a queued message can wait for this agent's active task to finish.
+Like participation, the setting follows the agent's Matrix user across all authorized rooms, including ad hoc rooms.
+It is separate from participation eligibility and message debounce.
+Omitting the setting or using `null` keeps the normal wrap-up notice; teams do not inherit it from their members.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `judgment` | object | Required | Shared LLM model alias or TypeSafe backend |
+| `instructions` | string | `""` | Extra guidance for the finish-or-wrap-up decision |
+| `defer_reaction` | string or null | `null` | Optional acknowledgement such as `"👀"` when a queued message can wait; the message remains queued |
+
+See [Mid-Turn Coalescing](index.md#mid-turn-coalescing) for backend configuration, context limits, and decision behavior.
 
 ## Per-Agent Tool Configuration
 
@@ -385,7 +421,10 @@ Adding or removing tools via chat does not discard existing per-agent overrides 
 ## Worker Routing
 
 `worker_tools` decides which tools run in the sandbox proxy instead of the main MindRoom process.
-When omitted, MindRoom routes `coding`, `docker`, `file`, `python`, and `shell` through the proxy by default.
+An explicit agent `worker_tools` list takes precedence, followed by `defaults.worker_tools`; an explicit empty list selects local execution.
+When both are omitted, MindRoom follows the [sandbox environment routing policy](../deployment/sandbox-proxy.md#execution-modes).
+With the default static backend, no proxy URL, and no environment routing overrides, tools execute locally.
+Invalid non-empty execution modes are rejected when that environment policy is read.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
 Dedicated Docker workers also receive a projected read-only config snapshot so config-relative plugins, knowledge bases, and other worker-safe assets remain available without exposing unrelated primary-runtime state.
@@ -650,6 +689,8 @@ This is negligible with a local embedder but costs real money with paid embeddin
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID.
+A persisted `!thread_mode room` or `!thread_mode thread` override takes precedence for all entities in that room.
+Room admins can use `!thread_mode reset` to restore the static resolution rules below; see [Chat Commands](../chat-commands.md).
 For an agent, MindRoom checks `room_thread_modes` in this order.
 First, it checks an exact room ID key.
 Second, it checks the managed room key/alias associated with that room ID.
@@ -682,10 +723,14 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 ## Agent Delegation
 
 Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
-The model-facing tools are `run_subagent(task: str, agent_name: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
+The model-facing tools are `run_subagent(task: str, agent_name: str | None = None, model: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
+The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, and tool policy.
+Pass a configured alias from `models:` as `model` to choose a different model for that child, including a fresh copy of yourself.
+An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
+Unknown model aliases are rejected before execution.
+The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
 Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
 Calls wait for the child by default.
 Enable the instance-wide root option `background_tool_jobs: true` and restart to use generic background execution; it is disabled by default.
@@ -790,5 +835,5 @@ agents:
     display_name: Researcher
     role: Focus on deep research
     include_default_tools: false
-    tools: [web_search]
+    tools: [duckduckgo]
 ```

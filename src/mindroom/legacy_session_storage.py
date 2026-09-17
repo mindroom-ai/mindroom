@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 # LEGACY_COMPAT: Agno 2 session history stored in JSON run blobs.
 # Legacy format: Agno 2 sessions stored run history in single- or double-encoded JSON `runs` blobs.
 # Last legacy release: v2026.9.11; replacement: v2026.9.12 wrote first-class Agno 3 run rows.
-# Handling: Merge retained blob runs with current rows and scrub deletions and descendants transactionally.
+# Handling: Decode retained payloads and scrub deletions and descendants transactionally.
 # Coverage: tests/test_agent_storage_runs.py::test_legacy_runs_blob_is_merged_into_reads_and_deletions_stick.
 
 
@@ -41,19 +41,6 @@ def scrub_legacy_run_blobs(
         )
 
 
-def merge_legacy_run_payloads(current_runs: list[object], legacy_payload: object) -> list[object]:
-    """Append historical runs absent from current rows without deduplicating the blob itself."""
-    decoded = decode_persisted_session_json(legacy_payload)
-    if decoded is None:
-        return list(current_runs)
-    if not isinstance(decoded, list):
-        raise TypeError
-    merged = list(current_runs)
-    current_ids = {run_id for run_id in map(_run_id, current_runs) if run_id is not None}
-    merged.extend(legacy_run for legacy_run in decoded if _run_id(legacy_run) not in current_ids)
-    return merged
-
-
 def decode_persisted_session_json(raw_value: object) -> object:
     """Strictly decode the single- or double-encoded JSON used by retained session payloads."""
     if raw_value is None:
@@ -62,13 +49,6 @@ def decode_persisted_session_json(raw_value: object) -> object:
         raise TypeError
     decoded = json.loads(raw_value)
     return json.loads(decoded) if isinstance(decoded, str) else decoded
-
-
-def legacy_session_runs_projection(columns: Collection[str]) -> str:
-    """Select old blob payload fields using stable aliases whether or not the column remains."""
-    if "runs" in columns:
-        return "runs AS legacy_runs_payload, length(CAST(runs AS BLOB)) AS legacy_runs_payload_bytes"
-    return "NULL AS legacy_runs_payload, NULL AS legacy_runs_payload_bytes"
 
 
 def _decode_legacy_run_blob(blob: object) -> list[object]:
@@ -100,11 +80,6 @@ def _legacy_runs_without(runs: list[object], run_ids: Collection[str]) -> list[o
         for run in runs
         if _string_field(run, "run_id") not in removed and _string_field(run, "parent_run_id") not in removed
     ]
-
-
-def _run_id(run: object) -> str | None:
-    value = cast("dict[str, object]", run).get("run_id") if isinstance(run, dict) else None
-    return value if isinstance(value, str) else None
 
 
 def _string_field(entry: object, key: str) -> str | None:

@@ -28,8 +28,11 @@ approvedEgress:
 The chart renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist ConfigMap, persistence PVC, worker egress NetworkPolicy, and proxy ingress NetworkPolicy.
 The chart also sets `MINDROOM_APPROVED_EGRESS_ENABLED`, `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` on the MindRoom container.
 When `MINDROOM_APPROVED_EGRESS_ENABLED=true`, MindRoom adds `approved_egress` to defaults and requires Matrix approval for blocked-host `request_network_access` grant requests at runtime.
+The overlay preserves configured default tools, including the implicit `scheduler` when `defaults.tools` is omitted.
+An explicit `defaults.tools: []` receives only `approved_egress`; agents with `include_default_tools: false` do not inherit the overlay toolkit.
 Requests where every hostname is static-allowlisted skip the approval card and return that no temporary grant is needed.
 These runtime-derived entries are not written back to `config.yaml` by dashboard or API saves.
+Structured saves preserve an explicitly authored empty tool list, so disabling the overlay does not restore implicit tools that were deliberately disabled.
 Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
 
 ## Agent Vault Chaining
@@ -124,10 +127,33 @@ tool_approval:
 You can assign `approved_egress` to individual agents instead of `defaults.tools` if only some agents should request network access.
 The toolkit is built into MindRoom and uses the chart-provided policy API URL, token, allowlist path, and TTL settings.
 
+### Temporary Full Access
+
+The `allow_full_access` tool option defaults to `false`.
+Enable it in the tool's settings or an authored tool entry to allow temporary access to all public hostnames:
+
+```yaml
+defaults:
+  tools:
+    - approved_egress:
+        allow_full_access: true
+```
+
+The same option can be set on an individual agent's `approved_egress` tool entry.
+With this option enabled, agents can call `request_network_access(hostnames=["*"], ttl_minutes=5, reason="Install dependencies")`.
+The `"*"` must be the only entry; partial wildcards and mixed hostname batches are rejected.
+Full-access requests use the same Matrix approval rule and deployment TTL cap as hostname requests, and never qualify for the static-allowlist approval exemption.
+The grant applies only to the requesting agent or requester-owned worker, using the same scope rules as hostname grants.
+
+This requires an approved egress proxy build that supports `hostname: "*"` grants; older proxy images reject these requests.
+It opens access to all public hostnames through the HTTP proxy on its allowed ports (80 and 443), while retaining private-network, internal-hostname, and DNS destination checks.
+It does not enable arbitrary protocols or ports.
+After the TTL expires, new requests need a static allowlist match or another active grant; already established connections, including HTTPS CONNECT tunnels, are not forcibly closed.
+
 ## Runtime Behavior
 
 Agents call `request_network_access(hostnames, ttl_minutes, reason)` with every blocked external hostname the task needs, and a single Matrix approval covers the whole batch.
-The tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API, and one bad hostname fails the whole batch before any grant is created.
+For exact-host requests, the tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API, and one bad hostname fails the whole batch before any grant is created.
 The tool creates one policy grant per blocked hostname and skips hostnames the static allowlist already covers.
 If every requested hostname already matches the static allowlist, the tool reports that no dynamic grant is needed without sending a Matrix approval card.
 When `worker_scope: user_agent` is active, the tool creates a `worker_key` grant for the exact requester-owned worker.

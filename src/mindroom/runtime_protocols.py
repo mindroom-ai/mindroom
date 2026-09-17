@@ -77,6 +77,10 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Resolve the current running bot's already-owned Matrix device pin."""
         ...
 
+    def request_interrupted_turn_recovery(self, entity_name: str, room_id: str) -> None:
+        """Notify existing fleet recovery that a settled interruption needs scanning."""
+        ...
+
     def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
         """Handle a managed bot completing its first sync."""
         ...

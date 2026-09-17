@@ -34,6 +34,8 @@ Use these tools when you need lightweight text extraction, structured scraping A
 `browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window.
 For a visible, persistent browser inside a dedicated Docker or Kubernetes worker, see [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
 MindRoom Chat can watch or control that same browser while its downloads remain accessible to worker shell tools.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` with the opt-in [Chat UI toolkit](https://docs.mindroom.chat/tools/chat-ui/).
+That request only reveals the Computer panel in watch mode; it does not navigate, send a prompt to ChatGPT, take control, or open the user's local browser.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
 Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth.
 `crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser.
@@ -53,6 +55,7 @@ When you pass `search_query`, the tool enables BM25-based content filtering to k
 When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
 The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
+The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
 
@@ -65,7 +68,6 @@ This is a local crawler rather than a hosted API, so it does not need an API key
 | `bm25_threshold` | `number` | `no` | `1.0` | Threshold passed to BM25 filtering when `search_query` is used. |
 | `headless` | `boolean` | `no` | `true` | Launch Crawl4AI's browser in headless mode. |
 | `wait_until` | `text` | `no` | `domcontentloaded` | Playwright wait condition before extraction. |
-| `proxy_config` | `object` | `no` | `null` | Raw browser proxy config passed into Crawl4AI `BrowserConfig`, while the current MindRoom metadata exposes this as text. |
 | `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
@@ -88,7 +90,6 @@ crawl("https://matrix.org/blog/", search_query="bridges and federation")
 #### Notes
 
 - Use `crawl4ai` when you want a local scraper instead of a hosted API.
-- `proxy_config` maps directly to Crawl4AI browser settings, so treat it as an advanced raw config object.
 - For heavily protected or browser-hostile sites, `browserbase`, `brightdata`, or `browser` can be a better fit.
 
 ### [`website`]
@@ -295,7 +296,7 @@ search_query("latest Matrix bridge updates")
 `formats` is applied to scrape, crawl, and search requests.
 `limit` acts as the default result cap for crawl and search operations.
 `poll_interval` controls how often crawl jobs are polled.
-`search_params` is passed through to Firecrawl search calls as raw provider-specific options.
+The upstream `search_params` mapping is not exposed in authored YAML or dashboard configuration.
 The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provided directly.
 
 #### Configuration
@@ -308,10 +309,9 @@ The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provid
 | `enable_mapping` | `boolean` | `no` | `false` | Enable `map_website()`. |
 | `enable_search` | `boolean` | `no` | `false` | Enable `search_web()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `formats` | `string[]` | `no` | `null` | Requested Firecrawl formats such as `markdown` or `html`, while the current MindRoom metadata exposes this field as text. |
+| `formats` | `string[]` | `no` | `null` | Requested Firecrawl formats as a list of strings, such as `markdown` or `html`. |
 | `limit` | `number` | `no` | `10` | Default page or result limit for crawl and search. |
 | `poll_interval` | `number` | `no` | `30` | Crawl polling interval in seconds. |
-| `search_params` | `object` | `no` | `null` | Raw Firecrawl search parameters object, while the current MindRoom metadata exposes this field as text. |
 | `api_url` | `url` | `no` | `https://api.firecrawl.dev` | Firecrawl API base URL. |
 
 #### Example
@@ -334,7 +334,7 @@ search_web("latest Matrix bridges")
 #### Notes
 
 - Use `firecrawl` when you want scrape, crawl, map, and search in one hosted API.
-- `formats` and `search_params` are raw upstream arguments, so verify them against your Firecrawl plan and endpoint version.
+- Verify the requested `formats` against your Firecrawl plan and endpoint version.
 - This is usually a better fit than `crawl4ai` when you want provider-hosted crawling instead of local browser work.
 
 ### [`spider`]
@@ -346,7 +346,7 @@ search_web("latest Matrix bridges")
 `spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`.
 The current wrapper calls Spider search with `fetch_page_content: false`, so search is primarily discovery rather than full-content extraction.
 `scrape()` and `crawl()` request Markdown-style output from Spider.
-`optional_params` is merged into Spider API requests as a raw provider options object.
+The upstream `optional_params` mapping is not exposed in authored YAML or dashboard configuration.
 The installed `spider-client` constructor raises when no API key is available, even though the current MindRoom metadata says this tool is available without setup.
 
 #### Configuration
@@ -355,7 +355,6 @@ The installed `spider-client` constructor raises when no API key is available, e
 | --- | --- | --- | --- | --- |
 | `max_results` | `number` | `no` | `null` | Default result count override for `search_web()`. |
 | `url` | `url` | `no` | `null` | Optional default URL constructor argument from the upstream toolkit. |
-| `optional_params` | `object` | `no` | `null` | Raw Spider API parameters merged into search, scrape, and crawl requests, while the current MindRoom metadata exposes this field as text. |
 | `enable_search` | `boolean` | `no` | `true` | Enable `search_web()`. |
 | `enable_scrape` | `boolean` | `no` | `true` | Enable `scrape()`. |
 | `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |
@@ -380,7 +379,6 @@ scrape("https://matrix.org/blog/")
 #### Notes
 
 - Treat `spider` as a credentialed tool and set `SPIDER_API_KEY`, even though the current MindRoom metadata still says `setup_type: none`.
-- `optional_params` is a raw provider object and is best used only when you already know the Spider API field names you want.
 - If you want a cleaner, explicitly credentialed hosted scraper with clearer metadata, `firecrawl` is usually simpler.
 
 ### [`scrapegraph`]
@@ -421,6 +419,7 @@ agents:
     tools:
       - scrapegraph:
           enable_searchscraper: true
+          enable_markdownify: true
 ```
 
 ```python
@@ -569,15 +568,15 @@ search_amazon_products("ergonomic keyboard", domain_code="com")
 
 `agentql` exposes `scrape_website(url)` and, when enabled, `custom_scrape_website(url)`.
 `scrape_website()` uses a built-in query that extracts generic page text.
-`custom_scrape_website()` only becomes useful when `agentql_query` is non-empty.
+`custom_scrape_website()` uses the configured `agentql_query` and returns JSON that preserves extracted values and nested lists and objects.
 The installed upstream toolkit registers the custom scrape function automatically when `agentql_query` is set, even if `enable_custom_scrape_website` is false.
-The current upstream implementation launches Playwright with `headless=False`, which matters on headless-only runtimes.
+The toolkit launches Playwright with `headless=False`, which matters on headless-only runtimes.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | AgentQL API key, with `AGENTQL_API_KEY` as the SDK fallback. |
+| `api_key` | `password` | `yes` | `null` | Stored AgentQL API key; falls back to `AGENTQL_API_KEY` when no key is supplied. |
 | `enable_scrape_website` | `boolean` | `no` | `true` | Enable `scrape_website()`. |
 | `enable_custom_scrape_website` | `boolean` | `no` | `false` | Enable `custom_scrape_website()` when `agentql_query` is also useful. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -604,7 +603,11 @@ custom_scrape_website("https://matrix.org/blog/")
 
 #### Notes
 
-- The installed upstream code launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- Each request uses the toolkit's resolved key without changing shared AgentQL SDK configuration or environment credentials.
+- AgentQL query API redirects are rejected before any follow-up request, so the resolved key stays with the configured API endpoint.
+- Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
+- AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
+- The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 
@@ -664,20 +667,25 @@ get_page_content()
 
 #### What It Does
 
-`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
-With `target="host"`, it manages named browser profiles on the MindRoom host, with `mindroom` as the default profile name.
+`browser` exposes one callable, `browser_control(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
+With `target="host"`, it manages named browser profiles on the MindRoom host or its routed worker, with `mindroom` as the default profile name.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` after any desired browser navigation.
+The Computer request accepts no URL and reports only that the UI request was sent.
 With `target="desktop"`, it routes the supported action subset over pinned Matrix encryption to the official Playwright MCP extension in the user's existing local Chrome or Brave profile.
-The desktop target operates the current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric indices that can point at a different tab after the tab list changes.
-It creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
+The desktop target supports observations (`status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`) and the controls `start`, `stop`, and `open`.
+It rejects `targetId` and existing-page controls (`focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`) because Playwright MCP cannot bind these actions to a stable page identity.
+The host target creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
 The host target's `snapshot()` can return either `ai` or `aria` format, while the desktop target returns Playwright MCP's native accessibility snapshot.
-`act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
-The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge, the local extension option, and a local control lease for interactive actions.
+Host-target `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
+The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge and the local extension option, with a local control lease for `start`, `stop`, and `open`.
+Host screenshots return model-visible image content by default plus their retained path; `saveOnly=True` preserves an explicit save-only mode.
+Host captures and `view_file` use shared bounded image delivery, with any resizing or first-frame handling disclosed.
 Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without creating a separate plaintext attachment copy or uploading the encrypted media again.
 Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
-The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files, retained PDFs, and upload inputs; the cloud tool's `output_dir` option does not change that local path.
+The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
 #### Configuration
@@ -706,11 +714,11 @@ agents:
 ```
 
 ```python
-browser(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
-browser(action="snapshot", target="desktop")
-browser(action="act", target="desktop", request={"kind": "click", "ref": "e1"})
-browser(action="screenshot", target="desktop", fullPage=True)
-browser(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
+browser_control(action="start", target="desktop")
+browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
+browser_control(action="snapshot", target="desktop")
+browser_control(action="screenshot", target="desktop", fullPage=True)
+browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
 #### Notes

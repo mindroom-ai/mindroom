@@ -71,6 +71,10 @@ from mindroom.workers.backends.docker_config import (
 )
 from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
+from mindroom.workers.backends.worker_security import (
+    docker_worker_security_options,
+    docker_worker_security_policy_signature,
+)
 from mindroom.workers.compatibility import WORKER_PROTOCOL_VERSION
 from mindroom.workers.models import (
     ProgressSink,
@@ -164,6 +168,30 @@ __all__ = [
 ]
 
 
+def _docker_seccomp_profile_matches(options: list[str]) -> bool:
+    seccomp_options = [option for option in options if option.lower().startswith("seccomp=")]
+    if len(options) != 2 or len(seccomp_options) != 1:
+        return False
+    actual_profile_json = seccomp_options[0].split("=", 1)[1]
+    expected_profile_json = docker_worker_security_options()[1].split("=", 1)[1]
+    try:
+        return json.loads(actual_profile_json) == json.loads(expected_profile_json)
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def _docker_security_options_match(value: object) -> bool:
+    if not isinstance(value, list) or not all(isinstance(option, str) for option in value):
+        return False
+    options = cast("list[str]", value)
+    no_new_privileges_options = [
+        option for option in options if option.lower() in {"no-new-privileges", "no-new-privileges:true"}
+    ]
+    if len(no_new_privileges_options) != 1:
+        return False
+    return _docker_seccomp_profile_matches(options)
+
+
 def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
     resolved_workers_root = workers_root.expanduser().resolve()
     return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
@@ -183,7 +211,7 @@ def _host_config_contents_hash(host_config_path: Path | None) -> str:
     if host_config_path is None:
         return ""
     try:
-        _, source_digests = load_yaml_config_source_with_digests(host_config_path)
+        _, source_digests, _uses_includes = load_yaml_config_source_with_digests(host_config_path)
     except OSError as exc:
         msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
         raise WorkerBackendError(msg) from exc
@@ -427,6 +455,7 @@ class DockerWorkerBackend:
         if config.host_config_path is not None:
             base_runtime_paths = runtime_paths_with_config_path(base_runtime_paths, config.host_config_path)
         self._runtime_paths = runtime_paths_with_storage_root(base_runtime_paths, self._storage_path)
+        config.validate_runtime_security(self._runtime_paths)
         self._tool_validation_snapshot = tool_validation_snapshot
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks: dict[str, threading.Lock] = {}
@@ -868,6 +897,10 @@ class DockerWorkerBackend:
             return False
         if self._container_launch_config_hash(container) not in compatible_launch_config_hashes:
             return False
+        if self.config.security_policy == "computer" and not self._container_runtime_security_matches(
+            container,
+        ):
+            return False
 
         storage_mounts = self._scoped_storage_mount_specs(
             metadata.worker_key,
@@ -895,6 +928,23 @@ class DockerWorkerBackend:
         mount_checks.extend(storage_mounts)
         mount_checks.extend(config_mount_specs)
         return self._container_mount_layout_matches(container, expected_mounts=mount_checks)
+
+    def _container_runtime_security_matches(self, container: _DockerContainer | None) -> bool:
+        if container is None:
+            return False
+        host_config = container.attrs.get("HostConfig")
+        if not isinstance(host_config, dict):
+            return False
+        host_config = cast("dict[str, object]", host_config)
+        cap_add = host_config.get("CapAdd")
+        cap_drop = host_config.get("CapDrop")
+        return (
+            host_config.get("Privileged") is False
+            and (cap_add is None or (isinstance(cap_add, list) and not cap_add))
+            and isinstance(cap_drop, list)
+            and [str(cap).upper() for cap in cap_drop] == ["ALL"]
+            and _docker_security_options_match(host_config.get("SecurityOpt"))
+        )
 
     def _ensure_container(
         self,
@@ -927,6 +977,11 @@ class DockerWorkerBackend:
                 state_scope_worker_key=state_scope_worker_key,
             )
             self._prepare_nested_storage_mount_targets(paths, volumes)
+            security_kwargs = (
+                {"cap_drop": ["ALL"], "security_opt": docker_worker_security_options()}
+                if self.config.security_policy == "computer"
+                else {}
+            )
             container = self._client.containers.run(
                 launch_config.image_reference,
                 command=["/app/run-sandbox-runner.sh"],
@@ -940,6 +995,7 @@ class DockerWorkerBackend:
                     launch_config_hash=launch_config.launch_config_hash,
                 ),
                 user=self.config.user,
+                **security_kwargs,
             )
         elif not self._container_is_running(container):
             try:
@@ -1264,7 +1320,7 @@ class DockerWorkerBackend:
             client=self._client,
             docker_errors=self._docker_errors,
         )
-        config_payload = {
+        config_payload: dict[str, object] = {
             "auth_token": self.auth_token or "",
             "config_path": self.config.config_path,
             "config_contents_hash": _host_config_contents_hash(self.config.host_config_path),
@@ -1281,6 +1337,8 @@ class DockerWorkerBackend:
             "user": self.config.user or "",
             "worker_port": self.config.worker_port,
         }
+        if self.config.security_policy == "computer":
+            config_payload["runtime_security"] = docker_worker_security_policy_signature()
         normalized = json.dumps(config_payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

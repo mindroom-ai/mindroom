@@ -33,6 +33,7 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
+from mindroom.matrix import message_builder
 from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import (
@@ -54,7 +55,7 @@ from tests.conftest import (
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from mindroom.final_delivery import StreamTransportOutcome
 
@@ -140,6 +141,8 @@ def fake_clock() -> Iterator[None]:
 async def _run_stream(
     config: Config,
     response_stream: AsyncIterator[object],
+    *,
+    visible_progress_callback: Callable[[str], None] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -147,6 +150,7 @@ async def _run_stream(
         config=config,
         runtime_paths=runtime_paths_for(config),
         response_stream=response_stream,
+        visible_progress_callback=visible_progress_callback,
     )
 
 
@@ -299,6 +303,89 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config, *, accepted: bool) -> None:
+    """Only acknowledged plain text reaches progress observers, never buffered text or trace details."""
+    visible: list[str] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    gateway = _FakeGateway()
+
+    async def delayed_send(
+        client: object,
+        room_id: str,
+        content: dict[str, Any],
+        *,
+        retry_sync_recovery: bool = False,
+    ) -> DeliveredMatrixEvent | None:
+        entered.set()
+        await release.wait()
+        if not accepted:
+            return None
+        return await gateway.send(client, room_id, content, retry_sync_recovery=retry_sync_recovery)
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        visible_progress_callback=visible.append,
+    )
+    streaming.tool_trace = [ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")]
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+    with patch("mindroom.streaming.send_message_result", new=delayed_send):
+        delivery = asyncio.create_task(streaming.update_content("Published reply", client))
+        try:
+            await entered.wait()
+            assert visible == []
+            streaming.accumulated_text += " buffered later"
+            release.set()
+            if accepted:
+                await delivery
+            else:
+                with pytest.raises(RuntimeError, match="Failed to send initial streaming message"):
+                    await delivery
+        finally:
+            release.set()
+            if not delivery.done():
+                delivery.cancel()
+                await asyncio.gather(delivery, return_exceptions=True)
+    assert visible == (["Published reply"] if accepted else [])
+    if accepted:
+        assert visible == [gateway.ops[0].content["body"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_stream_driver_publishes_only_visible_text_to_progress_callback(config: Config) -> None:
+    """The stream driver forwards its observer without forwarding rich tool arguments."""
+    visible: list[str] = []
+    published = asyncio.Event()
+    gateway = _FakeGateway()
+
+    def note_progress(text: str) -> None:
+        visible.append(text)
+        published.set()
+
+    async def stream() -> AsyncIterator[object]:
+        yield StructuredStreamChunk(
+            content="I found the file.\n🔧 `read_file` [1] ⏳",
+            tool_trace=[ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")],
+        )
+        await published.wait()
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        await _run_stream(config, stream(), visible_progress_callback=note_progress)
+    assert visible
+    assert "I found the file" in visible[0]
+    assert "read_file" in visible[0]
+    assert "private path" not in "\n".join(visible)
+
+
+@pytest.mark.asyncio
 async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config) -> None:
     """Markdown and mention formatting should not block the stream owner's event loop."""
     streaming = StreamingResponse(
@@ -322,6 +409,8 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
         latest_thread_event_id: str | None = None,
         tool_trace: list[ToolTraceEntry] | None = None,
         extra_content: dict[str, object] | None = None,
+        *,
+        markdown_renderer: Callable[[str], str] | None = None,
     ) -> dict[str, Any]:
         format_thread_ids.append(threading.get_ident())
         return original_format(
@@ -333,6 +422,7 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
             latest_thread_event_id=latest_thread_event_id,
             tool_trace=tool_trace,
             extra_content=extra_content,
+            markdown_renderer=markdown_renderer,
         )
 
     async def fake_send(
@@ -358,6 +448,69 @@ async def test_nonterminal_delivery_formats_off_event_loop_thread(config: Config
     assert all(thread_id != loop_thread_id for thread_id in format_thread_ids)
     assert delivered_content["body"] == "Hello **world**"
     assert "<strong>world</strong>" in delivered_content["formatted_body"]
+
+
+@pytest.mark.asyncio
+async def test_stream_reuses_markdown_without_reusing_delivery_metadata(config: Config) -> None:
+    """Status/trace updates reuse HTML within a turn, while separate turns render independently."""
+    with patch.object(
+        message_builder._MARKDOWN_RENDERER,
+        "render",
+        wraps=message_builder._MARKDOWN_RENDERER.render,
+    ) as render:
+        for _ in range(2):
+            gateway = _FakeGateway()
+            streaming = StreamingResponse(
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                accumulated_text="Hello **world**",
+            )
+            client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+            with (
+                patch("mindroom.streaming.send_message_result", new=gateway.send),
+                patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+            ):
+                await streaming._send_or_edit_message(client)
+                streaming.tool_trace.append(ToolTraceEntry(type="tool_call_started", tool_name="search"))
+                await streaming._send_or_edit_message(client)
+                outcome = await streaming.finalize(client)
+
+            assert outcome.terminal_update_committed
+            assert [op.content[STREAM_STATUS_KEY] for op in gateway.ops] == ["pending", "streaming", "completed"]
+            assert [op.content["msgtype"] for op in gateway.ops] == ["m.notice", "m.notice", "m.text"]
+            assert all(op.content["formatted_body"] == "<p>Hello <strong>world</strong></p>\n" for op in gateway.ops)
+            assert _TOOL_TRACE_KEY not in gateway.ops[0].content
+            assert gateway.ops[1].content[_TOOL_TRACE_KEY] == gateway.ops[2].content[_TOOL_TRACE_KEY]
+
+    assert render.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["text", "mention_config"])
+async def test_stream_rerenders_changed_markdown(config: Config, change: str) -> None:
+    """Reuse must not retain old text or old mention display names after config changes."""
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        accumulated_text="Hello @helper",
+    )
+    initial = await streaming._prepare_delivery_async(is_final=False, allow_empty_progress=False, stream_status=None)
+    assert initial is not None
+    assert "@HelperAgent</a>" in initial.content["formatted_body"]
+
+    if change == "text":
+        streaming.accumulated_text = "Goodbye **world**"
+        expected_html = "<p>Goodbye <strong>world</strong></p>\n"
+    else:
+        config.agents["helper"].display_name = "UpdatedHelper"
+        expected_html = '<p>Hello <a href="https://matrix.to/#/@mindroom_helper:localhost">@UpdatedHelper</a></p>\n'
+    final = await streaming._prepare_delivery_async(is_final=True, allow_empty_progress=False, stream_status=None)
+    assert final is not None
+    assert final.content["formatted_body"] == expected_html
+    assert initial.content[STREAM_STATUS_KEY] == "pending"
+    assert final.content[STREAM_STATUS_KEY] == "completed"
 
 
 @pytest.mark.asyncio

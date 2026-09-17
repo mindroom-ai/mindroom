@@ -19,10 +19,11 @@ from agno.compression.manager import CompressionManager
 from agno.models.response import ModelResponse, ToolExecution
 from agno.session.agent import AgentSession
 
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.participation import RoomParticipationConfig
+from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -58,6 +59,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -2974,6 +2976,7 @@ class TestAgentBot(AgentBotTestBase):
             # hold until sync echoes it back.
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
+            membership_index=bot._runtime_view.agent_reply_memberships,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -3095,6 +3098,7 @@ class TestAgentBot(AgentBotTestBase):
             conversation_reader=bot._conversation_reader,
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
+            membership_index=bot._runtime_view.agent_reply_memberships,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()
         compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs
@@ -3425,18 +3429,28 @@ class TestAdaptiveResponse(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
-    @pytest.mark.parametrize("action", ["respond", "stay_silent", "compression_failure", "sync_restart"])
-    async def test_participation_precedes_every_visible_effect(
+    @pytest.mark.parametrize(
+        "action",
+        ["respond", "stay_silent", "compression_failure", "sync_restart", "decision_failure"],
+    )
+    @pytest.mark.parametrize("backend", ["model", "typesafe", "llm"])
+    @pytest.mark.parametrize("reaction", [None, "👍"])
+    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0915 - full delivery lifecycle assertions
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         streaming: bool,
         action: str,
+        backend: str,
+        reaction: str | None,
     ) -> None:
         """A silent decision must not send placeholders, typing, or retry notices."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        # Keep background summaries out of foreground participation call counts.
+        config.defaults.thread_summary_first_threshold = 100
+        paths = replace(runtime_paths_for(config), process_env={"TYPESAFE_API_KEY": "test-key"})
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -3446,6 +3460,36 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action == "sync_restart"
             else ModelResponse(content=json.dumps({"action": action, "reason": "Conversation context."})),
         )
+        if action == "decision_failure":
+            model.decision = RuntimeError("Decision provider unavailable")
+        typesafe_calls: list[bytes] = []
+
+        async def post(_self: SystemOneClient, body: bytes) -> bytes:
+            typesafe_calls.append(body)
+            if action == "sync_restart":
+                raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+            if action == "decision_failure":
+                msg = "Decision provider unavailable"
+                raise RuntimeError(msg)
+            return json.dumps(
+                {
+                    "model": PINNED_MODEL,
+                    "answers": {"participation": {"type": "noul", "noul": 0.95 if action == "respond" else 0.05}},
+                    "usage": {"input_tokens": 100, "output_tokens": 1},
+                },
+            ).encode()
+
+        monkeypatch.setattr(SystemOneClient, "_post", post)
+        judge = ParticipationModel(
+            asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+            if action == "sync_restart"
+            else ModelResponse(content=json.dumps({"decision": action == "respond"})),
+        )
+        if action == "decision_failure":
+            judge.decision = RuntimeError("Decision provider unavailable")
+        monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_: judge)
+        if backend != "model" and action != "decision_failure":
+            model.decision = ModelResponse(content="Useful answer")
         model.cache_response = True
         monkeypatch.setattr(
             model,
@@ -3470,6 +3514,9 @@ class TestAdaptiveResponse(AgentBotTestBase):
             AsyncMock(return_value=_prepared_prompt_result(agent)),
         )
         monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
+        # Summary inference is separate from the participation judge being counted here.
+        thread_summary = AsyncMock()
+        monkeypatch.setattr("mindroom.post_response_effects.maybe_generate_thread_summary", thread_summary)
         memory_queued: list[str] = []
         monkeypatch.setattr(
             ResponseRunner,
@@ -3483,7 +3530,10 @@ class TestAdaptiveResponse(AgentBotTestBase):
 
         request = ResponseRequest(
             prompt="Any thoughts?",
-            sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
+            sources=ResponseSources(
+                pending_event_ids=("$event", "$earlier"),
+                logical_source_event_ids=("$earlier", "$event"),
+            ),
             thread_history=[],
             user_id="@alice:localhost",
             response_envelope=request_envelope(
@@ -3494,7 +3544,16 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 user_id="@alice:localhost",
                 agent_name=bot.agent_name,
             ),
-            participation=RoomParticipationConfig(agent=bot.agent_name),
+            participation=ParticipationConfig.model_validate(
+                {
+                    "decline_reaction": reaction,
+                    "judgment": (
+                        {"provider": "typesafe"} if backend == "typesafe" else {"provider": "llm", "model": "default"}
+                    )
+                    if backend != "model"
+                    else None,
+                },
+            ),
             on_no_response_handled=settled,
         )
         try:
@@ -3503,7 +3562,22 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 raise
             result = None
+        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert thread_summary.await_count == (1 if action == "respond" else 0)
         bodies = [call.kwargs["content"].get("body", "") for call in bot.client.room_send.await_args_list]
+        reactions = [
+            call.kwargs for call in bot.client.room_send.await_args_list if call.kwargs["message_type"] == "m.reaction"
+        ]
+        if action == "stay_silent" and reaction is not None:
+            assert len(reactions) == 1
+            assert reactions[0]["room_id"] == "!test:localhost"
+            assert reactions[0]["content"] == {
+                "m.relates_to": {"rel_type": "m.annotation", "event_id": "$event", "key": reaction},
+            }
+            assert reactions[0]["tx_id"]
+        else:
+            assert reactions == []
+        bodies = [body for body in bodies if body]
         assert all("Thinking" not in body and '"action"' not in body for body in bodies)
         if action != "respond":
             assert result is None
@@ -3512,12 +3586,16 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 assert source_settled == ["quiet"]
             assert memory_queued == []
-            assert len(model.requests) == (0 if action == "compression_failure" else 1)
+            assert len(model.requests) == (
+                0 if action == "compression_failure" or (backend != "model" and action != "decision_failure") else 1
+            )
         else:
             assert result == "$response"
             assert any("Useful answer" in body for body in bodies)
             assert source_settled == []
-            assert len(model.requests) == 2
+            assert len(model.requests) == (1 if backend != "model" else 2)
+        assert len(typesafe_calls) == (1 if backend == "typesafe" and action != "compression_failure" else 0)
+        assert len(judge.requests) == (1 if backend == "llm" and action != "compression_failure" else 0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["history", "payload", "runtime", "knowledge"])
@@ -3585,7 +3663,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
                 thread_history=[],
                 response_envelope=envelope,
-                participation=RoomParticipationConfig(agent=bot.agent_name),
+                participation=ParticipationConfig(),
                 requires_model_history_refresh=True,
                 payload_preparation=preparation if failure_stage == "payload" else None,
                 on_no_response_handled=settled,
@@ -3640,7 +3718,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                     thread_id="$thread",
                     agent_name=bot.agent_name,
                 ),
-                participation=RoomParticipationConfig(agent=bot.agent_name),
+                participation=ParticipationConfig(),
                 on_no_response_handled=settled,
             ),
         )

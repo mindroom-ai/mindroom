@@ -10,7 +10,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Let an agent request bounded actions in MindRoom Chat",
+      "description": "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel with open_panel(panel='computer'), open Settings, or show room members. Sends a UI request; does not navigate or control the user's local browser.",
       "display_name": "Chat UI",
       "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
       "function_names": [
@@ -597,6 +597,7 @@
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -1565,11 +1566,11 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Bitbucket username",
+          "description": "Atlassian account email for Bitbucket Cloud; Basic-auth username for other deployments",
           "label": "Username",
           "name": "username",
           "options": null,
-          "placeholder": "Bitbucket username",
+          "placeholder": "you@example.com",
           "required": true,
           "type": "text",
           "validation": null
@@ -1577,8 +1578,8 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "App password. Use either this or token.",
-          "label": "App Password",
+          "description": "Basic-auth password for deployments that support it; use token for Bitbucket Cloud.",
+          "label": "Password",
           "name": "password",
           "options": null,
           "placeholder": null,
@@ -1589,7 +1590,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Access token. Use either this or password.",
+          "description": "Scoped Bitbucket Cloud API token; takes precedence over password.",
           "label": "Token",
           "name": "token",
           "options": null,
@@ -1677,7 +1678,7 @@
         "list_repositories",
         "list_repository_commits"
       ],
-      "helper_text": "Create an app password at [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/)",
+      "helper_text": "For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in Token, with your Atlassian account email in Username. Other deployments must accept the supplied credentials through Basic authentication.",
       "icon": "SiBitbucket",
       "icon_color": "text-blue-600",
       "name": "bitbucket",
@@ -2182,6 +2183,7 @@
       "icon": "Bot",
       "icon_color": "text-orange-500",
       "name": "claude_agent",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2263,6 +2265,7 @@
       "icon": "Settings",
       "icon_color": "text-purple-500",
       "name": "config_manager",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -2733,6 +2736,7 @@
       "icon": "FaTerminal",
       "icon_color": "text-blue-600",
       "name": "daytona",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2897,6 +2901,7 @@
       "icon": "Terminal",
       "icon_color": "text-blue-600",
       "name": "e2b",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -4560,6 +4565,27 @@
         },
         {
           "authored_override": true,
+          "default": "ray-2",
+          "description": "Dream Machine video model used for text and image generation requests",
+          "label": "Model",
+          "name": "model",
+          "options": [
+            {
+              "label": "Ray 2",
+              "value": "ray-2"
+            },
+            {
+              "label": "Ray 2 Flash",
+              "value": "ray-flash-2"
+            }
+          ],
+          "placeholder": null,
+          "required": false,
+          "type": "select",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Wait For Completion",
@@ -4731,7 +4757,7 @@
         {
           "authored_override": true,
           "default": 15,
-          "description": "Time in seconds to add to the ETA to account for the time it takes to fetch the media",
+          "description": "Extra one-second polling attempts added to the provider ETA; fractional attempt budgets round up",
           "label": "Add to ETA",
           "name": "add_to_eta",
           "options": null,
@@ -4743,7 +4769,7 @@
         {
           "authored_override": true,
           "default": 60,
-          "description": "Maximum time in seconds to wait for the media to be ready",
+          "description": "Cap on polling attempts, rounded up; zero skips polling and HTTP request time is additional",
           "label": "Max Wait Time",
           "name": "max_wait_time",
           "options": null,
@@ -5610,6 +5636,7 @@
       "icon": "FaBrain",
       "icon_color": "text-purple-500",
       "name": "reasoning",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -6782,10 +6809,8 @@
       "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
       "function_names": [
         "apply_label",
-        "archive_email",
         "create_draft_email",
         "delete_custom_label",
-        "download_attachment",
         "get_draft",
         "get_emails_by_context",
         "get_emails_by_date",
@@ -6798,21 +6823,15 @@
         "get_unread_emails",
         "list_custom_labels",
         "list_drafts",
-        "list_labels",
         "mark_email_as_read",
         "mark_email_as_unread",
-        "modify_message_labels",
-        "modify_thread_labels",
         "remove_label",
         "search_emails",
         "search_threads",
-        "send_draft",
         "send_email",
         "send_email_reply",
         "send_email_to_self",
         "star_email",
-        "trash_message",
-        "trash_thread",
         "unstar_email",
         "update_draft"
       ],
@@ -7244,6 +7263,7 @@
       "icon": "Lock",
       "icon_color": "text-amber-600",
       "name": "agent_vault_access",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -7252,7 +7272,20 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "integrations",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow temporary approval requests for all public hostnames using hostnames=[\"*\"]. Private-network and port restrictions still apply.",
+          "label": "Allow Full Network Access",
+          "name": "allow_full_access",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
@@ -7276,6 +7309,18 @@
       "auth_provider": null,
       "category": "integrations",
       "config_fields": [
+        {
+          "authored_override": true,
+          "default": null,
+          "description": "Nonempty list of Composio action IDs to expose to the agent",
+          "label": "Actions",
+          "name": "actions",
+          "options": null,
+          "placeholder": "GITHUB_GET_THE_AUTHENTICATED_USER",
+          "required": true,
+          "type": "string[]",
+          "validation": null
+        },
         {
           "authored_override": true,
           "default": null,
@@ -7477,42 +7522,12 @@
       "description": "Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
       "display_name": "Composio",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/composio",
-      "function_names": [
-        "check_connected_account",
-        "create_integration",
-        "create_trigger_listener",
-        "delete_trigger",
-        "execute_action",
-        "execute_request",
-        "fetch_expected_integration_params",
-        "find_actions_by_tags",
-        "find_actions_by_use_case",
-        "get_action",
-        "get_action_schemas",
-        "get_active_triggers",
-        "get_agent_instructions",
-        "get_app",
-        "get_apps",
-        "get_auth_params",
-        "get_auth_scheme_for_app",
-        "get_auth_schemes",
-        "get_connected_account",
-        "get_connected_accounts",
-        "get_entity",
-        "get_expected_params_for_user",
-        "get_integration",
-        "get_integrations",
-        "get_tools",
-        "get_trigger",
-        "get_trigger_config_scheme",
-        "initiate_connection",
-        "set_workspace_id",
-        "validate_tools"
-      ],
+      "function_names": [],
       "helper_text": null,
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
       "name": "composio",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -7620,7 +7635,7 @@
         "get_shop_info",
         "get_top_selling_products"
       ],
-      "helper_text": "Create a custom app in your [Shopify Admin](https://admin.shopify.com/) to get an access token",
+      "helper_text": "Create and install new apps through the [Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard), then follow its authentication steps and store the Admin API access token here. Existing legacy custom apps can keep their token setup. This tool does not issue or refresh tokens.",
       "icon": "SiShopify",
       "icon_color": "text-green-600",
       "name": "shopify",
@@ -7642,7 +7657,8 @@
       "function_names": [
         "get_attachment",
         "list_attachments",
-        "register_attachment"
+        "register_attachment",
+        "view_file"
       ],
       "helper_text": null,
       "icon": "Paperclip",
@@ -8056,6 +8072,7 @@
       "icon": "Database",
       "icon_color": "text-yellow-600",
       "name": "duckdb",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -8068,7 +8085,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Tool names workflow participants may call without per-call user approval. Use \"*\" to pre-approve every granted tool. System-mutating tools (claude_agent, config_manager, scheduler) always require per-call approval and cannot be pre-approved.",
+          "description": "Toolkit names receiving automatic approval grants after operator rules. Use \"*\" for all eligible granted toolkits. claude_agent, config_manager, and scheduler receive no generated grant; explicit operator rules can authorize otherwise eligible functions. Functions requiring approval or native confirmation remain unavailable.",
           "label": "Pre-approved participant tools",
           "name": "allowed_tools",
           "options": null,
@@ -8517,6 +8534,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "mem0",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -8842,6 +8860,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -9076,6 +9095,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "sql",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"
@@ -9474,6 +9494,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "zep",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -10126,7 +10147,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "Browse websites, fill in forms, and capture screenshots",
+      "description": "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. With worker routing, this controls the agent's worker browser. To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). The user's local browser requires the separately configured desktop target.",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "function_names": [
@@ -10136,6 +10157,70 @@
       "icon": "FaChrome",
       "icon_color": "text-orange-500",
       "name": "browser",
+      "requires_room_context": false,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "research",
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow trusted private networks. Metadata and link-local addresses remain blocked.",
+          "label": "Allow Private Networks",
+          "name": "allow_private_networks",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
+      "consumes_workspace_paths": true,
+      "default_execution_target": "worker",
+      "dependencies": [],
+      "description": "Native Playwright browser tools in an isolated worker Computer",
+      "display_name": "Browser MCP",
+      "docs_url": null,
+      "function_names": [
+        "browser_close",
+        "browser_resize",
+        "browser_console_messages",
+        "browser_handle_dialog",
+        "browser_evaluate",
+        "browser_file_upload",
+        "browser_drop",
+        "browser_find",
+        "browser_fill_form",
+        "browser_press_key",
+        "browser_type",
+        "browser_mouse_move_xy",
+        "browser_mouse_click_xy",
+        "browser_mouse_drag_xy",
+        "browser_mouse_down",
+        "browser_mouse_up",
+        "browser_mouse_wheel",
+        "browser_navigate",
+        "browser_navigate_back",
+        "browser_network_requests",
+        "browser_network_request",
+        "browser_pdf_save",
+        "browser_take_screenshot",
+        "browser_snapshot",
+        "browser_click",
+        "browser_drag",
+        "browser_hover",
+        "browser_select_option",
+        "browser_tabs",
+        "browser_wait_for"
+      ],
+      "helper_text": null,
+      "icon": "FaChrome",
+      "icon_color": null,
+      "name": "browser_mcp",
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -10289,6 +10374,7 @@
       "icon": "FaChrome",
       "icon_color": "text-blue-600",
       "name": "browserbase",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -10376,18 +10462,6 @@
           "description": null,
           "label": "Wait Until",
           "name": "wait_until",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Proxy Config",
-          "name": "proxy_config",
           "options": null,
           "placeholder": null,
           "required": false,
@@ -10814,7 +10888,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -10826,7 +10900,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -10987,7 +11061,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -11012,18 +11086,6 @@
           "placeholder": null,
           "required": false,
           "type": "number",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Search Params",
-          "name": "search_params",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -11217,7 +11279,7 @@
       "dependencies": [
         "ddgs"
       ],
-      "description": "Search Google for web results using the WebSearch backend",
+      "description": "Search web and news through DDGS with a requested Google backend and automatic fallback",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/websearch",
       "function_names": [
@@ -11937,7 +11999,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -12250,18 +12312,6 @@
           "placeholder": null,
           "required": false,
           "type": "url",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Optional Params",
-          "name": "optional_params",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -13293,7 +13343,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Restrict tool calls to these subreddits (case-insensitive)",
+          "description": "Restrict posts and replies to these subreddits (case-insensitive); reads are unaffected",
           "label": "Allowed Subreddits",
           "name": "allowed_subreddits",
           "options": null,

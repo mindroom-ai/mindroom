@@ -89,6 +89,12 @@ config:
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
   source: configMap
   path: ""
+  # Optional source directory for native initialize-only installation before run.
+  # Requires source: file and path inside its own directory below storage.mountPath.
+  # contentBundles can transport files here; initialization runs in the runtime image.
+  bootstrapBundlePath: ""
+  # Optional opaque revision; a new value validates and installs the bootstrap bundle.
+  bootstrapBundleRevision: ""
   create: true
   existingConfigMap: ""
   key: config.yaml
@@ -122,6 +128,7 @@ eventCache:
       tag: "17"
       pullPolicy: IfNotPresent
     service:
+      # Shared by the PostgreSQL listener, probes, Service, and generated connection URL.
       port: 5432
       annotations: {}
     auth:
@@ -348,6 +355,11 @@ workers:
     namePrefix: mindroom-worker
     storageSubpathPrefix: workers
     enableServiceLinks: false
+    # Optional RuntimeClass applied to every generated worker pod.
+    runtimeClassName: ""
+    # Optional node-installed profile applied only to the main worker container.
+    # Example: {type: Localhost, localhostProfile: profiles/worker-computer.json}
+    seccompProfile: {}
     configMapName: ""
     configKey: ""
     configPath: ""

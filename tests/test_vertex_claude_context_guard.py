@@ -21,8 +21,8 @@ from mindroom.claude_prompt_cache import (
     TOOL_SEARCH_RESULT_BLOCK_TYPE,
     TOOL_SEARCH_TOOL_TYPE,
 )
-from mindroom.claude_stream_retry import install_claude_stream_retry_hook
 from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
+from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 from mindroom.vertex_claude_compat import (
     _VERTEX_TOOL_SEARCH_TOKEN_RESERVE,
     MindroomVertexAIClaude,
@@ -576,7 +576,7 @@ async def test_fit_request_messages_rejects_current_turn_that_cannot_fit() -> No
 async def test_stream_retry_does_not_repeat_current_turn_fit_failure() -> None:
     """The installed stream wrapper preserves one typed local fit failure."""
     model = _model()
-    install_claude_stream_retry_hook(model)
+    install_provider_stream_retry_hook(model)
     counter = AsyncMock(return_value=90)
 
     with (

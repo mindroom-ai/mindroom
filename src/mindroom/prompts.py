@@ -508,9 +508,10 @@ DYNAMIC_TOOLS_TOOLKIT_INSTRUCTIONS = (
 DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE = """You can run the following configured agents as fresh subagents:
 {agent_descriptions}
 
-Use run_subagent(task, agent_name=None) for a bounded subtask whose result you need before continuing.
+Use run_subagent(task, agent_name=None, model=None) for a bounded subtask whose result you need before continuing.
 The child starts with fresh conversation context, so include the relevant facts, constraints, and expected output in task.
 It retains its configured tools, workspace, and memory.
+Set model to a configured model name to choose a different model for the child session, including follow-ups.
 Omit agent_name or pass null to run a fresh copy of yourself, if your own name is listed in Allowed subagents.
 Delegation is limited to three nested child levels.
 For an ongoing conversation, use matrix_message(recipient="agent_name", message="...") to request a response.

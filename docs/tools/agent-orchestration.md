@@ -145,13 +145,15 @@ agents:
 
 All three functions accept an optional `include_daily` boolean, which defaults to `false`.
 `get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
-`get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
+`get_all_usage()` reports retained Agno session aggregates across configured agents and all stored teams, including ad hoc teams and teams removed from configuration.
 
 ### Daily Token Usage
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
+Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
+Each top-level run counts once on its first request date, so tokens on later days or from saved team members do not add extra replies.
+Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
 The report's overall totals and overall `model_breakdown` expose the same counters.
@@ -159,9 +161,10 @@ For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includ
 Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
 
 `daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
-Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+Usage with neither valid request timestamps nor a usable run creation timestamp is excluded from daily rows and marks its source as partially unavailable, while its tokens remain eligible for the other totals.
+The run-date fallback cannot provide exact provider billing dates for historical or incomplete request detail.
 This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
-Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
+Daily rows include saved team member usage, but may differ from session totals when historical usage lacks retained counters or dates.
 Both daily fields are omitted unless `include_daily=True`.
 
 ### Response And Coverage
@@ -170,19 +173,33 @@ All three functions return a JSON custom-tool envelope with `status` and `tool` 
 A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
-The admin response groups session aggregates by configured agent or team ID.
+The admin response groups session aggregates by configured agent or stored team ID.
 Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
-Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
-Both responses group retained top-level runs by provider and model in `model_breakdown`.
+Admin breakdown rows include every configured agent and stored team with retained usage and are sorted by total tokens.
+Each entity also includes `retained_run_totals`, `run_count`, and `user_breakdown`, grouping retained usage by canonical requester and model.
+With `include_daily=True`, these requester rows include daily detail too; the report's model, user, and daily coverage applies to them.
+Shared and private instances of the same entity are combined; `private_agent_breakdown` separately identifies the private contribution.
+Run counts describe retained top-level runs with usable metrics, not message counts, and requester totals sum to `retained_run_totals` rather than cumulative session `totals`.
+Both responses group stored usage snapshots by provider and model in `model_breakdown`.
+Organization detail includes each saved team member's own counters once, without adding replies to `run_count` or adding its tokens again to cumulative team session totals.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
 Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.
 Malformed model details or details that do not account for the run's token totals put the run's tokens under `unknown` and mark model and daily coverage as partially unavailable.
 Model rows include token totals and run counts and are sorted by total tokens.
-Each model counts a run once, while daily and user run counts count that run once across all its models.
+Each model counts a top-level run once, while daily and user run counts count that run once across all its models.
 Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
-Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
+Model coverage is reported separately because history lost before usage migration and unrecorded member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
+The HTTP usage routes add `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp when a scan finishes; cached responses retain that scan timestamp.
+
+Admin and all-private self reports also include `cumulative_model_breakdown` and `cumulative_model_coverage`.
+Cumulative model rows use per-model details stored with session aggregates, so they include compacted usage still present in retained sessions.
+Each row contains provider, model, all token counters, and `session_count`; a session using several models counts once in each model row.
+Duplicate entries for the same provider and model within one session are combined before that count is added.
+The details must reconcile every token counter to the session total; absent, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark cumulative model coverage incomplete.
+Session aggregates do not retain dates or requester attribution for these counters, and deleted sessions remain unavailable.
+Shared-agent self reports omit the cumulative fields because their totals are requester-filtered retained runs rather than whole session aggregates.
 
 ### Private-Agent Accounting
 
@@ -190,9 +207,9 @@ The tool does not change Agno persistence settings.
 Personal reports omit user identifiers and contain only the requester's own private agents.
 `get_my_private_usage()` combines those agents in the overall totals; `get_all_usage()` includes private rows alongside the instance-wide report.
 
-Each private row contains session `totals` and `session_count`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
+Each private row contains session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
 With `include_daily=True`, it also contains `daily_breakdown` using the same UTC dates and model/token counters as the other daily views.
-Session totals can include compacted history that no longer has retained model or daily detail; the two totals are intentionally separate.
+Session totals can include history compacted before usage migration that no longer has model or daily detail; the two totals are intentionally separate.
 
 For admin reports, session ownership comes from a validated private-instance identity record, falling back to the session's recorded requester.
 Retained runs keep their recorded requester, with the validated owner as fallback when requester metadata is missing.
@@ -200,8 +217,12 @@ Known aliases are combined; missing ownership remains `user_id: null`.
 `private_agent_coverage` describes unavailable attribution or metrics.
 All views share the same storage reader, run deduplication, token normalization, and daily grouping.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
-Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
-Agno 2.x session run blobs, including double-encoded JSON, and Agno 3 run tables are supported, including partly migrated databases.
+Usage snapshots survive compaction, edits, and regeneration; explicit whole-session erasure removes them.
+A one-time startup import in `legacy_usage_storage.py` reads available Agno 2.x session blobs and Agno 3 run rows, including partly migrated databases.
+The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+The importer retains unknown timestamps and attribution and reports malformed records as coverage gaps.
+Reports and tools read the current usage table without migrating or scanning conversation payloads.
+History lost before migration cannot be recovered by this report.
 Missing counters are reported as zero, so zero does not prove that an older provider recorded that token category.
 These counters support cost estimates, but do not guarantee exact billing: provider-specific charging rules and calls outside retained session storage are not captured.
 
@@ -232,11 +253,14 @@ Automatic saving of large tool results uses the same configured policy as other 
 ### What It Does
 
 ```python
-run_subagent(task: str, agent_name: str | None = None) -> str
+run_subagent(task: str, agent_name: str | None = None, model: str | None = None) -> str
 continue_subagent(subagent_id: str, message: str) -> str
 ```
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
-Fresh execution still uses the target agent's configured workspace, memory, requester scope, model, and tool policy.
+Fresh execution still uses the target agent's configured workspace, memory, requester scope, and tool policy.
+Set `model` to an alias from `models:` to override the child's model without changing its agent identity.
+The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
+Unknown model aliases are rejected before the child starts, with available aliases included in the error.
 When the child finishes within the foreground wait, the caller receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
@@ -251,7 +275,8 @@ Empty tasks and follow-up messages are rejected.
 
 Use `continue_subagent` after the child returns to retain its own conversation history.
 The stable ID remains usable across parent turns and restarts, within the same caller, requester, and originating conversation.
-Follow-ups preserve the child session and nesting depth, recheck current permissions, and require the original storage scope.
+Follow-ups preserve the child session, selected model, and nesting depth, recheck current permissions, and require the original storage scope.
+The model choice also survives approval pauses and restarts.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
 Calls do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
@@ -372,7 +397,7 @@ agents:
 ```
 
 ```python
-run_subagent(task="Independently review the proposed design and return its three main risks.")
+run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")
 
 run_subagent(
     agent_name="research",
@@ -434,11 +459,11 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 `inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
 Participants can be `ephemeral_agent` or `room_agent`.
 An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
-Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`).
+Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`).
 Every participant tool must also be listed in `permissions.tools`.
 Dynamic Workflow participants cannot suspend and resume a model run for human approval.
 A participant grant is rejected when any exposed function would require approval under the operator's `tool_approval` policy and the caller's `dynamic_workflow` `allowed_tools` config.
-Setting `allowed_tools` to `["*"]` makes every granted tool eligible except system-mutating tools and functions still gated by an operator-authored approval rule.
+The [participant approval rules below](#allowing-participant-tools) describe operator-rule precedence, automatic grants, and tool eligibility.
 A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
 Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
 Step types are `transform_step`, `agent_step`, and `report_step`.
@@ -501,7 +526,7 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to make trusted tools eligible for embedded participants.
+Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to add automatic approval grants for embedded participants after operator-authored approval rules.
 
 ```yaml
 agents:
@@ -512,10 +537,15 @@ agents:
           allowed_tools: [duckduckgo, website]
 ```
 
-Use `allowed_tools: ["*"]` to make every granted non-system-mutating tool eligible.
-Tools outside `allowed_tools` are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
-Operator-authored approval rules retain precedence, so a matching `require_approval` rule still makes that function unavailable.
-System-mutating tools (`claude_agent`, `config_manager`, `scheduler`) are always unavailable to embedded participants.
+Use `allowed_tools: ["*"]` to generate automatic approval grants for all otherwise eligible granted toolkits.
+Operator-authored rules remain first and use the normal first-match function-name policy.
+A first matching `auto_approve` rule can authorize a function outside `allowed_tools`; a matching `require_approval` or script rule makes it unavailable to embedded participants.
+Unmatched functions default to requiring approval and are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
+`claude_agent`, `config_manager`, and `scheduler` receive no generated grant from `allowed_tools`, including `"*"`, but an explicit operator rule can authorize otherwise eligible functions from those toolkits.
+Native-confirming functions remain unavailable even under an operator auto-approval rule.
+Agent-infrastructure toolkits (`compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `invite_router`, `memory`, and `self_config`) are always excluded.
+Participant tools must still be granted in the workflow's `permissions.tools`, resolve through the caller's tool routing, and satisfy their runtime authority checks.
+A function name shared by several granted toolkits receives a generated grant only when every owner is eligible.
 
 ### Notes
 

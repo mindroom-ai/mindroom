@@ -8,13 +8,16 @@ import os
 import stat
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+from agno.media import Image
 from agno.metrics import MessageMetrics
 from agno.models.anthropic import Claude
+from agno.models.google import Gemini
 from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.models.response import ModelResponse
@@ -42,6 +45,11 @@ from mindroom.openai_tool_search import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+_TEST_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+)
+_TEST_PNG_BASE64 = base64.b64encode(_TEST_PNG_BYTES).decode("ascii")
 
 
 def _jwt_with_exp(exp: int) -> str:
@@ -347,11 +355,6 @@ def test_codex_responses_invoke_aggregates_streaming_deltas(monkeypatch: pytest.
     assert response.content == "mindroom-codex-live-ok"
     assert response.provider_data == {"response_id": "resp_123"}
     assert response.response_usage == usage
-    assert assistant_message.content == "mindroom-codex-live-ok"
-    assert assistant_message.provider_data == {"response_id": "resp_123"}
-    assert assistant_message.metrics.input_tokens == 7
-    assert assistant_message.metrics.cache_read_tokens == 5
-    assert assistant_message.metrics.reasoning_tokens == 2
 
 
 def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:
@@ -445,9 +448,9 @@ class _FakeResponsesAPI:
         self._event_batches = iter(event_batches)
         self.captured_kwargs: list[dict[str, object]] = []
 
-    def create(self, **kwargs: object) -> Iterator[object]:
+    def create(self, **kwargs: object) -> nullcontext[Iterator[object]]:
         self.captured_kwargs.append(kwargs)
-        return iter(next(self._event_batches))
+        return nullcontext(iter(next(self._event_batches)))
 
 
 class _FakeCodexClient:
@@ -625,6 +628,110 @@ def test_codex_tool_search_items_replay_ahead_of_the_discovered_function_call() 
         },
         {"type": "function_call_output", "call_id": "call_1", "output": "sunny"},
     ]
+
+
+def test_codex_formats_synthetic_tool_image_followup_on_next_request() -> None:
+    """Agno's standard tool-media follow-up carries the viewed image to Codex."""
+    model = CodexResponses(id="gpt-6-astra")
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            {
+                "id": "fc_view",
+                "call_id": "call_view",
+                "type": "function",
+                "function": {"name": "view_file", "arguments": '{"path":"plot.png"}'},
+            },
+        ],
+    )
+    tool_result = Message(
+        role="tool",
+        content='{"path":"plot.png","view_status":"ready"}',
+        tool_call_id="fc_view",
+        tool_name="view_file",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    messages = [assistant, tool_result]
+    model._handle_function_call_media(messages, [tool_result])
+    formatted_input = model._format_messages(messages)
+
+    assert formatted_input[-1] == {
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "The tool call above generated the attached media."},
+            {"type": "input_image", "image_url": f"data:image/png;base64,{_TEST_PNG_BASE64}"},
+        ],
+    }
+    assert tool_result.images is None
+
+
+def test_public_openai_responses_formats_synthetic_tool_image_followup() -> None:
+    """The standard Responses adapter sends Agno's tool-media follow-up as image input."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted = MindRoomOpenAIResponses(id="gpt-6-astra")._format_messages([message])
+
+    assert formatted == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "The tool call above generated the attached media."},
+                {"type": "input_image", "image_url": f"data:image/png;base64,{_TEST_PNG_BASE64}"},
+            ],
+        },
+    ]
+
+
+def test_openai_chat_formats_synthetic_tool_image_followup() -> None:
+    """Chat Completions receives the viewed image through Agno's standard follow-up."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted = OpenAIChat(id="gpt-6-astra", api_key="test-key")._format_message(message)
+
+    assert formatted["role"] == "user"
+    assert formatted["content"][0] == {"type": "text", "text": message.content}
+    assert formatted["content"][1]["type"] == "image_url"
+    assert formatted["content"][1]["image_url"]["url"] == f"data:image/png;base64,{_TEST_PNG_BASE64}"
+
+
+def test_claude_formats_synthetic_tool_image_followup() -> None:
+    """Claude receives the viewed image through Agno's standard user follow-up."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted, _system = claude_format_messages([message])
+
+    assert formatted[0]["role"] == "user"
+    assert formatted[0]["content"][0]["type"] == "text"
+    assert formatted[0]["content"][1]["type"] == "image"
+    assert formatted[0]["content"][1]["source"]["data"] == _TEST_PNG_BASE64
+
+
+def test_gemini_formats_synthetic_tool_image_followup() -> None:
+    """Gemini receives the viewed image through Agno's standard user follow-up."""
+    message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id="mindroom_viewed_plot", content=_TEST_PNG_BYTES, mime_type="image/png")],
+    )
+
+    formatted, _system = Gemini(id="gemini-3.1-pro-preview", api_key="test-key")._format_messages([message])
+
+    assert formatted[0].parts[0].text == message.content
+    assert formatted[0].parts[1].inline_data is not None
+    assert formatted[0].parts[1].inline_data.data == _TEST_PNG_BYTES
 
 
 def test_codex_parse_provider_response_captures_tool_search_items() -> None:

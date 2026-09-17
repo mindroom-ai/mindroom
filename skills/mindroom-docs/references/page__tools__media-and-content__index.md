@@ -38,6 +38,9 @@ MindRoom treats `spotify` as a shared-only integration, so dashboard credential 
 Despite the `enable_process_video` config name, the current upstream method it enables is specifically `extract_audio()`, not a general-purpose video editing surface.
 `create_srt()` writes the provided transcription text directly to disk, so it expects the caller to already have SRT-formatted content.
 `embed_captions()` reads an SRT file, converts it to word timings, and renders word-highlighted captions onto a new MP4 output.
+`font_size` sets the pixel size of words and spaces; `font_color` sets the base text color, while the active word remains yellow.
+`stroke_color` and `stroke_width` apply to both base and highlighted words, with `stroke_width=0` disabling the outline.
+Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
 
 ### Configuration
@@ -260,6 +263,8 @@ The tool itself consumes an `access_token`, but MindRoom also provides a dedicat
 That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
 By default the connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, and `user-top-read`.
 The upstream playlist and playback methods need additional Spotify scopes beyond that base dashboard flow, so manual token provisioning or a broadened OAuth scope set is still required if you want playlist modification or playback control to succeed.
+`get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
+Spotify's [endpoint access notice](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) restricts new and affected Development Mode apps while preserving access for qualifying existing Extended Quota Mode apps.
 
 ### Configuration
 

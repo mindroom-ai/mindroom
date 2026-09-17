@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="lumalabs",
+    worker_inert_agent_functions=("image_to_video", "generate_video"),
     display_name="Luma Labs",
     description="3D content creation and video generation using Luma AI Dream Machine",
     category=ToolCategory.DEVELOPMENT,  # others/ category maps to DEVELOPMENT
@@ -27,6 +29,18 @@ if TYPE_CHECKING:
             type="password",
             required=False,
             default=None,
+        ),
+        ConfigField(
+            name="model",
+            label="Model",
+            type="select",
+            required=False,
+            default="ray-2",
+            options=[
+                {"label": "Ray 2", "value": "ray-2"},
+                {"label": "Ray 2 Flash", "value": "ray-flash-2"},
+            ],
+            description="Dream Machine video model used for text and image generation requests",
         ),
         ConfigField(
             name="wait_for_completion",
@@ -79,4 +93,42 @@ def lumalabs_tools() -> type[LumaLabTools]:
     """Return Luma Labs tools for 3D content creation and video generation."""
     from agno.tools.lumalab import LumaLabTools
 
-    return LumaLabTools
+    class MindRoomLumaLabTools(LumaLabTools):
+        """Luma toolkit with a configured model for both generation methods."""
+
+        def __init__(
+            self,
+            api_key: str | None = None,
+            wait_for_completion: bool = True,
+            poll_interval: int = 3,
+            max_wait_time: int = 300,
+            enable_generate_video: bool = True,
+            enable_image_to_video: bool = True,
+            all: bool = False,  # noqa: A002 - Preserve the upstream toolkit configuration key.
+            model: Literal["ray-2", "ray-flash-2"] | None = "ray-2",
+            **kwargs: object,
+        ) -> None:
+            super().__init__(
+                api_key=api_key,
+                wait_for_completion=wait_for_completion,
+                poll_interval=poll_interval,
+                max_wait_time=max_wait_time,
+                enable_generate_video=enable_generate_video,
+                enable_image_to_video=enable_image_to_video,
+                all=all,
+                **kwargs,
+            )
+            if model is None:
+                model = "ray-2"
+            # AGNO_COMPAT: Luma video creation omits the SDK's required model.
+            # Reason: Agno 3.0.9 omits model in both creation methods; lumaai 1.21.0 requires it.
+            # Upstream issue: Tracking gap; no matching issue has been verified for this omission.
+            # Upstream PR: No matching fix has been verified.
+            # Remove when: Agno forwards a configurable model to both creation paths;
+            # retain MindRoom's configured default, polling, media, and error behavior.
+            # Coverage: tests/test_lumalabs_tool.py::test_lumalabs_generation_sends_model_and_returns_video;
+            # tests/test_lumalabs_tool.py preserves completion controls, HTTP errors, and registration flags.
+            # Intentional instance-local SDK method binding; its declared method type cannot express this repair.
+            self.client.generations.create = partial(self.client.generations.create, model=model)  # ty: ignore[invalid-assignment]
+
+    return MindRoomLumaLabTools

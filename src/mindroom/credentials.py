@@ -764,6 +764,7 @@ def _scoped_credentials_target_manager(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
+    worker_credentials_manager: CredentialsManager | None = None,
 ) -> CredentialsManager:
     manager = credentials_manager
     if worker_target is None or worker_target.worker_scope is None:
@@ -780,7 +781,7 @@ def _scoped_credentials_target_manager(
     if primary_runtime_manager is not None:
         return primary_runtime_manager
 
-    worker_manager = _resolve_worker_credentials_manager(
+    worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
         credentials_manager=manager,
         worker_target=worker_target,
     )
@@ -808,8 +809,15 @@ def load_scoped_credentials(
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
     allowed_shared_services: frozenset[str] | None = None,
+    worker_credentials_manager: CredentialsManager | None = None,
+    allow_shared_mirror: bool = True,
 ) -> dict[str, Any] | None:
-    """Load credentials for a service, resolving worker-scoped overrides when available."""
+    """Load scoped overrides over the service's permitted shared credential layer.
+
+    Callers with an authorized worker store can supply it without resolving it
+    again. Dashboard reads disable ``allow_shared_mirror`` so their committed
+    allowlist still applies when the base manager has a separate shared layer.
+    """
     manager = credentials_manager
     shared_manager = _shared_credentials_manager(manager)
     if worker_target is None or worker_target.worker_scope is None:
@@ -830,30 +838,21 @@ def load_scoped_credentials(
         service,
         worker_target.worker_scope,
     ).uses_local_shared_credentials
-    worker_manager = (
-        _resolve_worker_credentials_manager(
+    worker_manager = None
+    if primary_runtime_manager is None and not uses_local_shared_credentials:
+        worker_manager = worker_credentials_manager or _resolve_worker_credentials_manager(
             credentials_manager=manager,
             worker_target=worker_target,
         )
-        if primary_runtime_manager is None and not uses_local_shared_credentials
-        else None
-    )
-    resolved_allowed_shared_services = allowed_shared_services
-    if resolved_allowed_shared_services is None and manager.shared_base_path == manager.base_path:
-        resolved_allowed_shared_services = frozenset()
     if primary_runtime_manager is not None:
         shared_credentials = None
-    elif (
-        uses_local_shared_credentials
-        or manager.shared_base_path != manager.base_path
-        or resolved_allowed_shared_services is None
-    ):
+    elif uses_local_shared_credentials or (allow_shared_mirror and manager.shared_base_path != manager.base_path):
         shared_credentials = shared_manager.load_credentials(service)
     else:
         shared_credentials = load_worker_grantable_shared_credentials(
             service,
             shared_manager=shared_manager,
-            allowed_services=resolved_allowed_shared_services,
+            allowed_services=allowed_shared_services or frozenset(),
         )
     scoped_manager = primary_runtime_manager or worker_manager
     worker_credentials = scoped_manager.load_credentials(service) if scoped_manager is not None else None
@@ -866,13 +865,15 @@ def save_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
+    worker_credentials_manager: CredentialsManager | None = None,
 ) -> None:
-    """Save credentials for a service to the current worker scope when available."""
+    """Save to the service's scope, reusing an already authorized worker store when supplied."""
     normalized_service = validate_service_name(service)
     target_manager = _scoped_credentials_target_manager(
         normalized_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
+        worker_credentials_manager=worker_credentials_manager,
     )
     target_manager.save_credentials(normalized_service, credentials)
 
@@ -882,12 +883,14 @@ def delete_scoped_credentials(
     *,
     credentials_manager: CredentialsManager,
     worker_target: ResolvedWorkerTarget | None,
+    worker_credentials_manager: CredentialsManager | None = None,
 ) -> None:
-    """Delete credentials for a service from the current worker scope when available."""
+    """Delete from the service's scope, reusing an already authorized worker store when supplied."""
     normalized_service = validate_service_name(service)
     target_manager = _scoped_credentials_target_manager(
         normalized_service,
         credentials_manager=credentials_manager,
         worker_target=worker_target,
+        worker_credentials_manager=worker_credentials_manager,
     )
     target_manager.delete_credentials(normalized_service)

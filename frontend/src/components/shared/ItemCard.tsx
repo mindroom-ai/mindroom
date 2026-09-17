@@ -1,5 +1,5 @@
 import React, { ReactNode } from "react";
-import { Card, CardContent } from "@/components/ui/card";
+import { Check } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { sharedStyles, getSelectionStyles } from "./styles";
@@ -20,6 +20,7 @@ export interface ItemCardBadge {
 }
 
 export interface ItemCardProps {
+  leading?: ReactNode;
   /**
    * Unique identifier for the item
    */
@@ -63,6 +64,7 @@ export interface ItemCardProps {
  */
 export function ItemCard({
   id,
+  leading,
   title,
   description,
   isSelected = false,
@@ -79,14 +81,16 @@ export function ItemCard({
   };
 
   return (
-    <Card
+    <div
       className={cn(
+        "w-full",
         clickable && sharedStyles.item.containerCard,
         getSelectionStyles(isSelected, "card"),
         className,
       )}
       onClick={handleClick}
       role={clickable ? "button" : undefined}
+      aria-pressed={clickable ? isSelected : undefined}
       tabIndex={clickable ? 0 : undefined}
       onKeyDown={
         clickable
@@ -99,10 +103,24 @@ export function ItemCard({
           : undefined
       }
     >
-      <CardContent className="p-4">
-        <div className="flex items-start justify-between">
-          <div className="flex-1">
-            <h3 className={sharedStyles.item.cardTitle}>{title}</h3>
+      <div className={sharedStyles.item.cardContent}>
+        <div className="flex items-start justify-between gap-3">
+          {leading}
+          <div className="min-w-0 flex-1">
+            <h3
+              className={cn(
+                sharedStyles.item.cardTitle,
+                "flex items-start gap-2",
+              )}
+            >
+              <span className="min-w-0 flex-1">{title}</span>
+              {isSelected && (
+                <Check
+                  aria-hidden="true"
+                  className="mt-0.5 h-4 w-4 shrink-0 text-primary"
+                />
+              )}
+            </h3>
             {description && (
               <p className={sharedStyles.item.cardDescription}>{description}</p>
             )}
@@ -132,7 +150,7 @@ export function ItemCard({
             {children}
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }

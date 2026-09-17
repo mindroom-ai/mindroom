@@ -7,6 +7,21 @@
 {{- if not (or (eq .Values.eventCache.backend "postgres") (eq .Values.eventCache.backend "sqlite")) -}}
 {{- fail "eventCache.backend must be either postgres or sqlite" -}}
 {{- end -}}
+{{- $workerSeccomp := .Values.workers.kubernetes.seccompProfile -}}
+{{- if $workerSeccomp -}}
+{{- if or (not (kindIs "map" $workerSeccomp)) (ne (len $workerSeccomp) 2) (not (hasKey $workerSeccomp "type")) (not (hasKey $workerSeccomp "localhostProfile")) -}}
+{{- fail "workers.kubernetes.seccompProfile must define exactly type and localhostProfile" -}}
+{{- end -}}
+{{- if ne $workerSeccomp.type "Localhost" -}}
+{{- fail "workers.kubernetes.seccompProfile.type must be Localhost" -}}
+{{- end -}}
+{{- if not (kindIs "string" $workerSeccomp.localhostProfile) -}}
+{{- fail "workers.kubernetes.seccompProfile.localhostProfile must be a relative path" -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[^/\\\\]+(/[^/\\\\]+)*$" $workerSeccomp.localhostProfile)) (has "." (splitList "/" $workerSeccomp.localhostProfile)) (has ".." (splitList "/" $workerSeccomp.localhostProfile)) -}}
+{{- fail "workers.kubernetes.seccompProfile.localhostProfile must be a relative path without traversal segments" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (or (eq .Values.matrix.managedAccountAuth "password") (eq .Values.matrix.managedAccountAuth "appservice")) -}}
 {{- fail "matrix.managedAccountAuth must be either password or appservice" -}}
 {{- end -}}
@@ -23,6 +38,56 @@
 {{- fail "matrix.registrationToken cannot be set when matrix.managedAccountAuth=appservice" -}}
 {{- end -}}
 {{- $configSource := include "mindroom-runtime.configSource" . -}}
+{{- if not (kindIs "string" .Values.config.bootstrapBundleRevision) -}}
+{{- fail "config.bootstrapBundleRevision must be a string" -}}
+{{- end -}}
+{{- if .Values.config.bootstrapBundleRevision -}}
+{{- if not .Values.config.bootstrapBundlePath -}}
+{{- fail "config.bootstrapBundleRevision requires config.bootstrapBundlePath" -}}
+{{- end -}}
+{{- if or (eq (trim .Values.config.bootstrapBundleRevision) "") (gt (len .Values.config.bootstrapBundleRevision) 128) (regexMatch "[[:cntrl:]]" .Values.config.bootstrapBundleRevision) -}}
+{{- fail "config.bootstrapBundleRevision must be nonempty, at most 128 bytes, and contain no control characters" -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.config.bootstrapBundlePath -}}
+{{- if eq .Values.workers.backend "static_runner" -}}
+{{- fail "config.bootstrapBundlePath cannot be combined with workers.backend=static_runner; sidecar startup is concurrent" -}}
+{{- end -}}
+{{- $storageRoot := clean .Values.storage.mountPath -}}
+{{- $target := dir (clean .Values.config.path) -}}
+{{- if or (ne $configSource "file") (not (hasPrefix (printf "%s/" $storageRoot) $target)) -}}
+{{- fail "config.bootstrapBundlePath requires config.source=file and a config directory below storage.mountPath" -}}
+{{- end -}}
+{{- if not (hasPrefix "/" .Values.config.bootstrapBundlePath) -}}
+{{- fail "config.bootstrapBundlePath must be absolute" -}}
+{{- end -}}
+{{- $source := clean .Values.config.bootstrapBundlePath -}}
+{{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $source)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
+{{- fail "config.bootstrapBundlePath must not overlap the config.path directory" -}}
+{{- end -}}
+{{- $mountPaths := list (clean .Values.storage.mountPath) -}}
+{{- if .Values.stateStorage.enabled -}}
+{{- if .Values.stateStorage.mountPath -}}
+{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.mountPath) -}}
+{{- end -}}
+{{- if .Values.stateStorage.encryptionKeys.enabled -}}
+{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.encryptionKeys.mountPath) -}}
+{{- end -}}
+{{- if .Values.stateStorage.syncContinuity.enabled -}}
+{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.syncContinuity.mountPath) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.extraVolumeMounts -}}
+{{- if .mountPath -}}
+{{- $mountPaths = append $mountPaths (clean .mountPath) -}}
+{{- end -}}
+{{- end -}}
+{{- range $mount := $mountPaths -}}
+{{- if or (eq $target $mount) (hasPrefix (printf "%s/" $target) $mount) -}}
+{{- fail "config.path directory overlaps a mounted volume" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
 {{- fail "config.source must be either configMap or file" -}}
 {{- end -}}

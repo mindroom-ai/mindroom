@@ -92,23 +92,47 @@ def install_message_projection(
     model_dict["aresponse"] = response_with_projection
 
 
+def _with_tool_checkpoint(
+    messages: list[Message],
+    kwargs: dict[str, object],
+    after_tools: Callable[[list[Message], ModelResponse], Awaitable[None]],
+) -> dict[str, object]:
+    """Run the owner's post-tool policy without discarding Agno's checkpoint."""
+    previous = cast("Callable[[ModelResponse], Awaitable[None]] | None", kwargs.get("after_tool_results"))
+
+    async def after_tool_results(result: ModelResponse) -> None:
+        try:
+            await after_tools(messages, result)
+        finally:
+            if previous is not None:
+                await previous(result)
+
+    return {**kwargs, "after_tool_results": after_tool_results}
+
+
 # AGNO_COMPAT: Post-tool callbacks lack mutable messages and results.
-# Reason: after_tool_results exists in Agno 3.0.9 but lacks the mutable messages
-# and results and is not exposed as an owner callback through Agent/Team runs.
+# Reason: after_tool_results exists in Agno 3.0.9 but does not expose mutable
+# input messages or raw tool-result messages to the owner through Agent/Team runs.
 # Approved continuations append results directly before entering aresponse or
 # aresponse_stream, bypassing both formatting and media callbacks.
+# Mid-turn judgments must be awaited after a completed batch or at resumed entry,
+# before the next provider request; existing checkpoints must run even on cancellation.
 # Upstream issue: No matching public post-tool message callback issue identified.
 # Upstream PR: None identified; existing checkpoint callbacks are only a partial API.
-# Remove when: Public callbacks expose messages/results after formatting and media
+# Remove when: Public awaitable callbacks expose messages/results after formatting and media
 # insertion, including resumed batches; retain the owner's notice deduplication
 # and stop-after policy.
-# Coverage: tests/test_queued_message_notify.py; tests/test_approval_queued_notice.py.
+# Coverage: tests/test_mid_turn.py exercises streaming, resumed batches, terminal tools,
+# and checkpoint cancellation; tests/test_queued_message_notify.py and
+# tests/test_approval_queued_notice.py cover queued notices and approval resumes.
 def install_tool_result_callback(
     model: Model,
     *,
     marker: str,
     callback: Callable[[list[Message], list[Message]], None],
     before_response: Callable[[list[Message]], None],
+    before_response_async: Callable[[list[Message]], Awaitable[None]],
+    after_tools_async: Callable[[list[Message], ModelResponse], Awaitable[None]],
 ) -> None:
     """Observe tool-result stages and response entry after approved batches."""
     try:
@@ -127,7 +151,8 @@ def install_tool_result_callback(
 
     async def response(messages: list[Message], *args: object, **kwargs: object) -> ModelResponse:
         before_response(messages)
-        return await original_response(messages, *args, **kwargs)
+        await before_response_async(messages)
+        return await original_response(messages, *args, **_with_tool_checkpoint(messages, kwargs, after_tools_async))
 
     async def response_stream(
         messages: list[Message],
@@ -135,7 +160,10 @@ def install_tool_result_callback(
         **kwargs: object,
     ) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
         before_response(messages)
-        async with aclosing(original_stream(messages, *args, **kwargs)) as stream:
+        await before_response_async(messages)
+        async with aclosing(
+            original_stream(messages, *args, **_with_tool_checkpoint(messages, kwargs, after_tools_async)),
+        ) as stream:
             async for event in stream:
                 yield event
 
@@ -183,7 +211,7 @@ def install_tool_result_callback(
 # Upstream PR: None identified for this extension point.
 # Remove when: Public invocation hooks compose sync/async streams and request context
 # with the same ordering; logging, retry limits, and stream cleanup remain owners.
-# Coverage: tests/test_llm_request_logging.py; tests/test_claude_stream_retry.py.
+# Coverage: tests/test_llm_request_logging.py; tests/test_claude_stream_retry.py; tests/test_provider_stream_retry.py.
 def install_async_invocation_hooks(
     model: Model,
     *,

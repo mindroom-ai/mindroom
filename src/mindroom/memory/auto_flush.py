@@ -8,12 +8,15 @@ import re
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, TypedDict, cast
+from uuid import uuid4
 
 from agno.agent import Agent
 
 from mindroom import model_loading
 from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
 from mindroom.runtime_resolution import resolve_agent_execution
@@ -477,7 +480,28 @@ async def _extract_memory_summary(
         model=model,
         telemetry=False,
     )
-    response = await extractor_agent.arun(prompt, session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}")
+    invocation_id = uuid4().hex
+    response = await extractor_agent.arun(
+        prompt,
+        run_id=invocation_id,
+        session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}",
+    )
+    await record_helper_usage(
+        response,
+        owner=HelperUsageOwner(
+            storage_factory=partial(
+                create_session_storage,
+                agent_name,
+                config,
+                runtime_paths,
+                execution_identity=execution_identity,
+            ),
+            session_id=session_id,
+        ),
+        invocation_id=invocation_id,
+        kind="memory_auto_flush",
+        requester_id=execution_identity.requester_id if execution_identity is not None else None,
+    )
     content = response.content
     raw_output = content if isinstance(content, str) else str(content or "")
     return _sanitize_extractor_output(raw_output, extractor.no_reply_token)

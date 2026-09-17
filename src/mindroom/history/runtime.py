@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom import model_loading
+from mindroom.agno_compat_provider_errors import is_provider_timeout
 from mindroom.history.compaction import SummaryModel, compact_scope_history
 from mindroom.history.native import configure_native_history, native_history_route
 from mindroom.history.policy import (
@@ -16,7 +17,6 @@ from mindroom.history.policy import (
     resolve_history_execution_plan,
 )
 from mindroom.history.prompt_tokens import estimate_agent_static_tokens, estimate_team_static_tokens
-from mindroom.history.provider_error_compat import is_provider_timeout
 from mindroom.history.replay import (
     configured_replay_plan,
     estimate_prompt_visible_history_tokens,

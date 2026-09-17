@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
 from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
@@ -74,12 +75,10 @@ async def verify_openid(token: MatrixOpenIDToken, paths: RuntimePaths) -> str:
                 if response.status != 200:
                     raise ComputerError(401, "Matrix OpenID verification failed.")
                 # StreamReader.read(n) may return a partial response; read to EOF with a hard cap.
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(4096):
-                    body.extend(chunk)
-                    if len(body) > 16384:
-                        raise ComputerError(401, "Invalid Matrix OpenID response.")
+                body = await collect_bounded_bytes(response.content.iter_chunked(4096), max_bytes=16384)
                 payload = json.loads(body)
+    except ByteLimitExceededError:
+        raise ComputerError(401, "Invalid Matrix OpenID response.") from None
     except (aiohttp.ClientError, TimeoutError):
         # Do not chain upstream exceptions: their URLs contain the OpenID token.
         raise ComputerError(503, "Matrix OpenID verifier is unavailable.") from None

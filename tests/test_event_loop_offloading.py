@@ -50,12 +50,13 @@ async def test_agent_knowledge_lookup_runs_off_event_loop(
     loop_thread_id = threading.get_ident()
     schedule_thread_ids: list[int] = []
 
-    def gated_lookup(*_args: object, **_kwargs: object) -> None:
+    def gated_lookup(*_args: object, **_kwargs: object) -> knowledge_utils.PublishedIndexResolution:
         lookup_started.set()
         assert threading.get_ident() != loop_thread_id
         if not gate.wait(5.0):
             msg = "timed out waiting to release published-index lookup"
             raise TimeoutError(msg)
+        return knowledge_utils.get_published_index("docs", config=config, runtime_paths=test_runtime_paths(tmp_path))
 
     def record_refresh_schedule(
         *_args: object,
@@ -156,12 +157,13 @@ async def test_knowledge_base_lookup_runs_off_event_loop(
     lookup_started = threading.Event()
     loop_thread_id = threading.get_ident()
 
-    def gated_lookup(*_args: object, **_kwargs: object) -> None:
+    def gated_lookup(*_args: object, **_kwargs: object) -> knowledge_utils.PublishedIndexResolution:
         lookup_started.set()
         assert threading.get_ident() != loop_thread_id
         if not gate.wait(5.0):
             msg = "timed out waiting to release direct published-index lookup"
             raise TimeoutError(msg)
+        return knowledge_utils.get_published_index("docs", config=config, runtime_paths=test_runtime_paths(tmp_path))
 
     monkeypatch.setattr(knowledge_utils, "_lookup_knowledge_for_base", gated_lookup)
     config = Config.model_validate(

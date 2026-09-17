@@ -3,27 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useConfigStore } from "@/store/configStore";
 
-import App, {
-  resolveCurrentTab,
-  shouldShowBlockingDiagnosticOverlay,
-} from "./App";
+import App, { shouldShowBlockingDiagnosticOverlay } from "./App";
 
 vi.mock("@/store/configStore", () => ({
   useConfigStore: vi.fn(),
 }));
-
-describe("resolveCurrentTab", () => {
-  it("defaults to dashboard for empty and unknown paths", () => {
-    expect(resolveCurrentTab("/")).toBe("dashboard");
-    expect(resolveCurrentTab("/unknown")).toBe("dashboard");
-  });
-
-  it("ignores trailing and repeated slashes for known tabs", () => {
-    expect(resolveCurrentTab("/dashboard/")).toBe("dashboard");
-    expect(resolveCurrentTab("///agents//")).toBe("agents");
-    expect(resolveCurrentTab("/teams/details")).toBe("teams");
-  });
-});
 
 describe("shouldShowBlockingDiagnosticOverlay", () => {
   it("keeps access overlays blocking for auth failures", () => {

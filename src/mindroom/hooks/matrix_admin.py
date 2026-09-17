@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
 
 import nio
 
 from mindroom.matrix.client_room_admin import (
     add_room_to_space,
+    admin_join_room_user,
     create_room,
     get_joined_rooms,
     get_room_members,
@@ -79,19 +78,7 @@ class _BoundHookMatrixAdmin:
         # user's behalf, but still enforces the room's join rules.  Restore an
         # invite first so a user who left an invite-only room can rejoin.
         await invite_to_room(self.client, room_id, user_id)
-        path = f"/_synapse/admin/v1/join/{quote(room_id, safe='')}"
-        response = await self.client.send(
-            "POST",
-            path,
-            data=json.dumps({"user_id": user_id}),
-            headers={
-                "Authorization": f"Bearer {self.client.access_token}",
-                "Content-Type": "application/json",
-            },
-        )
-        succeeded = 200 <= response.status < 300
-        response.release()
-        return succeeded
+        return await admin_join_room_user(self.client, room_id, user_id)
 
     async def kick_user(self, room_id: str, user_id: str, *, reason: str | None = None) -> bool:
         """Kick one joined user from one room."""

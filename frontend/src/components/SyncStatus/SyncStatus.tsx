@@ -5,30 +5,30 @@ const STATUS_CONFIG = {
   synced: {
     icon: Check,
     text: "Synced",
-    className: "text-green-300",
-    iconClassName: "text-green-300",
-    dotClassName: "bg-green-400",
+    className: "text-emerald-700 dark:text-emerald-300",
+    iconClassName: "text-emerald-600 dark:text-emerald-300",
+    dotClassName: "bg-emerald-500 dark:bg-emerald-400",
   },
   syncing: {
     icon: RefreshCw,
     text: "Syncing...",
-    className: "text-blue-300",
-    iconClassName: "text-blue-300 animate-spin",
-    dotClassName: "bg-blue-400 animate-pulse",
+    className: "text-sky-700 dark:text-sky-300",
+    iconClassName: "text-sky-600 dark:text-sky-300 animate-spin",
+    dotClassName: "bg-sky-500 dark:bg-sky-400 animate-pulse",
   },
   error: {
     icon: AlertCircle,
     text: "Sync Error",
-    className: "text-red-300",
-    iconClassName: "text-red-300",
-    dotClassName: "bg-red-400",
+    className: "text-red-700 dark:text-red-300",
+    iconClassName: "text-red-600 dark:text-red-300",
+    dotClassName: "bg-red-500 dark:bg-red-400",
   },
   disconnected: {
     icon: WifiOff,
     text: "Disconnected",
-    className: "text-gray-300",
-    iconClassName: "text-gray-300",
-    dotClassName: "bg-gray-400",
+    className: "text-muted-foreground",
+    iconClassName: "text-muted-foreground",
+    dotClassName: "bg-muted-foreground",
   },
 } as const;
 
@@ -53,7 +53,7 @@ export function SyncStatus({
         aria-label={config.text}
         role="status"
       >
-        <span className={cn("h-2.5 w-2.5 rounded-full", config.dotClassName)} />
+        <span className={cn("h-2 w-2 rounded-full", config.dotClassName)} />
         <span className="sr-only">{config.text}</span>
       </div>
     );
@@ -61,6 +61,7 @@ export function SyncStatus({
 
   return (
     <div
+      role="status"
       className={cn(
         "flex items-center gap-2 text-sm",
         config.className,

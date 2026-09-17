@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import inspect
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -37,6 +39,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     wrap_function_for_output_files,
     wrap_toolkit_for_output_files,
+    write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 
@@ -525,6 +528,72 @@ def test_existing_regular_file_is_overwritten_atomically_and_receipt_marks_overw
 
     assert target.read_text(encoding="utf-8") == "new"
     assert _receipt(result.result)["overwritten"] is True
+
+
+@pytest.mark.parametrize("failure", [None, "fsync", "replace"])
+def test_output_publication_and_cleanup_stay_in_opened_directory(
+    tmp_path: Path,
+    failure: str | None,
+) -> None:
+    parent = tmp_path / "reports"
+    parent.mkdir()
+    (parent / "result.bin").write_bytes(b"old")
+    original_parent = tmp_path / "renamed-reports"
+    real_fsync = os.fsync
+
+    def rename_parent_after_write(descriptor: int) -> None:
+        real_fsync(descriptor)
+        if original_parent.exists():
+            return
+        parent.rename(original_parent)
+        parent.mkdir()
+        (parent / "result.bin").write_bytes(b"replacement directory")
+        if failure == "fsync":
+            msg = "flush failed"
+            raise OSError(msg)
+
+    with (
+        patch("os.fsync", side_effect=rename_parent_after_write),
+        patch("os.replace", side_effect=OSError("replace failed") if failure == "replace" else os.replace),
+    ):
+        result = write_bytes_to_output_path(_policy(tmp_path), "reports/result.bin", b"\x00new\xff")
+
+    assert (parent / "result.bin").read_bytes() == b"replacement directory"
+    assert sorted(path.name for path in original_parent.iterdir()) == ["result.bin"]
+    assert sorted(path.name for path in parent.iterdir()) == ["result.bin"]
+    if failure is None:
+        assert not isinstance(result, str)
+        assert (original_parent / "result.bin").read_bytes() == b"\x00new\xff"
+    else:
+        assert isinstance(result, str)
+        assert "Failed to write" in result
+        assert (original_parent / "result.bin").read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("file_mode", [None, 0o600, 0o640])
+def test_binary_output_replacement_preserves_requested_permissions(tmp_path: Path, file_mode: int | None) -> None:
+    destination = tmp_path / "report.bin"
+    destination.write_bytes(b"old")
+    destination.chmod(0o666)
+
+    result = write_bytes_to_output_path(_policy(tmp_path), "report.bin", b"\x00new\xff", file_mode=file_mode)
+
+    assert not isinstance(result, str)
+    assert result.overwritten
+    assert destination.read_bytes() == b"\x00new\xff"
+    assert stat.S_IMODE(destination.stat().st_mode) == (0o600 if file_mode is None else file_mode)
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("name_length", [230, 255])
+def test_output_temp_name_does_not_limit_destination_basename(tmp_path: Path, name_length: int) -> None:
+    filename = "x" * name_length
+
+    result = write_bytes_to_output_path(_policy(tmp_path), filename, b"payload")
+
+    assert not isinstance(result, str)
+    assert (tmp_path / filename).read_bytes() == b"payload"
+    assert list(tmp_path.iterdir()) == [tmp_path / filename]
 
 
 @pytest.mark.parametrize(

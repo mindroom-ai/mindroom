@@ -13,11 +13,21 @@ It should own lifecycle, callback registration, sync, room membership, presence,
 `InboundTurnNormalizer` owns raw input shaping.
 It should turn text, voice, sidecars, and media into canonical turn inputs before policy or execution runs.
 
+`VoiceReadiness` owns preparing a voice source for dispatch.
+It restores or checkpoints the prepared content through `TurnStore`, and waits for required router echo publication through `VisibleVoiceEchoLifecycle`.
+Only normalization failures select raw-audio fallback; checkpoint, publication, and ingress metadata failures retain the source for durable retry.
+
 `ConversationResolver` owns conversation identity.
 It should resolve explicit thread identity, history, mentions, and normalized ingress envelopes.
 
 `DeliveryGateway` owns Matrix transport.
 It should send, edit, redact, and finalize already-generated responses.
+
+`response_turn.py` owns continuation and terminal settlement for fresh and resumed agent attempts.
+`AgentApprovalExecution` restores saved execution, validates exact approved calls, and supplies the resumed attempt to that shared driver.
+The driver distinguishes a completed model attempt from a completed response and reports typed execution status independently of display metadata.
+Approval pauses retain the response's continuation count and active model in `ApprovalContinuation`, so resuming does not reset the remaining budget.
+`FinalDeliveryOutcome` exposes terminal run identity from the frozen delivery payload through its typed contract, keeping live and recovered history linkage consistent.
 
 `ResponseSources` captures immutable pending events, logical sources, discovery aliases, and the selected edit receipt for one request.
 The journal registers `ResponseAttempt` identity atomically with approval creation or response delivery enqueue, and binds the visible response on acknowledgement.
@@ -106,12 +116,19 @@ This keeps ignored high-volume traffic out of the handled-turn ledger without we
 An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
 Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
 A successful empty readiness result explicitly settles the exact source as intentionally ignored instead of repeating download or transcription work forever.
+An unpublished required voice echo is a retry, never an empty readiness result.
+Prepared voice body, Matrix content, batching scope, and preparation/echo thread are checkpointed before publication waits, so replay after restart reuses the same transcript and identities.
+The batching scope and echo thread are distinct: a root audio source can enter the room's batch while its echo starts a thread rooted at that source.
+The final coalesced reply target continues to follow the current dispatch policy.
+The router retains its source when initial echo publication fails; responders can also recognize the router's persisted publication receipt after restart.
 Router delivery failure raises back into that same retry path instead of completing without terminal truth.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
-Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
-To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
-Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
+Recovery logs and skips rows that cannot be decoded as `JournalEvent` values, retaining those rows pending for repair so other valid rows can continue.
+If a decoded event raises `JournalCorruptionError` during replay or its payload type does not match its stored kind, recovery logs the corruption and settles it, clearing its replay payload.
+To repair a retained unreadable pending row, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
+Deleting one of those unrecoverable retained rows is a last resort that accepts losing that callback.
+Pending-row repair cannot recover payloads already cleared by settlement.
 Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit settlement.
 Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
 Nio 1.0 owns receive cursors, prepared source batches, provenance, and recognition of local membership echoes.
@@ -178,6 +195,7 @@ An ordinary callback moves through these lifecycle phases; durable and in-proces
 - Journal pending: the durable acceptance row exists and still owns the callback work.
 - Executing in-process: `PendingEventWorker` marks one process as running the persisted callback without adding a durable running state.
 - Downstream-owned: the callback handed the source to lane, coalescing, or turn work, so the journal row stays pending while the live owner exists.
+- Prepared voice checkpoint: an incomplete `TurnStore` record preserves normalized content before response ownership begins; the pending journal source still owns retry.
 - Durably pending turn: `TurnStore.record_pending_turn` wrote `completed=False`; response ownership has begun.
 - Terminal delivery: the final outbox enqueue or an intentional no-answer decision settles the journal source; delivery acknowledgement commits the corresponding terminal turn record when needed.
 
@@ -377,13 +395,16 @@ The old `prepare_after_lock` callback that ran payload building back inside `Tur
 
 Ordering identities are named types now: `ReceiptLaneKey` for receipt lanes, the `CoalescingOwner` union for batching, and `ResponseLifecycleKey` (via `MessageTarget.lifecycle_key`) for response serialization; no synthetic requester string or bare tuple crosses these boundaries.
 Ordinary ingress is normalized once at admission into the canonical `PreparedIngress`, which also owns the per-source evidence that used to travel in mutable parallel fields.
-`DeliveryGateway` is the sole constructor of `FinalDeliveryOutcome`, translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary, and the delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
+`DeliveryGateway` constructs `FinalDeliveryOutcome` values for its Matrix delivery operations and translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary.
+`response_runner.py` also constructs these outcomes for participation suppression and approval lifecycle settlement.
+The delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
 Agent and team outer settlement share extracted helpers for blocking cancellation, failed-turn persistence, delivery timing, and streamed finalization; the shared blocking and streaming drivers are unchanged.
 The router relay lives in `router_relay.py` behind the narrow `_RouterRelaySupport` protocol.
 
 ## Next Simplification Work
 
-The router relay already lives in `router_relay.py`; the voice readiness cluster, interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
+The router relay lives in `router_relay.py`, and voice preparation, checkpoint reuse, and publication gating live in `voice_readiness.py`.
+Interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.

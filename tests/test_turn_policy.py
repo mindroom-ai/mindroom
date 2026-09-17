@@ -17,7 +17,7 @@ from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.participation import RoomParticipationConfig
+from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND
@@ -95,8 +95,8 @@ def _entity_id(config: Config, entity_name: str) -> MatrixID:
     return entity_identity_registry(config, runtime_paths_for(config)).current_id(entity_name)
 
 
-def _room_with_members(*user_ids: str) -> nio.MatrixRoom:
-    room = nio.MatrixRoom(_ROOM_ID, "@mindroom_general:localhost")
+def _room_with_members(*user_ids: str, room_id: str = _ROOM_ID) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id, "@mindroom_general:localhost")
     for user_id in user_ids:
         room.add_member(user_id, user_id, None)
     return room
@@ -123,10 +123,10 @@ def _context(
     )
 
 
-def _dispatch(context: MessageContext, *, agent_name: str) -> PreparedDispatch:
-    target = MessageTarget.resolve(_ROOM_ID, context.thread_id, _EVENT_ID)
+def _dispatch(context: MessageContext, *, agent_name: str, room_id: str = _ROOM_ID) -> PreparedDispatch:
+    target = MessageTarget.resolve(room_id, context.thread_id, _EVENT_ID)
     envelope = request_envelope(
-        room_id=_ROOM_ID,
+        room_id=room_id,
         reply_to_event_id=_EVENT_ID,
         thread_id=context.thread_id,
         prompt="hello agents",
@@ -666,7 +666,7 @@ async def test_adaptive_participation_counts_current_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only an actual second human makes an untagged turn adaptive."""
-    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
+    config.agents["general"].participation = ParticipationConfig()
     room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "general").full_id)
     context = _context(
         thread_id="$thread:localhost",
@@ -698,9 +698,9 @@ async def test_adaptive_participation_counts_current_sender(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["idle", "active", "backlog"])
-async def test_adaptive_participation_non_designated_agent_skips(config: Config, mode: str) -> None:
-    """Opt-in does not grant other agents untagged access to multi-human threads."""
-    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
+async def test_adaptive_participation_existing_thread_agent_decides(config: Config, mode: str) -> None:
+    """Every authorized agent already in the thread can decide whether to continue."""
+    config.agents["research"].participation = ParticipationConfig()
     room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "research").full_id)
     context = _context(
         thread_id="$thread:localhost",
@@ -716,7 +716,8 @@ async def test_adaptive_participation_non_designated_agent_skips(config: Config,
             envelope=replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND),
         )
     plan = await _plan(_policy_for(config, "research"), room, dispatch, has_active_response=mode == "active")
-    assert plan.kind == "ignore"
+    assert plan.kind == "respond"
+    assert plan.response_action.participation is not None
 
 
 @pytest.mark.asyncio
@@ -727,7 +728,7 @@ async def test_adaptive_participation_non_designated_agent_skips(config: Config,
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_adaptive_participation_exclusions(config: Config, mode: str) -> None:
     """Mention intent, degraded context, and access rules cannot become adaptive turns."""
-    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general")}
+    config.agents["general"].participation = ParticipationConfig()
     config.bot_accounts = ["@bridge:localhost"]
     with_responder_access(config, "general", users=["@owner:localhost" if mode == "unauthorized" else _SENDER])
     room = _room_with_members(_SENDER, "@other:localhost", _entity_id(config, "general").full_id)
@@ -766,3 +767,130 @@ async def test_adaptive_participation_exclusions(config: Config, mode: str) -> N
         assert plan.kind == "ignore"
     if mode == "agent_mention":
         assert plan.kind == "respond"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["idle", "active", "backlog"])
+@pytest.mark.parametrize("thread_agent", [None, "research"])
+async def test_adaptive_participation_never_recruits_room_agents(
+    config: Config,
+    mode: str,
+    thread_agent: str | None,
+) -> None:
+    """Agent opt-in must not let a nonparticipant join even through an active queue."""
+    config.agents["general"].participation = ParticipationConfig()
+    room = _room_with_members(
+        _SENDER,
+        "@other:localhost",
+        *(_entity_id(config, name).full_id for name in config.agents),
+    )
+    history = [make_visible_message(sender="@other:localhost", body="earlier")]
+    if thread_agent:
+        history.append(make_visible_message(sender=_entity_id(config, thread_agent).full_id, body="answer"))
+    context = _context(thread_id="$thread:localhost", thread_history=history)
+    dispatch = _dispatch(context, agent_name="general")
+    if mode == "backlog":
+        dispatch = replace(
+            dispatch,
+            envelope=replace(dispatch.envelope, dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND),
+        )
+    policy = _policy_for(config, "general")
+    plan = await _plan(policy, room, dispatch, has_active_response=mode == "active")
+    assert plan.kind == "ignore"
+    assert policy.adaptive_participation(context=context, room=room, requester_user_id=_SENDER) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_participation_only_checks_existing_agents_in_fifty_agent_room(config: Config, enabled: bool) -> None:
+    """Two thread agents may judge; the other 48 room agents and router stay out."""
+    config.agents.update({f"idle_{index}": AgentConfig(display_name=f"Idle {index}") for index in range(48)})
+    config = bind_runtime_paths(config, runtime_paths_for(config))
+    if enabled:
+        for agent in config.agents.values():
+            agent.participation = ParticipationConfig()
+    room = _room_with_members(
+        _SENDER,
+        "@other:localhost",
+        *(_entity_id(config, name).full_id for name in config.agents),
+    )
+    context = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender="@other:localhost", body="earlier"),
+            make_visible_message(sender=_SENDER, body="my earlier question"),
+            make_visible_message(sender=_entity_id(config, "general").full_id, body="first answer"),
+            make_visible_message(sender=_entity_id(config, "research").full_id, body="second answer"),
+        ],
+    )
+    for name in (*config.agents, ROUTER_AGENT_NAME):
+        policy = _policy_for(config, name)
+        plan = await _plan(policy, room, _dispatch(context, agent_name=name))
+        selected = policy.adaptive_participation(context=context, room=room, requester_user_id=_SENDER)
+        if enabled and name in {"general", "research"}:
+            assert plan.kind == "respond", name
+            assert plan.response_action.participation is not None, name
+            assert selected is not None, name
+        else:
+            assert plan.kind == "ignore", name
+            assert selected is None, name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_name", ["general", "research", ROUTER_AGENT_NAME])
+@pytest.mark.parametrize("room_id", ["!ad-hoc:localhost", "!another:localhost"])
+async def test_participation_follows_only_opted_in_agent(
+    config: Config,
+    agent_name: str,
+    room_id: str,
+) -> None:
+    """An agent's opt-in works in ad hoc rooms without enabling its peers."""
+    config.agents["general"].participation = ParticipationConfig(instructions="Only add useful context.")
+    assert all(not agent.rooms for agent in config.agents.values())
+    assert not config.rooms
+    room = _room_with_members(
+        _SENDER,
+        "@other:localhost",
+        *(_entity_id(config, name).full_id for name in config.agents),
+        room_id=room_id,
+    )
+    context = _context(
+        thread_id="$thread:localhost",
+        thread_history=[
+            make_visible_message(sender="@other:localhost", body="earlier"),
+            make_visible_message(sender=_entity_id(config, "general").full_id, body="first answer"),
+            make_visible_message(sender=_entity_id(config, "research").full_id, body="second answer"),
+        ],
+    )
+    policy = _policy_for(config, agent_name)
+    plan = await _plan(policy, room, _dispatch(context, agent_name=agent_name, room_id=room_id))
+    selected = policy.adaptive_participation(context=context, room=room, requester_user_id=_SENDER)
+    if agent_name == "general":
+        assert plan.kind == "respond"
+        assert plan.response_action.participation is config.agents["general"].participation
+        assert selected is config.agents["general"].participation
+    else:
+        assert plan.kind == "ignore"
+        assert selected is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_router_does_not_recruit_when_current_sender_is_second_human(config: Config, enabled: bool) -> None:
+    """The current human counts even before their message appears in thread history."""
+    for name in config.agents:
+        config.agents[name].participation = ParticipationConfig() if enabled else None
+        config.agents[name].access = ResponderAccessConfig(users=[_SENDER])
+    config.router.access = ResponderAccessConfig(users=[_SENDER])
+    room = _room_with_members(
+        _SENDER,
+        "@other:localhost",
+        *(_entity_id(config, name).full_id for name in config.agents),
+    )
+    context = _context(
+        thread_id="$thread:localhost",
+        thread_history=[make_visible_message(sender="@other:localhost", body="earlier")],
+    )
+    for name in (*config.agents, ROUTER_AGENT_NAME):
+        plan = await _plan(_policy_for(config, name), room, _dispatch(context, agent_name=name))
+        assert plan.kind == "ignore", name

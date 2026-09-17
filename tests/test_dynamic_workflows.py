@@ -7,6 +7,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from inspect import isawaitable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock, patch
@@ -438,10 +439,36 @@ def test_run_workflow_persists_failed_run_when_completion_persistence_fails(tmp_
     assert "not JSON serializable" in str(loaded.error)
 
 
-def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: Path) -> None:
-    """Workflow runs should validate declared input schema before executing any step."""
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reject_policy", [False, True], ids=["input", "policy"])
+@pytest.mark.asyncio
+async def test_service_records_validation_failure_before_execution(
+    tmp_path: Path,
+    use_async: bool,
+    reject_policy: bool,
+) -> None:
+    """Policy and input failures should persist without executing participants."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
-    service = DynamicWorkflowService(store)
+    executions: list[str] = []
+
+    def execute(**_kwargs: object) -> str:
+        executions.append("executed")
+        return "unexpected execution"
+
+    async def aexecute(**kwargs: object) -> str:
+        return execute(**kwargs)
+
+    def validate_policy(_spec: dict[str, object]) -> None:
+        if reject_policy:
+            msg = "Participant is no longer allowed."
+            raise DynamicWorkflowError(msg)
+
+    service = DynamicWorkflowService(
+        store,
+        participant_executor=execute,
+        async_participant_executor=aexecute,
+        spec_validator=validate_policy,
+    )
     store.create_workflow(
         spec=_workflow_spec(),
         scope="agent",
@@ -450,7 +477,8 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
         reason="initial design",
     )
 
-    run = service.run_workflow(
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+    result = run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -458,6 +486,7 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
         requested_by="general",
         base_url="https://acme.mindroom.chat",
     )
+    run = await result if isawaitable(result) else result
 
     loaded = store.get_workflow_run(
         workflow_id="competitor-research-report",
@@ -465,9 +494,99 @@ def test_run_workflow_rejects_missing_required_input_before_execution(tmp_path: 
         owner_id="general",
         run_id=run.run_id,
     )
+    assert run == loaded
     assert loaded.status == "failed"
-    assert loaded.error == "Input field 'topic' is required."
+    assert loaded.error == (
+        "Participant is no longer allowed." if reject_policy else "Input field 'topic' is required."
+    )
     assert loaded.steps == []
+    assert loaded.completed_at is not None
+    assert executions == []
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_service_uses_revision_pinned_when_run_started(tmp_path: Path, use_async: bool) -> None:
+    """An update after admission must not replace the run's spec or input schema."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_workflow_spec(
+            workflow=[{"id": "write", "type": "transform_step", "template": "Original {input.topic}."}],
+        ),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+    )
+    started = store.start_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "report"},
+        requested_by="general",
+    )
+    store.update_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        patch={
+            "name": "Updated report",
+            "inputs": {"required": ["new_field"], "properties": {"new_field": {"type": "string"}}},
+            "workflow": [{"id": "write", "type": "transform_step", "template": "Updated {input.new_field}."}],
+        },
+        updated_by="general",
+        reason="Update report inputs",
+    )
+    validated_names: list[str] = []
+    service = DynamicWorkflowService(store, spec_validator=lambda spec: validated_names.append(str(spec["name"])))
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+
+    with patch.object(store, "start_workflow_run", return_value=started):
+        result = run_workflow(
+            workflow_id="competitor-research-report",
+            scope="agent",
+            owner_id="general",
+            input_data={"topic": "report"},
+            requested_by="general",
+        )
+        run = await result if isawaitable(result) else result
+
+    loaded = store.get_workflow_run(
+        workflow_id=run.workflow_id,
+        scope=run.scope,
+        owner_id=run.owner_id,
+        run_id=run.run_id,
+    )
+    assert run == loaded
+    assert run.status == "completed"
+    assert run.revision == "000001"
+    assert run.outputs == {"report_html": "Original report."}
+    assert validated_names == ["Competitor Research Report"]
+    assert "Competitor Research Report" in store.run_report_html_artifact_path(run).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_service_propagates_run_start_failure(tmp_path: Path, use_async: bool) -> None:
+    """Admission errors must escape without attempting to persist a failed run."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    service = DynamicWorkflowService(store)
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+
+    async def start_run() -> None:
+        result = run_workflow(
+            workflow_id="missing-workflow",
+            scope="agent",
+            owner_id="general",
+            input_data={},
+            requested_by="general",
+        )
+        if isawaitable(result):
+            await result
+
+    with pytest.raises(DynamicWorkflowError, match="YAML mapping was not found"):
+        await start_run()
+
+    assert not (tmp_path / "mindroom_data").exists()
 
 
 def test_validate_workflow_spec_rejects_invalid_input_schema_type(tmp_path: Path) -> None:
@@ -1350,7 +1469,12 @@ def test_get_workflow_run_wraps_json_decoder_errors(tmp_path: Path) -> None:
     assert str(tmp_path) not in str(exc_info.value)
 
 
-def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(
+    tmp_path: Path,
+    use_async: bool,
+) -> None:
     """Failed workflow execution should still persist a run record and error report."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
     service = DynamicWorkflowService(store)
@@ -1374,7 +1498,8 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
     ]
     revision_path.write_text(yaml.safe_dump(revision, sort_keys=False), encoding="utf-8")
 
-    run = service.run_workflow(
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+    result = run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -1382,6 +1507,7 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
         requested_by="general",
         base_url="https://acme.mindroom.chat",
     )
+    run = await result if isawaitable(result) else result
 
     loaded = store.get_workflow_run(
         workflow_id="competitor-research-report",
@@ -1396,7 +1522,9 @@ def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(t
     assert "unknown prior step" in report_html
 
 
-def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_path: Path, use_async: bool) -> None:
     """Revision load failures after run creation should not leave run records stuck as running."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")
     service = DynamicWorkflowService(store)
@@ -1412,7 +1540,8 @@ def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_pat
     )
     revision_path.unlink()
 
-    run = service.run_workflow(
+    run_workflow = service.arun_workflow if use_async else service.run_workflow
+    result = run_workflow(
         workflow_id="competitor-research-report",
         scope="agent",
         owner_id="general",
@@ -1420,6 +1549,7 @@ def test_run_workflow_records_failed_run_when_active_revision_is_missing(tmp_pat
         requested_by="general",
         base_url="https://acme.mindroom.chat",
     )
+    run = await result if isawaitable(result) else result
 
     loaded = store.get_workflow_run(
         workflow_id="competitor-research-report",

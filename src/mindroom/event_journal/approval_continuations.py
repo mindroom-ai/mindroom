@@ -17,6 +17,7 @@ from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from . import journal, membership_state, outbox, response_attempts, turn_records
 from .legacy_approval_recovery import deleted_delivery_is_terminal
 from .models import DeliveryStage
+from .projection import is_tombstoned
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -180,6 +181,7 @@ class ApprovalContinuation:
     failure_reason: str | None = None
     generation: int = 0
     prepared_edit_record: TurnRecord | None = None
+    continuation_count: int = 0
 
     @property
     def source_event_ids(self) -> tuple[str, ...]:
@@ -191,6 +193,7 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
     """Return the opaque response snapshot stored beside normalized routing facts."""
     return {
         "run_id": continuation.run_id,
+        "continuation_count": continuation.continuation_count,
         "session_id": continuation.session_id,
         "entity_kind": continuation.entity_kind,
         "thread_id": continuation.thread_id,
@@ -315,6 +318,7 @@ def _from_rows(
     return ApprovalContinuation(
         approval_id=str(row["approval_id"]),
         run_id=cast("str", stored["run_id"]),
+        continuation_count=int(stored.get("continuation_count", 0)),
         session_id=cast("str", stored["session_id"]),
         entity_kind=cast("Literal['agent', 'team']", stored["entity_kind"]),
         entity_name=attempt.entity_name,
@@ -669,11 +673,13 @@ def advance(
     run_id: str,
     session_id: str,
     calls: tuple[ApprovalCall, ...],
+    runtime_model_name: str | None = None,
     response_text: str | None = None,
     response_tool_trace: tuple[dict[str, object], ...] | None = None,
     response_presentation_state: dict[str, object] | None = None,
     delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
     requires_background_tool_jobs: bool = False,
+    continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
     """Replace one claimed generation with the next exact Agno pause."""
     current = get(transaction, principal_id, approval_id=approval_id)
@@ -690,6 +696,8 @@ def advance(
         run_id=run_id,
         session_id=session_id,
         calls=calls,
+        runtime_model_name=runtime_model_name or current.runtime_model_name,
+        continuation_count=current.continuation_count if continuation_count is None else continuation_count,
         response_text=current.response_text if response_text is None else response_text,
         response_tool_trace=current.response_tool_trace if response_tool_trace is None else response_tool_trace,
         response_presentation_state=(
@@ -799,6 +807,54 @@ def request_failure(
         ),
     )
     return None if updated is None else get(transaction, principal_id, approval_id=approval_id)
+
+
+def interruption_is_recoverable(
+    transaction: Transaction,
+    principal_id: str,
+    delivery_id: str,
+    *,
+    visible_text: str,
+    failure_reason: str | None,
+) -> bool:
+    """Require the exact acknowledged interruption and retain shared ownership fences."""
+    attempt = response_attempts.load_response_attempt(transaction, principal_id, delivery_id)
+    if attempt is None or attempt.response_event_id is None or failure_reason == "cancelled_by_user":
+        return False
+    final = outbox.load(transaction, principal_id, delivery_id=attempt.driving_event_id, stage=DeliveryStage.FINAL)
+    if (
+        final is None
+        or final.acknowledged_event_id is None
+        or final.retired
+        or final.permanently_failed
+        or final.room_id != attempt.room_id
+        or final.membership_epoch != attempt.membership_epoch
+        or final.edits_event_id != attempt.response_event_id
+    ):
+        return False
+    content = final.payload.get("m.new_content", final.payload)
+    if not isinstance(content, dict) or cast("dict[str, object]", content).get("body") != visible_text:
+        return False
+    if any(
+        is_tombstoned(transaction, principal_id, room_id=attempt.room_id, event_id=event_id)
+        for event_id in (*attempt.logical_source_event_ids, attempt.response_event_id)
+    ):
+        return False
+    current = turn_records.load_record(transaction, attempt.entity_name, attempt.logical_source_event_ids[0])
+    if current is not None and (current.user_stop_receipt_order or 0) >= (
+        attempt.edit_receipt_order or attempt.selected_receipt_order
+    ):
+        return False
+    return (
+        response_attempts.approval_failure_disposition(
+            transaction,
+            principal_id,
+            attempt=attempt,
+            current_record=current,
+            failure_reason=failure_reason,
+        )
+        is response_attempts.ApprovalFailureDisposition.PUBLISH
+    )
 
 
 def finish(

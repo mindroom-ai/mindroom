@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="reasoning",
+    requires_primary_runtime=True,
     display_name="Reasoning",
     description="Step-by-step reasoning scratchpad with think and analyze tools for structured problem solving",
     category=ToolCategory.DEVELOPMENT,

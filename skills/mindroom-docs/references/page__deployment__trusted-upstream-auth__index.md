@@ -75,6 +75,44 @@ When no Matrix user ID claim is configured, strict mode only accepts a Matrix id
 That derivation can use the verified JWT email claim even when `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is not configured.
 When no Matrix user ID claim or email-to-Matrix template is configured, strict mode rejects `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` because that header is not backed by a signed identity.
 
+## Usage Export Service
+
+Strict JWT deployments can expose `GET /api/usage/export` to a service client without granting that client a browser or administrator identity.
+The route prepares the same organization-wide report as the standard dashboard-authenticated `GET /api/usage` route and accepts the same optional `include_daily` and `include_requests` query parameters, both defaulting to `false`.
+With `include_requests=true`, the report adds reconciled provider-request token facts and request coverage as described in [Token Usage](https://docs.mindroom.chat/dashboard/#token-usage); missing request detail remains unavailable.
+Both routes share background preparation and cache state while authenticating every request independently.
+It never accepts an assertion from a query parameter, and methods other than `GET` are unsupported.
+
+Configure trusted-upstream strict JWT mode as above, then add a dedicated service audience and exact client ID:
+
+```bash
+MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
+MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=Cf-Access-Authenticated-User-Email
+MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true
+MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=Cf-Access-Jwt-Assertion
+MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://gateway.example.org/.well-known/jwks.json
+MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=mindroom-dashboard
+MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://gateway.example.org
+MINDROOM_USAGE_SERVICE_JWT_AUDIENCE=mindroom-usage-export
+MINDROOM_USAGE_SERVICE_CLIENT_ID=usage-export-client.example.org
+```
+
+The service assertion must use `RS256` and include valid `exp`, `iat`, `iss`, and `aud` claims.
+It must also contain `type=app`, a `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and an empty `sub` claim.
+The issuer, JWKS URL, and assertion header come from the trusted-upstream settings, while `MINDROOM_USAGE_SERVICE_JWT_AUDIENCE` is separate from the browser audience.
+
+The export route returns `503` until trusted-upstream auth, strict JWT mode, every shared strict-JWT setting, and both service settings are configured.
+Missing or invalid assertions return `401`.
+A valid service assertion authorizes only `/api/usage/export`; it does not authorize `/api/usage`, configuration APIs, personal usage APIs, or any administrator route.
+
+Every request, including polls and cache hits, must include the service assertion.
+When a report needs preparation, the route promptly returns `202` with `{"status":"pending"}`, `Retry-After: 5`, and `Cache-Control: no-store`.
+Poll the same URL with the same `include_daily` and `include_requests` values after the requested delay.
+Once preparation succeeds, an authenticated poll returns `200`, `Cache-Control: no-store`, and the existing aggregate report schema.
+The four daily/request option combinations are prepared and cached separately, successful results expire 60 seconds after completion, and only one retained-data scan runs at a time.
+Configuration or runtime changes discard earlier results.
+On either organization route, a failed scan or unavailable committed configuration returns a content-free `503` with `Cache-Control: no-store`; scan failures remain cached for five seconds before another request can start a retry.
+
 ## Connections Portal
 
 Set `MINDROOM_CONNECTIONS_AGENT` to the name of a private agent to enable `/connections`.
@@ -189,6 +227,11 @@ The platform chart fails rendering when `provisioner.trustedUpstreamAuth.emailTo
 The platform chart also fails rendering when `provisioner.trustedUpstreamAuth.requireJwt` is true without `jwtHeader`, `jwksUrl`, `jwtAudience`, or `jwtIssuer`.
 
 ## Security Boundary
+
+Dashboard configuration is an operator capability.
+Without `MINDROOM_CONNECTIONS_AGENT`, every user authenticated by the trusted upstream can read and change dashboard configuration, regardless of the Matrix `administrators` list.
+Restrict gateway admission to trusted operators in that mode.
+With Connections enabled, ordinary dashboard pages and configuration APIs additionally require a Matrix identity authorized by `administrators`; the portal and state-bound OAuth completion routes keep their separate access checks.
 
 Trusted upstream auth is provider-neutral.
 A reverse proxy, ingress controller, OAuth2 proxy, or another gateway can provide the headers as long as MindRoom only receives gateway-verified values.

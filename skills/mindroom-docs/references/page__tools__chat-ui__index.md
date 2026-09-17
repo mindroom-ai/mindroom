@@ -1,6 +1,6 @@
 # Agent Chat UI Actions
 
-The `chat_ui` tool lets an agent ask MindRoom Chat to reveal its worker computer, open a Settings section, or open the room's Members panel.
+The `chat_ui` toolkit opens MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel, open Settings, or show room members.
 It sends a normal Matrix notice with a readable fallback and bounded action metadata.
 The tool reports that the request was sent; it cannot know whether a client opened the requested interface.
 
@@ -27,13 +27,36 @@ Delegated transport identities and team contexts are rejected because they canno
 
 ## Actions
 
-- `show_computer()` asks Chat to reveal the requesting agent's worker computer in watch mode.
-- `open_settings(section="general")` opens `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about`.
-- `open_panel(panel="members")` opens the Members side panel. `members` is the only supported panel in this release.
+- `open_panel(panel="computer")` asks Chat to reveal the current agent's worker browser in the Computer panel in watch mode.
+- `open_panel(panel="members")` requests the room's Members side panel and remains the default when `panel` is omitted.
+  `computer` and `members` are the only supported panel values; `browser` is not a panel value.
+- `show_computer()` remains a backward-compatible alias for `open_panel(panel="computer")`.
+- `open_settings(section="general")` separately requests `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about` without changing account settings.
 
 Each call sends an `m.room.message` notice in the current conversation.
 Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
 The Matrix event sender must equal the metadata's agent identity, or the request is rejected before sending.
+Both Computer entry points retain the existing `action: "show_computer"` transport metadata and result action for compatibility with existing clients.
+Members retains `action: "open_panel", panel: "members"`; Settings retains `action: "open_settings"` and its `section`.
+
+## Control the browser, then show it
+
+The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')`.
+If the user asks to visit a page and show it, navigate separately before requesting the panel:
+
+```python
+browser_control(action="open", target="host", targetUrl="https://example.org")
+chat_ui.open_panel(panel="computer")
+```
+
+Opening Computer only requests display of the worker browser.
+It does not navigate, send a prompt to ChatGPT, take control, or open or control the user's local browser.
+It does not send a chat prompt or mutate an account; the Matrix notice carries only the UI request.
+The user's connected local browser uses the separately configured `browser` desktop target and [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
+`web_browser_tools` instead asks the host operating system to open a browser; it does not reveal a worker browser in Chat.
+Panel calls accept no `url` or `targetUrl`; browser navigation belongs in `browser_control`.
+Success returns `UI action request sent.`, which confirms delivery of the request without confirming that any panel opened.
 
 ## What the user sees
 
@@ -65,7 +88,7 @@ UI requests reveal only the bounded Chat surfaces described above; worker comput
 
 ## Worker computer requirements
 
-`show_computer()` uses the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.
+`open_panel(panel="computer")` and its `show_computer()` alias use the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.
 The target agent still needs a dedicated Docker or Kubernetes worker, effective `worker_scope: user_agent`, worker-routed browser tools, and an operator-configured Chat computer API origin.
 See [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) for the backend, worker, proxy, and Chat configuration.
 

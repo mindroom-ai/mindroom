@@ -19,7 +19,8 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
-            path: "Sources/MindRoom"
+            path: "Sources/MindRoom",
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "MindRoomTests",

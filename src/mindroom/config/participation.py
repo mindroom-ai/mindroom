@@ -2,12 +2,15 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mindroom.config.judgment import JudgmentConfig
 
-class RoomParticipationConfig(BaseModel):
-    """Designated individual agent and pause for one room's adaptive turns."""
+
+class ParticipationConfig(BaseModel):
+    """Pause and judgment settings for an agent's existing threads in any room."""
 
     model_config = ConfigDict(extra="forbid")
 
-    agent: str
     debounce_seconds: float = Field(default=3.0, ge=0.0, le=30.0, allow_inf_nan=False)
     instructions: str = ""
+    decline_reaction: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"\S")
+    judgment: JudgmentConfig | None = None

@@ -45,6 +45,7 @@ from mindroom.api.skills import router as skills_router
 from mindroom.api.thread_exports import router as thread_exports_router
 from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
+from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials_sync import sync_env_to_credentials
@@ -53,6 +54,7 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.legacy_private_storage import migrate_private_storage
+from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
@@ -345,6 +347,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
         )
         source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
+        uses_includes = current_snapshot.uses_includes if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
             app_state.thread_export_runner = None
             app_state.leave_matrix_room = None
@@ -364,6 +367,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             config_load_result=config_load_result,
             source_fingerprint=source_fingerprint,
             source_files=source_files,
+            uses_includes=uses_includes,
         )
     config_lifecycle.register_api_app(api_app)
 
@@ -506,6 +510,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
     await migrate_private_storage(runtime_paths)
+    await migrate_usage_storage(runtime_paths)
     await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
     app_state = config_lifecycle.app_state(_app)
     preload_snapshot = _app_context(_app)
@@ -569,6 +574,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await standalone_knowledge_source_watcher.shutdown()
     if api_owned_knowledge_refresh_scheduler is not None:
         await api_owned_knowledge_refresh_scheduler.shutdown()
+    close_usage_export_runner(_app)
 
 
 def bind_orchestrator_knowledge_refresh_scheduler(
@@ -754,7 +760,7 @@ app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
-app.include_router(usage_router)  # Each route requires administrator or signed personal authentication.
+app.include_router(usage_router)  # Routes require dashboard, signed personal, or dedicated service authentication.
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)

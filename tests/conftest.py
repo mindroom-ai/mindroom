@@ -1242,8 +1242,14 @@ def serve_conversation_reader(
                 sender=message.sender,
                 # `or ordinal` would rewrite a real timestamp of 0.
                 created_ts=ordinal if message.timestamp is None else message.timestamp,
-                revision_event_id=message.event_id,
-                revision_ts=ordinal if message.timestamp is None else message.timestamp,
+                revision_event_id=message.latest_event_id,
+                revision_ts=(
+                    message.edited_timestamp
+                    if message.edited_timestamp is not None
+                    else ordinal
+                    if message.timestamp is None
+                    else message.timestamp
+                ),
                 content=dict(message.content),
             )
             for ordinal, message in enumerate(messages, start=1)
@@ -1954,6 +1960,7 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
         change_membership=change_membership,
     )
     bot.change_local_membership = change_membership  # type: ignore[method-assign]
+    bot.personal_rooms.change_membership = change_membership
     sync_bot_runtime_state(bot)
     return bot
 
@@ -2923,6 +2930,15 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
 
     Tests in test_authorization.py are excluded since they test authorization itself.
     """
+
+    # These defaults never need call tracking. Plain stubs avoid creating six
+    # MagicMocks (and their reference cycles) for every test in the suite.
+    def allow_reply(*_args: object, **_kwargs: object) -> _ReplyAuthorizationDecision:
+        return _ReplyAuthorizationDecision.ALLOWED
+
+    def allow_sender(*_args: object, **_kwargs: object) -> bool:
+        return True
+
     # Don't bypass authorization for tests that are specifically testing it
     if "test_authorization" in request.node.parent.name:
         yield
@@ -2932,27 +2948,27 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                 stack.enter_context(
                     patch(
                         "mindroom.authorization._responder_reply_authorization",
-                        return_value=_ReplyAuthorizationDecision.ALLOWED,
+                        new=allow_reply,
                     ),
                 )
-                stack.enter_context(patch("mindroom.authorization.is_sender_allowed_for_responder", return_value=True))
+                stack.enter_context(patch("mindroom.authorization.is_sender_allowed_for_responder", new=allow_sender))
                 stack.enter_context(
                     patch(
                         "mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room",
-                        return_value=True,
+                        new=allow_sender,
                     ),
                 )
                 stack.enter_context(
-                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", return_value=True),
+                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", new=allow_sender),
                 )
                 stack.enter_context(
                     patch(
                         "mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder",
-                        return_value=True,
+                        new=allow_sender,
                     ),
                 )
                 stack.enter_context(
-                    patch("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", return_value=True),
+                    patch("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", new=allow_sender),
                 )
             yield
 

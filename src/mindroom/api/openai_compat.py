@@ -239,7 +239,7 @@ class _ChatCompletionChoice(BaseModel):
 
 
 class _UsageInfo(BaseModel):
-    """Token usage information (always zeros — Agno doesn't expose counts)."""
+    """Token usage fields default to zero and are not populated from run metrics."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -417,8 +417,8 @@ async def _resolve_auto_route(
 ) -> str | JSONResponse:
     """Resolve auto-routing to a specific agent name.
 
-    Returns the resolved agent name, or a JSONResponse error if routing fails
-    and no agents are available.
+    Returns the resolved agent name, or a JSONResponse error if no agent is
+    available or the judgment explicitly finds no suitable responder.
     """
     available = openai_compatible_agent_names(config)
     if authority is not None:
@@ -432,13 +432,19 @@ async def _resolve_auto_route(
             error_type="server_error",
         )
 
-    routed = await suggest_responder(prompt, available, config, runtime_paths, thread_history)
-    if routed is None:
+    selection = await suggest_responder(prompt, available, config, runtime_paths, thread_history)
+    if selection is None:
         routed = available[0]
         logger.warning("Auto-routing failed, falling back", agent=routed)
-    else:
-        logger.info("Auto-routed", requested="auto", resolved=routed)
-    return routed
+        return routed
+    if selection.entity_name is None:
+        return _error_response(
+            400,
+            "No suitable agent for this request; choose a model explicitly or rephrase the request",
+            code="no_suitable_responder",
+        )
+    logger.info("Auto-routed", requested="auto", resolved=selection.entity_name)
+    return selection.entity_name
 
 
 def _request_knowledge_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:

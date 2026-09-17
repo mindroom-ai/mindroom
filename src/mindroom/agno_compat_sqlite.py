@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.db.sqlite import SqliteDb
-from sqlalchemy import event
+from agno.db.utils import build_single_run_row
+from sqlalchemy import event, func, select
+from sqlalchemy.dialects.sqlite import insert
+
+from mindroom.usage_storage import project_usage, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from agno.db.sqlite import SqliteDb
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.run.workflow import WorkflowRunOutput
@@ -46,15 +51,54 @@ def remove_default_pragmas(engine: Engine) -> None:
 # Remove when: The pinned adapter appends new runs after existing indexes even when
 # given a shortened session-list position; keep owner prompt sanitization.
 # Coverage: tests/test_agent_storage_runs.py::test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors.
+# AGNO_COMPAT: Run persistence has no caller-owned transaction extension point.
+# Reason: SqliteDb.upsert_run commits internally, preventing atomic application-owned usage writes.
+# Upstream issue: No matching transaction extension point identified; the run UPSERT is copied from Agno 3.0.9.
+# Upstream PR: None identified for sharing the run transaction.
+# Remove when: Agno accepts a caller-owned transaction or an in-transaction persistence hook;
+# retain the owner's independent usage retention and atomic snapshot update.
+# Coverage: tests/test_usage_storage.py::test_usage_write_failure_rolls_back_the_run.
 def upsert_run_at_end(
     db: SqliteDb,
     run: RunOutput | TeamRunOutput | WorkflowRunOutput | dict[str, Any],
     *,
     session_id: str,
     user_id: str | None,
+    record_usage: bool = True,
 ) -> None:
-    """Use Agno's atomic MAX+1 insertion while preserving existing row indexes."""
-    SqliteDb.upsert_run(db, run=run, session_id=session_id, user_id=user_id, run_index=None)
+    """Save the run and optional usage in one transaction, preserving Agno's row/index semantics."""
+    runs = db._get_table(table_type="runs", create_table_if_not_found=True)
+    if runs is None:
+        msg = "Run table unavailable"
+        raise RuntimeError(msg)
+    row = build_single_run_row(run, session_id=session_id, user_id=user_id, run_index=None)
+    with db.Session() as transaction, transaction.begin():
+        row["run_index"] = (
+            select(func.coalesce(func.max(runs.c.run_index) + 1, 0))
+            .where(runs.c.session_id == session_id)
+            .scalar_subquery()
+        )
+        statement = insert(runs).values(**row)
+        stored = transaction.execute(
+            statement.on_conflict_do_update(
+                index_elements=["run_id"],
+                set_={
+                    **{
+                        name: statement.excluded[name]
+                        for name in ("status", "run_data", "user_id", "parent_run_id", "updated_at")
+                    },
+                    "run_index": func.coalesce(runs.c.run_index, statement.excluded.run_index),
+                },
+            ).returning(runs.c.session_id, runs.c.run_id, runs.c.run_data, runs.c.created_at),
+        ).one()
+        if record_usage:
+            payload = project_usage({**stored.run_data, "created_at": stored.created_at})
+            connection = transaction.connection()
+            connection.exec_driver_sql(usage_table_sql(db.session_table_name))
+            connection.exec_driver_sql(
+                usage_upsert_sql(db.session_table_name),
+                (stored.session_id, stored.run_id, json.dumps(payload)),
+            )
 
 
 # AGNO_COMPAT: Run deletion and legacy-blob cleanup are not atomic.

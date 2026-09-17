@@ -1220,9 +1220,11 @@ def test_oauth_entrypoints_reject_dynamic_client_without_exact_https_redirect(
     assert "available only when MindRoom is opened on localhost" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("response_scope", [None, "scope.write"])
 def test_provider_exchange_and_refresh_use_oauth_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    response_scope: str | None,
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -1260,7 +1262,7 @@ def test_provider_exchange_and_refresh_use_oauth_client(
                 "access_token": "access-token",
                 "refresh_token": "refresh-token",
                 "token_type": "Bearer",
-                "scope": "scope.read",
+                "scope": response_scope,
                 "expires_at": 1234.0,
             }
 
@@ -1301,6 +1303,7 @@ def test_provider_exchange_and_refresh_use_oauth_client(
         "refresh_token": "refresh-token",
     }
     assert result.token_data["token"] == "access-token"
+    assert result.token_data["scopes"] == (["scope.write"] if response_scope else list(provider.scopes))
     assert result.token_data["_source"] == "oauth"
     assert result.token_data["_oauth_provider"] == provider.id
     assert result.token_data["refresh_token"] == "refresh-token"
@@ -1519,9 +1522,62 @@ def test_provider_refresh_token_data_preserves_existing_refresh_token_when_respo
     assert refreshed["refresh_token"] == "stored-refresh-token"
 
 
+@pytest.mark.parametrize(
+    ("stored_scope_fields", "response_fields", "requested_scope", "expected_scopes"),
+    [
+        pytest.param({"scopes": ["scope.read"]}, {}, None, ["scope.read"], id="stored-list"),
+        pytest.param({"scopes": ["scope.write"]}, {}, None, ["scope.write"], id="changed-config"),
+        pytest.param({"scopes": []}, {}, None, [], id="empty-list"),
+        pytest.param(
+            {"scope": " scope.write \t scope.extra "},
+            {},
+            None,
+            ["scope.write", "scope.extra"],
+            id="stored-string",
+        ),
+        pytest.param({"scopes": None, "scope": "scope.write"}, {}, None, ["scope.write"], id="invalid-list"),
+        pytest.param(
+            {"scopes": ["scope.read"], "scope": "scope.write"},
+            {},
+            None,
+            ["scope.read"],
+            id="list-precedence",
+        ),
+        pytest.param({"scopes": [], "scope": "scope.write"}, {}, None, [], id="empty-list-precedence"),
+        pytest.param({"scope": " "}, {}, None, [], id="empty-string"),
+        pytest.param({}, {}, None, [], id="unknown-grant"),
+        pytest.param({"scope": "scope.write"}, {}, "scope.read", ["scope.read"], id="requested-string"),
+        pytest.param(
+            {"scope": "scope.write"},
+            {"scope": "scope.extra"},
+            "scope.read",
+            ["scope.extra"],
+            id="response-string",
+        ),
+        pytest.param(
+            {"scopes": ["scope.read", "scope.write"]},
+            {"permissions": ["scope.write"]},
+            None,
+            ["scope.write"],
+            id="parser-narrowed-grant",
+        ),
+        pytest.param({"scopes": ["scope.read"]}, {"permissions": []}, None, [], id="parser-empty-grant"),
+        pytest.param(
+            {"scope": "scope.write"},
+            {"permissions": ["scope.extra"]},
+            "scope.read",
+            ["scope.extra"],
+            id="parser-precedence",
+        ),
+    ],
+)
 def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    stored_scope_fields: dict[str, Any],
+    response_fields: dict[str, Any],
+    requested_scope: str | None,
+    expected_scopes: list[str],
 ) -> None:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -1534,12 +1590,13 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
         _client_config: OAuthClientConfig,
         _runtime_paths: constants.RuntimePaths,
     ) -> OAuthTokenResult:
-        return OAuthTokenResult(
-            token_data={
-                "token": token_response["access_token"],
-                "refresh_token": token_response["refresh_token"],
-            },
-        )
+        token_data = {
+            "token": token_response["access_token"],
+            "refresh_token": token_response["refresh_token"],
+        }
+        if isinstance(token_response.get("permissions"), list):
+            token_data["scopes"] = token_response["permissions"]
+        return OAuthTokenResult(token_data=token_data)
 
     provider = OAuthProvider(
         id="custom_refresh",
@@ -1550,6 +1607,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
         credential_service="custom_refresh_oauth",
         client_config_services=("test_drive_oauth_client",),
         token_parser=_parse_minimal_token,
+        extra_token_params={"scope": requested_scope} if requested_scope is not None else {},
     )
 
     class FakeOAuth2Client:
@@ -1566,6 +1624,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
             return {
                 "access_token": "refreshed-access-token",
                 "expires_in": 300,
+                **response_fields,
             }
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", FakeOAuth2Client)
@@ -1577,7 +1636,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
                 "token": "expired-access-token",
                 "refresh_token": "stored-refresh-token",
                 "client_id": "client-id",
-                "scopes": ["scope.read"],
+                **stored_scope_fields,
                 "expires_at": 900.0,
             },
             runtime_paths,
@@ -1588,7 +1647,7 @@ def test_provider_refresh_token_data_stamps_core_metadata_for_custom_parser(
     assert refreshed["token"] == "refreshed-access-token"
     assert refreshed["refresh_token"] == "stored-refresh-token"
     assert refreshed["client_id"] == "client-id"
-    assert refreshed["scopes"] == ["scope.read"]
+    assert refreshed["scopes"] == expected_scopes
     assert refreshed["_source"] == "oauth"
     assert refreshed["_oauth_provider"] == provider.id
 
@@ -2504,7 +2563,7 @@ def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(t
 
     async def replace_credentials() -> None:
         async with oauth_credential_store.oauth_credential_transaction(target.credential_context) as transaction:
-            transaction.publish(
+            await transaction.publish(
                 {
                     "token": "replacement-access-token",
                     "refresh_token": "replacement-refresh-token",
@@ -2623,7 +2682,7 @@ def test_browser_reset_rejects_stale_connection_generation(tmp_path: Path) -> No
 
     async def replace_credentials() -> None:
         async with oauth_credential_store.oauth_credential_transaction(target.credential_context) as transaction:
-            transaction.publish(
+            await transaction.publish(
                 {
                     "token": "new-access-token",
                     "refresh_token": "new-refresh-token",

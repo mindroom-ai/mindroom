@@ -67,6 +67,24 @@ def test_supervisor_status_parser_is_canonical(
     assert status.exit_code == exit_code
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "Finished", "handle": None, "output_file_handled": "false"},
+        {"message": "Started", "handle": 123, "output_file_handled": True},
+        {"message": {}, "handle": None, "output_file_handled": False},
+        {"message": "Missing ownership metadata"},
+    ],
+)
+def test_invalid_result_metadata_cannot_claim_output_ownership(payload: dict[str, object]) -> None:
+    """Malformed supervisor fields must not suppress the caller's normal error handling."""
+    result = shell_supervisor._parse_supervisor_response(json.dumps(payload).encode())
+
+    assert result.output_file_handled is False
+    assert result.handle is None
+    assert result.message.startswith("Error: Invalid shell supervisor response:")
+
+
 @contextlib.asynccontextmanager
 async def _running_server(
     registry: dict[str, ProcessRecord],
@@ -100,7 +118,7 @@ async def _run(
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
 ) -> str:
-    return await run_command_via_supervisor(
+    result = await run_command_via_supervisor(
         socket_path,
         namespace=namespace,
         argv=argv,
@@ -111,6 +129,7 @@ async def _run(
         handle=handle,
         max_runtime_seconds=max_runtime_seconds,
     )
+    return result.message
 
 
 def _extract_handle(message: str) -> str:
@@ -599,7 +618,7 @@ async def test_script_shim_does_not_mask_directory_token_validation(tmp_path: Pa
     assert token_path.is_dir()
 
 
-@pytest.mark.parametrize("cleanup_operation", ["lstat", "unlink"])
+@pytest.mark.parametrize("cleanup_operation", ["stat", "unlink"])
 def test_script_shim_cleanup_permission_error_preserves_source_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -617,21 +636,31 @@ def test_script_shim_cleanup_permission_error_preserves_source_validation(
     monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
 
     def reject_source(_source_path: Path) -> None:
-        if cleanup_operation == "lstat":
+        if cleanup_operation == "stat":
+            original_stat = os.stat
 
-            def deny_lstat(_path: Path) -> os.stat_result:
-                message = "cleanup denied"
-                raise PermissionError(message)
+            def deny_stat(
+                path: str | Path,
+                *,
+                dir_fd: int | None = None,
+                follow_symlinks: bool = True,
+            ) -> os.stat_result:
+                if dir_fd is not None:
+                    message = "cleanup denied"
+                    raise PermissionError(message)
+                return original_stat(path, follow_symlinks=follow_symlinks)
 
-            monkeypatch.setattr(Path, "lstat", deny_lstat)
+            monkeypatch.setattr(os, "stat", deny_stat)
         else:
+            original_unlink = os.unlink
 
-            def deny_unlink(_path: Path, *, missing_ok: bool = False) -> None:
-                del missing_ok
-                message = "cleanup denied"
-                raise PermissionError(message)
+            def deny_unlink(path: str | Path, *, dir_fd: int | None = None) -> None:
+                if dir_fd is not None:
+                    message = "cleanup denied"
+                    raise PermissionError(message)
+                original_unlink(path)
 
-            monkeypatch.setattr(Path, "unlink", deny_unlink)
+            monkeypatch.setattr(os, "unlink", deny_unlink)
         msg = "Script source digest does not match the launch receipt."
         raise ValueError(msg)
 
@@ -863,7 +892,7 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
         argv = kwargs["argv"]
         assert isinstance(argv, list)
         observed_argv.extend(str(item) for item in argv)
-        return shell_execution_module._RunResult(message="ordinary result")
+        return shell_execution_module.ShellRunResult(message="ordinary result")
 
     monkeypatch.setattr(shell_supervisor, "run_command", record_run)
     reader = asyncio.StreamReader()
@@ -879,7 +908,8 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
 
     message = await shell_supervisor._handle_run({}, set(), payload, reader)
 
-    assert message == "ordinary result"
+    assert message is not None
+    assert message.message == "ordinary result"
     assert observed_argv == ["echo", "ordinary"]
 
 

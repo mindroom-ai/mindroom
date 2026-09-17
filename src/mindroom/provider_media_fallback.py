@@ -2,24 +2,28 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Never, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Any, Never, Protocol, cast, runtime_checkable
 
 from agno.exceptions import ContextWindowExceededError, ModelProviderError, RetryableModelProviderError
 from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_retry_cycle_hooks
+from mindroom.agno_compat_provider_errors import is_transient_stream_error
 from mindroom.error_handling import (
     TRANSIENT_PROVIDER_STATUS_CODES,
     IncompleteResponsesStreamError,
     is_model_safeguard_refusal,
 )
 from mindroom.logging_config import get_logger
+from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from mindroom.model_stream_output import has_meaningful_stream_output
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.context_bound_streams import close_async_stream
+from mindroom.tool_system.context_bound_streams import close_async_stream, context_bound_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Mapping
@@ -28,8 +32,13 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
 
     from mindroom.media_inputs import MediaKind
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-__all__ = ["install_provider_media_fallback", "reset_model_media_capability_cache"]
+__all__ = [
+    "guard_tool_image_result",
+    "install_provider_media_fallback",
+    "reset_model_media_capability_cache",
+]
 
 logger = get_logger(__name__)
 
@@ -92,6 +101,58 @@ _ADAPTER_OMITTED_MEDIA: dict[str, frozenset[MediaKind]] = {
     "agno.models.groq.groq": frozenset({"audio", "file", "video"}),
     "agno.models.cerebras.cerebras": frozenset({"audio", "image", "file", "video"}),
 }
+_CONFIGURED_PROVIDER_OMITTED_MEDIA: dict[str, frozenset[MediaKind]] = {
+    "cerebras": frozenset({"audio", "image", "file", "video"}),
+}
+
+
+def _mark_ready_tool_image_unsupported(
+    content: str | list[Any] | None,
+    *,
+    message: str,
+) -> str | list[Any] | None:
+    """Change one ready JSON receipt to an explicit unsupported result."""
+    if not isinstance(content, str):
+        return content
+    try:
+        receipt = json.loads(content)
+    except (TypeError, ValueError):
+        return content
+    if not isinstance(receipt, dict) or receipt.get("view_status") != "ready":
+        return content
+    receipt["view_status"] = "unsupported"
+    receipt["message"] = message
+    return json.dumps(receipt, sort_keys=True)
+
+
+def _configured_model_supports_tool_images(context: ToolRuntimeContext | None) -> bool:
+    """Return false only for an adapter known to omit image input."""
+    if context is None or context.active_model_name is None:
+        return True
+    model_config = context.current_config.models.get(context.active_model_name)
+    if model_config is None:
+        return True
+    provider = model_config.provider.strip().lower().replace("-", "_")
+    return "image" not in _CONFIGURED_PROVIDER_OMITTED_MEDIA.get(provider, frozenset())
+
+
+def guard_tool_image_result(
+    result: object,
+    *,
+    context: ToolRuntimeContext | None,
+) -> object:
+    """Reject image delivery explicitly when the active adapter is known to omit it."""
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    if not isinstance(result, ToolResult) or not result.images or _configured_model_supports_tool_images(context):
+        return result
+    content = _mark_ready_tool_image_unsupported(
+        result.content,
+        message="The active model adapter does not support viewed image tool results.",
+    )
+    if content is result.content:
+        return result
+    return result.model_copy(update={"content": content, "images": None})
 
 
 def install_provider_media_fallback(model: Model, *, fallback_prompt: str) -> None:
@@ -117,15 +178,19 @@ async def _ainvoke_in_request_scope(
         return await original_ainvoke_with_retry(*args, **kwargs)
 
 
-async def _ainvoke_stream_in_request_scope(
+def _ainvoke_stream_in_request_scope(
     model: Model,
     original_ainvoke_stream_with_retry: Callable[..., AsyncIterator[ModelResponse]],
     *args: object,
     **kwargs: object,
-) -> AsyncGenerator[ModelResponse, None]:
-    with _media_fallback_request(model):
-        async for response in original_ainvoke_stream_with_retry(*args, **kwargs):
-            yield response
+) -> AsyncIterator[ModelResponse]:
+    # Keep retry state for this stream, but never carry a ContextVar token across
+    # a yield: consumers may resume or close the stream in another task.
+    state = _request_state(model) or _MediaFallbackRequestState()
+    return context_bound_async_stream(
+        context_factory=lambda: _media_fallback_request(model, state=state),
+        stream_factory=lambda: original_ainvoke_stream_with_retry(*args, **kwargs),
+    )
 
 
 def _is_retryable_provider_error(
@@ -250,7 +315,12 @@ async def _stream_with_fallback(
                 _learn_from_request_fallback(route, request_state)
                 return
             except Exception as error:
-                if request_state.stream_output_produced or not remaining_kinds or not _should_retry(error):
+                if (
+                    request_state.stream_output_produced
+                    or not remaining_kinds
+                    or is_transient_stream_error(error)
+                    or not _should_retry(error)
+                ):
                     raise
                 failure = error
                 break
@@ -316,6 +386,8 @@ def _call_without_media_kinds(
     if messages is None or not removed_kinds:
         return args, kwargs
     retry_messages = [_without_inline_media(message, removed_kinds) for message in messages]
+    if "image" in removed_kinds:
+        _mark_stripped_view_receipts(messages, retry_messages)
     retry_messages.append(
         Message(
             role="user",
@@ -328,12 +400,32 @@ def _call_without_media_kinds(
     return (retry_messages, *args[1:]), kwargs
 
 
+def _mark_stripped_view_receipts(source: list[Message], stripped: list[Message]) -> None:
+    """Update tool receipts whose marked synthetic image follow-up was removed."""
+    for index, message in enumerate(source):
+        if not message.images or not any(
+            isinstance(image.id, str) and image.id.startswith(VIEWED_IMAGE_ID_PREFIX) for image in message.images
+        ):
+            continue
+        preceding = index - 1
+        while preceding >= 0 and source[preceding].role == "tool":
+            stripped[preceding].content = _mark_ready_tool_image_unsupported(
+                stripped[preceding].content,
+                message="The active model rejected the viewed image input; the retained attachment is still available.",
+            )
+            preceding -= 1
+
+
 def _without_inline_media(message: Message, removed_kinds: frozenset[MediaKind]) -> Message:
     copied = message.model_copy()
     if "audio" in removed_kinds:
         copied.audio = None
     if "image" in removed_kinds:
         copied.images = None
+        copied.content = _mark_ready_tool_image_unsupported(
+            copied.content,
+            message="The active model rejected the viewed image input; the retained attachment is still available.",
+        )
     if "file" in removed_kinds:
         copied.files = None
     if "video" in removed_kinds:
@@ -508,12 +600,14 @@ def _active_model(model: Model) -> Iterator[None]:
 
 
 @contextmanager
-def _media_fallback_request(model: Model) -> Iterator[None]:
+def _media_fallback_request(
+    model: Model,
+    *,
+    state: _MediaFallbackRequestState | None = None,
+) -> Iterator[None]:
     states = _REQUEST_STATES.get() or {}
-    if id(model) in states:
-        yield
-        return
-    token = _REQUEST_STATES.set({**states, id(model): _MediaFallbackRequestState()})
+    state = state or states.get(id(model)) or _MediaFallbackRequestState()
+    token = _REQUEST_STATES.set({**states, id(model): state})
     try:
         yield
     finally:
@@ -536,7 +630,9 @@ async def _next_stream_response(
             error,
             output_produced=request_state.stream_output_produced,
         )
-    request_state.stream_output_produced = True
+    request_state.stream_output_produced = request_state.stream_output_produced or has_meaningful_stream_output(
+        response,
+    )
     return response
 
 

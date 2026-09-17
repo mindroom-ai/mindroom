@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +17,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, VISIBLE_ROUTER_VOICE_ECHO_KEY
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.handled_turns import TurnRecord
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.visible_voice_echo import (
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
+    from mindroom.event_journal import TurnRecordStore
     from mindroom.ingress_validation import IngressValidator
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.turn_store import TurnStore
@@ -66,6 +68,12 @@ class _EchoTurnStore:
 
     def visible_echo_for_source(self, source_event_id: str) -> str | None:
         return self.visible_event_ids.get(source_event_id)
+
+    async def load(self, source_event_id: str) -> TurnRecord | None:
+        event_id = self.visible_event_ids.get(source_event_id)
+        if event_id is None:
+            return None
+        return replace(TurnRecord.create([source_event_id], completed=False), visible_echo_event_id=event_id)
 
     async def record_visible_echo(self, source_event_id: str, echo_event_id: str) -> None:
         self.visible_event_ids[source_event_id] = echo_event_id
@@ -159,6 +167,7 @@ def _echo_harness(
                 agent_name=agent_name,
                 delivery_gateway=cast("DeliveryGateway", gateway),
                 turn_store=cast("TurnStore", turn_store),
+                router_turn_records=cast("TurnRecordStore", turn_store),
                 ingress=cast("IngressValidator", ingress),
                 wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
             ),
@@ -245,8 +254,8 @@ async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path
     with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
     harness.runtime.config = replacement_config
     admission_gate.reopen()
-    await harness.router.finish(handle, _normalized_event(source_event_id))
-
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
+    assert await _await_responder(harness, source_event_id) is True
     assert not harness.gateway.send_started.is_set()
 
 
@@ -291,10 +300,14 @@ async def test_unclaimed_expected_echo_fails_closed_after_grace(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_responder_skips_barrier_when_visible_echo_is_disabled(tmp_path: Path) -> None:
-    """A disabled echo must not add ordering delay."""
+async def test_responder_skips_barrier_when_visible_echo_is_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled echo must not add ordering delay or require a journal lookup."""
     harness = _echo_harness(tmp_path)
     harness.config.voice.visible_router_echo = False
+    monkeypatch.setattr(_EchoTurnStore, "load", AsyncMock(side_effect=RuntimeError("Journal unavailable")))
 
     assert await _await_responder(harness, "$voice-disabled") is True
 
@@ -337,14 +350,14 @@ async def test_abandoned_router_lifecycle_releases_responder(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_router_canonical_turn_does_not_wait_on_its_own_echo(tmp_path: Path) -> None:
-    """Gating the router on a failed best-effort echo would suppress canonical dispatch."""
+async def test_router_required_initial_echo_failure_is_not_ready(tmp_path: Path) -> None:
+    """The router must retain its publication obligation when no echo exists."""
     harness = _echo_harness(tmp_path)
     source_event_id = "$voice-router"
     harness.gateway.send_result = None
     handle = harness.router.start(_request(source_event_id))
     assert handle is not None
-    await harness.router.finish(handle, _normalized_event(source_event_id))
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is False
 
     assert (
         await harness.router.await_publication(
@@ -352,7 +365,7 @@ async def test_router_canonical_turn_does_not_wait_on_its_own_echo(tmp_path: Pat
             source_event_id=source_event_id,
             requester_user_id=_REQUESTER_ID,
         )
-        is True
+        is False
     )
 
 
@@ -444,3 +457,40 @@ async def test_claimed_echo_stays_ordered_after_config_disable(tmp_path: Path) -
     harness.gateway.release_send.set()
     await finish
     assert await asyncio.wait_for(responder_wait, timeout=1) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit_raises", [False, True])
+async def test_failed_edit_of_durable_placeholder_still_releases_responders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit_raises: bool,
+) -> None:
+    """A preexisting echo remains published when replay cannot finalize its text."""
+    harness = _echo_harness(tmp_path)
+    source_event_id = "$voice-edit-failed"
+    await harness.router.deps.turn_store.record_visible_echo(source_event_id, "$existing-echo")
+    edit = AsyncMock(side_effect=RuntimeError("Edit unavailable")) if edit_raises else AsyncMock(return_value=False)
+    monkeypatch.setattr(harness.gateway, "edit_text", edit)
+    handle = harness.router.start(_request(source_event_id))
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
+    assert await _await_responder(harness, source_event_id) is True
+    assert not harness.gateway.send_started.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unavailable", ["disabled", "absent", "not_ready"])
+async def test_failed_claim_stops_blocking_when_echo_is_unavailable(tmp_path: Path, unavailable: str) -> None:
+    """A failed claim must not retain an echo requirement after its router becomes unavailable."""
+    harness = _echo_harness(tmp_path)
+    source_event_id = "$voice-disabled-after-failure"
+    harness.gateway.send_result = None
+    handle = harness.router.start(_request(source_event_id))
+    assert await harness.router.finish(handle, _normalized_event(source_event_id)) is False
+    if unavailable == "disabled":
+        harness.config.voice.visible_router_echo = False
+    elif unavailable == "absent":
+        harness.room.remove_member(cast("_RouterIngress", harness.router.deps.ingress).router_user_id)
+    else:
+        harness.runtime.orchestrator = cast("OrchestratorRuntime", _RouterReadiness(False))
+    assert await _await_responder(harness, source_event_id) is True

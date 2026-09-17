@@ -77,10 +77,13 @@ incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=tr
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 cp .env.example .env
-$EDITOR .env  # add at least one AI provider key
+$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
 
 ./scripts/quickstart.py
 ```
+
+The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
+To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
 
 Raw `docker compose up -d` remains a manual fallback; the quickstart validates provider configuration, waits for readiness, and diagnoses common port and startup failures.
 
@@ -96,14 +99,16 @@ mindroom run --storage-path ./mindroom_data
 
 The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
-If you want local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use:
+For local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 mindroom run --storage-path ./mindroom_data
 ```
 
 ### Docker (single container)
+
+Create `./mindroom_data` and grant write access to the container's UID/GID `1000:1000` before running this command; follow the [Docker guide's storage preparation](docker.md#quick-start) for your Docker user mapping.
 
 ```bash
 docker run -d \

@@ -35,7 +35,8 @@ The remaining rows include existing focused boundaries and later audit additions
 | Boundary | Trigger and current caller | Retained guarantees |
 | --- | --- | --- |
 | [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
-| [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion and usage diagnostics encounter an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, diagnostics, and byte accounting remain with current owners. |
+| `src/mindroom/legacy_usage_storage.py` | Startup or direct storage opening finds a session database without an independent usage table. | Import only retained facts, publishing the table and seed atomically; current reporting never reads old run representations. |
+| [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion or initial usage migration encounters an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, and diagnostics remain with current owners. |
 | [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `openai_response_replay.py`. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
@@ -56,7 +57,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
-| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] | Script-runtime startup encounters an unversioned recovery signature. | Only an exact recomputation of the original digest permits migration to v2; the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
+| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] and [`src/mindroom/workers/backends/kubernetes.py`][kubernetes-worker-backend] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp or RuntimeClass fields. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, an unset RuntimeClass retains the pre-RuntimeClass digest bytes, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 
 ## Python provenance and regression coverage
@@ -71,7 +72,8 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | --- | --- |
 | `tool_jobs/runtime.py` | `tests/test_tool_jobs.py` preserves exact outcomes, native approval state, and consumption evidence while discarding retired pause and Matrix-notification fields from unreleased job snapshots. |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
-| [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover precedence and retained duplicates. |
+| `legacy_usage_storage.py` | `tests/test_legacy_usage_storage.py` covers mixed schemas, current-row precedence, unknown dates, interruption rollback and retry, dormant stores, symlink isolation, and both startup entry points. |
+| [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover import precedence and available usage. |
 | [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments and placeholder pairs; [Responses replay tests][openai-replay-tests] and [history tests][native-history-tests] cover reasoning tails, filtered call/result links, bounded SQLite replay, and unchanged canonical state. |
 | [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
 | [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] cover released DDL, missing and already-added toolkit columns, rejection of stale approval clicks, preserved current generations and frozen deliveries, and stable repeat opening on both database backends. |
@@ -79,7 +81,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | [`event_journal/legacy_approval_recovery.py`][legacy-approval-recovery] | [Journal store][journal-store-tests] tests preserve incomplete deletion proof and FINAL debt; [response runner][response-runner-tests] tests recover every approval state only after card expiration, without editing deleted responses or resuming tools. |
 | [`matrix/legacy_sync_continuity.py`][legacy-sync] and [`matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | [Sync-continuity tests][sync-continuity-tests] cover complete v2/v3 conversion and retry, while [crypto upgrade tests][crypto-upgrade-tests] verify that identity, keys, and trust survive retirement of transport recovery. |
 | [`script_runs/legacy_schema.py`][script-legacy-schema] | [Script-run tests][script-run-tests] rebuild the literal old table, preserve every old value, add empty resource snapshots, and verify a second open. |
-| [`script_runs/legacy_recovery.py`][script-legacy-recovery] | [Script lifecycle tests][script-lifecycle-tests] cover exact legacy adoption and rejection after authority changes; [script-run tests][script-run-tests] verify atomic signature replacement. |
+| [`script_runs/legacy_recovery.py`][script-legacy-recovery] and [`workers/backends/kubernetes.py`][kubernetes-worker-backend] | [Script lifecycle tests][script-lifecycle-tests] cover exact legacy adoption and rejection after authority changes; [Kubernetes worker tests][kubernetes-worker-tests] cover byte-compatible unset RuntimeClass authority and rejection after configuration changes; [script-run tests][script-run-tests] verify atomic signature replacement. |
 | [`knowledge/legacy_metadata.py`][knowledge-legacy] | [Knowledge indexing tests][knowledge-indexing-tests] use independently written metadata from each field boundary and check preservation, nonmutation, repeated normalization, and corpus/query compatibility. |
 | [`matrix/legacy_state.py`][matrix-legacy-state] and [`matrix/users.py`][matrix-users] | [Matrix identity][matrix-identity-tests] and [agent manager][matrix-agent-tests] tests preserve durable account state, verify stable reloads, and exercise the missing-request fallback without network registration. |
 | [`config/legacy_access.py`][access-legacy] and [`config/legacy_fields.py`][config-legacy] | [Access migration tests][access-migration-tests] cover validated conversion, exact backup bytes, stable publication, and rejection paths; [configuration tests][agent-config-tests] cover every directed retired-field error. |
@@ -146,7 +148,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S16 | Current behavior | [`external_triggers/store.py`][trigger-store] and [`external_triggers/replay_store.py`][replay-store] own current validation and replay deduplication; the only retained historical default supplies an empty `threads` map when that section is absent. |
 | S17 | Current behavior | [Receipts][scheduled-records], [todos][todo-state], [attachments][attachments], and workflows combine sparse fields with current identity and integrity checks. |
 | S18 | Isolated | [`session_storage_preflight.py`][session-preflight] archives incompatible owned sessions; MindRoom does not invoke Agno's historical migration manager. |
-| S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob merge, scrub, and double-JSON decoding; other Agno readers remain dependency-owned. |
+| S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 
 ## Configuration and credentials
@@ -223,6 +225,7 @@ Interrupted visible replies are excluded; eligible in-progress text is cleaned b
 A journal replacement must coordinate its generation binding with the next Nio baseline.
 Agno sessions may still contain current handled-turn recovery facts and historical run blobs, while Matrix keeps visible messages and state independently of local storage.
 Private storage moves require stopped primaries and absent managed workers, as described in [Private Storage Migration](https://docs.mindroom.chat/deployment/private-storage-upgrade/).
+Usage discovery ignores verified historical primary and session aliases because their canonical directories are scanned separately; unverified symlinks still report incomplete coverage.
 The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/).
 Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
 
@@ -265,6 +268,8 @@ Dependency migrations use their dependency's schema and locking contract, and Sa
 [knowledge-index]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/index_metadata.py
 [knowledge-legacy]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/legacy_metadata.py
 [knowledge-settings]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/knowledge/indexing_config.py
+[kubernetes-worker-backend]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/workers/backends/kubernetes.py
+[kubernetes-worker-tests]: https://github.com/mindroom-ai/mindroom/blob/main/tests/test_kubernetes_worker_backend.py
 [legacy-revision-replay]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_revision_replay.py
 [legacy-streaming]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_streaming.py
 [legacy-approval]: https://github.com/mindroom-ai/mindroom/blob/main/src/mindroom/legacy_approval_payloads.py

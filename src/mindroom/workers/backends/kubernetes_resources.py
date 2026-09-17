@@ -1401,6 +1401,11 @@ class KubernetesResourceManager:
                     "securityContext": {
                         "allowPrivilegeEscalation": False,
                         "capabilities": {"drop": ["ALL"]},
+                        **(
+                            {"seccompProfile": dict(self.config.seccomp_profile)}
+                            if self.config.seccomp_profile is not None
+                            else {}
+                        ),
                     },
                 },
             ],
@@ -1414,6 +1419,8 @@ class KubernetesResourceManager:
         )
         if include_agent_vault:
             template_spec["initContainers"] = [self._agent_vault_init_container(worker_key=worker_key)]
+        if self.config.runtime_class_name is not None:
+            template_spec["runtimeClassName"] = self.config.runtime_class_name
         node_name = self._worker_node_name_or_none()
         if node_name is not None:
             template_spec["nodeName"] = node_name

@@ -8,7 +8,7 @@ import json
 import threading
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from agno.db.base import BaseDb
@@ -21,6 +21,7 @@ from agno.run.team import TeamRunOutput
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.participation import ParticipationGate
@@ -202,7 +203,11 @@ class _AdapterLog:
 
 def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager[ScopeSessionContext]]:
     def _open() -> AbstractContextManager[ScopeSessionContext]:
-        log.scope = ScopeSessionContext(HistoryScope(kind="agent", scope_id="helper"), MagicMock(spec=BaseDb), None)
+        log.scope = ScopeSessionContext(
+            scope=HistoryScope(kind="agent", scope_id="general"),
+            storage=MagicMock(spec=BaseDb),
+            session=None,
+        )
         return contextlib.nullcontext(log.scope)
 
     return _open
@@ -666,6 +671,86 @@ def _bump(log: _AdapterLog, attr: str) -> None:
 
 async def _collect(stream: AsyncIterator[str]) -> list[str]:
     return [chunk async for chunk in stream]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["blocking", "exhaust", "close"])
+async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finish: str) -> None:
+    """The caller's owner must follow each attempt pull and close without leaking at public yields."""
+    log = _AdapterLog()
+    storage = Mock(spec=BaseDb)
+    scope = ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=storage,
+        session=None,
+        session_id="session-1",
+        storage_factory=lambda: storage,
+    )
+    observed_phases: list[str] = []
+
+    def observe_owner(phase: str) -> None:
+        owner = get_helper_usage_owner()
+        assert owner is not None
+        assert owner.session_id == "session-1"
+        assert owner.storage_factory is scope.storage_factory
+        observed_phases.append(phase)
+
+    async def blocking_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        observe_owner("run")
+        return CompletedAttempt(response_text="done", replayable_text="done", has_visible_content=True)
+
+    async def streamed_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        try:
+            observe_owner("first")
+            yield "first"
+            observe_owner("second")
+            yield AttemptResolved(CompletedAttempt(replayable_text="first", has_visible_content=True))
+        finally:
+            observe_owner("close")
+
+    assert get_helper_usage_owner() is None
+    if finish == "blocking":
+        assert (
+            await run_blocking_response_turn(
+                _ctx(),
+                _blocking_adapter(log, blocking_attempt, open_scope=lambda: contextlib.nullcontext(scope)),
+                TurnSinks(),
+                continuation=_continuation(),
+            )
+            == "done"
+        )
+        assert observed_phases == ["run"]
+    else:
+        stream = stream_response_turn(
+            _ctx(),
+            _streaming_adapter(log, streamed_attempt, open_scope=lambda: contextlib.nullcontext(scope)),
+            TurnSinks(),
+            continuation=_continuation(),
+        )
+        try:
+            assert await anext(stream) == "first"
+            assert get_helper_usage_owner() is None
+
+            async def finish_in_child() -> None:
+                if finish == "close":
+                    await stream.aclose()
+                else:
+                    assert await _collect(stream) == []
+                assert get_helper_usage_owner() is None
+
+            await asyncio.create_task(finish_in_child())
+        finally:
+            await stream.aclose()
+        assert observed_phases == (["first", "close"] if finish == "close" else ["first", "second", "close"])
+    assert get_helper_usage_owner() is None
+    assert log.finalized == 1
+    assert log.closed == 1
 
 
 @pytest.mark.asyncio
@@ -1748,6 +1833,155 @@ def test_streaming_continuation_limit_yields_limit_message() -> None:
     assert len(chunks) == 1
     assert chunks[0].startswith("notice:")
     assert "did not produce a final answer" in chunks[0]
+
+
+@pytest.mark.parametrize(("saved_count", "expected_attempts"), [(0, 4), (2, 2), (4, 0)])
+def test_resumed_schema_change_uses_remaining_budget(saved_count: int, expected_attempts: int) -> None:
+    """Restoring a schema boundary cannot reset the logical turn budget or leak stale text."""
+    log = _AdapterLog()
+    prompts: list[str] = []
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        prompts.append(continuation.active_prompt)
+        yield AttemptResolved(
+            CompletedAttempt(attempt_run_id="fresh", tool_executions=(_dynamic_tool_execution(),)),
+        )
+
+    restored = CompletedAttempt(
+        response_text="stale",
+        attempt_run_id="saved",
+        tool_executions=(_dynamic_tool_execution(),),
+    )
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, attempt),
+                TurnSinks(on_completed=completed.append),
+                continuation=_continuation(),
+                resumed_attempt=response_turn_module.ResumedAttempt(restored, continuation_count=saved_count),
+            ),
+        ),
+    )
+    assert len(prompts) == expected_attempts
+    assert all("DYNAMIC TOOL CALL COMPLETED" in prompt for prompt in prompts)
+    assert len(chunks) == 1
+    assert "did not produce a final answer" in chunks[0]
+    assert "stale" not in chunks[0]
+    assert len(completed) == 1
+    assert completed[0].status is RunStatus.completed
+    assert completed[0].metadata_content is None
+
+
+def test_resumed_schema_change_preserves_count_on_next_pause() -> None:
+    """A second approval must save the consumed fresh schema step."""
+    log = _AdapterLog()
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(
+            response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={}),
+        )
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        asyncio.run(
+            _collect(
+                stream_response_turn(
+                    _ctx(),
+                    _streaming_adapter(log, attempt),
+                    TurnSinks(on_completed=completed.append),
+                    continuation=_continuation(),
+                    resumed_attempt=response_turn_module.ResumedAttempt(
+                        CompletedAttempt(tool_executions=(_dynamic_tool_execution(),)),
+                        continuation_count=2,
+                    ),
+                ),
+            ),
+        )
+    assert raised.value.paused.continuation_count == 3
+    assert completed == []
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_fresh_schema_change_saves_count_before_first_approval(streaming: bool) -> None:
+    """The budget starts with the first schema change, before any approval checkpoint."""
+    log = _AdapterLog()
+    calls = 0
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation: DynamicContinuationRunState,
+    ) -> CompletedAttempt | response_turn_module.PausedAttempt:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return CompletedAttempt(tool_executions=(_dynamic_tool_execution(),))
+        return response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={})
+
+    async def streamed_attempt(
+        run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(await attempt(run, continuation))
+
+    async def execute() -> None:
+        if streaming:
+            await _collect(
+                stream_response_turn(
+                    _ctx(),
+                    _streaming_adapter(log, streamed_attempt),
+                    TurnSinks(on_completed=completed.append),
+                    continuation=_continuation(),
+                ),
+            )
+        else:
+            await run_blocking_response_turn(
+                _ctx(),
+                _blocking_adapter(log, attempt),
+                TurnSinks(on_completed=completed.append),
+                continuation=_continuation(),
+            )
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        asyncio.run(execute())
+    assert raised.value.paused.continuation_count == 1
+    assert calls == 2
+    assert completed == []
+
+
+@pytest.mark.parametrize(
+    "resolution",
+    [HandledAttempt(), ExcludedAttempt(original_status=RunStatus.error), SkippedAttempt(reason="quiet")],
+)
+def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAttemptResolution) -> None:
+    """Handled errors, excluded runs and quiet turns cannot report typed success."""
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(resolution)
+
+    asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(_AdapterLog(), attempt),
+                TurnSinks(on_completed=completed.append),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+    assert completed == []
 
 
 def test_streaming_finalize_runs_when_attempt_raises() -> None:

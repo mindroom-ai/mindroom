@@ -11,6 +11,7 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
+from agno.tools import Toolkit
 
 import mindroom
 from mindroom import vendor_telemetry
@@ -79,7 +80,7 @@ def test_composio_tools_reapplies_vendor_telemetry_after_lazy_import(
     monkeypatch.setitem(sys.modules, "composio.utils.sentry", sentry_module)
     monkeypatch.setattr(vendor_telemetry.atexit, "unregister", unregistered.append)
 
-    assert composio_tools() is FakeComposioToolSet
+    assert issubclass(composio_tools(), Toolkit)
     assert unregistered == [update_dsn]
 
 

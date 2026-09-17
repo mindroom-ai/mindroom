@@ -5116,6 +5116,46 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
+    @pytest.mark.parametrize("redaction_scope", ["same", "other_room", "other_principal", "other_event"])
+    async def test_startup_recovery_skips_only_exact_redacted_response(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+        redaction_scope: str,
+    ) -> None:
+        """A deleted response is terminal evidence, while unrelated deletions are not."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("Thinking..."),
+        )
+        await alice.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+        await alice.acknowledge_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.INITIAL,
+            event_id="$response",
+            delivered_projections=(),
+        )
+        assert len(await alice.recovery_initial_deliveries()) == 1
+
+        redaction_principal = journal_store.principal("agent@bob") if redaction_scope == "other_principal" else alice
+        await admit(
+            redaction_principal,
+            "$redaction",
+            room_id=OTHER_ROOM if redaction_scope == "other_room" else ROOM,
+            redacts="$unrelated" if redaction_scope == "other_event" else "$response",
+            kind=EventKind.REDACTION,
+        )
+
+        candidates = await alice.recovery_initial_deliveries()
+        assert len(candidates) == (0 if redaction_scope == "same" else 1)
+        # Keep the transport identity and ACK available for other lifecycle owners.
+        initial = await alice.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+        assert initial is not None
+        assert initial.acknowledged_event_id == "$response"
+
     @pytest.mark.ledger_loads_from_disk
     async def test_changed_source_claim_rolls_back_ack_without_losing_pending_owner(
         self,
@@ -6232,6 +6272,43 @@ class TestOutbox:
 class TestApprovalContinuations:
     """A paused Agno run remains owned by its original journal sources."""
 
+    @pytest.mark.parametrize("next_count", [None, 3])
+    async def test_continuation_count_survives_reopen_and_advance(
+        self,
+        journal_database: Callable[[], EventJournalStore],
+        next_count: int | None,
+    ) -> None:
+        """Approval checkpoints retain the budget already spent by the logical response."""
+        first = journal_database().principal("agent@alice")
+        await self.admit_sources(first)
+        original = self.continuation()
+        continuation = replace(
+            original,
+            continuation_count=2,
+            calls=tuple(replace(call, toolkit_name="shell") for call in original.calls),
+        )
+        await first.create_approval_continuation(continuation)
+        reopened = journal_database().principal("agent@alice")
+        loaded = await reopened.approval_continuation("approval-1")
+        assert loaded is not None
+        assert loaded.continuation_count == 2
+        assert loaded.state == "ready", loaded.failure_reason
+        claimed = await reopened.claim_approval_continuation("approval-1", runtime_generation="runtime-a")
+        assert claimed is not None
+        advanced = await reopened.advance_approval_continuation(
+            "approval-1",
+            claimant_generation=claimed.generation,
+            run_id="run-next",
+            session_id=claimed.session_id,
+            calls=claimed.calls,
+            **({"continuation_count": next_count} if next_count is not None else {}),
+        )
+        assert advanced is not None
+        assert advanced.continuation_count == (3 if next_count is not None else 2)
+        saved = await journal_database().principal("agent@alice").approval_continuation("approval-1")
+        assert saved is not None
+        assert saved.continuation_count == advanced.continuation_count
+
     @staticmethod
     def continuation(*, state: str = "ready") -> ApprovalContinuation:
         """Return one exact paused-run owner."""
@@ -6259,6 +6336,29 @@ class TestApprovalContinuations:
             request_body="run it",
             state=state,
         )
+
+    async def test_missing_saved_continuation_count_defaults_to_zero(self, alice: PrincipalStore) -> None:
+        """Existing approval snapshots remain readable without a saved budget."""
+        await self.admit_sources(alice)
+        await alice.create_approval_continuation(self.continuation())
+
+        def remove_count(transaction: Transaction) -> None:
+            row = transaction.fetchone(
+                "SELECT context_json FROM approval_continuations WHERE approval_id = ?",
+                ("approval-1",),
+            )
+            assert row is not None
+            context = json.loads(str(row["context_json"]))
+            context.pop("continuation_count")
+            transaction.execute(
+                "UPDATE approval_continuations SET context_json = ? WHERE approval_id = ?",
+                (json.dumps(context), "approval-1"),
+            )
+
+        await alice._backend.write(remove_count)
+        loaded = await alice.approval_continuation("approval-1")
+        assert loaded is not None
+        assert loaded.continuation_count == 0
 
     @staticmethod
     async def admit_sources(store: PrincipalStore) -> None:

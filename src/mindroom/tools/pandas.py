@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="pandas",
+    requires_primary_runtime=True,
     display_name="Pandas",
     description="Advanced data manipulation and analysis",
     category=ToolCategory.PRODUCTIVITY,

@@ -22,6 +22,7 @@ from .config import (
     load_config_quiet,
     print_config_search_locations,
 )
+from .config_bundle import config_install_bundle, initialize_runtime_bundle
 from .config_reload import config_check_applied, config_fingerprint
 from .desktop import desktop_app
 from .local_stack import local_stack_setup
@@ -65,6 +66,7 @@ threads_app = typer.Typer(help="Export Matrix threads to local files.")
 journal_app = typer.Typer(help="Inspect and rebind the durable event journal.")
 config_app.command("migrate")(config_migrate)
 config_app.command("fingerprint")(config_fingerprint)
+config_app.command("install-bundle")(config_install_bundle)
 config_app.command("check-applied")(config_check_applied)
 app.add_typer(config_app, name="config")
 app.add_typer(plugins_app, name="plugins")
@@ -121,6 +123,14 @@ def run(
         "-s",
         help="Base directory for persistent MindRoom data (state, sessions, tracking)",
     ),
+    bootstrap_config_bundle: Path | None = typer.Option(  # noqa: B008
+        None,
+        help="Initialize the selected config directory from this bundle only when the directory is absent.",
+    ),
+    bootstrap_config_bundle_revision: str | None = typer.Option(
+        None,
+        help="Install a changed bootstrap revision through native validation; preserve a matching active revision.",
+    ),
     api: bool = typer.Option(
         True,
         "--api/--no-api",
@@ -145,6 +155,11 @@ def run(
     - Manages agent room memberships
     - Starts the bundled dashboard/API server (disable with --no-api)
     """
+    if bootstrap_config_bundle_revision is not None and bootstrap_config_bundle is None:
+        typer.echo("--bootstrap-config-bundle-revision requires --bootstrap-config-bundle.", err=True)
+        raise typer.Exit(2)
+    if bootstrap_config_bundle is not None:
+        initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
     asyncio.run(
         _run(
             log_level=log_level.upper(),

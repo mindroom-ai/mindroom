@@ -51,14 +51,16 @@ The manifest is a JSON file named `mindroom.plugin.json` at the plugin root:
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | string | **yes** | Plugin identifier. Must be lowercase ASCII letters, digits, `-`, and `_` only (pattern: `^[a-z0-9_-]+$`). Must be unique across all configured plugins. Invalid or duplicate names abort plugin loading entirely. |
+| `name` | string | **yes** | Plugin identifier. Must be lowercase ASCII letters, digits, `-`, and `_` only (pattern: `^[a-z0-9_-]+$`). Must be unique across resolved plugin manifests. |
 | `tools_module` | string | no | Relative path to the Python module containing `@register_tool_with_metadata` factories. Must exist on disk if declared. |
 | `oauth_module` | string | no | Relative path to the Python module containing `register_oauth_providers(settings, runtime_paths)`. Must exist on disk if declared. |
 | `hooks_module` | string | no | Relative path to the Python module containing `@hook`-decorated functions. Must exist on disk if declared. |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories (each with a `SKILL.md`). Each directory must exist on disk. |
 
 Unknown fields are silently ignored.
-Invalid, duplicate, or malformed manifests are configuration errors and stop all plugin loading.
+Strict checks (`mindroom config validate` and `mindroom plugins check`) reject invalid or malformed manifests.
+Normal `mindroom run` startup logs and skips broken entries and disables affected unresolved tools, as described under [Live development](#live-development-hot-reload).
+Duplicate names among successfully resolved manifests abort loading the configured plugin set, including during tolerant startup.
 All declared module files and skill directories must exist on disk.
 
 If `hooks_module` is omitted, MindRoom auto-scans `tools_module` for `@hook`-decorated functions.
@@ -146,7 +148,7 @@ plugins:
 
 Rules:
 
-- A bare package name (no slashes, no `.` or `..` prefix) is tried as a Python package first.
+- A bare package name (no slashes, no `.` or `..` prefix) uses an existing config-relative path first, then falls back to an importable Python package.
 - `python:`, `pkg:`, and `module:` are explicit prefixes that force package resolution.
 - `:sub/path` after the package name points to a subdirectory inside the package.
 
@@ -161,9 +163,16 @@ MindRoom instantiates the class when building agents.
 Set `requires_room_context=True` in tool metadata when the toolkit requires the live Matrix room runtime, including its client, requester, or conversation context.
 The MCP gateway omits these toolkits from discovery and rejects direct schema and invocation requests before constructing them.
 Agent runs without a room also hide these tools using the same metadata.
+These toolkits stay in the primary runtime because workers do not provide live room context.
 This requirement describes runtime compatibility; it does not grant or replace tool authorization.
 
 Set `requires_primary_runtime=True` when a toolkit depends on process-local services or primary-runtime authority and must never be routed to a worker, even if an agent lists it in `worker_tools`.
+This also applies to toolkits that retain session state or an in-memory resource between calls: the generic worker runner creates a fresh toolkit for each request.
+This includes functions that read or mutate an injected `Agent`, `Team`, or `RunContext`.
+Worker call arguments accept JSON values and paths; unsupported objects are rejected before worker allocation or credential grants.
+For an SDK function that accepts an `agent` parameter but never uses it, list its function name in `worker_inert_agent_functions`.
+Only those declared functions receive `None` in place of the injected agent when routed to a worker.
+Do not use this declaration for functions that depend on agent identity, configuration, or session state.
 This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
 
 ## OAuth providers
@@ -407,6 +416,7 @@ All `@register_tool_with_metadata` arguments are keyword-only.
 | `managed_init_args` | tuple of `ToolManagedInitArg` | `()` | Declares which MindRoom-managed values the toolkit constructor expects (see [Managed init args](#managed-init-args)) |
 | `default_execution_target` | `ToolExecutionTarget` | `PRIMARY` | Default location, `PRIMARY` or `WORKER`; sandbox routing configuration may override it |
 | `requires_primary_runtime` | boolean | `False` | Always execute in the primary runtime, including when sandbox routing requests all tools or explicitly lists this toolkit |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Functions whose unused injected `agent` parameter can safely receive `None` during worker execution |
 
 ### Dependencies
 
@@ -437,11 +447,15 @@ Each `ConfigField` describes one constructor parameter that can be configured th
 | `label` | string | *required* | Display label shown in the dashboard |
 | `type` | string | `"text"` | Input type: `text`, `password`, `url`, `number`, `boolean`, or `select` |
 | `required` | bool | `True` | Whether the field must be set before the tool can be used |
-| `default` | any | `None` | Default value when not configured |
+| `default` | any | `None` | Initial value in the dashboard configuration form |
 | `placeholder` | string | `None` | Placeholder text shown in the input |
 | `description` | string | `None` | Help text for the field |
 | `options` | list | `None` | For `select` type: list of `{"label": "...", "value": "..."}` dicts |
 | `validation` | dict | `None` | Optional validation rules (min, max, pattern, etc.) |
+
+Metadata defaults are not automatically passed to generic plugin constructors.
+When a value is absent from stored or explicit configuration, the constructor's Python default applies.
+Give optional constructor parameters matching Python defaults, such as `units: str = "metric"` for the example below.
 
 Example — a tool that requires an API key:
 
@@ -645,19 +659,21 @@ Validate a plugin against the installed MindRoom version before deployment:
 mindroom plugins check ./my-plugin
 ```
 
-The command strictly loads and validates the manifest, tools, hooks, OAuth providers, and skills using isolated temporary runtime paths.
-It reports discovered tools, hooks, and skills, then exits nonzero without leaving plugin registrations active when validation fails.
+The command strictly checks the manifest, imports declared Python modules, validates tool, hook, and OAuth registration surfaces, and verifies that declared skill-root directories exist, using isolated temporary runtime paths.
+It reports discovered tools and hooks plus the declared skill directories; it does not parse `SKILL.md` contents or evaluate skill eligibility.
+Validation failures exit nonzero, and the check restores plugin registration state before returning.
 
 ## Live development (hot reload)
 
 Plugins hot-reload automatically.
 When you edit any file inside a configured plugin directory, MindRoom notices the change on the next poll, waits out the debounce window, re-imports the plugin's modules in place, swaps the new hooks and tools into the live registry, and the next event invokes your new code.
 In practice the new code is usually live about 1-2 seconds after a save.
-No service restart and no agent session disruption.
+No service restart or agent session reset is required, but unfinished durable background scripts are interrupted before code replacement.
 
 ### How it works
 
 - A background watcher polls each configured plugin root every ~1s and debounces saves over a ~1s window.
+- Before either watcher-triggered or manual reload replaces plugin code, MindRoom interrupts every unfinished durable background script run, even if it did not use the changed plugin; replacement fails if any run remains unfinished.
 - On change, the synthetic plugin package subtree is evicted from `sys.modules`, `load_plugins()` re-runs, a fresh `HookRegistry` is built, and the live registry is swapped atomically.
 - Module-level `asyncio.Task` objects, and one-level containers like `dict[..., Task]`, on the old module are best-effort cancelled before the swap.
 - The watcher ignores `__pycache__/`, `*.pyc`, `*.pyo`, editor swap files (`*.swp`, `*~`, `.#*`, `*.tmp`), and tool caches (`.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`).
@@ -698,7 +714,7 @@ Admin gating uses `administrators` from `config.yaml`.
 
 The hot-reload path is intentionally best-effort, not transactional.
 
-- **In-flight turns keep their old code.** A reload swaps the registry for new events, but any callback already running on the old module finishes there, and only new events use the new module.
+- **Ordinary in-flight callbacks keep their old code:** a reload swaps the registry for new events, while callbacks already running on the old module finish there, subject to the background-task cleanup described below.
 - **No partial-write detection.** If your editor saves the file in two writes, the watcher may briefly load the half-written first state, log an import error, and then reload again on the second write.
 - **CPU-bound infinite loops still wedge the event loop.** The hook dispatcher uses `asyncio.timeout()` for cooperative cancellation, so truly blocking CPU code is not preempted.
 - **Background resources held by the old module can leak until natural cleanup.** Reload cancels direct module-global `asyncio.Task` objects and tasks in one-level built-in dict, tuple, list, or set containers; deeper or custom containers and non-task resources need their own cleanup bookkeeping.
@@ -708,7 +724,8 @@ The hot-reload path is intentionally best-effort, not transactional.
 
 Hot reload is enabled by default in production.
 Edit any configured plugin directory directly while `mindroom.service` is running.
-`~/.mindroom/plugins/<name>/` is the common local layout, and active agent sessions, in-flight conversations, and streaming responses continue untouched.
+`~/.mindroom/plugins/<name>/` is the common local layout.
+Agent sessions are retained, but plan for the interruption of all unfinished durable background script runs before each reload.
 
 ## Community plugins
 

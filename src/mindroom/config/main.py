@@ -39,6 +39,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
+from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
@@ -63,7 +64,7 @@ from mindroom.config.models import (
     RouterConfig,
     ToolConfigEntry,
 )
-from mindroom.config.participation import RoomParticipationConfig  # noqa: TC001
+from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
@@ -87,7 +88,6 @@ from mindroom.constants import (
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
-from mindroom.entity_resolution import resolve_room_scoped_override
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
@@ -161,7 +161,6 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "rooms",
     "room_models",
-    "room_participation",
     "room_thread_summary_models",
     "knowledge_bases",
     "mcp_servers",
@@ -399,9 +398,11 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _source_fingerprint: str | None = PrivateAttr(default=None)
+    _uses_includes: bool = PrivateAttr(default=False)
     _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
     _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
+    _runtime_approved_egress_inherited_default_tools: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
 
@@ -424,7 +425,6 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
-    room_participation: dict[str, RoomParticipationConfig] = Field(default_factory=dict)
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     room_thread_summary_models: dict[str, str] = Field(
         default_factory=dict,
@@ -456,6 +456,7 @@ class Config(BaseModel):
         description="Tool-approval rules for agent-initiated tool calls",
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
+    personal_rooms: PersonalRoomsConfig | None = Field(default=None, description="Optional native personal agent rooms")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
     background_tool_jobs: bool = False
@@ -524,6 +525,18 @@ class Config(BaseModel):
             return
         if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
             raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def validate_personal_rooms(self) -> Config:
+        """Require a real target and onboarding rooms observed by the router."""
+        if self.personal_rooms is not None:
+            if self.personal_rooms.agent not in self.agents:
+                msg = "personal_rooms.agent must name a configured agent"
+                raise ValueError(msg)
+            if set(self.personal_rooms.onboarding_rooms) - self.get_all_configured_rooms():
+                msg = "personal_rooms.onboarding_rooms must name configured rooms"
+                raise ValueError(msg)
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -1057,7 +1070,7 @@ class Config(BaseModel):
     def source_files(self) -> frozenset[Path]:
         """Files this config was loaded from: the top-level file plus every include.
 
-        Empty when the config was not loaded from disk via :func:`load_config`.
+        Empty when the config was constructed without YAML source metadata.
         """
         return self._source_files
 
@@ -1065,6 +1078,23 @@ class Config(BaseModel):
     def source_fingerprint(self) -> str | None:
         """Fingerprint of source bytes captured at load time, including includes."""
         return self._source_fingerprint
+
+    @property
+    def uses_includes(self) -> bool:
+        """Whether the loaded YAML source resolved include or expansion tags."""
+        return self._uses_includes
+
+    def record_source_metadata(
+        self,
+        config_path: Path,
+        source_digests: dict[Path, str],
+        *,
+        uses_includes: bool,
+    ) -> None:
+        """Retain the source identity and topology of one validated YAML config."""
+        self._source_files = frozenset(source_digests)
+        self._source_fingerprint = source_files_fingerprint(config_path, source_digests)
+        self._uses_includes = uses_includes
 
     @classmethod
     def validate_with_runtime(
@@ -1082,6 +1112,7 @@ class Config(BaseModel):
 
         validate_call_agent_room_ownership(config, runtime_paths)
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
+        config._runtime_approved_egress_inherited_default_tools = approved_egress_overlay.inherited_default_tools
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
@@ -1110,6 +1141,7 @@ class Config(BaseModel):
         payload = strip_runtime_approved_egress_overlay_from_dump(
             payload,
             injected_default_tool=self._runtime_approved_egress_injected_default_tool,
+            inherited_default_tools=self._runtime_approved_egress_inherited_default_tools,
             injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
         )
         return _strip_empty_root_sections(payload)
@@ -1864,17 +1896,17 @@ class Config(BaseModel):
         return "thread"
 
     @model_validator(mode="after")
-    def validate_room_participation(self) -> Config:
-        """Require each room's designated responder to be an individual agent."""
-        for room, participation in self.room_participation.items():
-            if participation.agent not in self.agents or participation.agent == ROUTER_AGENT_NAME:
-                msg = f"Room participation for {room!r} requires a configured individual agent: {participation.agent!r}"
-                raise ValueError(msg)
+    def validate_agent_judgments(self) -> Config:
+        """Validate dedicated judgment model aliases for opted-in agents."""
+        for agent_name, agent in self.agents.items():
+            for settings in (agent.participation, agent.mid_turn):
+                if settings is None:
+                    continue
+                judgment = settings.judgment
+                if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
+                    msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
+                    raise ValueError(msg)
         return self
-
-    def get_room_participation(self, room_id: str, runtime_paths: RuntimePaths) -> RoomParticipationConfig | None:
-        """Resolve participation by concrete room ID or persisted room alias."""
-        return resolve_room_scoped_override(self.room_participation, room_id, runtime_paths, allow_raw_room_id=True)
 
     def _entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.
@@ -1976,6 +2008,7 @@ def validate_loaded_config_source(
     original: bytes,
     runtime_paths: RuntimePaths,
     *,
+    uses_includes: bool,
     tolerate_plugin_load_errors: bool = False,
 ) -> tuple[Config, dict[Path, str]]:
     """Validate and, when needed, persist one already-parsed config source."""
@@ -1983,7 +2016,7 @@ def validate_loaded_config_source(
     source_files = frozenset(source_digests)
 
     try:
-        validate_access_migration_source(data, source_files, path)
+        validate_access_migration_source(data, uses_includes=uses_includes)
         migration = migrate_access_config_data(data)
         config = Config.validate_with_runtime(
             migration.data,
@@ -1996,11 +2029,10 @@ def validate_loaded_config_source(
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         # Parsing succeeded, so the full file set is known; expose it the same
         # way as parse-time failures so reload watchers keep covering it.
-        attach_partial_source_files(exc, source_files)
+        attach_partial_source_files(exc, source_files, uses_includes=uses_includes)
         exc.config_source_fingerprint = source_files_fingerprint(path, source_digests)  # ty: ignore[invalid-assignment]
         raise
-    config._source_files = frozenset(source_digests)
-    config._source_fingerprint = source_files_fingerprint(path, source_digests)
+    config.record_source_metadata(path, source_digests, uses_includes=uses_includes)
     return config, source_digests
 
 
@@ -2016,12 +2048,13 @@ def load_config(
         raise FileNotFoundError(msg)
 
     original = path.read_bytes()
-    data, source_digests = load_yaml_config_source_with_digests(path, source=original)
+    data, source_digests, uses_includes = load_yaml_config_source_with_digests(path, source=original)
     config, source_digests = validate_loaded_config_source(
         data,
         source_digests,
         original,
         runtime_paths,
+        uses_includes=uses_includes,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
     source_files = frozenset(source_digests)

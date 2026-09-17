@@ -7,13 +7,12 @@ import base64
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import get_default_environment, stdio_client
+from mcp import StdioServerParameters
+from mcp.client.stdio import get_default_environment
 from mcp.types import ImageContent, TextContent
 
 if TYPE_CHECKING:
@@ -21,7 +20,8 @@ if TYPE_CHECKING:
 
     from mcp.types import CallToolResult
 
-PLAYWRIGHT_MCP_PACKAGE = "@playwright/mcp@0.0.78"
+from mindroom.playwright_mcp_session import PLAYWRIGHT_MCP_PACKAGE, PlaywrightMCPSession
+
 _MAX_RESULT_CHARS = 32_000
 _MAX_RESULT_JSON_BYTES = 24_000
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -69,13 +69,6 @@ class BrowserProvider(Protocol):
         ...
 
 
-@dataclass(slots=True)
-class _QueuedCall:
-    tool_name: str
-    arguments: dict[str, object]
-    future: asyncio.Future[CallToolResult]
-
-
 @dataclass(frozen=True, slots=True)
 class _MCPCall:
     tool_name: str
@@ -89,7 +82,17 @@ class _ScreenshotOutput:
 
 
 class PlaywrightMCPBrowserProvider:
-    """Drive the user's existing browser profile through Playwright MCP extension mode."""
+    """Own extension launch policy, action restrictions, and browser result handling.
+
+    Each shared session owns its MCP transport and subprocesses. User-facing
+    stop retires that session before a later start creates a fresh one; close
+    permanently forbids restart. Screenshot files are removed after the shared
+    session settles each call, including cancellation and late process output.
+
+    Callers must serialize execute calls, including stop and observations, as
+    the desktop bridge does. Observation gating and session selection assume
+    that ordering; concurrent execute calls are not supported.
+    """
 
     def __init__(
         self,
@@ -118,8 +121,7 @@ class PlaywrightMCPBrowserProvider:
         self._package = package
         self._call_timeout_seconds = float(call_timeout_seconds)
         self._extension_token = extension_token
-        self._queue: asyncio.Queue[_QueuedCall | None] | None = None
-        self._actor_task: asyncio.Task[None] | None = None
+        self._session: PlaywrightMCPSession | None = None
         self._actor_lock = asyncio.Lock()
         self._closed = False
 
@@ -192,122 +194,64 @@ class PlaywrightMCPBrowserProvider:
     @property
     def running(self) -> bool:
         """Return whether the local MCP actor is alive."""
-        return self._actor_task is not None and not self._actor_task.done()
+        return self._session is not None and self._session.running
 
     async def close(self) -> None:
-        """Permanently close the provider after its already queued calls finish."""
+        """Permanently close the provider and all owned transport resources."""
         await self._stop_actor(permanent=True)
 
     async def _stop_actor(self, *, permanent: bool) -> None:
-        """Stop the current actor, optionally rejecting every later MCP call."""
         async with self._actor_lock:
             if permanent:
                 self._closed = True
-            task = self._actor_task
-            queue = self._queue
-            self._actor_task = None
-            self._queue = None
-            if task is None:
-                return
-            if queue is not None:
-                queue.put_nowait(None)
-        await task
+            session = self._session
+            if session is not None:
+                await session.close()
+                self._session = None
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, object]) -> CallToolResult:
         async with self._actor_lock:
             if self._closed:
                 msg = "Playwright browser provider is closed."
                 raise PlaywrightBrowserError(msg)
-            future: asyncio.Future[CallToolResult] = asyncio.get_running_loop().create_future()
-            queued_call = _QueuedCall(tool_name=tool_name, arguments=arguments, future=future)
-            if self.running:
-                assert self._queue is not None
-                self._queue.put_nowait(queued_call)
-            else:
-                self._start_actor(queued_call)
+            if self._session is None or not self._session.running:
+                self._session = self._new_session()
+            session = self._session
         try:
-            async with asyncio.timeout(self._call_timeout_seconds):
-                return await future
+            return await session.call_tool(tool_name, arguments)
         except TimeoutError as exc:
-            future.cancel()
             msg = f"Playwright MCP tool {tool_name} did not answer within {self._call_timeout_seconds:g} seconds."
             raise PlaywrightBrowserError(msg) from exc
+        except Exception as exc:
+            raise _browser_error(tool_name, exc) from exc
 
-    def _start_actor(self, first_call: _QueuedCall) -> None:
-        """Start one MCP actor with work already queued so startup failures reach the caller."""
+    def _new_session(self) -> PlaywrightMCPSession:
         if shutil.which(self._command) is None:
             msg = f"Playwright browser support requires '{self._command}' on the local computer."
             raise PlaywrightBrowserError(msg)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._output_dir.chmod(0o700)
-        queue: asyncio.Queue[_QueuedCall | None] = asyncio.Queue()
-        queue.put_nowait(first_call)
-        self._queue = queue
-        self._actor_task = asyncio.create_task(self._run_actor(queue), name="playwright_mcp_extension")
+        return PlaywrightMCPSession(
+            StdioServerParameters(
+                command=self._command,
+                args=self._server_args(),
+                env=self._server_environment(),
+                cwd=str(self._output_dir),
+            ),
+            call_timeout_seconds=self._call_timeout_seconds,
+            cancelled_call_cleanup=self._remove_cancelled_call_screenshot,
+        )
 
-    def _remove_cancelled_call_screenshot(self, call: _QueuedCall) -> None:
-        """Remove a screenshot only after its timed-out MCP call has actually returned."""
-        if call.tool_name != "browser_take_screenshot":
+    def _remove_cancelled_call_screenshot(self, tool_name: str, arguments: dict[str, object]) -> None:
+        """Remove late output only after the abandoned MCP call has stopped."""
+        if tool_name != "browser_take_screenshot":
             return
-        filename = call.arguments.get("filename")
+        filename = arguments.get("filename")
         if not isinstance(filename, str) or Path(filename).name != filename:
             return
         path = (self._output_dir / filename).resolve()
         if path.parent == self._output_dir:
             path.unlink(missing_ok=True)
-
-    async def _run_actor(self, queue: asyncio.Queue[_QueuedCall | None]) -> None:  # noqa: C901, PLR0912
-        active: _QueuedCall | None = None
-        try:
-            parameters = StdioServerParameters(
-                command=self._command,
-                args=self._server_args(),
-                env=self._server_environment(),
-                cwd=str(self._output_dir),
-            )
-            async with (
-                stdio_client(parameters) as (read_stream, write_stream),
-                ClientSession(
-                    read_stream,
-                    write_stream,
-                    read_timeout_seconds=timedelta(seconds=self._call_timeout_seconds),
-                ) as session,
-            ):
-                await session.initialize()
-                while True:
-                    active = await queue.get()
-                    if active is None:
-                        return
-                    if active.future.done():
-                        active = None
-                        continue
-                    try:
-                        result = await session.call_tool(
-                            active.tool_name,
-                            active.arguments,
-                            read_timeout_seconds=timedelta(seconds=self._call_timeout_seconds),
-                        )
-                        if not active.future.done():
-                            active.future.set_result(result)
-                    except Exception as exc:
-                        if not active.future.done():
-                            active.future.set_exception(_browser_error(active.tool_name, exc))
-                    finally:
-                        if active.future.cancelled():
-                            self._remove_cancelled_call_screenshot(active)
-                        active = None
-        except Exception as exc:
-            error = _browser_error(active.tool_name if active is not None else "startup", exc)
-            if active is not None and not active.future.done():
-                active.future.set_exception(error)
-            while not queue.empty():
-                queued = queue.get_nowait()
-                if queued is not None and not queued.future.done():
-                    queued.future.set_exception(error)
-        finally:
-            if self._actor_task is asyncio.current_task():
-                self._actor_task = None
-                self._queue = None
 
     def _server_args(self) -> list[str]:
         args = [

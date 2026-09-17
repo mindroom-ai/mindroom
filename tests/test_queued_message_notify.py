@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -25,7 +25,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from structlog.testing import capture_logs
 
-from mindroom import ai_runtime
+from mindroom import ai_runtime, model_loading
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_state_storage, get_agent_session
 from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
@@ -42,7 +42,9 @@ from mindroom.coalescing_batch import (
     build_prepared_turn,
 )
 from mindroom.config.agent import AgentConfig
+from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
+from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.conversation_resolver import MessageContext
@@ -58,7 +60,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
@@ -68,6 +70,7 @@ from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAG
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
+from mindroom.mid_turn import QueuedMessage
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
@@ -109,6 +112,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.history_helpers import RecordingModel
+from tests.participation_helpers import ParticipationModel
 from tests.turn_dispatch_helpers import dispatch_test_turn, prepared_turn_recorder
 
 if TYPE_CHECKING:
@@ -521,6 +525,9 @@ class _StaticQueuedState:
     def has_pending_human_messages(self) -> bool:
         return self.pending
 
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$pending", None),) if self.has_pending_human_messages() else ()
+
 
 def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
     """Queued-message state should track distinct source events, not anonymous increments."""
@@ -653,10 +660,12 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
 
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
-    yield SimpleNamespace(
-        storage=storage,
-        storage_factory=lambda: storage,
+    yield ScopeSessionContext(
+        storage=cast("BaseDb", storage),
+        storage_factory=lambda: cast("BaseDb", storage),
         session=storage.session,
+        session_id=storage.session.session_id if storage.session is not None else "session-1",
+        session_exists=storage.session is not None,
         scope=HistoryScope("agent", "general"),
     )
 
@@ -929,6 +938,22 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
+    client.room_messages.return_value = nio.RoomMessagesResponse(
+        room_id="!room:localhost",
+        chunk=[
+            nio.RoomMessageText.from_dict(
+                {
+                    "type": "m.room.message",
+                    "event_id": "$thread",
+                    "sender": "@user0:localhost",
+                    "origin_server_ts": 0,
+                    "content": {"msgtype": "m.text", "body": "Thread root"},
+                },
+            ),
+        ],
+        start="",
+        end=None,
+    )
     runtime = BotRuntimeState(
         client=client,
         config=config,
@@ -1027,6 +1052,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         "default",
         conversation_reader,
         initial_enrichment_complete=None,
+        generated_at=ANY,
     )
 
 
@@ -2308,13 +2334,13 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
 
     async def scheduled_operation(_target: MessageTarget) -> str:
         observed_scheduled_pending.append(
-            set(lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids),
+            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
         )
         return "$scheduled-response"
 
     async def human_operation(_target: MessageTarget) -> str:
         observed_human_pending.append(
-            set(lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids),
+            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
         )
         return "$human-response"
 
@@ -2344,7 +2370,9 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
     assert await active_task == "$active-response"
     assert await scheduled_task == "$scheduled-response"
     assert observed_scheduled_pending == [{"$human"}]
-    assert lifecycle._get_or_create_queued_signal(target).pending_human_message_event_ids == {"$human"}
+    assert {
+        message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()
+    } == {"$human"}
     human_reservation.consume()
 
     assert (
@@ -4599,3 +4627,129 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
         response_turn_id=response_1_id,
     )
     assert [message.content for message in persisted_notices] == [QUEUED_MESSAGE_NOTICE_TEXT]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending_media", [False, True])
+@pytest.mark.parametrize("selection", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("reaction", [None, "👀"])
+async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pending_media: bool,
+    selection: bool,
+    enabled: bool,
+    reaction: str | None,
+) -> None:
+    """Agent opt-in reaches the real tool loop while unprepared media keeps wrap-up."""
+    bot = _bot(tmp_path)
+    bot.client.room_send.return_value = nio.RoomSendResponse.from_dict({"event_id": "$reaction"}, "!room:localhost")
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.agents[bot.agent_name].mid_turn = (
+        MidTurnConfig(
+            judgment=LLMJudgmentConfig(provider="llm", model="default"),
+            defer_reaction=reaction,
+        )
+        if enabled
+        else None
+    )
+    judge = ParticipationModel(ModelResponse(content='{"decision": false}'))
+    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    envelope = _envelope(target=MessageTarget.resolve("!room:localhost", "$thread", "$event"))
+    prompt = "Question: Install the dependency?\nSelected option: yes (install)" if selection else "hello"
+    if selection:
+        envelope = replace(envelope, body="The user selected: yes")
+    preparation = _payload_preparation(envelope.target)
+    if pending_media:
+        preparation = replace(preparation, payload_inputs=replace(preparation.payload_inputs, raw_audio_fallback=True))
+    request = ResponseRequest(
+        sources=ResponseSources(("$event",), ("$event",)),
+        prompt=prompt,
+        thread_history=[],
+        response_envelope=envelope,
+        payload_preparation=preparation if pending_media else None,
+    )
+    monkeypatch.setattr(
+        runner.deps.resolver,
+        "fetch_thread_history",
+        AsyncMock(
+            return_value=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Do the task", event_id="$thread"),
+                    ResolvedVisibleMessage.synthetic(sender="@user:localhost", body=prompt, event_id="$event"),
+                ],
+                is_full_history=True,
+            ),
+        ),
+    )
+    reservations = []
+
+    def note_progress(text: str) -> None:
+        progress = runner._lifecycle_coordinator.visible_progress_callback(envelope.target)
+        assert (progress is not None) is enabled
+        if progress is not None:
+            progress(text)
+
+    def queue_followup() -> str:
+        reservation = runner.reserve_waiting_human_message(
+            target=envelope.target,
+            response_envelope=replace(envelope, source_event_id="$queued", body="Thanks"),
+        )
+        assert reservation is not None
+        reservations.append(reservation)
+        note_progress("Later text that the user had not seen when sending")
+        return "Completed"
+
+    model = ParticipationModel(
+        ModelResponse(
+            tool_calls=[
+                {"id": "call", "type": "function", "function": {"name": "queue_followup", "arguments": "{}"}},
+            ],
+        ),
+    )
+    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    agent = AgnoAgent(model=model, tools=[queue_followup], telemetry=False)
+
+    async def locked_operation(_target: MessageTarget, _placeholder: object) -> str:
+        await runner._prepare_request_after_lock(replace(request, payload_preparation=None))
+        note_progress("I have located the requested file")
+        await agent.arun("Do the task")
+        return "$response"
+
+    try:
+        assert (
+            await runner._run_locked_response_lifecycle(
+                request,
+                response_kind="agent",
+                locked_operation=locked_operation,
+            )
+            == "$response"
+        )
+        assert len(model.requests) == 2
+        reactions = [
+            call.kwargs["content"]
+            for call in bot.client.room_send.await_args_list
+            if call.kwargs["message_type"] == "m.reaction"
+        ]
+        assert reactions == (
+            [{"m.relates_to": {"rel_type": "m.annotation", "event_id": "$queued", "key": "👀"}}]
+            if enabled and not pending_media and reaction
+            else []
+        )
+        assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is (
+            pending_media or not enabled
+        )
+        assert len(judge.requests) == (1 if enabled and not pending_media else 0)
+        assert runner._lifecycle_coordinator.visible_progress_callback(envelope.target) is None
+        if enabled and not pending_media:
+            evidence = "\n".join(str(message.content) for message in judge.requests[0]["messages"])
+            assert "I have located the requested file" in evidence
+            assert "Later text" not in evidence
+            if selection:
+                assert "Install the dependency?" in evidence
+                assert "yes (install)" in evidence
+    finally:
+        for reservation in reservations:
+            reservation.cancel()

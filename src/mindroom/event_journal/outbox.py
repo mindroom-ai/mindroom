@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 from mindroom.legacy_delivery_payloads import decode_delivery_result
 
@@ -664,13 +665,19 @@ def recovery_initials(
     *,
     after: tuple[int, str] | None = None,
 ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-    """Enumerate owned visible INITIALs without a FINAL, not arbitrary room history."""
+    """Enumerate recoverable INITIALs without resurrecting redacted responses."""
     cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
     rows = transaction.fetchall(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox AS delivery
         WHERE principal_id = ? AND event_type = 'm.room.message' AND stage = 'initial'
           AND attempted = 1 AND acknowledged_event_id IS NOT NULL AND retired = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM redaction_tombstones AS tombstone
+            WHERE tombstone.principal_id = delivery.principal_id
+              AND tombstone.room_id = delivery.room_id
+              AND tombstone.redacted_event_id = delivery.acknowledged_event_id
+          )
           AND EXISTS (
             SELECT 1 FROM room_membership AS membership
             WHERE membership.principal_id = delivery.principal_id AND membership.room_id = delivery.room_id
@@ -681,10 +688,13 @@ def recovery_initials(
             WHERE final.principal_id = delivery.principal_id AND final.delivery_id = delivery.delivery_id
               AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
                 OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
+              AND NOT (final.acknowledged_event_id IS NOT NULL AND final.result_json IS NULL
+                AND final.retired = 0 AND final.permanent_failure_reason IS NULL
+                AND final.payload_json LIKE ? ESCAPE '!')
           ){cursor_clause}
         ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
         """,  # noqa: S608 - fixed columns and cursor clause
-        (principal_id, *(after or ())),
+        (principal_id, f'%"{STREAM_STATUS_KEY.replace("_", "!_")}":"{STREAM_STATUS_ERROR}"%', *(after or ())),
     )
     return tuple(_recovery_delivery(row) for row in rows)
 

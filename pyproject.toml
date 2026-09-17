@@ -43,9 +43,10 @@ dependencies = [
   "mdit-py-plugins>=0.5",
   "mem0ai>=0.1.115",
   # Owned to-device transport requires the durable NIO API.
-  "mindroom-nio[e2e]==1.1",
+  "mindroom-nio[e2e]==1.1.1",
   "openai",
   "packaging>=24",
+  "pillow>=10.2",
   "pydantic>=2",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
@@ -105,6 +106,7 @@ brandfetch = [
 brightdata = [
   "requests",
 ]
+browser_mcp = []
 browser = [
   "playwright",
 ]

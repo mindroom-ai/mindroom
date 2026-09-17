@@ -34,6 +34,13 @@ def test_parse_native_request_accepts_strict_record() -> None:
     assert (request.request_id, request.action, request.parameters) == (request_id, "status", {})
 
 
+def test_parse_native_request_accepts_app_selection_update() -> None:
+    request = parse_native_request(
+        _request(action="set_allowed_apps", parameters={"expected_revision": 1, "allowed_app_ids": []}),
+    )
+    assert request.action == "set_allowed_apps"
+
+
 @pytest.mark.parametrize(
     ("line", "code"),
     [

@@ -4136,6 +4136,8 @@ dependencies = [
     { name = "mindroom-nio", extra = ["e2e"] },
     { name = "openai" },
     { name = "packaging" },
+    { name = "pillow", version = "10.4.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "pillow", version = "11.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pygments" },
@@ -4630,7 +4632,7 @@ requires-dist = [
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", specifier = ">=0.1.115" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=0.1.115" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.1" },
+    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.1.1" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4641,6 +4643,7 @@ requires-dist = [
     { name = "oxylabs", marker = "extra == 'oxylabs'" },
     { name = "packaging", specifier = ">=24" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2" },
+    { name = "pillow", specifier = ">=10.2" },
     { name = "pillow", marker = "extra == 'desktop'", specifier = ">=10.2" },
     { name = "playwright", marker = "extra == 'agentql'" },
     { name = "playwright", marker = "extra == 'browser'" },
@@ -4715,7 +4718,7 @@ requires-dist = [
     { name = "youtube-transcript-api", marker = "extra == 'youtube'" },
     { name = "zep-cloud", marker = "extra == 'zep'", specifier = ">=3.3" },
 ]
-provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "chat-ui", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-voice-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "supabase", "tavily", "telegram", "thread-model", "thread-resolution", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
+provides-extras = ["agent-vault-access", "agentql", "airflow", "apify", "approved-egress", "arxiv", "attachments", "aws-bedrock", "aws-lambda", "aws-ses", "baidusearch", "bitbucket", "brandfetch", "brightdata", "browser", "browser-mcp", "browserbase", "cal-com", "calculator", "callback-manager", "cartesia", "chat-ui", "claude-agent", "clickup", "coding", "compact-context", "composio", "config-manager", "confluence", "crawl4ai", "csv", "custom-api", "daytona", "delegate", "desktop", "discord", "docker", "duckdb", "duckduckgo", "dynamic-tools", "dynamic-workflow", "e2b", "eleven-labs", "email", "exa", "external-trigger-manager", "fal", "file", "file-generation", "financial-datasets-api", "firecrawl", "gemini", "giphy", "github", "gmail", "google-bigquery", "google-calendar", "google-docs", "google-drive", "google-maps", "google-scholar", "google-sheets", "googlesearch", "groq", "hackernews", "homeassistant", "invite-router", "jina", "jira", "linear", "linkup", "lumalabs", "matrix-api", "matrix-calls", "matrix-e2ee", "matrix-message", "matrix-room", "matrix-voice-message", "mem0", "memory", "modelslabs", "moviepy-video-tools", "neo4j", "newspaper", "notion", "oauth-connections", "openai", "openbb", "openclaw-compat", "openweather", "oxylabs", "pandas", "postgres", "pubmed", "python", "reasoning", "reddit", "redshift", "replicate", "report-publishing", "resend", "scheduler", "scrapegraph", "script", "searxng", "self-config", "sentence-transformers", "serpapi", "serper", "shell", "shopify", "slack", "sleep", "spider", "spotify", "sql", "supabase", "tavily", "telegram", "thread-model", "thread-resolution", "thread-summary", "thread-tags", "todo", "todoist", "trafilatura", "trello", "twilio", "unsplash", "update-awareness", "usage-stats", "visualization", "web-browser-tools", "webex", "website", "whatsapp", "wikipedia", "x", "yfinance", "youtube", "zendesk", "zep", "zoom"]
 
 [package.metadata.requires-dev]
 desktop-helper = [
@@ -4756,7 +4759,7 @@ dev = [
 
 [[package]]
 name = "mindroom-nio"
-version = "1.1.0"
+version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -4769,9 +4772,9 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/82/99/d5ea557f666db694c771400d974d075be180bb042f5bce48223ea5c89746/mindroom_nio-1.1.0.tar.gz", hash = "sha256:ba45634a41a79e702cb84696197548041d343dee036d87ef6879ec04af798a2b", size = 216965, upload-time = "2026-09-15T12:54:39.607Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/a6/53f4ab9c36c3e365d30e9ec566d9d959b66a6c2fc63f4f28432aa442715c/mindroom_nio-1.1.1.tar.gz", hash = "sha256:458ee18d207d297804c81710e726a1946e761075d9c1214fe1f75365ec574f7c", size = 217014, upload-time = "2026-09-23T02:21:31.502Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8d/46/01331b62a1e3be3a5ab3d2bebbbb49bbfb65731c7854a93ae132096d7777/mindroom_nio-1.1.0-py3-none-any.whl", hash = "sha256:92620881887370028254eaf6a8f0a976ff53cefbe701fd5e6ca62269d7ed31ab", size = 252816, upload-time = "2026-09-15T12:54:37.77Z" },
+    { url = "https://files.pythonhosted.org/packages/36/0f/7f5b298ae473f372598d5ea5a7c5cea24ae6f60ece6f09895b4d2046e77f/mindroom_nio-1.1.1-py3-none-any.whl", hash = "sha256:00399d2d94979cbe50a6fc419f9b2de37cfe7ba1c401f1c510866cba3905b2e3", size = 252844, upload-time = "2026-09-23T02:21:29.844Z" },
 ]
 
 [package.optional-dependencies]

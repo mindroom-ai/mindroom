@@ -13,6 +13,7 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -30,6 +31,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
+from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.call_session import (
     CallJoinError,
     CallSession,
@@ -37,7 +39,7 @@ from mindroom.matrix_rtc.call_session import (
     CallStartRevokedError,
     required_device_id,
 )
-from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
+from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools, record_call_voice_usage
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -66,6 +68,7 @@ from mindroom.response_admission import (
     admitted_response_decision,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.token_budget import approximate_o200k_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -119,6 +122,30 @@ _LIVE_VOICE_INSTRUCTIONS = (
     "it executes the tool workflows described above. Relay its answer conversationally. Never claim to have "
     "checked information or completed work until the agent returns the result."
 )
+_LIVE_INSTRUCTION_TOKEN_LIMIT = 16_000
+_LIVE_OVERSIZED_INSTRUCTIONS = (
+    "The agent's full caller-bound instructions and context are intentionally held by the delegated agent, "
+    "not this voice model. Delegate every substantive user request to the agent, including questions, requests "
+    "about identity or preferences, research, memory, tools, and actions. Do not answer substantive requests from "
+    "your own knowledge or infer omitted instructions. Relay only the agent's returned answer, briefly and naturally, "
+    "without markdown. Never claim to have checked information or completed work until the agent returns the result."
+)
+
+
+def _build_live_instructions(agent_system_prompt: str, *, agent_display_name: str) -> str:
+    """Use full context when it fits, otherwise require full-context delegation."""
+    suffix = f"\n\n{_LIVE_VOICE_INSTRUCTIONS}"
+    complete = f"{agent_system_prompt}{suffix}"
+    if approximate_o200k_tokens(complete) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+        return complete
+
+    bounded = (
+        f"You are speaking as {agent_display_name}, the configured agent in a live voice call. "
+        f"{_LIVE_OVERSIZED_INSTRUCTIONS}"
+    )
+    if approximate_o200k_tokens(bounded) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+        return bounded
+    return f"You are the configured agent in a live voice call. {_LIVE_OVERSIZED_INSTRUCTIONS}"
 
 
 @dataclass(frozen=True)
@@ -279,7 +306,11 @@ class CallManager:
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""
-        if event.type not in _CALL_EVENT_TYPES or self._shutting_down or not self._is_configured_call_room(room):
+        if (
+            event.type not in _CALL_EVENT_TYPES
+            or self._shutting_down
+            or not self._is_configured_call_room(room, call_event=event)
+        ):
             return
         self._observed_rooms[room.room_id] = room
         await self._reconcile(room)
@@ -604,7 +635,7 @@ class CallManager:
             self._replay_pending_keys(room.room_id, session)
             self._clear_reconcile_retry(room.room_id)
 
-    def _is_configured_call_room(self, room: nio.MatrixRoom) -> bool:
+    def _is_configured_call_room(self, room: nio.MatrixRoom, *, call_event: nio.UnknownEvent | None = None) -> bool:
         """Return whether this agent is configured to join calls in ``room``."""
         room_alias = room.canonical_alias
         room_aliases = (room_alias,) if isinstance(room_alias, str) and room_alias else ()
@@ -617,9 +648,17 @@ class CallManager:
                 invited_rooms_by_agent=self._get_invited_rooms_by_agent(),
             )
         except ValueError as error:
-            logger.warning("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
+            log = logger.warning if self._has_live_remote_call_signal(room, call_event) else logger.debug
+            log("call_room_ownership_ambiguous", room_id=room.room_id, error=str(error))
             return False
         return configured_agent == self._agent_name
+
+    def _has_live_remote_call_signal(self, room: nio.MatrixRoom, event: nio.UnknownEvent | None) -> bool:
+        """Check delivered call state without fetching idle rooms just for diagnostics."""
+        member = parse_membership_event(event.source) if event is not None else None
+        if member is None or member.is_expired(self._clock_ms()) or member.user_id == self._client.user_id:
+            return False
+        return member.user_id in cached_joined_member_ids(room)
 
     def _is_configured_call_room_id(self, room_id: str) -> bool:
         """Return whether this agent is configured to join calls in ``room_id``."""
@@ -1206,7 +1245,10 @@ class CallManager:
                 raise RuntimeError(msg)
 
             async def get_live_instructions() -> str:
-                return f"{await get_system_prompt()}\n\n{_LIVE_VOICE_INSTRUCTIONS}"
+                return _build_live_instructions(
+                    await get_system_prompt(),
+                    agent_display_name=self._config.agents[self._agent_name].display_name,
+                )
 
             return LiveVoiceAgentOptions(
                 get_instructions=get_live_instructions,
@@ -1214,6 +1256,12 @@ class CallManager:
                 api_key=backend.realtime_api_key,
                 voice=live_config.voice,
                 respond=tooling.responder,
+                record_usage=partial(
+                    record_call_voice_usage,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                ),
                 close_responder=tooling.close,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 on_conversation_turn=transcript.record,

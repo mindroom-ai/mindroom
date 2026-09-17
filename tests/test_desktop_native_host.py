@@ -1,22 +1,22 @@
 """Native desktop host lifecycle tests."""
 
 # Compact fakes keep the wire-level lifecycle assertions readable.
-# ruff: noqa: C416, D101, D102, D103, EM101, S106, TC001, TC003, TRY003
+# ruff: noqa: C416, D101, D102, D103, EM101, S106, TRY003
 
 from __future__ import annotations
 
 import asyncio
 import io
 import json
-from pathlib import Path
+import os
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
 
 from mindroom.desktop.command_journal import DesktopCommandJournal
-from mindroom.desktop.native_config import NativeDesktopConfig
+from mindroom.desktop.native_config import NativeDesktopConfig, load_native_config, native_config_path
 from mindroom.desktop.native_host import (
     NativeDesktopHost,
     NativeHostDependencies,
@@ -25,6 +25,10 @@ from mindroom.desktop.native_host import (
 )
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest
 from mindroom.desktop.protocol import DesktopCommand
+from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _config_payload() -> dict[str, object]:
@@ -92,6 +96,101 @@ class FakeRuntime:
 
 def _request(action: str, **parameters: object) -> NativeRequest:
     return NativeRequest(str(uuid4()), action, parameters)
+
+
+def test_status_restores_saved_identity_without_exposing_or_changing_session(tmp_path: Path) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    save_desktop_session(path, DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"))
+    original = path.read_bytes()
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    status = host.status()
+
+    assert status["pairing"] == {
+        "state": "unpaired",
+        "session_state": "ready",
+        "homeserver": "https://example.org",
+        "user_id": "@me:example.org",
+        "device_id": "LOCAL",
+        "controller_fingerprint": None,
+    }
+    assert status["bridge"]["state"] == "stopped"
+    assert "secret-token" not in repr(status)
+    assert path.read_bytes() == original
+
+
+def test_status_detects_session_created_and_removed_while_helper_runs(tmp_path: Path) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    assert host.status()["pairing"]["session_state"] == "missing"
+
+    save_desktop_session(path, DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"))
+
+    assert host.status()["pairing"]["device_id"] == "LOCAL"
+    path.unlink()
+    assert host.status()["pairing"]["session_state"] == "missing"
+    assert host.status()["pairing"]["device_id"] is None
+
+
+@pytest.mark.parametrize("invalid", ["malformed", "exposed", "directory"])
+def test_status_keeps_invalid_saved_session_recoverable_without_trusting_identity(tmp_path: Path, invalid: str) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    save_desktop_session(path, DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"))
+    if invalid == "malformed":
+        path.write_text("invalid-secret-json")
+    elif invalid == "exposed":
+        path.chmod(0o644)
+    else:
+        path.unlink()
+        path.mkdir()
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    status = host.status()
+
+    assert status["pairing"]["session_state"] == "invalid"
+    assert status["pairing"]["device_id"] is None
+    assert status["pairing"]["user_id"] is None
+    assert "secret" not in repr(status)
+    assert status["helper"]["state"] == "running"
+    assert path.exists()
+
+
+def test_status_does_not_open_a_fifo_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    path.parent.mkdir()
+    os.mkfifo(path, 0o600)
+    open_file = os.open
+
+    def guarded_open(file: Path, flags: int) -> int:
+        if file == path:
+            assert flags & os.O_NONBLOCK, "Opening the session FIFO would block all helper requests"
+        return open_file(file, flags)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    assert host.status()["pairing"]["session_state"] == "invalid"
+
+
+def test_replacing_directory_session_rejects_before_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    path.mkdir(parents=True)
+    sentinel = path / "keep.txt"
+    sentinel.write_text("keep")
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    async def unexpected_authentication(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Authentication must not start for an unreplaceable session path")
+
+    monkeypatch.setattr("mindroom.desktop.session.resolve_desktop_login_method", unexpected_authentication)
+
+    with pytest.raises(NativeProtocolError, match="regular file"):
+        asyncio.run(host.handle(_request("login", homeserver="https://example.org", replace=True)))
+
+    assert sentinel.read_text() == "keep"
 
 
 def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:
@@ -211,6 +310,79 @@ def test_configure_same_controller_preserves_journal_and_saves_app_changes(tmp_p
     assert result["status"]["config"]["revision"] == 2
     assert result["status"]["config"]["allowed_app_ids"] == ["com.example.Other"]
     assert journal_path.read_bytes() == original_journal
+
+
+def test_set_allowed_apps_preserves_connection_and_other_settings(tmp_path: Path) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    payload = _config_payload()
+    payload["capture"] = {"max_screenshot_width": 1200, "jpeg_quality": 65}
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+    original = load_native_config(native_config_path(tmp_path)).to_payload()
+
+    result = asyncio.run(
+        host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=["com.example.Other"])),
+    )
+
+    saved = load_native_config(native_config_path(tmp_path)).to_payload()
+    assert saved == original | {"revision": 2, "allowed_app_ids": ["com.example.Other"]}
+    assert result["status"]["config"]["allowed_app_ids"] == ["com.example.Other"]
+    with pytest.raises(NativeProtocolError, match="changed"):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+    assert load_native_config(native_config_path(tmp_path)).to_payload() == saved
+
+
+def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
+    )
+    with pytest.raises(NativeProtocolError, match="setup"):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=0, allowed_app_ids=[])))
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    asyncio.run(host.handle(_request("start")))
+    with pytest.raises(NativeProtocolError, match="Stop"):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+    asyncio.run(host.handle(_request("stop")))
+    result = asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+    assert result["status"]["config"]["allowed_app_ids"] == []
+    assert result["status"]["bridge"]["state"] == "stopped"
+    with pytest.raises(NativeProtocolError, match="at least one app"):
+        asyncio.run(host.handle(_request("start")))
+
+
+@pytest.mark.parametrize("app_ids", ["com.example.Editor", [""], [123]])
+def test_set_allowed_apps_validates_app_ids(tmp_path: Path, app_ids: object) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    with pytest.raises(NativeProtocolError):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=app_ids)))
+    assert host.status()["config"]["revision"] == 1
+
+
+def test_app_only_save_preserves_browser_config_when_paths_disappear(tmp_path: Path) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    executable = tmp_path / "browser"
+    executable.touch()
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    payload = _config_payload()
+    payload["browser"] = {
+        "enabled": True,
+        "executable_path": str(executable),
+        "user_data_dir": str(profile),
+        "timeout_seconds": 45,
+    }
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+    executable.unlink()
+    profile.rmdir()
+
+    asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+
+    saved = load_native_config(native_config_path(tmp_path))
+    assert saved.allowed_app_ids == ()
+    assert saved.to_payload()["browser"] == payload["browser"]
 
 
 @pytest.mark.parametrize("journal_kind", ["malformed", "directory", "symlink"])

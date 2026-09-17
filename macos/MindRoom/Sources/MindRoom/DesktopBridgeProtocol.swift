@@ -57,8 +57,13 @@ struct DesktopConfigStatus: Codable, Equatable {
     }
 }
 
+enum DesktopSessionState: String, Codable {
+    case missing, ready, invalid
+}
+
 struct DesktopPairingStatus: Codable, Equatable {
     let state: String
+    let sessionState: DesktopSessionState
     let homeserver: String?
     let userID: String?
     let deviceID: String?
@@ -66,6 +71,7 @@ struct DesktopPairingStatus: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case state, homeserver
+        case sessionState = "session_state"
         case userID = "user_id"
         case deviceID = "device_id"
         case controllerFingerprint = "controller_fingerprint"
@@ -163,6 +169,7 @@ struct DesktopStatus: Codable, Equatable {
         ),
         pairing: DesktopPairingStatus(
             state: "unpaired",
+            sessionState: .missing,
             homeserver: nil,
             userID: nil,
             deviceID: nil,

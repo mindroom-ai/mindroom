@@ -361,6 +361,17 @@ class CascadedVoiceAgentOptions:
 
 
 @dataclass(frozen=True)
+class LiveVoiceUsage:
+    """Cumulative provider duration for one GPT-Live session."""
+
+    provider_session_id: str
+    model: str
+    created_at: float
+    duration_seconds: float
+    finalized: bool
+
+
+@dataclass(frozen=True)
 class LiveVoiceAgentOptions:
     """GPT-Live speech with delegation to the normal MindRoom agent."""
 
@@ -369,6 +380,7 @@ class LiveVoiceAgentOptions:
     api_key: str
     voice: str
     respond: Callable[[str, Callable[[list[str]], None] | None], Awaitable[CallAgentResponse]]
+    record_usage: Callable[[LiveVoiceUsage], Awaitable[None]] | None = None
     close_responder: Callable[[], Awaitable[None]] | None = None
     greeting_instructions: str | None = None
     on_conversation_turn: Callable[[str, str], None] | None = None

@@ -123,6 +123,8 @@ _CLI_ROOTS = frozenset(
     },
 )
 _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
+    "mindroom.desktop.protocol": frozenset({"dotenv"}),
+    "mindroom.matrix.runtime_media": frozenset({"dotenv"}),
     "mindroom.cli.main": _CLI_ROOTS,
     # Doctor may use the CLI, config, and HTTP stacks at import time, but no
     # provider, storage, or other feature-specific dependency.

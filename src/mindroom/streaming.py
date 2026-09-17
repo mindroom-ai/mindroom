@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
@@ -30,6 +31,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.large_messages import should_send_oversized_nonterminal_streaming_edit
 from mindroom.matrix.mentions import format_message_with_mentions
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.orchestration.runtime import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
@@ -432,6 +434,7 @@ class _StreamingDeliverySnapshot:
     stream_status: str
     interactive_creator_agent: str | None
     interactive_source_event_id: str | None
+    markdown_renderer: Callable[[str], str]
 
 
 def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _PreparedStreamingDelivery:
@@ -470,6 +473,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
         latest_thread_event_id=latest_for_message,
         tool_trace=tool_trace if snapshot.show_tool_calls else None,
         extra_content=extra_content,
+        markdown_renderer=snapshot.markdown_renderer,
     )
     if snapshot.stream_status in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}:
         # Matrix suppresses m.notice before evaluating mention rules. Streaming
@@ -549,6 +553,7 @@ class StreamingResponse:
     placeholder_progress_sent: bool = False
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     # How the terminal edit reaches Matrix, when the caller wants it durable.
     # A streamed answer becomes visible through edits, so the last one is the
@@ -576,6 +581,12 @@ class StreamingResponse:
     transport_is_current: Callable[[], Awaitable[bool]] | None = None
     canonical_final_body_candidate: str | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
+    # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
+    _render_markdown: Callable[[str], str] = field(
+        default_factory=lambda: lru_cache(maxsize=1)(markdown_to_html),
+        init=False,
+        repr=False,
+    )
     _last_delivered_text: str = field(default="", init=False, repr=False)
     _last_delivered_tool_trace: list[ToolTraceEntry] = field(default_factory=list, init=False, repr=False)
     _last_delivered_presentation_state: dict[str, object] | None = field(default=None, init=False, repr=False)
@@ -1151,6 +1162,7 @@ class StreamingResponse:
             stream_status=self._resolve_stream_status(is_final=is_final, stream_status=stream_status),
             interactive_creator_agent=self.interactive_creator_agent,
             interactive_source_event_id=self.interactive_source_event_id,
+            markdown_renderer=self._render_markdown,
         )
 
     async def _prepare_delivery_async(
@@ -1195,6 +1207,8 @@ class StreamingResponse:
         self._last_committed_visible_body_state = committed_state.visible_body_state
         self._last_committed_interactive_metadata = committed_state.interactive_metadata
         self.placeholder_progress_sent = committed_state.placeholder_progress_sent
+        if self.visible_progress_callback is not None:
+            self.visible_progress_callback(committed_state.rendered_body)
 
     def _committed_terminal_snapshot(
         self,
@@ -2027,6 +2041,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
+    visible_progress_callback: Callable[[str], None] | None = None,
     latest_thread_event_id: str | None = None,
     preserve_existing_visible_on_empty_terminal: bool = False,
     terminal_edit: TerminalEdit | None = None,
@@ -2053,6 +2068,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         max_idle=sc.max_idle,
         pipeline_timing=pipeline_timing,
         visible_event_id_callback=visible_event_id_callback,
+        visible_progress_callback=visible_progress_callback,
         preserve_existing_visible_on_empty_terminal=preserve_existing_visible_on_empty_terminal,
         terminal_edit=terminal_edit,
         terminal_send=terminal_send,

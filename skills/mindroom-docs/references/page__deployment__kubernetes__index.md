@@ -44,23 +44,55 @@ Enable `autoscaling.enabled` only after the cluster has metrics-server and enoug
 
 ### Via Provisioner API (Recommended)
 
-```bash
-export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
+Create customer instances through the portal or `POST /my/instances/provision` using the customer's Supabase access token.
+The route checks subscription entitlement and derives the account, subscription, and tier from the authenticated customer.
+Set `PLATFORM_DOMAIN` to the deployment domain and `SUPABASE_ACCESS_TOKEN` to that customer's access token:
 
-# Provision, check status, view logs
-./cluster/scripts/mindroom-cli.sh provision 1
-./cluster/scripts/mindroom-cli.sh status
-./cluster/scripts/mindroom-cli.sh logs 1
+```bash
+curl --fail-with-body --request POST \
+  "https://api.${PLATFORM_DOMAIN}/my/instances/provision" \
+  --header @- <<EOF
+Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}
+EOF
 ```
+
+The authorization header is read from standard input so the token does not appear in curl's process arguments.
+
+Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned or re-provisioned when deprovisioned.
+Use the returned `customer_id` with the CLI's `logs <id>` command.
+The CLI's `provision <id>` command uses fixed test metadata and is not the new-customer creation path.
 
 ### Direct Helm Installation
 
-For debugging only:
+For debugging only, first create a private values file with a nonempty sandbox token from a trusted working directory:
+
+```bash
+(
+  set -eu
+  umask 077
+  test ! -d ./instance-secrets.yaml
+  instance_secrets_tmp="$(mktemp ./instance-secrets.yaml.XXXXXX)"
+  trap 'rm -f -- "$instance_secrets_tmp"' EXIT
+  instance_sandbox_token="$(openssl rand -hex 32)"
+  printf 'sandbox_proxy_token: "%s"\n' "$instance_sandbox_token" > "$instance_secrets_tmp"
+  mv -f -- "$instance_secrets_tmp" ./instance-secrets.yaml
+)
+```
+
+The private temporary file replaces `instance-secrets.yaml` atomically, without reusing an existing file's permissions or following a file symlink.
+Keep this file out of version control.
+With Helm's default Secret storage backend, the command below also retains supplied values and rendered Secrets in release history in `mindroom-instances`.
+Readers of those release Secrets can recover the sandbox token and other supplied credentials.
+Restrict access to both the instance Secret and every retained Helm release Secret, as well as this local values file.
+Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
+The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
+The provisioner supplies this token automatically, while a direct install must provide it.
 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --create-namespace \
+  -f instance-secrets.yaml \
   --set customer=1 \
   --set accountId="your-account-uuid" \
   --set baseDomain=mindroom.chat \
@@ -185,7 +217,16 @@ Shared, unscoped, and `user_agent` worker keys select their encoded agent, while
 Knowledge bases assigned to other agents and configured knowledge bases with no matching assignment are not mounted.
 
 For a source at `<shared-storage-root>/<relative-path>`, the worker-visible path is `<worker-storage-mount>/<relative-path>`.
-The default worker storage mount is `/app/worker`, so a source at `<shared-storage-root>/knowledge/reference` is visible at `/app/worker/knowledge/reference`.
+The effective default depends on the deployment:
+
+| Deployment | Worker storage mount | Visible path for `knowledge/reference` |
+| --- | --- | --- |
+| Runtime chart (`storage.mountPath`) | `/app/agent_data` | `/app/agent_data/knowledge/reference` |
+| Instance chart (`storagePath`) | `/mindroom_data` | `/mindroom_data/knowledge/reference` |
+| Direct backend without a mount override | `/app/worker` | `/app/worker/knowledge/reference` |
+
+Both charts set `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`; the direct-backend fallback applies when that environment override is absent.
+Custom chart values or runtime environment settings can select another root.
 The worker mounts that directory from the existing worker-storage PVC with `subPath: <relative-path>` and `readOnly: true`.
 The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
 MindRoom does not copy or clone the source per agent.
@@ -210,6 +251,7 @@ kubernetesWorkerStorageSubpathPrefix: "workers"
 kubernetesWorkerPort: 8766
 kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800
+kubernetesWorkerRuntimeClassName: ""
 sandbox_proxy_token: "replace-me"
 ```
 
@@ -224,6 +266,8 @@ Important behavior and constraints:
 - `kubernetesWorkerIdleTimeoutSeconds` controls when a worker is considered idle and eligible to scale down.
 - `kubernetesWorkerReadyTimeoutSeconds` controls how long the primary runtime waits for a worker Deployment to become ready.
 - `kubernetesWorkerPort` is the internal Service and container port used by dedicated workers.
+- `kubernetesWorkerRuntimeClassName` selects one Kubernetes RuntimeClass for the entire dedicated-worker pool, including background-script workers. The runtime chart uses `workers.kubernetes.runtimeClassName`; direct deployments can set `MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME`. Leave it empty for the cluster default.
+- Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior. Changing the value participates in worker reconciliation and can recreate existing workers when they are next ensured, so finish active work before changing it.
 - Dedicated workers need access to the shared instance PVC so they can reach agent storage directories.
 - For `shared`, `user_agent`, and unscoped execution, mounts are narrowed to just the target agent's directory plus the worker's scratch space.
 - Shared credentials are copied into each dedicated worker as needed instead of exposing the whole shared credentials directory inside agent-isolated pods.
@@ -279,8 +323,9 @@ env:
 The standalone runtime chart instead reads `providerCredentials` Secret keys into direct provider environment variables.
 Its `env` values shape is a map with `extra` and `envFrom`, not the list shown above for the hosted instance container.
 
-For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
-The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+For production SaaS instance provisioning, the instance chart is rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`.
+After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
+Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
 
 ## Ingress
 
@@ -299,11 +344,19 @@ cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-
 
 helm upgrade --install platform ./cluster/k8s/platform \
   -f ./cluster/k8s/platform/values-staging.yaml \
-  --namespace mindroom-staging
+  --namespace staging --create-namespace
 ```
 
-The namespace must match `mindroom-{environment}` where `environment` is set in values.
+For a fresh install, `staging` stores Helm release records; the chart creates application resources in `mindroom-{environment}`, with `environment` set in values.
+For an existing release, retain its original release name and namespace when upgrading.
+Ingress hosts use `domain`, independently of the namespace; the base values use `mindroom.chat`, while the staging example uses `staging.mindroom.chat`.
+Populate the staging file's credentials before deploying and keep it private.
+With this chart-managed Secret workflow, Helm also retains the supplied values and rendered Secrets in release history in `staging`; anyone with permission to read those release Secrets can recover the credentials.
+Restrict access to the values file and all retained release Secrets.
 For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
+This external-Secret option is also available in staging; omit credential material from Helm values when using it.
+Provisioning that external Secret requires the application namespace to exist with ownership compatible with the chart, which still declares `mindroom-{environment}` regardless of `platformSecrets.create`.
+Switching to the external-Secret option does not remove credentials from earlier release revisions.
 The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
 
 Platform ingress hosts:
@@ -329,12 +382,15 @@ See `cluster/k8s/kind/README.md` for details.
 ./cluster/scripts/mindroom-cli.sh list              # List instances
 ./cluster/scripts/mindroom-cli.sh status            # Overall status
 ./cluster/scripts/mindroom-cli.sh logs <id>         # View logs
-./cluster/scripts/mindroom-cli.sh provision <id>    # Create instance
+./cluster/scripts/mindroom-cli.sh provision <id>    # Re-provision an existing test fixture
 ./cluster/scripts/mindroom-cli.sh deprovision <id>  # Remove instance
 ./cluster/scripts/mindroom-cli.sh upgrade <id>      # Upgrade instance
 ```
 
 Reads configuration from `saas-platform/.env`.
+The `provision` helper always sends an instance ID, a fixed test account UUID, a synthetic subscription ID, and the BYOK tier.
+Use it only with a prepared test fixture whose instance and account records already exist, including the account email used to derive the owner identity.
+Use the customer route above for customer provisioning; operators should use real account and subscription records with the API below.
 
 ## Provisioner API
 
@@ -349,13 +405,16 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 | `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
 | `/system/sync-instances` | POST | Sync states between DB and K8s |
 
-Example provision request:
+For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
+Supplying `instance_id` selects an update of an existing instance; a missing row returns `404`.
+The account must have an email for owner identity derivation.
+Replace the placeholders in this operator request with those database values:
 
 ```bash
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
+  -d '{"account_id": "<account-uuid>", "subscription_id": "<subscription-row-uuid>", "tier": "<subscription-tier>"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.

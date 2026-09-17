@@ -565,6 +565,7 @@ export function AgentEditor() {
       icon={Bot}
       title="Agent Details"
       isDirty={isDirty}
+      isBusy={toolsLoading || skillsLoading}
       onSave={handleSave}
       onDelete={handleDelete}
       disableSave={isLoading}

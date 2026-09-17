@@ -13,12 +13,13 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
 from urllib.parse import quote, unquote
-from uuid import uuid4
 
 import yaml
 
 from mindroom import yaml_io
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -133,15 +134,9 @@ def _open_directory_at(
     create: bool,
 ) -> int | None:
     """Open one directory relative to a pinned parent without following symlinks."""
-    if create:
-        try:
-            os.mkdir(name, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise _unsafe_directory(path, label) from exc
     try:
-        return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+        with open_directory_within_root(parent_fd, name, create=create) as descriptor:
+            return os.dup(descriptor)
     except FileNotFoundError:
         if not create:
             return None
@@ -158,29 +153,21 @@ def _open_anchored_directory(
     final_label: str,
 ) -> int | None:
     """Open one descendant by descriptor-relative traversal without symlinks."""
-    descriptors: list[int] = []
     try:
-        descriptors.append(os.open(trusted_root, _DIRECTORY_OPEN_FLAGS))
-        for index, part in enumerate(relative_parts):
-            descriptor = _open_directory_at(
-                descriptors[-1],
-                part,
-                path=trusted_root.joinpath(*relative_parts[: index + 1]),
-                label=final_label if index == len(relative_parts) - 1 else "root parent",
+        with open_directory_within_root(trusted_root, Path(*relative_parts[:-1]), create=create) as parent_fd:
+            return _open_directory_at(
+                parent_fd,
+                relative_parts[-1],
+                path=trusted_root.joinpath(*relative_parts),
+                label=final_label,
                 create=create,
             )
-            if descriptor is None:
-                return None
-            descriptors.append(descriptor)
     except FileNotFoundError:
         if not create:
             return None
         raise
-    else:
-        return descriptors.pop()
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
+    except OSError as exc:
+        raise _unsafe_directory(trusted_root.joinpath(*relative_parts[:-1]), "root parent") from exc
 
 
 def _open_export_root(
@@ -444,28 +431,8 @@ def _read_text_at(directory_fd: int, filename: str) -> str | None:
 
 
 def _atomic_write_at(directory_fd: int, filename: str, text: str) -> None:
-    """Durably replace one file relative to an already-pinned directory."""
-    temp_name = f".{filename}.{uuid4().hex}.tmp"
-    temp_fd = -1
-    try:
-        temp_fd = os.open(
-            temp_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory_fd,
-        )
-        with os.fdopen(temp_fd, mode="w", encoding="utf-8") as temp_file:
-            temp_fd = -1
-            temp_file.write(text)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-        os.replace(temp_name, filename, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        _fsync_directory_fd(directory_fd)
-    finally:
-        if temp_fd >= 0:
-            os.close(temp_fd)
-        with suppress(FileNotFoundError):
-            os.unlink(temp_name, dir_fd=directory_fd)
+    """Publish UTF-8 text with the temporary naming scheme used by export cleanup."""
+    atomic_write_bytes_at(directory_fd, filename, text.encode("utf-8"), temp_prefix=f".{filename}.")
 
 
 def _timestamp_iso(timestamp_ms: int) -> str | None:

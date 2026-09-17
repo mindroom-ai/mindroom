@@ -25,12 +25,14 @@ from mindroom.config.access import (
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
+from mindroom.config.mid_turn import MidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
     AgentLearningMode,
     CompactionOverrideConfig,
     ToolConfigEntry,
     validate_unique_tool_entries,
 )
+from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
@@ -221,6 +223,14 @@ class AgentConfig(BaseModel):
     skills: list[str] = Field(default_factory=list, description="List of skill names")
     instructions: list[str] = Field(default_factory=list, description="Agent instructions")
     rooms: list[str] = Field(default_factory=list, description="List of room IDs or names to auto-join")
+    participation: ParticipationConfig | None = Field(
+        default=None,
+        description="Opt-in adaptive participation in existing multi-human threads across all rooms",
+    )
+    mid_turn: MidTurnConfig | None = Field(
+        default=None,
+        description="Opt-in judgments for messages queued during this agent's response across all rooms",
+    )
     access: ResponderAccessConfig | None = Field(
         default=None,
         description="Optional membership-based conversation access policy",

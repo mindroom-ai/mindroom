@@ -34,11 +34,16 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
     favicon = BytesIO()
     with Image.open(BytesIO(png[256])) as image:
         image.save(favicon, format="ICO", sizes=[(size, size) for size in (16, 32, 48, 64, 128, 256)])
+    app_icons = {
+        appearance: render(etree.fromstring(artwork[f"app-icon-{appearance}.svg"])) for appearance in ("light", "dark")
+    }
     return {
         "frontend/public/logo.svg": mark,
         "frontend/public/logo.png": png[1024],
         "frontend/public/favicon.png": png[64],
         "frontend/public/logo-square.png": artwork["preview.png"],
+        "macos/MindRoom/Sources/MindRoom/Resources/logo.svg": mark,
+        "macos/MindRoom/Sources/MindRoom/Resources/logo.png": png[1024],
         "docs/assets/logo.svg": mark,
         "docs/assets/logo.png": png[320],
         "docs/assets/favicon.png": png[64],
@@ -46,4 +51,12 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
         "saas-platform/platform-frontend/public/res/branding/mindroom.png": png[1024],
         "saas-platform/platform-frontend/src/app/favicon.ico": favicon.getvalue(),
         "avatars/spaces/root_space.png": png[256],
+        **{
+            f"macos/MindRoom/Sources/MindRoom/Resources/logo-menu{suffix}.png": render(root, size)
+            for suffix, size in (("", 20), ("@2x", 40))
+        },
+        **{
+            f"macos/MindRoom/Resources/MindRoom.icon/Assets/{appearance}.png": content
+            for appearance, content in app_icons.items()
+        },
     }

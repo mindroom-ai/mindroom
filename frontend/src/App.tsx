@@ -1,24 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, useNavigate, useLocation } from "react-router-dom";
-import {
-  BookOpen,
-  Bot,
-  Brain,
-  CalendarClock,
-  Check,
-  DoorOpen,
-  Home,
-  KeyRound,
-  LayoutDashboard,
-  Menu,
-  Mic,
-  Plug,
-  Puzzle,
-  Settings2,
-  type LucideIcon,
-  Users,
-} from "lucide-react";
+import { BrowserRouter, useLocation } from "react-router-dom";
 import { useConfigStore } from "@/store/configStore";
 import { AgentList } from "@/components/AgentList/AgentList";
 import { AgentEditor } from "@/components/AgentEditor/AgentEditor";
@@ -35,19 +17,12 @@ import { Integrations } from "@/components/Integrations/Integrations";
 import { UnconfiguredRooms } from "@/components/UnconfiguredRooms/UnconfiguredRooms";
 import { SyncStatus } from "@/components/SyncStatus/SyncStatus";
 import { Dashboard } from "@/components/Dashboard/Dashboard";
+import { Usage } from "@/components/Usage/Usage";
 import { Skills } from "@/components/Skills/Skills";
 import { Schedules } from "@/components/Schedules/Schedules";
 import { Credentials } from "@/components/Credentials/Credentials";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 import { ThemeToggle } from "@/components/ThemeToggle/ThemeToggle";
@@ -57,73 +32,31 @@ import {
   getGlobalConfigDiagnostics,
   type GlobalConfigDiagnostic,
 } from "@/lib/configValidation";
-import { cn } from "@/lib/utils";
+import {
+  getNavigationValue,
+  NAV_ITEMS,
+  Navigation,
+} from "@/components/Navigation/Navigation";
 
 const queryClient = new QueryClient();
 
-type NavItem = {
-  value: string;
+function RoutePanel({
+  active,
+  label,
+  className,
+  children,
+}: {
+  active: boolean;
   label: string;
-  icon: LucideIcon;
-  group: "Workspace" | "Configuration";
-};
-
-const NAV_ITEMS: NavItem[] = [
-  {
-    value: "dashboard",
-    label: "Dashboard",
-    icon: LayoutDashboard,
-    group: "Workspace",
-  },
-  { value: "agents", label: "Agents", icon: Bot, group: "Workspace" },
-  { value: "teams", label: "Teams", icon: Users, group: "Workspace" },
-  { value: "rooms", label: "Rooms", icon: Home, group: "Workspace" },
-  {
-    value: "schedules",
-    label: "Schedules",
-    icon: CalendarClock,
-    group: "Workspace",
-  },
-  {
-    value: "unconfigured-rooms",
-    label: "External",
-    icon: DoorOpen,
-    group: "Workspace",
-  },
-  { value: "models", label: "Models", icon: Settings2, group: "Configuration" },
-  { value: "memory", label: "Memory", icon: Brain, group: "Configuration" },
-  {
-    value: "knowledge",
-    label: "Knowledge",
-    icon: BookOpen,
-    group: "Configuration",
-  },
-  {
-    value: "credentials",
-    label: "Credentials",
-    icon: KeyRound,
-    group: "Configuration",
-  },
-  { value: "voice", label: "Voice", icon: Mic, group: "Configuration" },
-  { value: "integrations", label: "Tools", icon: Plug, group: "Configuration" },
-  { value: "skills", label: "Skills", icon: Puzzle, group: "Configuration" },
-];
-
-const NAV_GROUPS: NavItem["group"][] = ["Workspace", "Configuration"];
-const DEFAULT_TAB = NAV_ITEMS[0].value;
-const NAV_VALUES = new Set(NAV_ITEMS.map((item) => item.value));
-
-const TAB_TRIGGER_CLASS =
-  "inline-flex items-center gap-1.5 rounded-lg data-[state=active]:bg-white/50 dark:data-[state=active]:bg-primary/20 data-[state=active]:text-primary data-[state=active]:shadow-sm data-[state=active]:backdrop-blur-xl data-[state=active]:border data-[state=active]:border-white/50 dark:data-[state=active]:border-primary/30 transition-all whitespace-nowrap";
-const NAV_OVERFLOW_ENTER_PX = 1;
-const NAV_OVERFLOW_EXIT_BUFFER_PX = 24;
-
-export function resolveCurrentTab(pathname: string): string {
-  const [firstSegment] = pathname.split("/").filter(Boolean);
-  if (firstSegment && NAV_VALUES.has(firstSegment)) {
-    return firstSegment;
-  }
-  return DEFAULT_TAB;
+  className: string;
+  children: ReactNode;
+}) {
+  if (!active) return null;
+  return (
+    <section aria-label={`${label} workspace`} className={className}>
+      {children}
+    </section>
+  );
 }
 
 function isAuthDiagnosticMessage(message: string): boolean {
@@ -165,22 +98,18 @@ function AppContent() {
     configUsesIncludes,
     configJournalPendingRestart,
     isLoading,
+    isDirty,
     selectedAgentId,
     selectedTeamId,
     selectedRoomId,
   } = useConfigStore();
-  const navigate = useNavigate();
   const location = useLocation();
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [desktopCompactNav, setDesktopCompactNav] = useState(false);
-  const tabsListRef = useRef<HTMLDivElement | null>(null);
-  const compactNavEnteredWidthRef = useRef<number | null>(null);
 
   // Get the current tab from URL or default to 'dashboard'
-  const currentTab = resolveCurrentTab(location.pathname);
+  const currentTab = getNavigationValue(location.pathname);
   const currentNavItem =
     NAV_ITEMS.find((item) => item.value === currentTab) || NAV_ITEMS[0];
-  const CurrentNavIcon = currentNavItem.icon;
+  const previousSelectedRoomIdRef = useRef(selectedRoomId);
   const validationIssues = getConfigValidationIssues(diagnostics);
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
   const blockingDiagnostic =
@@ -219,62 +148,35 @@ function AppContent() {
     loadConfig();
   }, [loadConfig]);
 
-  useEffect(() => {
-    setMobileMenuOpen(false);
-  }, [currentTab]);
+  useLayoutEffect(() => {
+    const previousSelectedRoomId = previousSelectedRoomIdRef.current;
+    previousSelectedRoomIdRef.current = selectedRoomId;
 
-  useEffect(() => {
-    const tabsList = tabsListRef.current;
-    if (!tabsList) return;
-
-    let frameId: number | null = null;
-    const updateDesktopNavMode = () => {
-      if (frameId !== null) {
-        cancelAnimationFrame(frameId);
+    if (
+      currentTab === "rooms" &&
+      window.innerWidth < 1024 &&
+      previousSelectedRoomId === null &&
+      selectedRoomId !== null
+    ) {
+      const workspace = document.querySelector<HTMLElement>(".rooms-workspace");
+      const roomsLayout =
+        workspace?.querySelector<HTMLElement>(".rooms-layout");
+      if (workspace && roomsLayout) {
+        const workspaceTop = workspace.getBoundingClientRect().top;
+        const layoutTop = roomsLayout.getBoundingClientRect().top;
+        const paddingTop = Number.parseFloat(
+          window.getComputedStyle(workspace).paddingTop,
+        );
+        workspace.scrollTo(
+          0,
+          Math.max(
+            0,
+            workspace.scrollTop + layoutTop - workspaceTop - paddingTop,
+          ),
+        );
       }
-      frameId = requestAnimationFrame(() => {
-        const clientWidth = tabsList.clientWidth;
-        const hasHorizontalOverflow =
-          tabsList.scrollWidth > clientWidth + NAV_OVERFLOW_ENTER_PX;
-        setDesktopCompactNav((prevCompact) => {
-          if (!prevCompact) {
-            if (hasHorizontalOverflow) {
-              compactNavEnteredWidthRef.current = clientWidth;
-              return true;
-            }
-            return false;
-          }
-          const enteredWidth = compactNavEnteredWidthRef.current ?? clientWidth;
-          const hasGrownEnoughToExit =
-            clientWidth >= enteredWidth + NAV_OVERFLOW_EXIT_BUFFER_PX;
-          if (!hasHorizontalOverflow && hasGrownEnoughToExit) {
-            compactNavEnteredWidthRef.current = null;
-            return false;
-          }
-          return true;
-        });
-      });
-    };
-
-    updateDesktopNavMode();
-
-    const resizeObserver = new ResizeObserver(updateDesktopNavMode);
-    resizeObserver.observe(tabsList);
-    window.addEventListener("resize", updateDesktopNavMode);
-
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener("resize", updateDesktopNavMode);
-      if (frameId !== null) {
-        cancelAnimationFrame(frameId);
-      }
-    };
-  }, []);
-
-  // Handle tab change - update the URL
-  const handleTabChange = (value: string) => {
-    navigate(`/${value}`);
-  };
+    }
+  }, [currentTab, selectedRoomId]);
 
   const getPlatformUrl = () => {
     const configured = (import.meta as any).env?.VITE_PLATFORM_URL as
@@ -296,8 +198,8 @@ function AppContent() {
 
     if (!isAuthError && canRecoverInvalidConfig) {
       return (
-        <div className="flex items-center justify-center h-screen bg-gradient-to-br from-amber-50 via-orange-50/40 to-yellow-50/50 dark:from-stone-950 dark:via-stone-900 dark:to-amber-950/20">
-          <div className="max-w-4xl w-full mx-4 p-6 bg-white dark:bg-stone-900 rounded-lg shadow-lg space-y-4">
+        <div className="app-shell flex h-screen items-center justify-center">
+          <div className="glass-overlay mx-4 w-full max-w-4xl space-y-4 rounded-xl p-5 md:p-6">
             <div className="space-y-2">
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
                 {validationIssues.length > 0
@@ -367,8 +269,8 @@ function AppContent() {
     }
 
     return (
-      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-amber-50 via-orange-50/40 to-yellow-50/50 dark:from-stone-950 dark:via-stone-900 dark:to-amber-950/20">
-        <div className="max-w-md w-full mx-4 p-6 bg-white dark:bg-stone-900 rounded-lg shadow-lg">
+      <div className="app-shell flex h-screen items-center justify-center">
+        <div className="glass-overlay mx-4 w-full max-w-md rounded-xl p-6">
           <div className="flex items-center mb-4">
             <span className="text-3xl mr-3">🔒</span>
             <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
@@ -453,64 +355,48 @@ function AppContent() {
   }
 
   return (
-    <div className="flex flex-col h-screen relative overflow-hidden">
-      {/* Warm gradient background layers */}
-      <div className="absolute inset-0 bg-gradient-to-br from-amber-50 via-orange-50/40 to-yellow-50/50 dark:from-stone-950 dark:via-stone-900 dark:to-amber-950/20" />
-      <div className="absolute inset-0 bg-gradient-to-tl from-orange-100/30 via-transparent to-amber-100/20 dark:from-amber-950/10 dark:via-transparent dark:to-orange-950/10" />
-      <div className="absolute inset-0 gradient-mesh" />
+    <div className="app-shell relative flex h-screen flex-col overflow-hidden">
+      <a
+        href="#main-content"
+        className="glass-control fixed left-3 top-3 z-[100] -translate-y-16 px-3 py-2 text-sm font-medium focus:translate-y-0"
+      >
+        Skip to content
+      </a>
+      <header className="shell-toolbar relative z-20 flex h-15 shrink-0 items-center justify-between gap-3 px-3.5 md:h-16 md:px-6">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Navigation mode="mobile" />
+          <h1 className="flex min-w-0 items-center gap-2.5">
+            <img
+              src="/logo.svg"
+              alt="MindRoom logo"
+              className="h-7 w-7 shrink-0"
+            />
+            <span className="hidden text-sm font-semibold tracking-tight sm:inline">
+              MindRoom
+            </span>
+          </h1>
+          <span aria-hidden="true" className="hidden text-border sm:inline">
+            /
+          </span>
+          <span className="truncate text-sm text-muted-foreground">
+            {currentNavItem.label}
+          </span>
+        </div>
 
-      {/* Content wrapper */}
-      <div className="relative z-10 flex flex-col h-full">
-        {/* Header */}
-        <header className="bg-white/80 dark:bg-stone-900/50 backdrop-blur-xl border-b border-gray-200/50 dark:border-white/10 shadow-sm dark:shadow-2xl">
-          <div className="px-3 sm:px-6 py-2 sm:py-4 flex items-center justify-between gap-2">
-            <h1 className="flex items-center gap-2 sm:gap-3">
-              <img
-                src="/logo.svg"
-                alt="MindRoom logo"
-                className="h-8 w-8 sm:h-10 sm:w-10 shrink-0"
-              />
-              <div className="flex flex-col">
-                <span className="text-base sm:text-3xl font-bold tracking-tight text-gray-900 dark:text-white">
-                  MindRoom
-                </span>
-                <span className="hidden sm:block text-xs sm:text-sm font-normal text-gray-600 dark:text-gray-400 -mt-1">
-                  Configuration
-                </span>
-              </div>
-            </h1>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {isDirty && (
+            <span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
+              <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+              Draft
+            </span>
+          )}
+          <SyncStatus status={syncStatus} compact className="sm:hidden" />
+          <SyncStatus status={syncStatus} className="hidden sm:flex" />
+          <ThemeToggle className="glass-control h-9 w-9" />
+        </div>
+      </header>
 
-            <div className="flex items-center gap-1.5 sm:gap-4">
-              <button
-                type="button"
-                onClick={() => setMobileMenuOpen(true)}
-                aria-haspopup="dialog"
-                aria-expanded={mobileMenuOpen}
-                className={cn(
-                  "h-[30px] max-w-[8.5rem] sm:max-w-[11rem] rounded-lg border border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl px-2 py-1.5 items-center gap-1.5 min-w-0 text-left shadow-sm",
-                  desktopCompactNav ? "flex" : "flex sm:hidden",
-                )}
-              >
-                <CurrentNavIcon className="h-4 w-4 shrink-0 text-gray-700 dark:text-gray-200" />
-                <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">
-                  {currentNavItem.label}
-                </span>
-                <Menu className="h-4 w-4 shrink-0 text-gray-600 dark:text-gray-300" />
-              </button>
-              <ThemeToggle
-                className={cn(
-                  "h-[30px] w-[30px] rounded-lg border-white/60 dark:border-white/10 bg-white/80 dark:bg-stone-900/70 backdrop-blur-xl shadow-sm hover:bg-white/90 dark:hover:bg-stone-900/80",
-                  desktopCompactNav
-                    ? "sm:h-[30px] sm:w-[30px]"
-                    : "sm:h-9 sm:w-9",
-                )}
-              />
-              <SyncStatus status={syncStatus} compact className="sm:hidden" />
-              <SyncStatus status={syncStatus} className="hidden sm:flex" />
-            </div>
-          </div>
-        </header>
-
+      <div className="relative z-10 flex min-h-0 flex-1 flex-col">
         {configUsesIncludes && (
           <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-900 dark:text-amber-100 sm:px-6">
             This configuration is composed from multiple files via{" "}
@@ -565,250 +451,199 @@ function AppContent() {
           </div>
         )}
 
-        {/* Main Content */}
-        <div className="flex-1 overflow-hidden">
-          <Tabs
-            value={currentTab}
-            onValueChange={handleTabChange}
-            className="h-full flex flex-col relative"
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <Navigation mode="desktop" />
+          <main
+            id="main-content"
+            tabIndex={-1}
+            className="workspace-surface min-w-0 flex-1 overflow-hidden"
           >
-            {/* Desktop Tab Navigation */}
-            <TabsList
-              ref={tabsListRef}
-              className={cn(
-                "hidden sm:flex px-3 sm:px-6 py-3 bg-white/70 dark:bg-stone-900/50 backdrop-blur-lg border-b border-gray-200/50 dark:border-white/10 flex-shrink-0 overflow-x-auto overflow-y-hidden",
-                desktopCompactNav &&
-                  "sm:absolute sm:inset-x-0 sm:top-0 sm:opacity-0 sm:pointer-events-none sm:overflow-hidden",
-              )}
-            >
-              {NAV_ITEMS.map((item) => {
-                const ItemIcon = item.icon;
-                return (
-                  <TabsTrigger
-                    key={item.value}
-                    value={item.value}
-                    className={TAB_TRIGGER_CLASS}
-                  >
-                    <ItemIcon className="h-4 w-4" aria-hidden="true" />
-                    <span>{item.label}</span>
-                  </TabsTrigger>
-                );
-              })}
-            </TabsList>
-
-            <Dialog open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
-              <DialogContent className="w-[calc(100%-1.5rem)] max-w-sm p-0 border-white/60 dark:border-white/10 bg-white/95 dark:bg-stone-900/95 backdrop-blur-xl">
-                <DialogHeader className="px-4 pt-4 pb-2 text-left">
-                  <DialogTitle className="text-base text-gray-900 dark:text-gray-100">
-                    Navigate
-                  </DialogTitle>
-                  <DialogDescription className="text-xs text-gray-600 dark:text-gray-400">
-                    Choose a section
-                  </DialogDescription>
-                </DialogHeader>
-                <div className="max-h-[70vh] overflow-y-auto px-2 pb-3">
-                  {NAV_GROUPS.map((group) => (
-                    <div key={group} className="mb-3 last:mb-0">
-                      <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                        {group}
-                      </p>
-                      <div className="space-y-1">
-                        {NAV_ITEMS.filter((item) => item.group === group).map(
-                          (item) => {
-                            const isActive = item.value === currentTab;
-                            const ItemIcon = item.icon;
-                            return (
-                              <button
-                                key={item.value}
-                                type="button"
-                                onClick={() => handleTabChange(item.value)}
-                                aria-current={isActive ? "page" : undefined}
-                                className={`w-full rounded-lg px-3 py-2 text-sm flex items-center justify-between transition-colors ${
-                                  isActive
-                                    ? "bg-primary/10 dark:bg-primary/20 text-primary"
-                                    : "text-gray-700 dark:text-gray-200 hover:bg-gray-100/80 dark:hover:bg-white/10"
-                                }`}
-                              >
-                                <span className="flex items-center gap-2">
-                                  <ItemIcon
-                                    className="h-4 w-4"
-                                    aria-hidden="true"
-                                  />
-                                  <span>{item.label}</span>
-                                </span>
-                                {isActive ? (
-                                  <Check className="h-4 w-4" />
-                                ) : null}
-                              </button>
-                            );
-                          },
-                        )}
-                      </div>
-                    </div>
-                  ))}
+            <div className="relative flex h-full flex-col">
+              <RoutePanel
+                active={currentTab === "dashboard"}
+                label="Dashboard"
+                className="min-h-0 flex-1 overflow-auto"
+              >
+                <div className="min-h-full">
+                  <Dashboard />
                 </div>
-              </DialogContent>
-            </Dialog>
+              </RoutePanel>
 
-            <TabsContent
-              value="dashboard"
-              className="flex-1 p-2 sm:p-4 overflow-auto min-h-0"
-            >
-              <div className="min-h-full">
-                <Dashboard />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "usage"}
+                label="Usage"
+                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+              >
+                <Usage />
+              </RoutePanel>
 
-            <TabsContent
-              value="agents"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div
-                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedAgentId ? "hidden lg:block" : "block"
-                  }`}
-                >
-                  <AgentList />
-                </div>
-                <div
-                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedAgentId ? "block" : "hidden lg:block"
-                  }`}
-                >
-                  <AgentEditor />
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent
-              value="teams"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
-                <div
-                  className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                    selectedTeamId ? "hidden lg:block" : "block"
-                  }`}
-                >
-                  <TeamList />
-                </div>
-                <div
-                  className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                    selectedTeamId ? "block" : "hidden lg:block"
-                  }`}
-                >
-                  <TeamEditor />
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent
-              value="rooms"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="flex h-full flex-col gap-3 sm:gap-4">
-                <RoomAdmins />
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 flex-1 min-h-0">
+              <RoutePanel
+                active={currentTab === "agents"}
+                label="Agents"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
                   <div
                     className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
-                      selectedRoomId ? "hidden lg:block" : "block"
+                      selectedAgentId ? "hidden lg:block" : "block"
                     }`}
                   >
-                    <RoomList />
+                    <AgentList />
                   </div>
                   <div
                     className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
-                      selectedRoomId ? "block" : "hidden lg:block"
+                      selectedAgentId ? "block" : "hidden lg:block"
                     }`}
                   >
-                    <RoomEditor />
+                    <AgentEditor />
                   </div>
                 </div>
-              </div>
-            </TabsContent>
+              </RoutePanel>
 
-            <TabsContent
-              value="schedules"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-hidden">
-                <Schedules />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "teams"}
+                label="Teams"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 h-full">
+                  <div
+                    className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                      selectedTeamId ? "hidden lg:block" : "block"
+                    }`}
+                  >
+                    <TeamList />
+                  </div>
+                  <div
+                    className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                      selectedTeamId ? "block" : "hidden lg:block"
+                    }`}
+                  >
+                    <TeamEditor />
+                  </div>
+                </div>
+              </RoutePanel>
 
-            <TabsContent
-              value="unconfigured-rooms"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-hidden">
+              <RoutePanel
+                active={currentTab === "rooms"}
+                label="Rooms"
+                className="rooms-workspace min-h-0 flex-1 overflow-y-auto p-3 md:p-5 lg:overflow-hidden"
+              >
+                <div className="rooms-stack flex min-h-full flex-col gap-3 sm:gap-4 lg:h-full lg:min-h-0">
+                  <RoomAdmins />
+                  <div className="rooms-layout grid grid-cols-1 gap-3 sm:gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
+                    <div
+                      className={`col-span-1 overflow-visible lg:col-span-4 lg:h-full lg:overflow-hidden ${
+                        selectedRoomId ? "hidden lg:block" : "block"
+                      }`}
+                    >
+                      <RoomList />
+                    </div>
+                    <div
+                      className={`col-span-1 overflow-visible lg:col-span-8 lg:h-full lg:overflow-hidden ${
+                        selectedRoomId ? "block" : "hidden lg:block"
+                      }`}
+                    >
+                      <RoomEditor
+                        key={
+                          selectedRoomId === null
+                            ? "no-room"
+                            : `room:${selectedRoomId}`
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              </RoutePanel>
+
+              <RoutePanel
+                active={currentTab === "schedules"}
+                label="Schedules"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="h-full overflow-hidden">
+                  <Schedules />
+                </div>
+              </RoutePanel>
+
+              <RoutePanel
+                active={currentTab === "unconfigured-rooms"}
+                label="External rooms"
+                className="min-h-0 flex-1 overflow-y-auto p-3 md:p-5"
+              >
                 <UnconfiguredRooms />
-              </div>
-            </TabsContent>
+              </RoutePanel>
 
-            <TabsContent
-              value="models"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-hidden">
-                <ModelConfig />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "models"}
+                label="Models"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="h-full overflow-hidden">
+                  <ModelConfig />
+                </div>
+              </RoutePanel>
 
-            <TabsContent
-              value="memory"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-hidden">
-                <MemoryConfig />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "memory"}
+                label="Memory"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="h-full overflow-hidden">
+                  <MemoryConfig />
+                </div>
+              </RoutePanel>
 
-            <TabsContent
-              value="knowledge"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-hidden">
-                <Knowledge />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "knowledge"}
+                label="Knowledge"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="h-full overflow-hidden">
+                  <Knowledge />
+                </div>
+              </RoutePanel>
 
-            <TabsContent
-              value="credentials"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-hidden">
-                <Credentials />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "credentials"}
+                label="Credentials"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="h-full overflow-hidden">
+                  <Credentials />
+                </div>
+              </RoutePanel>
 
-            <TabsContent
-              value="voice"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-auto">
-                <VoiceConfig />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "voice"}
+                label="Voice"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="h-full overflow-auto">
+                  <VoiceConfig />
+                </div>
+              </RoutePanel>
 
-            <TabsContent
-              value="integrations"
-              className="flex-1 p-2 sm:p-4 overflow-auto min-h-0"
-            >
-              <div className="h-full overflow-auto">
-                <Integrations />
-              </div>
-            </TabsContent>
+              <RoutePanel
+                active={currentTab === "integrations"}
+                label="Tools"
+                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+              >
+                <div className="h-full overflow-auto">
+                  <Integrations />
+                </div>
+              </RoutePanel>
 
-            <TabsContent
-              value="skills"
-              className="flex-1 p-2 sm:p-4 overflow-hidden min-h-0"
-            >
-              <div className="h-full overflow-hidden">
-                <Skills />
-              </div>
-            </TabsContent>
-          </Tabs>
+              <RoutePanel
+                active={currentTab === "skills"}
+                label="Skills"
+                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+              >
+                <div className="h-full overflow-hidden">
+                  <Skills />
+                </div>
+              </RoutePanel>
+            </div>
+          </main>
         </div>
       </div>
     </div>

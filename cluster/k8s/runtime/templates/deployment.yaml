@@ -159,6 +159,14 @@ spec:
             - {{ .Values.runtime.apiHost | quote }}
             - --api-port
             - {{ .Values.runtime.apiPort | quote }}
+            {{- if .Values.config.bootstrapBundlePath }}
+            - --bootstrap-config-bundle
+            - {{ .Values.config.bootstrapBundlePath | quote }}
+            {{- end }}
+            {{- if .Values.config.bootstrapBundleRevision }}
+            - --bootstrap-config-bundle-revision
+            - {{ .Values.config.bootstrapBundleRevision | quote }}
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.runtime.apiPort }}
@@ -280,6 +288,14 @@ spec:
               value: {{ .Values.workers.kubernetes.namePrefix | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
               value: {{ .Values.workers.kubernetes.enableServiceLinks | quote }}
+            {{- with .Values.workers.kubernetes.runtimeClassName }}
+            - name: MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.workers.kubernetes.seccompProfile }}
+            - name: MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON
+              value: {{ toJson . | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON

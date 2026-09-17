@@ -1,5 +1,8 @@
 # ruff: noqa: D100, B018, F821
 # Generated Vulture baseline for dynamic/framework entry points.
+_.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
+_.validate_template  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
+_.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.unique_services  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 _.normalize_domains  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
@@ -11,6 +14,7 @@ can_use  # JSON response field consumed by connections portal (src/mindroom/api/
 avatar  # FastAPI route (src/mindroom/api/connections.py)
 can_connect  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
 account_label  # JSON response field consumed by personal portal (src/mindroom/api/connections.py)
+localhostProfile  # Kubernetes wire TypedDict key (src/mindroom/workers/backends/kubernetes_config.py)
 connection_url  # TypedDict field consumed by gateway clients (src/mindroom/mcp_gateway/types.py)
 has_credentials  # unused variable (src/mindroom/api/credentials.py)
 key_names  # unused variable (src/mindroom/api/credentials.py)
@@ -146,7 +150,7 @@ _.validate_thread_key  # Pydantic field validator (src/mindroom/external_trigger
 _.validate_auth  # unused method (src/mindroom/external_triggers/store.py)
 post_external_trigger  # unused function (src/mindroom/api/external_triggers.py)
 _.validate_team_agents  # unused method (src/mindroom/config/main.py)
-_.validate_room_participation  # Pydantic model validator (src/mindroom/config/main.py)
+_.validate_agent_judgments  # Pydantic model validator (src/mindroom/config/main.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)
 _._normalize_data  # unused method (src/mindroom/thread_tags.py)
@@ -274,6 +278,8 @@ _journal_adopt_command  # unused function (src/mindroom/cli/main.py)
 update_model  # unused function (src/mindroom/api/main.py)
 get_all_agents_rooms  # unused function (src/mindroom/api/matrix_operations.py)
 get_agent_rooms  # unused function (src/mindroom/api/matrix_operations.py)
+get_agent_avatar  # unused function (src/mindroom/api/matrix_operations.py)
+get_room_avatar  # unused function (src/mindroom/api/matrix_operations.py)
 authorize  # unused function (src/mindroom/api/oauth.py)
 confirm_reset  # FastAPI route dispatch (src/mindroom/api/oauth.py)
 reset_and_authorize  # FastAPI route dispatch (src/mindroom/api/oauth.py)
@@ -328,6 +334,7 @@ reindex_knowledge  # unused function (src/mindroom/api/knowledge.py)
 spotify_callback  # unused function (src/mindroom/api/integrations.py)
 list_models  # unused function (src/mindroom/api/openai_compat.py)
 execute_tool_call  # unused function (src/mindroom/api/sandbox_runner.py)
+view_file_in_worker  # FastAPI route (src/mindroom/api/sandbox_runner.py)
 config_init  # unused function (src/mindroom/cli/config.py)
 chat_completions  # unused function (src/mindroom/api/openai_compat.py)
 AgentVaultAccessTools  # unused class (src/mindroom/custom_tools/agent_vault_access.py)
@@ -359,6 +366,8 @@ FINAL  # unused variable (src/mindroom/event_journal/models.py)
 _RoomIdEvent  # unused class (src/mindroom/matrix/journal_ingress.py)
 
 # Agno 3 adapter overrides: agno reads the run-object cache attribute and calls drop_session itself.
+_.flush_in_flight_messages_on_error  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
+_.flush_in_flight_messages_on_error_team  # Agno terminal cleanup (src/mindroom/agno_compat_run_messages.py)
 _.external_execution_silent  # Agno suppresses the internal delegation wait message (src/mindroom/agents.py)
 _.external_execution_required  # Agno reads the retained tool pause flags (src/mindroom/delegation/execution.py)
 _._run_object_cache  # agno SqliteDb attribute replaced by the adapter (src/mindroom/agent_storage.py)
@@ -396,3 +405,11 @@ stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
 elapsed_time  # Restored SDK Timer value read by Agno metrics (src/mindroom/tool_jobs/agno_execution.py)
+_.require_adoption_room_id  # Pydantic model validator for explicit personal-room adoption
+_.validate_additional_user_ids  # Pydantic field validator for imported room membership attestations
+
+_.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically.
+# AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.
+_.scrape_website
+_.custom_scrape_website
+_._execute_query

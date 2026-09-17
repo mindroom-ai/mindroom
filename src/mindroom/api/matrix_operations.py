@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, HTTPException, Request
+import nio
+from aiohttp import ClientError
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from mindroom.api.config_lifecycle import app_state, read_committed_config_and_runtime, read_committed_runtime_config
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_name
+from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.rooms import filter_non_dm_rooms
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.matrix.users import create_agent_http_client
@@ -19,6 +23,7 @@ from mindroom.matrix.users import create_agent_http_client
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/matrix", tags=["matrix"])
+_AVATAR_HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
 
 
 if TYPE_CHECKING:
@@ -132,6 +137,105 @@ async def _get_agent_matrix_rooms(
         unconfigured_rooms=unconfigured_rooms,
         unconfigured_room_details=unconfigured_room_details,
     )
+
+
+def _avatar_response(thumbnail: tuple[bytes, str]) -> Response:
+    body, content_type = thumbnail
+    return Response(body, media_type=content_type, headers=_AVATAR_HEADERS)
+
+
+def _room_avatar_target(
+    config: Config,
+    requested_room: str,
+    runtime_paths: constants.RuntimePaths,
+) -> tuple[str, tuple[str, ...]]:
+    configured_rooms = sorted(config.get_all_configured_rooms())
+    resolved_rooms = resolve_room_aliases(configured_rooms, runtime_paths=runtime_paths)
+    matching_room_ids = {
+        resolved
+        for configured, resolved in zip(configured_rooms, resolved_rooms, strict=True)
+        if requested_room in {configured, resolved}
+    }
+    if not matching_room_ids:
+        raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
+
+    room_id = next(iter(matching_room_ids))
+    if not room_id.startswith("!"):
+        raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
+
+    candidates = [
+        entity_id
+        for entity_id in _get_runtime_matrix_entities(config)
+        if room_id
+        in resolve_room_aliases(
+            get_rooms_for_entity(entity_id, config),
+            runtime_paths=runtime_paths,
+        )
+    ]
+    candidates.append(ROUTER_AGENT_NAME)
+    return room_id, tuple(dict.fromkeys(candidates))
+
+
+@router.get("/agents/{agent_id}/avatar")
+async def get_agent_avatar(agent_id: str, request: Request) -> Response:
+    """Serve a configured Matrix entity's current thumbnail."""
+    config, runtime_paths = read_committed_runtime_config(request)
+    _get_runtime_matrix_entity(config, agent_id)
+    try:
+        client = create_agent_http_client(agent_id, runtime_paths)
+    except ValueError as exc:
+        raise HTTPException(404, "Avatar is not available", headers=_AVATAR_HEADERS) from exc
+    try:
+        async with asyncio.timeout(5):
+            profile = await client.get_profile(client.user_id)
+            avatar_url = matrix_profile_avatar_uri(profile)
+            if not avatar_url:
+                raise HTTPException(404, "Avatar is not available", headers=_AVATAR_HEADERS)
+            thumbnail = await fetch_matrix_thumbnail(client, avatar_url)
+            if thumbnail is None:
+                raise HTTPException(404, "Avatar is not available", headers=_AVATAR_HEADERS)
+            return _avatar_response(thumbnail)
+    except (ClientError, MatrixMediaUpstreamError, TimeoutError) as exc:
+        raise HTTPException(502, "Avatar is temporarily unavailable", headers=_AVATAR_HEADERS) from exc
+    finally:
+        await client.close()
+
+
+@router.get("/rooms/avatar")
+async def get_room_avatar(room_id: str, request: Request) -> Response:
+    """Serve the current thumbnail for one configured room reference."""
+    config, runtime_paths = read_committed_runtime_config(request)
+    resolved_room_id, candidates = _room_avatar_target(config, room_id, runtime_paths)
+    saw_upstream_error = False
+    try:
+        async with asyncio.timeout(5):
+            for candidate in candidates:
+                try:
+                    client = create_agent_http_client(candidate, runtime_paths)
+                except ValueError:
+                    continue
+                try:
+                    state = await client.room_get_state_event(resolved_room_id, "m.room.avatar")
+                    if isinstance(state, nio.RoomGetStateEventResponse):
+                        if not isinstance(state.content, dict):
+                            saw_upstream_error = True
+                            continue
+                        thumbnail = await fetch_matrix_thumbnail(client, state.content.get("url"))
+                        if thumbnail is None:
+                            raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
+                        return _avatar_response(thumbnail)
+                    if isinstance(state, nio.RoomGetStateEventError) and state.status_code == "M_NOT_FOUND":
+                        raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
+                    if not isinstance(state, nio.RoomGetStateEventError) or state.status_code != "M_FORBIDDEN":
+                        saw_upstream_error = True
+                finally:
+                    await client.close()
+    except (ClientError, MatrixMediaUpstreamError, TimeoutError) as exc:
+        raise HTTPException(502, "Room avatar is temporarily unavailable", headers=_AVATAR_HEADERS) from exc
+
+    if saw_upstream_error:
+        raise HTTPException(502, "Room avatar is temporarily unavailable", headers=_AVATAR_HEADERS)
+    raise HTTPException(404, "Room avatar is not available", headers=_AVATAR_HEADERS)
 
 
 @router.get("/agents/rooms")

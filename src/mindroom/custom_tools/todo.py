@@ -31,6 +31,7 @@ from mindroom.custom_tools.todo_state import (
     state_root,
     todos_path,
 )
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -215,12 +216,11 @@ def _validate_template_name(name: str) -> None:
 
 def _template_path(name: str, template_dir: Path | None = None) -> Path:
     _validate_template_name(name)
-    root = (template_dir or _templates_dir()).resolve()
-    path = (root / f"{name}.yaml.j2").resolve()
-    if not path.is_relative_to(root):
+    try:
+        return resolve_path_within_root(template_dir or _templates_dir(), f"{name}.yaml.j2", symlinks="internal")
+    except ValueError:
         msg = f"invalid template name: '{name}'"
-        raise ValueError(msg)
-    return path
+        raise ValueError(msg) from None
 
 
 def _agent_config_key(agent: Agent | Team | None, configured_agents: set[str]) -> str | None:
@@ -267,11 +267,15 @@ def _visible_template_roots(agent: Agent | Team | None = None) -> tuple[_Templat
     roots: list[_TemplateRoot] = []
     workspace_root = _current_agent_workspace_root(agent)
     if workspace_root is not None:
-        resolved_workspace_root = workspace_root.resolve()
-        workspace_template_root = (resolved_workspace_root / _WORKSPACE_TEMPLATE_RELATIVE_DIR).resolve()
-        if not workspace_template_root.is_relative_to(resolved_workspace_root):
+        try:
+            workspace_template_root = resolve_path_within_root(
+                workspace_root,
+                _WORKSPACE_TEMPLATE_RELATIVE_DIR,
+                symlinks="internal",
+            )
+        except ValueError:
             msg = "Workspace todo template directory escapes workspace"
-            raise ValueError(msg)
+            raise ValueError(msg) from None
         roots.append(_TemplateRoot(path=workspace_template_root, source="workspace"))
     roots.append(_TemplateRoot(path=_templates_dir(), source="builtin"))
     return tuple(roots)
@@ -918,10 +922,11 @@ class TodoTools(Toolkit):
             if not templates_root.is_dir():
                 continue
             for path in sorted(templates_root.glob("*.yaml.j2")):
-                resolved_path = path.resolve()
-                if not resolved_path.is_relative_to(templates_root):
+                try:
+                    resolve_path_within_root(templates_root, path, symlinks="internal")
+                except ValueError:
                     msg = f"Template '{path.name}' escapes templates dir via symlink"
-                    raise ValueError(msg)
+                    raise ValueError(msg) from None
                 try:
                     metadata = _load_template_metadata(path)
                 except (OSError, ValueError):

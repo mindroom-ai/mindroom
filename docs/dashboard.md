@@ -22,14 +22,40 @@ When running from a source checkout, MindRoom will build the dashboard assets on
 
 ## Dashboard Tabs
 
-### Dashboard (Overview)
+### Home and Browse Workspace
 
-The main dashboard shows system stats and monitoring:
+Home shows recorded activity, upcoming schedules, and shortcuts to room and agent editors.
+Select **Browse workspace** for the workspace directory:
 
-- **Stats cards** - Agents (with status breakdown), rooms, teams, models, and voice status
-- **Network graph** - Visual representation of agent-room-team relationships (desktop only)
-- **Search and filter** - Filter by agents, rooms, or teams
-- **Export Config** - Download configuration as JSON
+- **Workspace counts** - Agents, rooms, teams, and configured models
+- **Search and type filters** - Find agents, rooms, or teams
+- **Item details** - Inspect an item and open its editor
+- **Export summary** - Download a JSON workspace summary with counts, agents, rooms, teams, and model configurations
+
+The export contains derived workspace information and is not a complete `config.yaml` backup.
+
+### Usage
+
+The **Usage** tab shows token usage across the deployment using the existing [usage report](#token-usage) and normal dashboard authentication.
+
+- All-time recorded totals for input, output, and cache tokens
+- Daily activity with a UTC date range and an expandable data table
+- Searchable agent/team, model, and requester breakdowns, sorted by the selected token counter
+- Agent/team detail with requesters, cumulative models, and daily activity
+- Requester detail across agents, models, and daily activity, including usage of shared agents
+- Model detail across agents, requesters, and daily activity, keeping providers separate
+
+The token selector also exposes reasoning and audio counters when reported by the provider.
+Select a row in any breakdown to open its detail panel, where the same token selector is available.
+Date ranges apply only to daily activity; agent and model totals remain cumulative.
+Daily and requester detail can be lower than cumulative totals when older attribution is missing.
+Agent activity combines its requesters' dated runs; undated runs remain in recorded totals.
+A run using several models appears once in each model's run count, so model run counts should not be added together.
+Cache tokens may already be included in input counts, depending on the provider.
+This page shows recorded usage, not estimated spend or billing totals.
+
+The page waits automatically while a report is prepared.
+Use **Refresh** to request the latest available report; completed reports may be cached by the server for up to one minute.
 
 ### Agents
 
@@ -49,9 +75,11 @@ Configure AI agents:
 Configure multi-agent collaboration:
 
 - **Display name** and **Team purpose**
-- **Collaboration mode** - Coordinate (sequential) or Collaborate (parallel)
+- **Collaboration mode** - Coordinate (leader-directed delegation and synthesis) or Collaborate (send the task to all members)
 - **Team model** - Optional model override
 - **Team members** and **Team rooms**
+
+In Coordinate mode, the leader chooses delegations; independent tasks can run concurrently, so the mode does not guarantee serial execution.
 
 ### Rooms
 
@@ -223,7 +251,7 @@ The raw recovery editor keeps working on the top-level file's literal text; see 
 | POST | `/api/credentials/{service}` | Set credentials |
 | POST | `/api/credentials/{service}/api-key` | Set API key |
 | GET | `/api/credentials/{service}/api-key` | Get masked API key |
-| POST | `/api/credentials/{service}/test` | Test credentials validity |
+| POST | `/api/credentials/{service}/test` | Check stored credentials exist |
 | DELETE | `/api/credentials/{service}` | Delete credentials |
 | POST | `/api/credentials/{service}/copy-from/{source_service}` | Copy credentials from another service |
 
@@ -278,11 +306,16 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 ### Token Usage
 
-`GET /api/usage` returns retained token usage using the same collector as the `usage_stats` tool.
-It uses dashboard authentication; ordinary Connections users cannot access it.
-Standalone deployments should protect the dashboard with `MINDROOM_API_KEY` as described above.
+`GET /api/usage` returns organization-wide retained usage under the same standard dashboard authentication as other administrator APIs.
+`GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Trusted Upstream Authentication](deployment/trusted-upstream-auth.md#usage-export-service).
+The two routes share report preparation and caching while authenticating every request through their own policy.
+When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
+Every report-state response uses `Cache-Control: no-store`.
+Completed HTTP reports include `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp set when the scan finishes.
+Cached polls return the original timestamp for that completed scan.
 
-The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, and `user_breakdown`.
+The completed organization-wide HTTP JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
+Organization reports include retained configured and ad hoc team sessions, including teams no longer present in the current configuration.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
 Counters include input, output, total, cache read/write, reasoning, and audio tokens.
 Models include their provider.
@@ -290,42 +323,119 @@ Stored per-model details split runs that use several models; older runs fall bac
 Malformed or inconsistent model details retain the run's tokens under `unknown` and mark model coverage as incomplete.
 Requester aliases are combined; `user_id: null` holds unattributed usage.
 
-Use `GET /api/usage?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
+Each entity in `breakdown` also has `retained_run_totals`, `run_count`, and a `user_breakdown` with the same requester/model structure.
+These fields show which requesters used each agent or team, using the same deduplicated usage snapshots as the report, including saved team member runs.
+Entity rows combine shared and private instances; `private_agent_breakdown` identifies the private contribution separately.
+Run counts measure retained top-level runs with usable token metrics, not messages or conversations, and can undercount historical activity.
+Team member tokens contribute to model, requester, daily, and request detail without adding replies to `run_count`; cumulative team session totals already include those members.
+Requester totals sum to the entity's `retained_run_totals`, which can differ from its cumulative `totals`.
+The report-level `model_coverage` and `user_coverage` also apply to entity retained detail.
+
+`cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
+The same rows appear within each entity in `breakdown`.
+Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
+All token counters must reconcile to the session aggregate.
+Missing, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark `cumulative_model_coverage` incomplete.
+Session aggregates do not provide dates or requester attribution for these model counters, and deleted sessions remain unavailable.
+
+Use `GET /api/usage?include_daily=true` or `GET /api/usage/export?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
+This also applies to requesters inside each entity's `user_breakdown`.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
-Daily rows are sorted oldest first and use retained run creation timestamps.
-Missing or invalid timestamps exclude the run from daily rows and mark daily coverage as incomplete.
+Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and one model.
+Each run counts once on its earliest request date, so a later day can contain tokens with `run_count: 0`.
+Older or unreconciled request details fall back to the run creation date, which can shift usage across days and is not an exact provider billing date.
+When neither request details nor the run creation timestamp can date the usage, daily rows omit it and daily coverage is incomplete.
 Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
-The report-level `daily_coverage` applies to both the overall and per-user daily breakdowns.
+The report-level `daily_coverage` applies to overall, per-user, and per-entity requester daily breakdowns.
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
-User and model breakdowns cover retained top-level runs.
-They can differ from session totals, which may include compacted history and nested team-member usage.
+Use `GET /api/usage?include_requests=true` or `GET /api/usage/export?include_requests=true` to add `request_breakdown` and `request_coverage`.
+This option defaults to `false` and is available only on these organization HTTP routes, not agent tools or personal usage APIs.
+Each flat request row contains `entity`, canonical `user_id` (or `null`), `provider`, `model`, `kind`, an epoch-seconds `created_at`, and all nine token counters in `totals`.
+Rows preserve individual provider calls, including cache counters, so a consumer can apply context-length pricing without treating a multi-call run as one large request.
+No prices, provider thresholds, prompts, responses, session IDs, or run IDs are exported.
+Requests receive model attribution only when their counters reconcile exactly with the validated run totals and one known model bucket.
+Missing, malformed, mixed-model, or inconsistent request detail is excluded and marks `request_coverage` incomplete while aggregate totals remain available.
+Existing usage ledgers are not backfilled; initial migration can import request counters still present in retained messages, but missing history cannot be reconstructed.
+Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
+Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.
+
+Organization reports also include `voice_breakdown` and `voice_coverage` for GPT-Live calls.
+Each voice row contains `entity`, canonical `user_id` (or `null`), `provider`, `model`, epoch-seconds `created_at`, `duration_seconds`, and `finalized`.
+Missing caller attribution retains duration with `user_id: null` and marks voice coverage incomplete.
+Rows represent provider sessions, so reconnecting creates a separate row even within the same call.
+Duration comes from the provider's cumulative usage reports; repeated updates replace the saved snapshot instead of adding the cumulative total again.
+`finalized: true` means the provider's final usage event was received and saved; otherwise duration is the latest reported running total, including calls interrupted by connection loss or a process crash.
+`created_at` records when the provider session was first observed, and duration is not split across UTC days.
+Sum `duration_seconds` across these rows to group voice use by caller, agent, or model; apply duration pricing separately from delegated agent token pricing.
+Voice duration does not increase token totals, request rows, or AI reply counts, and delegated agent tokens continue through normal usage accounting.
+Only new recorded calls appear; older voice duration and usage never reported or saved cannot be reconstructed.
+These rows contain no audio, transcripts, conversation IDs, or provider session IDs and are restricted to organization reports.
+
+Portable compaction summaries, background memory auto-flush extraction, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
+Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, or `kind: dynamic_workflow`; ordinary run requests use `kind: run`.
+Helpers contribute zero to `run_count`, preserving its AI reply count meaning.
+Embedded workflow usage belongs to the exact caller conversation scope bound by the response runtime, including its private or team store, rather than the participant's synthetic session.
+Helpers use the current trusted requester and remain unattributed when unavailable.
+Compaction timestamps record when usage was saved after the provider response; other helpers preserve returned run and message timestamps.
+Individual helper requests are exported only when returned message counters reconcile with the full helper usage; absent or partial request detail stays aggregate-only and marks request coverage incomplete.
+Usage from exceptions or cancellation before Agno returns a helper run output remains unavailable.
+Historical helper costs were not retained and cannot be reconstructed.
+
+User and model breakdowns cover stored usage snapshots, including each saved team member's own counters once.
+Provider execution saves record content-free usage in the same database transaction; later provider saves replace that run's snapshot.
+Conversation-only rewrites preserve existing usage snapshots.
+Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.
+Explicit whole-session erasure removes its usage too.
+Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
+The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
+Breakdowns can still differ from session totals when history lost before migration or unrecorded member usage lacks detailed attribution.
 Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
+`scanned_sources` counts discovered database candidates, including absent configured databases.
+`unavailable_sources` also includes discovery failures and sources with incomplete metrics or attribution, so it is not a missing-token percentage or necessarily a subset of `scanned_sources`.
+Verified historical aliases are ignored because their canonical directories are scanned separately; unverified symlinks remain coverage warnings.
 This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
-The administrator response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
-Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
+The organization-wide response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
+Rows separate stored session `totals`, `session_count`, and `cumulative_model_breakdown` from `retained_run_totals`, `run_count`, and `model_breakdown`.
 They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
 Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
-Compacted history can contribute to session totals without recoverable model or daily detail.
+History compacted before usage migration can contribute to session totals without recoverable model or daily detail.
+
+For an ownership-based view, combine private-agent session usage attributed to owners with retained usage outside private-agent instances attributed to requesters.
+Group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
+For each token counter and user, calculate `user_breakdown.totals - private_agent_breakdown.retained_run_totals + private_agent_breakdown.totals`, summing private-agent rows first and treating missing rows as zero.
+Calculate over the union of users in both breakdowns; users with no private-agent row retain their full `user_breakdown.totals`.
+Use values from the same response and retain `user_id: null` as unattributed usage.
+For example, 60 retained tokens containing 20 private-agent tokens, plus a private-agent session total of 50, gives 90 tokens: `60 - 20 + 50`.
+This includes private history whose detail was lost before usage migration without counting its stored usage twice.
+It also replaces recorded-requester attribution for private runs with session ownership: if Bob requested 20 retained tokens from Alice's private instance with 100 session tokens, this view assigns those 100 tokens to Alice and none to Bob.
+Keep `user_breakdown` unchanged when reporting who made the retained requests; the combined view answers a different ownership question.
+Usage outside private-agent instances still relies on retained requester-attributed runs; a shared conversation's recorded requester is not the owner of every run.
+This combined view does not recover historical dates or per-model splits for the additional private session totals, and incomplete coverage still applies.
+
+Consumers should tolerate additional response fields and preserve the distinction between session totals and retained-run breakdowns.
+Coverage corrections can change counter values without changing the response shape.
+Treat each export as a snapshot, rather than adding successive all-time totals together.
 
 #### Personal Private-Agent Usage
 
 `GET /api/usage/me/private-agents?include_daily=true` returns the authenticated requester's usage across their configured private agents.
-It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an administrator `user_breakdown`.
+It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an organization-wide `user_breakdown`.
 Known requester aliases share one history; other users' databases and shared-agent databases are excluded.
 The optional `include_daily` parameter defaults to `false`.
 
 This endpoint requires trusted upstream authentication with signed JWTs and a verified Matrix identity, using the same identity checks as the personal Connections API.
 An instance API key alone cannot select a personal user.
 The requester comes only from authenticated identity; user, agent, and storage-path query overrides are rejected.
-Ordinary authenticated users can access this personal endpoint; `/api/usage` retains its existing dashboard administrator access rules.
+Ordinary authenticated users can access this personal endpoint, but their signed identity does not grant administrator dashboard access or access to the service export.
 
 ### Health & Readiness
 

@@ -1078,7 +1078,7 @@ class PrincipalStore:
         *,
         after: tuple[int, str] | None = None,
     ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-        """Page exact acknowledged INITIALs still lacking FINAL delivery ownership."""
+        """Page acknowledged INITIAL candidates, including potentially interrupted FINALs."""
         return await self._backend.read(
             lambda transaction: outbox.recovery_initials(transaction, self._principal_id, after=after),
         )
@@ -1452,11 +1452,13 @@ class PrincipalStore:
         run_id: str,
         session_id: str,
         calls: tuple[ApprovalCall, ...],
+        runtime_model_name: str | None = None,
         response_text: str | None = None,
         response_tool_trace: tuple[dict[str, object], ...] | None = None,
         response_presentation_state: dict[str, object] | None = None,
         delegation_storage_bindings: dict[str, dict[str, object]] | None = None,
         requires_background_tool_jobs: bool = False,
+        continuation_count: int | None = None,
     ) -> ApprovalContinuation | None:
         """Replace one claimed generation with the next exact Agno pause."""
         return await self._backend.write(
@@ -1468,11 +1470,13 @@ class PrincipalStore:
                 run_id=run_id,
                 session_id=session_id,
                 calls=calls,
+                runtime_model_name=runtime_model_name,
                 response_text=response_text,
                 response_tool_trace=response_tool_trace,
                 response_presentation_state=response_presentation_state,
                 delegation_storage_bindings=delegation_storage_bindings,
                 requires_background_tool_jobs=requires_background_tool_jobs,
+                continuation_count=continuation_count,
             ),
         )
 
@@ -1511,6 +1515,24 @@ class PrincipalStore:
                 expected_state=expected_state,
                 expected_generation=expected_generation,
                 expected_runtime_generation=expected_runtime_generation,
+            ),
+        )
+
+    async def approval_interruption_is_recoverable(
+        self,
+        delivery_id: str,
+        *,
+        visible_text: str,
+        failure_reason: str | None = None,
+    ) -> bool:
+        """Prove an acknowledged interruption still belongs to this response attempt."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.interruption_is_recoverable(
+                transaction,
+                self._principal_id,
+                delivery_id,
+                visible_text=visible_text,
+                failure_reason=failure_reason,
             ),
         )
 
@@ -2018,6 +2040,12 @@ class TurnRecordStore:
         """Return every record this agent holds, for a warm-up."""
         return await self._backend.read(
             lambda transaction: turn_records.load_all(transaction, self._agent_name),
+        )
+
+    async def load(self, event_id: str) -> TurnRecord | None:
+        """Read one exact record without depending on a runtime ledger cache."""
+        return await self._backend.read(
+            lambda transaction: turn_records.load_record(transaction, self._agent_name, event_id),
         )
 
     async def forget(self, *, index_event_ids: Sequence[str]) -> None:

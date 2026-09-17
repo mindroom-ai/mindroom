@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 import aiohttp
 from pydantic import TypeAdapter, ValidationError
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.worker_computer.protocol import ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError
 
@@ -58,12 +59,10 @@ async def computer_request(
                     raise ComputerError(409, "Computer control is unavailable or already held by another viewer.")
                 if response.status != 200:
                     raise ComputerError(503, "Computer worker is unavailable.")
-                data = bytearray()
-                async for chunk in response.content.iter_chunked(4096):
-                    data.extend(chunk)
-                    if len(data) > 16384:
-                        raise ComputerError(503, "Invalid computer worker response.")
+                data = await collect_bounded_bytes(response.content.iter_chunked(4096), max_bytes=16384)
                 return _STATUS.validate_python(json.loads(data))
+    except ByteLimitExceededError:
+        raise ComputerError(503, "Invalid computer worker response.") from None
     except (aiohttp.ClientError, TimeoutError, ValueError, ValidationError):
         raise ComputerError(503, "Computer worker is unavailable.") from None
 

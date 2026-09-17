@@ -75,6 +75,12 @@ describe("RoomAdmins", () => {
     mockedUseConfigStore.getState = vi.fn(() => mockStoreState);
   };
 
+  const expandRoomAdmins = () => {
+    fireEvent.click(
+      screen.getByRole("button", { name: /Room Admins, \d+ admins?/ }),
+    );
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockSaveConfig.mockImplementation(async () => {
@@ -85,15 +91,29 @@ describe("RoomAdmins", () => {
     setMockStore(createConfig());
   });
 
-  it("lists configured room admins", () => {
+  it("starts collapsed with an admin count and reveals the editor", () => {
     render(<RoomAdmins />);
 
-    expect(screen.getByText("Room Admins")).toBeInTheDocument();
+    const disclosure = screen.getByRole("button", {
+      name: "Room Admins, 1 admin",
+    });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByPlaceholderText("@alice:example.com"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(disclosure);
+
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("@alice:example.com")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Matrix users automatically granted admin power/),
+    ).toBeInTheDocument();
   });
 
   it("adds a new admin and preserves other access settings", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@bob:example.com" },
@@ -112,6 +132,7 @@ describe("RoomAdmins", () => {
     setMockStore(createConfig(), false);
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
@@ -120,6 +141,7 @@ describe("RoomAdmins", () => {
     setMockStore(null as unknown as Partial<Config>);
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@bob:example.com" },
@@ -134,6 +156,7 @@ describe("RoomAdmins", () => {
     setMockStore({});
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@bob:example.com" },
@@ -149,6 +172,7 @@ describe("RoomAdmins", () => {
 
   it("rejects invalid Matrix user IDs", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "not-a-user-id" },
@@ -165,6 +189,7 @@ describe("RoomAdmins", () => {
 
   it("rejects duplicate admins", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.change(screen.getByPlaceholderText("@alice:example.com"), {
       target: { value: "@alice:example.com" },
@@ -181,6 +206,7 @@ describe("RoomAdmins", () => {
 
   it("removes an admin", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.click(
       screen.getByRole("button", { name: "Remove @alice:example.com" }),
@@ -196,6 +222,7 @@ describe("RoomAdmins", () => {
 
   it("saves and shows a confirmation toast", async () => {
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -219,6 +246,7 @@ describe("RoomAdmins", () => {
     });
 
     render(<RoomAdmins />);
+    expandRoomAdmins();
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 

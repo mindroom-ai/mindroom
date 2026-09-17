@@ -17,7 +17,7 @@ from nio.exceptions import OlmTrustError
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
-from mindroom.matrix.media import upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
@@ -146,7 +146,7 @@ async def _retry_prepared_room_message_after_sync_recovery(
             return None
 
 
-async def _send_prepared_room_message(
+async def _send_prepared_room_message(  # noqa: C901 - recheck write authority for initial sends and retries
     client: nio.AsyncClient,
     room_id: str,
     content_sent: dict[str, Any],
@@ -156,10 +156,13 @@ async def _send_prepared_room_message(
     operation: str,
     retry_sync_recovery: bool,
     transaction_id: str | None = None,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> object | None:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
 
     async def send_once() -> object | None:
+        if write_allowed is not None and not write_allowed():
+            return None
         if cache_bypass:
             access_token = client.access_token
             if not access_token:
@@ -448,6 +451,7 @@ async def send_message_outcome(
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
     content_is_prepared: bool = False,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> MatrixSendOutcome:
     """Send a message to a Matrix room and return the delivered payload or a typed failure.
 
@@ -500,6 +504,7 @@ async def send_message_outcome(
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,
+        write_allowed=write_allowed,
     )
     if response is None:
         emit_timing_event(
@@ -564,6 +569,7 @@ async def send_message_result(
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     outcome = await send_message_outcome(
@@ -574,6 +580,7 @@ async def send_message_result(
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,
+        write_allowed=write_allowed,
     )
     return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 
@@ -615,40 +622,22 @@ async def _upload_media_bytes_as_mxc(
     mimetype: str,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload an in-memory Matrix media payload as MXC, encrypting for encrypted rooms."""
-    info: dict[str, Any] = {"size": len(media_bytes), "mimetype": mimetype}
     room_encrypted = await resolve_room_encryption_for_delivery(client, room_id, operation="upload_media_bytes")
     if room_encrypted is None:
         return None, None
-    upload_bytes = media_bytes
-    encrypted_file_payload: dict[str, Any] | None = None
-    upload_mimetype = mimetype
-    upload_name = filename
-
-    if room_encrypted:
-        try:
-            encrypted_bytes, encryption_keys = crypto.attachments.encrypt_attachment(media_bytes)
-        except Exception:
-            logger.exception("Failed to encrypt Matrix media upload", filename=filename)
-            return None, None
-        upload_bytes = encrypted_bytes
-        upload_mimetype = "application/octet-stream"
-        upload_name = f"{filename}.enc"
-        encrypted_file_payload = {
-            "url": "",
-            "key": encryption_keys["key"],
-            "iv": encryption_keys["iv"],
-            "hashes": encryption_keys["hashes"],
-            "v": "v2",
-            "mimetype": mimetype,
-            "size": len(media_bytes),
-        }
+    try:
+        prepared = prepare_media_upload(media_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
+    except Exception:
+        logger.exception("Failed to encrypt Matrix media upload", filename=filename)
+        return None, None
+    encrypted_file_payload = prepared.encrypted_file_content()
 
     try:
         upload_response = await upload_media_bytes(
             client,
-            upload_bytes,
-            content_type=upload_mimetype,
-            filename=upload_name,
+            prepared.data,
+            content_type=prepared.content_type,
+            filename=prepared.filename,
         )
     except Exception:
         logger.exception("Failed uploading Matrix media", filename=filename)
@@ -659,7 +648,7 @@ async def _upload_media_bytes_as_mxc(
         logger.error("Failed Matrix media upload response", filename=filename, response=str(upload_response))
         return None, None
 
-    upload_payload: dict[str, Any] = {"info": info}
+    upload_payload: dict[str, Any] = {"info": prepared.info}
     if encrypted_file_payload is not None:
         encrypted_file_payload["url"] = mxc_uri
         upload_payload["file"] = encrypted_file_payload

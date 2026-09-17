@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from mindroom.api import config_lifecycle
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.external_triggers.auth import (
     TriggerAuthError,
     TriggerSignatureHeaders,
@@ -106,7 +107,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
                 runtime.agent_reply_memberships,
             )
             await _require_external_trigger_runtime_ready(runtime, trigger_snapshot)
-            await _require_owner_joined_target_room(runtime, trigger_snapshot)
+            await _require_owner_joined_target_room(runtime, trigger_snapshot, config, runtime_paths)
 
             return await _claim_and_execute_trigger(
                 payload=payload,
@@ -307,14 +308,10 @@ def _validate_snapshot_policy_and_auth(
 
 
 async def _read_bounded_body(request: Request, *, max_body_bytes: int) -> bytes:
-    body_chunks: list[bytes] = []
-    total_bytes = 0
-    async for chunk in request.stream():
-        total_bytes += len(chunk)
-        if total_bytes > max_body_bytes:
-            raise HTTPException(status_code=413, detail="External trigger body exceeds configured limit")
-        body_chunks.append(chunk)
-    return b"".join(body_chunks)
+    try:
+        return await collect_bounded_bytes(request.stream(), max_bytes=max_body_bytes)
+    except ByteLimitExceededError as exc:
+        raise HTTPException(status_code=413, detail="External trigger body exceeds configured limit") from exc
 
 
 def _authenticate_trigger_request(
@@ -472,10 +469,14 @@ async def _require_external_trigger_runtime_ready(
 async def _require_owner_joined_target_room(
     runtime: config_lifecycle.ExternalTriggerRuntime,
     snapshot: TriggerDeliverySnapshot,
+    config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     owner_joined = await is_external_trigger_owner_joined_target_room(
         cast("nio.AsyncClient", runtime.client),
         snapshot,
+        config,
+        runtime_paths,
     )
     if not owner_joined:
         raise HTTPException(status_code=403, detail="External trigger owner is not joined to the target room")

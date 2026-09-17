@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="sql",
+    requires_primary_runtime=True,
     display_name="SQL Tools",
     description="Database query and management tools for SQL databases",
     category=ToolCategory.PRODUCTIVITY,

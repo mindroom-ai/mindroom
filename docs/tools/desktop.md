@@ -21,7 +21,8 @@ A new observation does not invalidate an older unchanged target; expiration, pro
 The local bridge pins the exact local process, window, element, and ancestor identity and rechecks them before acting.
 Passive labels such as clocks may change without invalidating an unchanged actionable target.
 Full actionable text and identity stay checked even when returned text is truncated.
-On macOS, a complete tree is sampled until it is briefly stable before its `state_id` is returned, while a capped partial tree is returned immediately with `truncated: true`.
+On macOS, complete trees undergo bounded stabilization sampling; a changing tree can still return a `state_id` with `stability: unstable`.
+A capped partial tree returns immediately with `truncated: true` and `stability: truncated`.
 
 Pixel and keyboard operations remain explicit fallbacks for controls that do not expose useful accessibility elements.
 Fallback coordinates run from `0` to `1000` inside the selected app window rather than using raw desktop pixels.
@@ -150,10 +151,11 @@ Chrome and Brave are supported by the local command through an explicit browser 
 
 ## Native macOS setup
 
-Open **Desktop Control** from the MindRoom menu app.
+Open MindRoom and select **Computer access**, or click the **Computer access: …** status row in the menu bar.
 In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
 Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
-Save the setup, confirm that exact identity locally, and claim pairing.
+Confirm the displayed controller fingerprint, requester, and agent locally, then choose **Save Setup**.
+Confirm the saved identities again before choosing **Claim Pairing**.
 Return the displayed `!desktop confirm ...` command to the same chat.
 For a homeserver behind Cloudflare Access, complete the printed terminal login flow first.
 
@@ -299,8 +301,9 @@ The Desktop tool can explain the trusted chat command, but the model cannot regi
 Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
-The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
-Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
+The `browser` tool keeps calls resolving to `target: desktop` in the primary process, including when `default_target: desktop` is configured.
+Host-browser calls still follow the worker routing policy, even with a desktop default or configured desktop device.
+Listing `browser` in `worker_tools` therefore isolates its host calls while preserving desktop control through the live Matrix context.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
 The separate `browser` tool can still target its Playwright extension transport through its own configuration:
@@ -413,6 +416,9 @@ It then calls `get_app_state` and inspects the returned roles, names, actions, h
 It prefers a semantic action using an `element_ref` and the matching `state_id`.
 The action response contains a new `state_id`, new element indexes, and a new screenshot for the next decision.
 The agent uses normalized `click`, `type_text`, `scroll`, or `keypress` only when the accessibility state lacks the needed semantic control.
+Coordinate input, unscoped typing, general scrolling, and keypress fallbacks require a fresh, complete, stable observation.
+If state is unstable or truncated, let the UI settle and call `get_app_state` again before a fallback.
+Semantic actions and element-targeted typing use separate exact-element validation.
 If the bridge reports stale state, the agent calls `get_app_state` again instead of reusing the old element index or coordinate.
 If an action outcome is unknown or its follow-up state is incomplete, the agent observes again and does not automatically repeat the action.
 Some applications change their UI successfully and then return an accessibility error, so a fresh observation is the only safe way to resolve an unknown outcome.
@@ -471,7 +477,12 @@ Approval does not override an absent or expired local control lease.
 
 Rotate the local desktop Matrix device with `mindroom desktop login --replace`, revoke the old device in Matrix account management, then run `!desktop rotate` and follow the new pairing command in the direct agent chat.
 The `--replace` option creates a fresh saved session but cannot revoke the old device by itself.
-If the cloud agent receives a new Matrix device, run `!desktop rotate` and follow the new pairing command so the local bridge pins the replacement controller identity.
+Cloud-controller rotation is a separate case: `!desktop rotate` starts pairing but does not migrate the local command journal.
+An existing journal pins the cloud user, device ID, and Ed25519 fingerprint, so pairing alone cannot resume that journal under a replacement controller.
+Keep the original journal and unresolved outcomes intact; do not delete or rewrite its ownership binding.
+The native app has no journal-migration action.
+Terminal commands accept `--storage-path` for a separate local setup; use the same new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`.
+A separate setup does not transfer pending commands or their outcomes from the old journal.
 A device ID or Ed25519 mismatch is a hard failure and should be treated as a rotation or possible substitution, not bypassed.
 Use `Ctrl+C` to stop accepting new bridge commands and begin shutdown.
 Desktop input already dispatched through a native worker thread and active Playwright MCP calls are not preemptible, so an in-flight control can still finish before shutdown returns; observe local state before deciding whether to retry it.

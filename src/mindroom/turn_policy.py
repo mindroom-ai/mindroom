@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.authorization import ResponderCandidatePermissions
-    from mindroom.config.participation import RoomParticipationConfig
+    from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
     from mindroom.matrix.identity import MatrixID
@@ -81,7 +81,7 @@ class ResponseAction:
     kind: Literal["skip", "team", "individual", "reject"]
     form_team: TeamResolution | None = None
     rejection_message: str | None = None
-    participation: RoomParticipationConfig | None = None
+    participation: ParticipationConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -120,8 +120,10 @@ class _DispatchPlan:
 _ROUTER_ONLY_MENTION_GUIDANCE = (
     "🧭 Rules of engagement: mention a specific agent or team when you want that entity to answer, or mention "
     "multiple agents when you want an ad-hoc collaboration. If one human and one agent or team are already talking "
-    "in a thread, you can keep going without an explicit tag. Once a thread has multiple human users or multiple "
-    "agent/team participants, explicitly tag the agent, team, or agents you want next. In a new untagged message, "
+    "in a thread, you can keep going without an explicit tag. Explicit tags select who answers next; an untagged "
+    "single-human thread may also continue an eligible ad-hoc team of participating individual agents. "
+    "In multi-human threads, explicitly tag who should answer; eligible existing individual agents may opt into "
+    "adaptive participation, but teams do not form automatically. In a new untagged message, "
     "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
     "agent you can tag directly."
 )
@@ -314,11 +316,11 @@ class TurnPolicy:
     def _adaptive_thread_participation(
         self,
         context: MessageContext,
-        room_id: str,
         requester_user_id: str,
-    ) -> RoomParticipationConfig | None:
-        """Resolve room participation for proven untagged multi-human context."""
-        participation = self.deps.runtime.config.get_room_participation(room_id, self.deps.runtime_paths)
+    ) -> ParticipationConfig | None:
+        """Resolve this agent's participation for proven untagged multi-human context."""
+        agent = self.deps.runtime.config.agents.get(self.deps.agent_name)
+        participation = agent.participation if agent is not None else None
         if (
             participation is not None
             and context.is_thread
@@ -336,16 +338,24 @@ class TurnPolicy:
             return participation
         return None
 
+    def _is_participating_thread_agent(self, context: MessageContext) -> bool:
+        """Only individual agents that have already replied may judge continuation."""
+        return self.deps.agent_name in self.deps.runtime.config.agents and self.deps.matrix_id in get_agents_in_thread(
+            context.planning_thread_history,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+
     def adaptive_participation(
         self,
         *,
         context: MessageContext,
         room: nio.MatrixRoom,
         requester_user_id: str,
-    ) -> RoomParticipationConfig | None:
-        """Select an authorized designated agent for a proven multi-human thread."""
-        participation = self._adaptive_thread_participation(context, room.room_id, requester_user_id)
-        if participation is None or participation.agent != self.deps.agent_name:
+    ) -> ParticipationConfig | None:
+        """Select an authorized existing agent for a proven multi-human thread."""
+        participation = self._adaptive_thread_participation(context, requester_user_id)
+        if participation is None or not self._is_participating_thread_agent(context):
             return None
         candidates = classify_responder_candidates_from_cached_room(
             room,
@@ -683,11 +693,7 @@ class TurnPolicy:
                     rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE,
                 ),
             )
-        elif (
-            context.mentioned_agents
-            or context.has_non_agent_mentions
-            or self._adaptive_thread_participation(context, room.room_id, requester_user_id) is not None
-        ):
+        elif context.mentioned_agents or context.has_non_agent_mentions:
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         elif context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
@@ -758,7 +764,6 @@ class TurnPolicy:
     def _adaptive_response_action(
         self,
         dispatch: PreparedDispatch,
-        room: nio.MatrixRoom,
         available_responders: list[MatrixID],
     ) -> ResponseAction | None:
         """Select participation for ambient turns, including coalesced active follow-ups."""
@@ -766,12 +771,11 @@ class TurnPolicy:
             return None
         participation = self._adaptive_thread_participation(
             dispatch.context,
-            room.room_id,
             dispatch.requester_user_id,
         )
         if participation is None:
             return None
-        if participation.agent != self.deps.agent_name or self.deps.matrix_id not in available_responders:
+        if not self._is_participating_thread_agent(dispatch.context) or self.deps.matrix_id not in available_responders:
             return ResponseAction(kind="skip")
         return ResponseAction(kind="individual", participation=participation)
 
@@ -837,11 +841,7 @@ class TurnPolicy:
             if should_continue_active_thread or single_visible_self:
                 return ResponseAction(kind="individual")
             return ResponseAction(kind="skip")
-        participation_action = self._adaptive_response_action(
-            dispatch,
-            room,
-            available_responders_in_room,
-        )
+        participation_action = self._adaptive_response_action(dispatch, available_responders_in_room)
         if participation_action is not None:
             return participation_action
         agents_in_thread = get_agents_in_thread(

@@ -18,7 +18,7 @@ from agno.run.team import TeamRunOutput
 
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.teams import TeamMode, team_response, team_response_stream
+from mindroom.teams import TeamMode, _TeamStreamUsage, team_response, team_response_stream
 from tests.conftest import make_turn_context, runtime_paths_for
 from tests.identity_helpers import entity_ids
 from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
@@ -28,6 +28,32 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from agno.team import Team as AgnoTeam
+
+
+@pytest.mark.parametrize(
+    ("output_tokens", "expected_total", "expected_payload"),
+    [
+        (None, None, None),
+        (0, 0, {"output_tokens": 0}),
+        (False, 0, {"output_tokens": 0}),
+        (True, 1, {"output_tokens": 1}),
+        (1.5, None, None),
+        ("3", None, None),
+    ],
+)
+def test_team_stream_usage_preserves_sparse_totals(
+    output_tokens: int | None,
+    expected_total: int | None,
+    expected_payload: dict[str, int] | None,
+) -> None:
+    """Absent output usage stays unknown, including after a later request omits counters."""
+    usage = _TeamStreamUsage()
+
+    usage.track(TeamModelRequestCompletedEvent(output_tokens=output_tokens))
+    usage.track(TeamModelRequestCompletedEvent())
+
+    assert usage.request_metric_totals.get("output_tokens") == expected_total
+    assert usage.fallback_payload() == expected_payload
 
 
 def _make_orchestrator() -> tuple[MagicMock, object]:
@@ -229,12 +255,27 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
     async def stream() -> AsyncIterator[object]:
         yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
         yield TeamModelRequestCompletedEvent(
-            model="test-model",
-            model_provider="openai",
+            model="earlier-model",
+            model_provider="earlier-provider",
             input_tokens=500,
             output_tokens=80,
             total_tokens=580,
+            reasoning_tokens=6,
+            cache_read_tokens=300,
+            cache_write_tokens=0,
         )
+        yield TeamModelRequestCompletedEvent(
+            model="test-model",
+            model_provider="openai",
+            input_tokens=100,
+            output_tokens=20,
+            total_tokens=120,
+            reasoning_tokens=4,
+            cache_read_tokens=40,
+            cache_write_tokens=10,
+            time_to_first_token=0,
+        )
+        yield TeamModelRequestCompletedEvent(model="", model_provider="", time_to_first_token=0.8)
 
     mock_team = _make_test_team()
     mock_team.arun = MagicMock(return_value=stream())
@@ -258,8 +299,17 @@ async def test_team_response_stream_falls_back_to_model_request_totals() -> None
 
     payload = collector["io.mindroom.ai_run"]
     assert payload["status"] == "completed"
-    assert payload["usage"]["input_tokens"] == 500
-    assert payload["usage"]["output_tokens"] == 80
+    assert payload["model"]["id"] == "test-model"
+    assert payload["model"]["provider"] == "openai"
+    assert payload["usage"] == {
+        "input_tokens": 600,
+        "output_tokens": 100,
+        "total_tokens": 700,
+        "reasoning_tokens": 10,
+        "cache_read_tokens": 340,
+        "cache_write_tokens": 10,
+        "time_to_first_token": "0",
+    }
 
 
 @pytest.mark.asyncio

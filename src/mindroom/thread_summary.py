@@ -7,7 +7,7 @@ import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -16,6 +16,11 @@ from pydantic import BaseModel, Field
 
 from mindroom import model_loading
 from mindroom.ai_runtime import cached_agent_run
+from mindroom.authorization import (
+    ReplyMembershipPendingError,
+    classify_responder_candidates_from_cached_room,
+    is_sender_allowed_for_responder,
+)
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
@@ -28,6 +33,7 @@ from mindroom.model_defaults import (
     OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES,
 )
 from mindroom.model_instance_checks import isinstance_of_loaded
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.thread_tag_vocabulary import (
     claim_vocabulary_check,
     format_tag_vocabulary_with_counts,
@@ -44,10 +50,11 @@ from mindroom.thread_tags import (
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Callable, Collection, Sequence
 
     import nio
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -345,15 +352,17 @@ def _parse_summary_generated_at(metadata: dict[str, object]) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw)
-    except ValueError:
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    except (ValueError, OverflowError):
         return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _recover_pin_state(
     thread_history: Sequence[ResolvedVisibleMessage],
     *,
     trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool] | None = None,
+    thread_id: str | None = None,
 ) -> bool:
     """Return the newest durable pin decision recorded in summary metadata.
 
@@ -361,17 +370,22 @@ def _recover_pin_state(
     pinned, so the newest decision has to win. Summaries that omit the key state
     no intent and are ignored entirely.
 
-    Ordering comes from ``generated_at`` rather than the position of the message
-    in the history, because history position does not always reflect Matrix
-    order: ``_sort_thread_items_root_first`` breaks equal ``origin_server_ts``
-    ties with backward-scan input order, which is newest-first. ``generated_at``
-    is also what the client uses to choose the summary it displays, so the pin
-    decision and the visible title are resolved by the same clock.
+    Pin intent follows Matrix event time, so a cold client's later pin wins
+    even if it never loaded an earlier release with a skewed ``generated_at``.
+    An edit reasserts the pin metadata in its replacement content at edit time.
+    ``generated_at`` breaks equal event-time ties because history position can
+    reflect a backward scan rather than send order. It remains the separate
+    display clock used by summary readers and writers.
     """
-    newest_decision: tuple[datetime, int] | None = None
+    newest_decision: tuple[int, datetime, int] | None = None
     pinned = False
     for position, message in enumerate(thread_history):
-        metadata = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
+        metadata = _summary_pin_metadata(
+            message,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        )
         if metadata is None:
             continue
         recorded = metadata.get("pinned")
@@ -380,11 +394,126 @@ def _recover_pin_state(
         generated_at = _parse_summary_generated_at(metadata)
         if generated_at is None:
             continue
-        decision = (generated_at, position)
+        event_timestamp = message.edited_timestamp if message.edited_timestamp is not None else message.timestamp
+        decision = (event_timestamp, generated_at, position)
         if newest_decision is None or decision > newest_decision:
             newest_decision = decision
             pinned = recorded
     return pinned
+
+
+def _human_summary_authorizer(
+    client: nio.AsyncClient,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+) -> Callable[[str], bool]:
+    """Reuse tool requester authority across responders sharing a room title."""
+
+    def allowed(sender: str) -> bool:
+        if not is_human_requester_id(sender, config, runtime_paths):
+            return False
+        pending = False
+        try:
+            if is_sender_allowed_for_responder(
+                sender,
+                entity_name,
+                room_id,
+                config,
+                runtime_paths,
+                membership_index,
+                require_resolved_membership=True,
+            ):
+                return True
+        except ReplyMembershipPendingError:
+            pending = True
+        room = client.rooms.get(room_id)
+        if room is None:
+            raise ReplyMembershipPendingError
+        candidates = classify_responder_candidates_from_cached_room(
+            room,
+            sender,
+            config,
+            runtime_paths,
+            membership_index,
+            require_complete_discovery=True,
+        )
+        if candidates.allowed:
+            return True
+        pending = pending or bool(candidates.pending)
+        if pending:
+            raise ReplyMembershipPendingError
+        return False
+
+    return allowed
+
+
+def _summary_pin_metadata(
+    message: ResolvedVisibleMessage,
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool] | None,
+    thread_id: str | None,
+) -> dict[str, object] | None:
+    """Accept human manual pins without trusting their scheduling metadata."""
+    trusted = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
+    if trusted is not None:
+        return trusted
+    metadata = message.content.get("io.mindroom.thread_summary")
+    if (
+        human_sender_allowed is None
+        or thread_id is None
+        or message.thread_id != thread_id
+        or message.content.get("msgtype") != "m.notice"
+        or not isinstance(metadata, dict)
+        or type(metadata.get("version")) is not int
+        or metadata.get("version") != 1
+        or metadata.get("model") != "manual"
+        or metadata.get("pinned") is not True
+    ):
+        return None
+    summary = metadata.get("summary")
+    if (
+        not isinstance(summary, str)
+        or not summary.strip()
+        or len(summary) > _THREAD_SUMMARY_MAX_LENGTH
+        or message.body != summary
+        or _parse_summary_generated_at(metadata) is None
+        or not human_sender_allowed(message.sender)
+    ):
+        return None
+    return metadata
+
+
+def _next_summary_generated_at(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool],
+    thread_id: str,
+) -> datetime:
+    """Order new summaries after authorized predecessors despite clock skew."""
+    generated_at = datetime.now(UTC)
+    try:
+        for message in thread_history:
+            metadata = _summary_pin_metadata(
+                message,
+                trusted_sender_ids=trusted_sender_ids,
+                human_sender_allowed=human_sender_allowed,
+                thread_id=thread_id,
+            )
+            predecessor = _parse_summary_generated_at(metadata) if metadata is not None else None
+            if predecessor is not None and predecessor >= generated_at:
+                generated_at = predecessor + timedelta(milliseconds=1)
+    except ReplyMembershipPendingError as exc:
+        msg = "Summary authorization awaits room membership; retry after membership is available."
+        raise ThreadSummaryWriteError(msg) from exc
+    except OverflowError as exc:
+        msg = "The existing summary timestamp is too large to replace."
+        raise ThreadSummaryWriteError(msg) from exc
+    return generated_at
 
 
 def _recover_initial_enrichment_complete(
@@ -562,14 +691,16 @@ async def _thread_is_resolved(
     return tags_state is not None and RESOLVED_THREAD_TAG in tags_state.tags
 
 
-async def _pinned_since_generation_started(
+async def _summary_delivery_timestamp(
     client: nio.AsyncClient,
     room_id: str,
     thread_id: str,
     *,
     trusted_sender_ids: Collection[str],
-) -> bool:
-    """Return whether a pin landed while this pass was generating a summary.
+    human_sender_allowed: Callable[[str], bool],
+    projected_history: Sequence[ResolvedVisibleMessage],
+) -> datetime | None:
+    """Order a new summary after source history, or suppress it for a new pin.
 
     The gate before generation cannot cover the generation window itself. The
     per-thread lock is process-local, so another runtime can write a manual pin
@@ -582,10 +713,9 @@ async def _pinned_since_generation_started(
     guard exists for. Costs one homeserver read per generated summary, so once
     per interval rather than per turn.
 
-    Fails open, like the other background reads here: if the re-read fails the
-    pass delivers, which is the same exposure the pre-generation gate already
-    has. An automatic summary carries no ``pinned`` key, so the worst case is a
-    single superseded title and the next pass bails at the gate.
+    A failed re-read suppresses delivery because a pin may have landed while
+    the model ran. The caller records the completed generation attempt so the
+    next eligible pass retries at the normal interval without a retry storm.
     """
     try:
         thread_history = await fetch_thread_messages_from_source(
@@ -596,12 +726,29 @@ async def _pinned_since_generation_started(
         )
     except Exception:
         logger.exception(
-            "Pin re-check before summary delivery failed; delivering anyway",
+            "Pin re-check before summary delivery failed; discarding automatic summary",
             room_id=room_id,
             thread_id=thread_id,
         )
-        return False
-    return _recover_pin_state(thread_history, trusted_sender_ids=trusted_sender_ids)
+        return None
+    try:
+        if _recover_pin_state(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        ):
+            return None
+    except ReplyMembershipPendingError:
+        # The model already ran, so this deferred delivery advances the same
+        # retry baseline as any other unsuccessful generation attempt.
+        return None
+    return _next_summary_generated_at(
+        [*projected_history, *thread_history],
+        trusted_sender_ids=trusted_sender_ids,
+        human_sender_allowed=human_sender_allowed,
+        thread_id=thread_id,
+    )
 
 
 @timed("maybe_generate_thread_summary")
@@ -715,6 +862,8 @@ async def _deliver_generated_summary(
     conversation_reader: ConversationReader,
     *,
     trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool],
+    thread_history: Sequence[ResolvedVisibleMessage],
 ) -> None:
     """Apply initial tags, then independently deliver the generated summary.
 
@@ -724,14 +873,21 @@ async def _deliver_generated_summary(
     check belongs here rather than in the caller because it is a delivery-time
     question: a superseded summary should apply neither its tags nor its title.
     """
-    if await _pinned_since_generation_started(
-        client,
-        room_id,
-        thread_id,
-        trusted_sender_ids=trusted_sender_ids,
-    ):
+    try:
+        generated_at = await _summary_delivery_timestamp(
+            client,
+            room_id,
+            thread_id,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            projected_history=thread_history,
+        )
+    except ThreadSummaryWriteError:
+        logger.exception("Cannot order automatic thread summary", room_id=room_id, thread_id=thread_id)
+        return
+    if generated_at is None:
         logger.info(
-            "Discarding an automatic thread summary that a pin superseded during generation",
+            "Skipping automatic thread summary delivery after pin re-check",
             room_id=room_id,
             thread_id=thread_id,
             message_count=message_count,
@@ -757,6 +913,7 @@ async def _deliver_generated_summary(
             model_name,
             conversation_reader,
             initial_enrichment_complete=initial_enrichment_complete,
+            generated_at=generated_at,
         )
     except Exception:
         logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
@@ -773,6 +930,7 @@ async def _send_thread_summary_event(
     *,
     initial_enrichment_complete: bool | None = None,
     pinned: bool | None = None,
+    generated_at: datetime | None = None,
 ) -> str | None:
     """Send a thread summary as a standard Matrix notice event.
 
@@ -815,7 +973,7 @@ async def _send_thread_summary_event(
         "version": 1,
         "summary": truncated_summary,
         "message_count": message_count,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": (generated_at or datetime.now(UTC)).isoformat(),
         "model": model_name,
     }
     if initial_enrichment_complete is not None:
@@ -854,6 +1012,8 @@ async def set_manual_thread_summary(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
     pin: bool = True,
 ) -> _ThreadSummaryWriteResult:
     """Write one validated manual summary for a canonical thread root.
@@ -888,9 +1048,24 @@ async def set_manual_thread_summary(
             msg = "Failed to fetch thread history for the target thread."
             raise ThreadSummaryWriteError(msg) from exc
 
+        trusted_sender_ids = current_internal_sender_ids(config, runtime_paths)
+        human_sender_allowed = _human_summary_authorizer(
+            client,
+            room_id,
+            config,
+            runtime_paths,
+            entity_name,
+            membership_index,
+        )
+        generated_at = _next_summary_generated_at(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        )
         message_count = _count_non_summary_thread_messages(
             thread_history,
-            trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+            trusted_sender_ids=trusted_sender_ids,
         )
         try:
             event_id = await _send_thread_summary_event(
@@ -902,6 +1077,7 @@ async def set_manual_thread_summary(
                 "manual",
                 conversation_reader,
                 pinned=pin,
+                generated_at=generated_at,
             )
         except Exception as exc:
             msg = "Failed to send thread summary event."
@@ -949,6 +1125,37 @@ async def _countable_thread_history(
         return None
 
 
+def _skip_pinned_thread(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    room_id: str,
+    thread_id: str,
+    message_count: int,
+    trusted_sender_ids: Collection[str],
+    human_sender_allowed: Callable[[str], bool],
+) -> bool:
+    """Defer unknown authority and advance the baseline only for proven pins."""
+    try:
+        pinned = _recover_pin_state(
+            thread_history,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_id=thread_id,
+        )
+    except ReplyMembershipPendingError:
+        return True
+    if pinned:
+        logger.debug(
+            "Skipping automatic thread summary for a pinned thread",
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+        )
+        # Keep the cheap pre-check from loading history on every pinned turn.
+        _update_last_summary_count(room_id, thread_id, message_count)
+    return pinned
+
+
 async def maybe_generate_thread_summary(  # noqa: PLR0911
     client: nio.AsyncClient,
     room_id: str,
@@ -958,7 +1165,8 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
     *,
     conversation_reader: ConversationReader,
     delivered_response: DeliveredResponse,
-    entity_name: str | None = None,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
 ) -> None:
     """Generate an early summary, then one-shot initial tags on its first refresh."""
     refreshed_tag_vocabulary = await _refresh_tag_vocabulary(client, room_id, config, runtime_paths)
@@ -991,16 +1199,22 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             thread_history,
             trusted_sender_ids=trusted_sender_ids,
         )
-        if _recover_pin_state(thread_history, trusted_sender_ids=trusted_sender_ids):
-            logger.debug(
-                "Skipping automatic thread summary for a pinned thread",
-                room_id=room_id,
-                thread_id=thread_id,
-                message_count=message_count,
-            )
-            # Advance the baseline so the cheap pre-check stops firing, and
-            # therefore stops spawning a history-loading pass, on every turn.
-            _update_last_summary_count(room_id, thread_id, message_count)
+        human_sender_allowed = _human_summary_authorizer(
+            client,
+            room_id,
+            config,
+            runtime_paths,
+            entity_name,
+            membership_index,
+        )
+        if _skip_pinned_thread(
+            thread_history,
+            room_id=room_id,
+            thread_id=thread_id,
+            message_count=message_count,
+            trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+        ):
             return
         if message_count < threshold:
             return
@@ -1071,6 +1285,8 @@ async def maybe_generate_thread_summary(  # noqa: PLR0911
             model_name,
             conversation_reader,
             trusted_sender_ids=trusted_sender_ids,
+            human_sender_allowed=human_sender_allowed,
+            thread_history=thread_history,
         )
         # Record after the delivery attempt so cancellation cannot leave a
         # partially delivered initial enrichment marked complete.

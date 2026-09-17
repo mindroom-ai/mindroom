@@ -12,9 +12,10 @@ The history of how it got here, including the theories that turned out wrong, is
 
 One shared database backend may hold several principals, but runtime code receives only a principal-bound store view.
 
-Operational methods such as `admit`, `pending`, `settle`, `load_conversation`, membership changes, and delivery methods therefore do not accept `principal_id`.
+Ordinary operations such as `admit`, `pending`, `settle`, `load_conversation`, membership changes, and response delivery take their principal from the bound view.
 Inbound envelopes and conversation keys also omit it, because the bound store supplies it.
 This is what stops a caller from reading or settling another bot's rows by accident.
+Internal approval coordination explicitly spans router-owned cards and responder-owned continuations through validated exact-call relationships; see [the approval coordination boundary](../architecture/matrix-event-journal-security.md#principal-binding).
 
 ### Conversation identity storage
 
@@ -26,7 +27,7 @@ One shared boundary helper encodes `None` to the empty string and decodes it bac
 ### Durable sync batch boundary
 
 The Matrix client uses `nio.durable.open_durable_sync` with Classic or Simplified Sliding Sync.
-Both development and published MindRoom wheels pin the released `mindroom-nio[e2e]==1.0.6` package, with no Git source override.
+The current repository dependency in `pyproject.toml` is `mindroom-nio[e2e]==1.1.1`; `uv.lock` resolves version `1.1.1` from the package registry, with no Git source override.
 Account, device, consumer and stream ownership bind once when opening the session.
 Soft-logout renewal requests the existing device; it preserves the bound stream, membership positions, and attempted-delivery sending identity.
 Hard logout, missing device storage, or changed identity stops startup instead of attempting a stream replacement.
@@ -128,7 +129,7 @@ export's own.
 Do not re-impose the prompt window on hydration on the belief that export is an
 independent consumer.
 
-One repair exists and is deliberate: contract 7's point refetch.
+Contract 7 covers revision-bound point refetch and read-triggered repair of durable room-history-loss obligations.
 
 ### 2. Ownership transfers at durable handoff
 
@@ -157,9 +158,10 @@ Outbound seeding was removed, so the sync echo is the only route into conversati
 
 The cost is real and accepted: a turn that reads the conversation immediately after speaking does not see its own message.
 
-### 6. Hydration is defined by the prompt window
+### 6. Ordinary hydration follows the caller's window
 
-Both walks are bounded, and the window counts logical messages rather than pages of events.
+Ordinary room and thread hydration walks are bounded, and the window counts logical messages rather than pages of events.
+The room-history-loss repair in contract 7 instead follows request and raw-event ceilings so a recent prompt window cannot hide the missing interval.
 
 Thread hydration adapts the room bounds rather than copying them: `_fetch_relations` counts a logical message only when `replaces_event_id is None`, and `max_fetched_events` bounds the raw relation tree that streaming makes an order of magnitude larger than the message count.
 The thread root is kept over and above the window, because a thread starting at its first reply is missing the message it is about.
@@ -169,9 +171,21 @@ Under MSC3981 the server returns relations in the topological order `/messages` 
 The window may therefore only stop at the moment a logical message was just admitted, with its whole edit tail already collected.
 The event ceiling can stop mid-message, and under this order that is the harmless direction: it drops an original and keeps edits nothing will claim, rather than keeping a message at a stale revision.
 
-### 7. Exactly one exceptional history repair
+### 7. Explicit, bounded history repair
 
-The point refetch, and nothing else.
+A revision-bound point refetch repairs a visible message whose body is missing or invalidated, such as after revision redaction or when a message carries an unresolved sidecar preview.
+The write checks the expected refresh token and membership epoch, rejects a tombstoned revision, and cannot install an unresolved sidecar preview.
+
+An admitted producer `LOSS` record also creates a durable room-history-loss obligation.
+Strict conversation reads ask the shared hydrator to repair it through the room's `/messages` history, including the threaded events returned there.
+Concurrent room and thread readers share one repair walk per room.
+That walk can continue beyond the logical prompt window to readable server exhaustion, but its request count and raw-event count remain bounded.
+Each page is installed under the exact recovery revision and membership epoch, so a new loss obligation or membership change fences stale work.
+
+Readable server exhaustion completes the obligation; reaching a ceiling retains a durable truncated result.
+A later read does not repeat the same bounded repair under the same policy, while a complete-history caller with a higher policy rank can request a further bounded attempt.
+Fetch failures or unreadable history at server exhaustion fail the read and leave the obligation repairable.
+These repairs are read-triggered; there is no unrestricted periodic background rescan.
 
 ### 8. Membership epochs fence every derived and pending fact
 
