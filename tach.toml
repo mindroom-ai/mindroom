@@ -4245,7 +4245,24 @@ depends_on = [
 visibility = [
     "mindroom.bot",
     "mindroom.turn_controller",
+    "mindroom.voice_readiness",
 ]
+
+[[modules]]
+path = "mindroom.voice_readiness"
+depends_on = [
+    "mindroom.attachments",
+    "mindroom.constants",
+    "mindroom.dispatch_handoff",
+    "mindroom.dispatch_source",
+    "mindroom.inbound_turn_normalizer",
+    "mindroom.ingress_lanes",
+    "mindroom.matrix.media",
+    "mindroom.timing",
+    "mindroom.turn_record",
+    "mindroom.visible_voice_echo",
+]
+visibility = ["mindroom.turn_controller"]
 
 [[modules]]
 path = "mindroom.turn_controller"
@@ -4283,7 +4300,7 @@ depends_on = [
     "mindroom.turn_store",
     "mindroom.turn_policy",
     "mindroom.visible_response_reconciliation",
-    "mindroom.visible_voice_echo",
+    "mindroom.voice_readiness",
 ]
 
 [[modules]]

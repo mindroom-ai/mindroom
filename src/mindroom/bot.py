@@ -785,6 +785,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 delivery_gateway=self._delivery_gateway,
                 turn_store=self._turn_store,
+                router_turn_records=self._journal_store.turn_records(ROUTER_AGENT_NAME),
                 ingress=self._ingress_validator,
                 wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
             ),

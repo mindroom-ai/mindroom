@@ -30,7 +30,11 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     EnrichmentItem,
 )
-from mindroom.inbound_turn_normalizer import DispatchPayload, DispatchPayloadWithAttachmentsRequest
+from mindroom.inbound_turn_normalizer import (
+    DispatchPayload,
+    DispatchPayloadWithAttachmentsRequest,
+    _VoiceNormalizationResult,
+)
 from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
@@ -62,7 +66,6 @@ from tests.conftest import (
     dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
-    make_pending_event,
     replace_turn_controller_deps,
     runtime_paths_for,
 )
@@ -429,7 +432,7 @@ class TestAgentBot(AgentBotTestBase):
 
         bot._turn_controller._precheck_dispatch_event = AsyncMock(return_value=prechecked_event)
         bot._turn_controller._dispatch_special_media_as_text = AsyncMock(return_value=_IngressAdmissionOutcome.IGNORED)
-        bot._turn_controller._resolve_ready_voice_target = AsyncMock(side_effect=asyncio.CancelledError)
+        bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=asyncio.CancelledError)
 
         with pytest.raises(asyncio.CancelledError):
             await bot._turn_controller._handle_media_message_inner(room, event)
@@ -478,40 +481,26 @@ class TestAgentBot(AgentBotTestBase):
         )
         replace_turn_controller_deps(bot, coalescing_gate=bot._coalescing_gate)
         bot._turn_controller.deps.resolver.coalescing_thread_id = AsyncMock(side_effect=coalescing_thread_id)
-        bot._turn_controller._resolve_ready_voice_target = AsyncMock(
-            return_value=(
-                bot._turn_controller.deps.resolver.build_message_target(
-                    room_id=room.room_id,
-                    thread_id="$thread-root",
-                    reply_to_event_id=voice_event.event_id,
-                    event_source=voice_event.source,
-                ),
-                CoalescingKey(room.room_id, "$thread-root", RequesterCoalescingOwner("@user:localhost")),
-            ),
-        )
-        bot._turn_controller._ready_voice_event = AsyncMock(
-            return_value=ReadyPendingEvent(
-                pending_event=make_pending_event(
-                    PreparedIngress(
-                        sender="@user:localhost",
-                        event_id="$voice",
-                        body="voice second",
-                        source={
-                            "content": {
-                                "body": "voice second",
-                                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
-                                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
-                            },
+        prepare_voice = AsyncMock(
+            return_value=_VoiceNormalizationResult(
+                event=PreparedIngress(
+                    sender="@user:localhost",
+                    event_id="$voice",
+                    body="voice second",
+                    source={
+                        "content": {
+                            "body": "voice second",
+                            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root"},
+                            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
                         },
-                        source_kind_override=VOICE_SOURCE_KIND,
-                    ),
-                    room,
-                    source_kind=VOICE_SOURCE_KIND,
+                    },
+                    source_kind_override=VOICE_SOURCE_KIND,
                 ),
             ),
         )
 
         with (
+            patch("mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event", new=prepare_voice),
             patch(
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.resolve_text_event",
                 new=AsyncMock(

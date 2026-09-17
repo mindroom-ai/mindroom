@@ -13,6 +13,10 @@ It should own lifecycle, callback registration, sync, room membership, presence,
 `InboundTurnNormalizer` owns raw input shaping.
 It should turn text, voice, sidecars, and media into canonical turn inputs before policy or execution runs.
 
+`VoiceReadiness` owns preparing a voice source for dispatch.
+It restores or checkpoints the prepared content through `TurnStore`, and waits for required router echo publication through `VisibleVoiceEchoLifecycle`.
+Only normalization failures select raw-audio fallback; checkpoint, publication, and ingress metadata failures retain the source for durable retry.
+
 `ConversationResolver` owns conversation identity.
 It should resolve explicit thread identity, history, mentions, and normalized ingress envelopes.
 
@@ -112,6 +116,11 @@ This keeps ignored high-volume traffic out of the handled-turn ledger without we
 An in-memory claim loser waits for the competing owner, then yields to durable terminal truth or retries ingress when that owner exits without a terminal outcome.
 Ingress-lane readiness and delivery failures return the exact source to the existing durable retry owner after the lane releases it.
 A successful empty readiness result explicitly settles the exact source as intentionally ignored instead of repeating download or transcription work forever.
+An unpublished required voice echo is a retry, never an empty readiness result.
+Prepared voice body, Matrix content, batching scope, and preparation/echo thread are checkpointed before publication waits, so replay after restart reuses the same transcript and identities.
+The batching scope and echo thread are distinct: a root audio source can enter the room's batch while its echo starts a thread rooted at that source.
+The final coalesced reply target continues to follow the current dispatch policy.
+The router retains its source when initial echo publication fails; responders can also recognize the router's persisted publication receipt after restart.
 Router delivery failure raises back into that same retry path instead of completing without terminal truth.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
@@ -184,6 +193,7 @@ An ordinary callback moves through these lifecycle phases; durable and in-proces
 - Journal pending: the durable acceptance row exists and still owns the callback work.
 - Executing in-process: `PendingEventWorker` marks one process as running the persisted callback without adding a durable running state.
 - Downstream-owned: the callback handed the source to lane, coalescing, or turn work, so the journal row stays pending while the live owner exists.
+- Prepared voice checkpoint: an incomplete `TurnStore` record preserves normalized content before response ownership begins; the pending journal source still owns retry.
 - Durably pending turn: `TurnStore.record_pending_turn` wrote `completed=False`; response ownership has begun.
 - Terminal delivery: the final outbox enqueue or an intentional no-answer decision settles the journal source; delivery acknowledgement commits the corresponding terminal turn record when needed.
 
@@ -389,7 +399,8 @@ The router relay lives in `router_relay.py` behind the narrow `_RouterRelaySuppo
 
 ## Next Simplification Work
 
-The router relay already lives in `router_relay.py`; the voice readiness cluster, interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
+The router relay lives in `router_relay.py`, and voice preparation, checkpoint reuse, and publication gating live in `voice_readiness.py`.
+Interactive-selection execution, response-action assembly, and the `ResponseRunner` domain clusters (team turn driver, interrupted persistence, inbox tracking, enrichment helpers) are the remaining moves.
 
 Revisit `IngressHookRunner`.
 It may stay as a helper, but it should not grow into another top-level orchestration object.

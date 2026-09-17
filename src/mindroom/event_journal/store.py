@@ -2040,6 +2040,12 @@ class TurnRecordStore:
             lambda transaction: turn_records.load_all(transaction, self._agent_name),
         )
 
+    async def load(self, event_id: str) -> TurnRecord | None:
+        """Read one exact record without depending on a runtime ledger cache."""
+        return await self._backend.read(
+            lambda transaction: turn_records.load_record(transaction, self._agent_name, event_id),
+        )
+
     async def forget(self, *, index_event_ids: Sequence[str]) -> None:
         """Drop records indexed by these events, as compaction does."""
         await self._backend.write(
