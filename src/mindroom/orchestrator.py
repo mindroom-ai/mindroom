@@ -891,18 +891,24 @@ class _MultiAgentOrchestrator:
 
     async def _run_scheduled_turn_dispatch_recovery(self) -> None:
         """Drain readiness signals without blocking a Matrix sync callback."""
+
+        async def recover() -> None:
+            if not self._runtime_ready_event.is_set():
+                return
+            await self._recover_ready_turn_journal_events()
+            await self._response_admission_gate.wait_until_open()
+            if self._runtime_ready_event.is_set() and self.config is not None:
+                await self._recover_pending_replacement_rooms(self.config)
+
         current_task = asyncio.current_task()
         try:
             while self._dispatch_recovery_requested:
                 self._dispatch_recovery_requested = False
                 await run_with_retry(
                     "Recovering ready turn dispatch obligations",
-                    self._recover_ready_turn_journal_events,
+                    recover,
                     update_runtime_state=False,
                 )
-                await self._response_admission_gate.wait_until_open()
-                if self.config is not None:
-                    await self._recover_pending_replacement_rooms(self.config)
         finally:
             if self._dispatch_recovery_task is current_task:
                 self._dispatch_recovery_task = None
@@ -2451,6 +2457,7 @@ class _MultiAgentOrchestrator:
     async def stop(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Stop all agent bots."""
         self.running = False
+        self._runtime_ready_event.clear()
         for bot in self.agent_bots.values():
             bot.begin_process_shutdown()
         self.hook_registry = HookRegistry.empty()

@@ -535,3 +535,114 @@ def test_interruption_registration_without_running_loop_retains_room(tmp_path: P
     assert bot._interrupted_turn_rooms.register("$source", room_id="!room:localhost")
     assert bot.pending_sync_restart_retry_room_ids == {"!room:localhost"}
     orchestrator.request_interrupted_turn_recovery.assert_not_called()
+
+
+async def _begin_shutdown(orchestrator: _MultiAgentOrchestrator) -> None:
+    """Exercise real shutdown admission, stopping before unrelated subsystem cleanup."""
+    with (
+        patch.object(type(orchestrator._script_runtime), "shutdown", new=AsyncMock()),
+        patch(
+            "mindroom.orchestrator.shutdown_approval_runtime",
+            new=AsyncMock(side_effect=RuntimeError("stop boundary")),
+        ),
+        pytest.raises(RuntimeError, match="stop boundary"),
+    ):
+        await orchestrator.stop()
+
+
+@pytest.mark.asyncio
+async def test_late_interruption_completion_during_shutdown_does_not_start_recovery(tmp_path: Path) -> None:
+    """Late response completion keeps its marker without reviving a stopped fleet worker."""
+    bot = _bot(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    orchestrator.config = bot.config
+    orchestrator.running = True
+    orchestrator._runtime_ready_event.set()
+    bot.orchestrator = orchestrator
+    await _begin_shutdown(orchestrator)
+
+    async def settle() -> None:
+        bot._interrupted_turn_rooms.register("$source", room_id="!room:localhost")
+
+    with patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as scan:
+        await asyncio.create_task(settle())
+        await asyncio.sleep(0)  # Run the response task's registered completion callback.
+        recovery_task = orchestrator._dispatch_recovery_task
+        if recovery_task is not None:
+            await recovery_task
+        assert recovery_task is None
+        scan.assert_not_awaited()
+    assert bot.pending_sync_restart_retry_room_ids == {"!room:localhost"}
+    assert orchestrator._pending_replacement_recovery_room_ids == {"general": {"!room:localhost"}}
+
+
+@pytest.mark.asyncio
+async def test_shutdown_while_recovery_waits_for_admission_preserves_pending_room(tmp_path: Path) -> None:
+    """An existing worker must not scan after shutdown begins during its gate wait."""
+    bot = _bot(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    orchestrator.config = bot.config
+    orchestrator.running = True
+    orchestrator._runtime_ready_event.set()
+    waiting = asyncio.Event()
+    gate = orchestrator._response_admission_gate
+    gate.close()
+    wait_for_admission = gate.wait_until_open
+
+    async def wait() -> None:
+        waiting.set()
+        await wait_for_admission()
+
+    with (
+        patch.object(gate, "wait_until_open", new=wait),
+        patch.object(orchestrator, "_recover_ready_turn_journal_events", new=AsyncMock()),
+        patch.object(orchestrator, "_recover_pending_replacement_rooms", new=AsyncMock()) as scan,
+    ):
+        orchestrator.request_interrupted_turn_recovery("general", "!room:localhost")
+        recovery_task = orchestrator._dispatch_recovery_task
+        assert recovery_task is not None
+        try:
+            await asyncio.wait_for(waiting.wait(), 5)
+            await _begin_shutdown(orchestrator)
+        finally:
+            gate.reopen()
+            await recovery_task
+        scan.assert_not_awaited()
+    assert orchestrator._pending_replacement_recovery_room_ids == {"general": {"!room:localhost"}}
+
+
+@pytest.mark.asyncio
+async def test_interruption_scan_error_retries_without_second_notification(tmp_path: Path) -> None:
+    """A transient candidate failure restores the room and retries under the same worker."""
+    bot = _bot(tmp_path)
+    bot.running = True
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
+    orchestrator.config = bot.config
+    orchestrator.running = True
+    orchestrator._runtime_ready_event.set()
+    orchestrator.agent_bots = {"general": bot, ROUTER_AGENT_NAME: MagicMock(running=True)}
+    calls = 0
+
+    async def scan(*args: object, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            message = "temporary candidate read failure"
+            raise OSError(message)
+        scanned_room_ids = args[3]
+        assert isinstance(scanned_room_ids, set)
+        scanned_room_ids.add("!room:localhost")
+
+    with (
+        patch.object(orchestrator, "_recover_ready_turn_journal_events", new=AsyncMock()),
+        patch.object(orchestrator, "_recover_stale_streams_after_restart", new=AsyncMock(side_effect=scan)),
+        patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0) as retry_delay,
+    ):
+        orchestrator.request_interrupted_turn_recovery("general", "!room:localhost")
+        recovery_task = orchestrator._dispatch_recovery_task
+        assert recovery_task is not None
+        await asyncio.wait_for(recovery_task, 5)
+    assert calls == 2
+    retry_delay.assert_called_once()
+    assert orchestrator._pending_replacement_recovery_room_ids == {}
+    assert orchestrator._dispatch_recovery_task is None
