@@ -1892,16 +1892,81 @@ class TestEncryptedRelations:
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
 
-    async def test_strict_unreadable_history_retries_after_keys_arrive(self, alice: PrincipalStore) -> None:
+    @pytest.mark.parametrize("recover_room", [False, True])
+    async def test_strict_unreadable_history_retries_after_keys_arrive(
+        self,
+        alice: PrincipalStore,
+        *,
+        recover_room: bool,
+    ) -> None:
         """Missing keys must not permanently spend the export walk's allowance."""
         client = self._thread_of_encrypted_replies(readable=False)
+        recovery = None
+        if recover_room:
+            client.history = [client.events["$root"], *client.relations["$root"]]
+            client.repeat_last = True
+            client.pages = [(client.history, None)]
+            recovery = await alice.record_room_history_recovery(ROOM)
         strict = hydrator(alice, client, **EXPORT_CALLER)
         with pytest.raises(RuntimeError, match="unreadable events remain"):
             await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert await alice.room_history_recovery(ROOM) == recovery
         client.room_keys = self._thread_of_encrypted_replies(readable=True).room_keys
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    @pytest.mark.parametrize("thread_id", [None, "$root"])
+    async def test_strict_history_reports_encrypted_events_and_sessions(
+        self,
+        alice: PrincipalStore,
+        thread_id: str | None,
+    ) -> None:
+        """Missing history is diagnosable without exposing ciphertext or session IDs."""
+        events = [encrypted("$root"), encrypted("$reply1"), encrypted("$reply2")]
+        client = FakeClient(
+            events={"$root": events[0]},
+            relations={"$root": events[1:]},
+            history=events,
+            olm=object(),
+        )
+
+        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+            await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
+
+        diagnostic = str(failure.value)
+        assert ROOM in diagnostic
+        if thread_id is not None:
+            assert thread_id in diagnostic
+        assert "encrypted_events=3" in diagnostic
+        assert "encrypted_sessions=1" in diagnostic
+        assert "invalid_events=0" in diagnostic
+        assert "historical encryption keys may be unavailable" in diagnostic
+        assert "live E2EE counters" in diagnostic
+        assert "ciphertext-of" not in diagnostic
+        assert "sender-key" not in diagnostic
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=thread_id)
+
+    async def test_history_session_diagnostics_are_bounded(self, alice: PrincipalStore) -> None:
+        """Large unreadable histories retain only a bounded set of session identities."""
+        replies = []
+        for index in range(105):
+            event = encrypted(f"$reply{index}")
+            event["content"]["session_id"] = f"private-session-{index}"
+            replies.append(event)
+        client = FakeClient(
+            events={"$root": raw("$root", "root")},
+            relations={"$root": replies},
+            olm=object(),
+        )
+
+        with pytest.raises(_HydrationError) as failure:
+            await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        diagnostic = str(failure.value)
+        assert "encrypted_events=105" in diagnostic
+        assert "encrypted_sessions>=100" in diagnostic
+        assert "private-session" not in diagnostic
 
     async def test_legacy_incomplete_export_is_revalidated(self, alice: PrincipalStore) -> None:
         """Rank20 did not distinguish missing keys from exhausted allowance."""
