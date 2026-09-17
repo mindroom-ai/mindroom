@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+import mcp.types as mcp_types
 import pytest
 from agno.agent import Agent
 from agno.tools import Toolkit
@@ -14,6 +15,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
+from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import resolved_mcp_tool_state
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.tool_jobs.authorization import (
@@ -31,6 +33,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mcp import ClientSession
 
 
 _OWNER = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
@@ -178,6 +182,93 @@ def test_mcp_server_and_authored_include_conventions_remain_distinct(
             {"name": "mcp_demo", "factory_origin": construction_origin},
         )
         is expected_allowed
+    )
+
+
+@pytest.mark.parametrize(
+    ("server_filters", "authored_filters"),
+    [
+        pytest.param(
+            {"include_tools": ["read"]},
+            {"exclude_tools": ["read"]},
+            id="server_includes_assignment_excludes",
+        ),
+        pytest.param(
+            {"exclude_tools": ["read"]},
+            {"include_tools": ["read"]},
+            id="server_excludes_assignment_includes",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    server_filters: dict[str, list[str]],
+    authored_filters: dict[str, list[str]],
+) -> None:
+    """A denylist at either MCP filter layer must hide and deauthorize a remote tool."""
+    config = Config.model_validate(
+        {
+            "agents": {"lead": {"display_name": "Lead"}},
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "test-server",
+                    **server_filters,
+                },
+            },
+        },
+    )
+
+    class _SingleToolSession:
+        @staticmethod
+        async def list_tools(cursor: str | None = None) -> mcp_types.ListToolsResult:
+            assert cursor is None
+            return mcp_types.ListToolsResult(
+                tools=[
+                    mcp_types.Tool(
+                        name="read",
+                        description="Read",
+                        inputSchema={"type": "object", "properties": {}},
+                    ),
+                ],
+            )
+
+    manager = MCPServerManager(
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+    )
+    catalog = await manager._discover_catalog(
+        "demo",
+        config.mcp_servers["demo"],
+        cast("ClientSession", _SingleToolSession()),
+        mcp_types.InitializeResult(
+            protocolVersion="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            serverInfo=mcp_types.Implementation(name="demo", version="1.0"),
+        ),
+    )
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=catalog,
+        server_config=config.mcp_servers["demo"],
+        include_tools=authored_filters.get("include_tools"),
+        exclude_tools=authored_filters.get("exclude_tools"),
+    )
+    entry = EffectiveToolConfig(name="mcp_demo", tool_config_overrides=authored_filters)
+    registry, _ = resolved_mcp_tool_state(config)
+    monkeypatch.setitem(TOOL_REGISTRY, "mcp_demo", registry["mcp_demo"])
+    construction_origin = authorization_module.tool_registry_origins()["mcp_demo"]
+
+    assert "demo_read" not in toolkit.async_functions
+    assert not _configured_tool_allowed(
+        config,
+        _OWNER,
+        entry,
+        "read",
+        {"mcp_server_id": "demo", "mcp_tool_name": "read"},
+        {"name": "mcp_demo", "factory_origin": construction_origin},
     )
 
 
