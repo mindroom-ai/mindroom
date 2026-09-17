@@ -115,7 +115,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
     from mindroom.response_delivery_recovery import ResponseDeliveryRecovery
-    from mindroom.streaming import StreamInputChunk
+    from mindroom.streaming import StreamingPresentation, StreamInputChunk
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -360,6 +360,7 @@ class CancelledVisibleNoteRequest:
     existing_event_is_placeholder: bool
     cancel_source: Literal["user_stop", "sync_restart", "interrupted"]
     identity: ResponseIdentity
+    initial_presentation: StreamingPresentation | None = None
 
 
 @dataclass(frozen=True)
@@ -1796,7 +1797,10 @@ class DeliveryGateway:
         request: CancelledVisibleNoteRequest,
     ) -> FinalDeliveryOutcome:
         """Edit the in-flight visible response into a terminal cancellation note."""
-        cancelled_text, stream_status = build_cancelled_response_update("", cancel_source=request.cancel_source)
+        initial = request.initial_presentation
+        prior_text = initial.response_text if initial is not None else ""
+        tool_trace = initial.tool_trace if initial is not None else ()
+        cancelled_text, stream_status = build_cancelled_response_update(prior_text, cancel_source=request.cancel_source)
         extra_content = {constants.STREAM_STATUS_KEY: stream_status}
         failure_reason = cancel_failure_reason(request.cancel_source)
         if current_task_is_process_shutdown():
@@ -1806,6 +1810,7 @@ class DeliveryGateway:
                 cancel_source=request.cancel_source,
                 failure_reason=failure_reason,
                 extra_content=extra_content,
+                tool_trace=tool_trace,
             )
         # A cancellation note is transport, not a turn's answer, so it never
         # reaches the outbox and nothing else would keep it out of a room this
@@ -1819,6 +1824,7 @@ class DeliveryGateway:
                 event_id=request.event_id,
                 new_text=cancelled_text,
                 extra_content=extra_content,
+                tool_trace=list(tool_trace) if tool_trace else None,
             ),
         )
         if edited:
@@ -1831,16 +1837,18 @@ class DeliveryGateway:
                 cancel_source=request.cancel_source,
                 failure_reason=failure_reason,
                 extra_content=extra_content,
+                tool_trace=tool_trace,
             )
         if not request.existing_event_is_placeholder:
             return FinalDeliveryOutcome(
                 terminal_status="cancelled",
                 event_id=request.event_id,
                 is_visible_response=True,
-                final_visible_body=cancelled_text,
+                final_visible_body=prior_text if initial is not None else cancelled_text,
                 cancel_source=request.cancel_source,
                 failure_reason=failure_reason,
                 extra_content=extra_content,
+                tool_trace=tool_trace,
             )
         cleanup_failure = await self._redact_visible_response_event(
             room_id=request.target.room_id,

@@ -118,6 +118,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.system_prompt import render_date_context
 from mindroom.team_exact_members import (
     ResolvedExactTeamMembers,
@@ -269,6 +270,26 @@ def _format_team_header(agent_names: list[str]) -> str:
     return f"🤝 **Team Response** ({', '.join(agent_names)}):\n\n"
 
 
+def _prepend_team_response_prefix(text: str, initial_presentation: StreamingPresentation | None) -> str:
+    """Keep delivered text before any recovered response or terminal notice."""
+    if initial_presentation is None:
+        return text
+    return append_stream_text(initial_presentation.response_text, text, separate=True)
+
+
+def _prefix_team_stream_chunk(
+    chunk: _TeamStreamChunk,
+    initial_presentation: StreamingPresentation | None,
+) -> _TeamStreamChunk:
+    """Carry recovered metadata with replacement text; structured documents already include it."""
+    if initial_presentation is None or not isinstance(chunk, str):
+        return chunk
+    return StructuredStreamChunk(
+        content=_prepend_team_response_prefix(chunk, initial_presentation),
+        tool_trace=list(deepcopy(initial_presentation.tool_trace)),
+    )
+
+
 def _format_member_contribution(agent_name: str, content: str, indent: int = 0) -> str:
     """Format a single team member's contribution.
 
@@ -376,12 +397,15 @@ class _TeamStreamPresentation:
     per_member: dict[str, str]
     consensus: str = ""
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    prefix_response_text: str = ""
+    prefix_tool_count: int = 0
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_scopes: set[str] = field(default_factory=set, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Restore pending tool identity from the durable trace."""
-        self.tool_tracker.restore_pending(self.tool_trace)
+        self.tool_tracker.restore_pending(self.tool_trace[self.prefix_tool_count :])
+        self.tool_tracker.sync_visible_indices(self.tool_trace)
         self.separate_next_scopes = {
             pending.scope_key
             for pending in self.tool_tracker.pending_tools
@@ -400,6 +424,7 @@ class _TeamStreamPresentation:
         display_names: Sequence[str],
         *,
         show_tool_calls: bool,
+        initial_presentation: StreamingPresentation | None = None,
     ) -> _TeamStreamPresentation:
         """Create an empty presentation for a new team run."""
         frozen_config_names = list(config_names)
@@ -419,6 +444,9 @@ class _TeamStreamPresentation:
             display_names_by_id=dict(zip(ids, names, strict=True)),
             show_tool_calls=show_tool_calls,
             per_member=dict.fromkeys(ids, ""),
+            prefix_response_text=initial_presentation.response_text if initial_presentation is not None else "",
+            prefix_tool_count=len(initial_presentation.tool_trace) if initial_presentation is not None else 0,
+            tool_trace=list(deepcopy(initial_presentation.tool_trace)) if initial_presentation is not None else [],
         )
 
     @classmethod
@@ -477,13 +505,20 @@ class _TeamStreamPresentation:
             msg = "Team continuation presentation snapshot is invalid"
             raise RuntimeError(msg)
         valid_tool_scopes = {"team", *(f"agent:{member_id}" for member_id in restored_ids)}
-        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace):
+        consensus = state.get("consensus")
+        prefix_response_text = state.get("prefix_response_text", "")
+        prefix_tool_count = state.get("prefix_tool_count", 0)
+        if (
+            not isinstance(consensus, str)
+            or not isinstance(prefix_response_text, str)
+            or type(prefix_tool_count) is not int
+            or not 0 <= prefix_tool_count <= len(tool_trace)
+        ):
+            msg = "Team continuation presentation snapshot is invalid"
+            raise RuntimeError(msg)
+        if any(entry.scope_key not in valid_tool_scopes for entry in tool_trace[prefix_tool_count:]):
             msg = "Team continuation durable tool scope is not a frozen presentation slot"
             raise RuntimeError(msg)
-        consensus = state.get("consensus")
-        if not isinstance(consensus, str):
-            msg = "Team continuation presentation snapshot is invalid"
-            raise RuntimeError(msg)  # noqa: TRY004
         restored_separators = _restore_hidden_team_separators(
             state,
             valid_tool_scopes=valid_tool_scopes,
@@ -499,6 +534,8 @@ class _TeamStreamPresentation:
             per_member=per_member,
             consensus=consensus,
             tool_trace=list(deepcopy(tool_trace)),
+            prefix_response_text=prefix_response_text,
+            prefix_tool_count=prefix_tool_count,
         )
         restored.separate_next_scopes.update(restored_separators)
         if restored.render_body() != prior_response_text:
@@ -522,6 +559,9 @@ class _TeamStreamPresentation:
             ],
             "consensus": self.consensus,
         }
+        if self.prefix_response_text or self.prefix_tool_count:
+            state["prefix_response_text"] = self.prefix_response_text
+            state["prefix_tool_count"] = self.prefix_tool_count
         if not self.show_tool_calls and self.separate_next_scopes:
             document_scopes = [*(f"agent:{member_id}" for member_id in self.member_ids), "team"]
             state["separate_next_scopes"] = [scope for scope in document_scopes if scope in self.separate_next_scopes]
@@ -587,7 +627,10 @@ class _TeamStreamPresentation:
             "team": len(self.member_ids),
         }
         old_indices = {id(trace_entry): index for index, trace_entry in enumerate(self.tool_trace, start=1)}
-        self.tool_trace.sort(key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"])
+        self.tool_trace[self.prefix_tool_count :] = sorted(
+            self.tool_trace[self.prefix_tool_count :],
+            key=lambda trace_entry: scope_order[trace_entry.scope_key or "team"],
+        )
         index_map = {
             old_indices[id(trace_entry)]: new_index for new_index, trace_entry in enumerate(self.tool_trace, start=1)
         }
@@ -654,7 +697,8 @@ class _TeamStreamPresentation:
             per_member=self.per_member,
             consensus=self.consensus,
         )
-        return _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+        body = _format_team_header(self.display_names) + "\n\n".join(parts) if parts else ""
+        return append_stream_text(self.prefix_response_text, body, separate=True)
 
 
 def _blocking_team_member_scope(
@@ -780,9 +824,15 @@ def _attach_team_pause_presentation(
     config_names: Sequence[str],
     display_names: Sequence[str],
     show_tool_calls: bool,
+    initial_presentation: StreamingPresentation | None = None,
 ) -> PausedAttempt:
     """Render a blocking team pause into the same document used by continuation."""
-    presentation = _TeamStreamPresentation.new(config_names, display_names, show_tool_calls=show_tool_calls)
+    presentation = _TeamStreamPresentation.new(
+        config_names,
+        display_names,
+        show_tool_calls=show_tool_calls,
+        initial_presentation=initial_presentation,
+    )
     scoped_tools: dict[tuple[str, str], ToolExecution] = {}
     _append_team_output_text(presentation, response, top_level=True)
     _collect_blocking_team_tools(presentation, response, scoped_tools)
@@ -2835,7 +2885,10 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
                     refresh_scheduler=refresh_scheduler,
                     members=members,
                 ),
-                response_text=presentation.render_body,
+                presentation=lambda: StreamingPresentation(
+                    response_text=presentation.render_body(),
+                    tool_trace=tuple(deepcopy(presentation.tool_trace)) if show_tool_calls else (),
+                ),
             )
         paused = paused_attempt_from_response(
             continued,
@@ -3044,7 +3097,7 @@ async def team_response(  # noqa: C901, PLR0915
             active_model_names=active_member_model_names,
         )
     except ValueError as exc:
-        return str(exc)
+        return _prepend_team_response_prefix(str(exc), ctx.initial_presentation)
     agents = team_members.agents
 
     agent_list = ", ".join(str(a.name) for a in agents if a.name)
@@ -3230,6 +3283,7 @@ async def team_response(  # noqa: C901, PLR0915
                         config_names=attempt_members.requested_agent_names,
                         display_names=attempt_members.display_names,
                         show_tool_calls=show_tool_calls,
+                        initial_presentation=ctx.initial_presentation,
                     ),
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
@@ -3368,7 +3422,7 @@ async def team_response(  # noqa: C901, PLR0915
         unexpected_error_text=lambda e: get_user_friendly_error_message(e, team_name),
         discard_empty_run=discard_team_empty_run,
     )
-    return await run_blocking_response_turn(
+    response_text = await run_blocking_response_turn(
         replace(
             ctx,
             background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
@@ -3383,6 +3437,7 @@ async def team_response(  # noqa: C901, PLR0915
             run_id=ctx.run_id,
         ),
     )
+    return _prepend_team_response_prefix(response_text, ctx.initial_presentation)
 
 
 async def _team_response_stream_raw(
@@ -3516,7 +3571,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             active_model_names=active_member_model_names,
         )
     except ValueError as exc:
-        yield str(exc)
+        yield _prefix_team_stream_chunk(str(exc), ctx.initial_presentation)
         return
     agent_names = team_members.display_names
     display_names = team_members.display_names
@@ -3616,6 +3671,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             attempt_config_names,
             attempt_display_names,
             show_tool_calls=show_tool_calls,
+            initial_presentation=ctx.initial_presentation,
         )
         attempt_member_ids = presentation.member_ids
         attempt_display_names_by_id = presentation.display_names_by_id
@@ -4122,7 +4178,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     # its cleanup does not wait for event-loop async-generator finalization.
     async with aclosing(response_stream) as closing_stream:
         async for chunk in closing_stream:
-            yield chunk
+            yield _prefix_team_stream_chunk(chunk, ctx.initial_presentation)
 
 
 __all__ = [

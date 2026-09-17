@@ -168,25 +168,26 @@ async def _run_operation(
     reference: ExecutionResourceReference,
 ) -> BackgroundOutcome:
     tracker = SyncToolCompletionTracker()
+    asynchronous = (
+        inspect.iscoroutinefunction(owned_call.function.entrypoint)
+        or inspect.isasyncgenfunction(owned_call.function.entrypoint)
+        or any(inspect.iscoroutinefunction(hook) for hook in owned_call.function.tool_hooks or [])
+    )
     try:
         with (
             tool_execution_identity(owner),
-            track_sync_tool_completion(tracker),
+            track_sync_tool_completion(tracker if asynchronous else None),
             authorized_tool_call(owner, owned_call.function, arguments=owned_call.arguments),
         ):
             await job_checkpoint()
             check_current_execution_authority()
             invocation = original(owned_call)
-            asynchronous = (
-                inspect.iscoroutinefunction(owned_call.function.entrypoint)
-                or inspect.isasyncgenfunction(owned_call.function.entrypoint)
-                or any(inspect.iscoroutinefunction(hook) for hook in owned_call.function.tool_hooks or [])
-            )
             if asynchronous:
                 success, timer, _, result = await invocation
             else:
-                # The SDK offloads the complete sync call. Keep its actual
-                # dispatch alive when no async bridge tracker owns the leaf.
+                # Own the SDK's complete offloaded dispatch. A sync hook bridge
+                # may create a worker-local loop whose leaf tasks cannot be
+                # retained by the tracker on this loop.
                 success, timer, _, result = await run_coroutine_until_complete(invocation)
             value, events, replay = await _drain_result(result.result)
             isolated = owned_call.function._run_context

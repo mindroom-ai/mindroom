@@ -24,6 +24,7 @@ from agno.tools.function import Function, FunctionCall, ToolResult
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,
@@ -41,7 +42,9 @@ from mindroom.tool_jobs.resources import (
 )
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_execution import DelegationModel, _call
 
@@ -51,6 +54,68 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("managed", "wait_timeout"), [(False, None), (True, None), (True, 0)])
+async def test_registered_sync_tool_completes_through_sdk_dispatch(
+    tmp_path: Path,
+    managed: bool,
+    wait_timeout: float | None,
+) -> None:
+    """The registered sync hook bridge must not give its job a foreign-loop completion task."""
+    (tmp_path / "input.txt").write_text("registered sync result\n")
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["coding"])},
+        background_tool_jobs=managed,
+    )
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    if managed:
+        register_background_runtime(paths, runtime)
+    toolkit = get_tool_by_name(
+        "coding",
+        paths,
+        worker_target=None,
+        disable_sandbox_proxy=True,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+    )
+    prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
+    arguments: dict[str, object] = {"path": "input.txt"}
+    if managed:
+        arguments["wait_timeout"] = wait_timeout
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("read_file", "sync-call", **arguments)]),
+            ModelResponse(content="done"),
+        ],
+    )
+    if managed:
+        install_tool_job_execution(model)
+    agent = Agent(id="leader", model=model, tools=[toolkit])
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                response = await agent.arun("read the input", session_id=context.session_id)
+                assert response.tools is not None
+                tool = response.tools[0]
+                if managed:
+                    jobs = await runtime.list_jobs(owner=owner, depth=0)
+                    assert len(jobs) == 1
+                    waited = await runtime.wait(jobs[0].job_id, owner=owner, depth=0)
+                    assert waited.job.status == "completed", waited.job.result
+                    assert "registered sync result" in waited.job.result
+                if wait_timeout is None:
+                    assert not tool.tool_call_error, tool.result
+                    assert "registered sync result" in tool.result
+                else:
+                    assert json.loads(tool.result)["job_id"] == jobs[0].job_id
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -417,7 +482,8 @@ def test_rich_result_captures_local_artifact_before_cleanup(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_bridge", [False, True])
+async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path, with_bridge: bool) -> None:
     """Cancellation cannot release resources before the actual sync worker exits."""
     started, release = threading.Event(), threading.Event()
     finished = threading.Event()
@@ -439,7 +505,10 @@ async def test_cancel_sync_job_waits_for_actual_thread(tmp_path: Path) -> None:
         responses=[ModelResponse(tool_calls=[_call("slow_tool", "sync-call")]), ModelResponse(content="done")],
     )
     install_tool_job_execution(model)
-    agent = Agent(id="leader", model=model, tools=[slow_tool])
+    toolkit = Toolkit(name="slow", tools=[slow_tool])
+    if with_bridge:
+        prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="leader"))
+    agent = Agent(id="leader", model=model, tools=[toolkit])
 
     @owned_tool_execution
     async def parent_run() -> RunOutput | TeamRunOutput:

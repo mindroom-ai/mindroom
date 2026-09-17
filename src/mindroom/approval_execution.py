@@ -146,10 +146,14 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     if paused is not None:
         for tool in paused.tools:
             presentation.start_tool(tool)
+    completed_call_ids = {
+        entry.tool_call_id for entry in presentation.tool_tracker.completed_tools if entry.tool_call_id is not None
+    }
     for tool in response.tools or ():
         if tool.is_paused:
             presentation.start_tool(tool)
-        else:
+        elif tool.tool_call_id is None or tool.tool_call_id not in completed_call_ids:
+            # Repeated terminal completions must not match older public slots by name.
             presentation.complete_tool(tool)
 
 

@@ -361,6 +361,7 @@ depends_on = ["mindroom.durable_write"]
 [[modules]]
 path = "mindroom.ai"
 depends_on = [
+    "mindroom.streaming",
     "mindroom.tool_jobs.completion",
     "mindroom.agno_compat_session_persistence",
     "mindroom.tool_system.context_bound_streams",
@@ -2345,6 +2346,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.teams"
 depends_on = [
+    "mindroom.streaming",
     "mindroom.tool_jobs.completion",
     "mindroom.helper_usage",
     "mindroom.team_scope",

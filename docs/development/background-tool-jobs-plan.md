@@ -649,3 +649,40 @@ The assertion counts all process-local adapters, so an unrelated retained empty 
 The storage suite passes alone, and the new approval suites followed by the diagnostic test leave no surviving adapters.
 The original adapter owner and scheduler stall were not established; the interrupted run is not completion evidence.
 The final load-scheduled run and isolated group passed without production or test changes for those issues.
+
+### Deployed restart and synchronous-tool regressions
+
+Two deployed failures were reproduced after the integration above:
+
+- Plain synchronous tools could execute successfully and then be recorded as failed during cleanup on Python 3.14.
+  The SDK runs their hook bridge on a worker-local event loop; the job's main-loop cleanup tracker incorrectly retained tasks from that loop.
+  The job now owns the complete offloaded dispatch without attaching the outer tracker to the worker loop.
+  Async calls retain their existing tracked cancellation drain.
+- Recovery reused the earlier Matrix response event but started its presentation empty, replacing already-streamed prose and tool metadata.
+  Recovery now reads the latest trusted visible edit and carries its text and trace into agent and team generation.
+  Earlier text remains a fixed prefix, tool indices continue after its trace, and the recovery prompt tells the model not to repeat it.
+  An unreadable earlier response leaves recovery retryable instead of replacing unknown content.
+
+Review also reproduced and corrected terminal-only provider output being hidden by that prefix, setup failures treating recovered prose as a disposable placeholder, blocking cancellation replacing the prefix, and approval completion reconciliation rewriting an older same-name tool slot.
+Regression tests cover agent and team responses, streaming and blocking delivery, approval snapshots, and exact trace preservation.
+Blocking teams apply the saved prefix once after the shared driver returns, including continuation-limit notices.
+If tool calls are hidden by the current config, recovery keeps the earlier prose while removing matching tool markers and trace metadata together.
+
+- [x] Real Matrix/backend restart checks: 27 assertions covering repeated restarts, shutdown-interrupted tools, blocking recovery, and approval recovery; prior prose and trace survive on the same event and original side effects execute once.
+- [x] Real Python 3.14 Matrix/tool checks: 37 assertions covering registered coding and todo tools, normal waits, zero waits with retrieval, saved outcomes, and a restart with the feature disabled.
+- [x] Add Python 3.14 CI coverage for registered execution, wait budgets, and tool hooks alongside the full Python 3.13 suite.
+- [x] Preserve newly published blocking wait progress and its trace through cancellation: eight further live assertions pass after a real Matrix Stop reaction.
+  Wait updates carry a complete presentation; cancellation re-reads the latest owned Matrix edit and leaves it untouched if that read fails.
+  This reuses the existing response owner without adding a separate mutable presentation cache.
+- [x] Combined verification: 22,318 tests passed with 13 skips across nonoverlapping groups (22,290 in parallel and 28 isolated cases); repository hooks, full type checking, and Tach passed.
+  The final parallel group completed in 322.45 seconds and the isolated group in 4.83 seconds.
+  The broader live lifecycle suite also passed 21 assertions for ordinary execution, active streaming, human follow-ups, approval parking across restarts, and delegation.
+- [x] Independent review accepted the corrections with no remaining findings.
+
+The broader Python 3.14 suite is not claimed to pass: the pinned SDK has nullable-schema differences, and a live-test helper explicitly launches Python 3.13 into an inherited test environment.
+The focused CI lane avoids those unrelated paths while covering the deployed cross-loop failure.
+
+The previous head's sole CI failure was a two-second deadline in the restart integration test while an empty consumption finalizer had already finished.
+A controlled 2.1-second finalization delay reproduced the failure without an execution-ownership defect.
+The test now awaits the task after its existing start barrier and human signal; the suite's 60-second timeout still bounds deadlocks.
+The same latency probe and both restart integration cases pass, with no production change for this test timing issue.

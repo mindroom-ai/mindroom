@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -24,14 +24,18 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.constants import RuntimePaths
+    from mindroom.streaming import StreamingPresentation
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 
-_WAIT_NOTICE: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar("background_wait_notice", default=None)
+_WAIT_NOTICE: ContextVar[Callable[[StreamingPresentation], Awaitable[None]] | None] = ContextVar(
+    "background_wait_notice",
+    default=None,
+)
 
 
 @contextmanager
-def background_wait_notice(callback: Callable[[str], Awaitable[None]]) -> Iterator[None]:
+def background_wait_notice(callback: Callable[[StreamingPresentation], Awaitable[None]]) -> Iterator[None]:
     """Bind blocking wait progress to the current serialized response's placeholder."""
     token = _WAIT_NOTICE.set(callback)
     try:
@@ -40,11 +44,11 @@ def background_wait_notice(callback: Callable[[str], Awaitable[None]]) -> Iterat
         _WAIT_NOTICE.reset(token)
 
 
-async def report_background_wait(text: str) -> None:
+async def report_background_wait(presentation: StreamingPresentation) -> None:
     """Report blocking wait progress through its response owner when present."""
     callback = _WAIT_NOTICE.get()
     if callback is not None:
-        await callback(text)
+        await callback(presentation)
 
 
 def completion_source_id(job_id: str, generation: int) -> str:
@@ -217,7 +221,7 @@ async def join_approval_jobs[RunT](
     *,
     is_complete: Callable[[RunT], bool],
     continue_response: Callable[[RunT, str], Awaitable[RunT]],
-    response_text: Callable[[], str],
+    presentation: Callable[[], StreamingPresentation],
 ) -> RunT:
     """Keep reconstructed agent/team approvals at the ordinary bounded join boundary."""
     attempted: set[tuple[str, int]] = set()
@@ -227,7 +231,8 @@ async def join_approval_jobs[RunT](
         prompt = None
         async for joined in join_conversation_jobs(attempted):
             if isinstance(joined, str):
-                await report_background_wait(response_text() + joined)
+                current = presentation()
+                await report_background_wait(replace(current, response_text=current.response_text + joined))
             else:
                 prompt = joined.prompt
         if prompt is None:

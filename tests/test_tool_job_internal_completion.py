@@ -17,6 +17,7 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
     stream_response_turn,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.tool_jobs.completion import background_wait_notice, join_conversation_jobs, report_background_wait
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
@@ -406,7 +407,7 @@ async def test_blocking_join_updates_existing_response_placeholder(tmp_path: Pat
         return True
 
     async def response(_target: object, _state: object) -> None:
-        await report_background_wait("Waiting for background work")
+        await report_background_wait(StreamingPresentation("Waiting for background work"))
 
     with patch.object(type(runner.deps.delivery_gateway), "edit_text", edit):
         await runner._run_locked_response_lifecycle(request, response_kind="test", locked_operation=response)
@@ -531,7 +532,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
         await finish.wait()
         return BackgroundOutcome("completed", "retained result")
 
-    async def progress(_text: str) -> None:
+    async def progress(_presentation: StreamingPresentation) -> None:
         waiting.set()
 
     async def attempt(_run: TurnRunState, _state: DynamicContinuationRunState) -> CompletedAttempt:

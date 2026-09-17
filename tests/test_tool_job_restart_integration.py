@@ -134,7 +134,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
             original_task = asyncio.create_task(start_original())
             await asyncio.wait_for(started.wait(), 2)
             signal.notify()
-            original = await asyncio.wait_for(original_task, 2)
+            original = await original_task
         assert original.tools is not None
         job_id = json.loads(cast("str", original.tools[0].result))["job_id"]
         release.set()
