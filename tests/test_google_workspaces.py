@@ -311,7 +311,6 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
                 "refresh_token": ["secondary-refresh"],
                 "client_id": ["secondary"],
                 "client_secret": ["secondary-secret"],
-                "scope": [" ".join(secondary.scopes)],
             },
         ]
         await reset_oauth_credentials(contexts[1])

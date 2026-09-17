@@ -14,6 +14,8 @@ from mindroom.matrix_identifiers import unnamespaced_agent_name_from_username_lo
 from mindroom.tool_system.events import build_tool_trace_content, ensure_visible_tool_marker_spacing
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.entity_resolution import EntityIdentityRegistry
@@ -439,6 +441,8 @@ def format_message_with_mentions(
     latest_thread_event_id: str | None = None,
     tool_trace: list[ToolTraceEntry] | None = None,
     extra_content: dict[str, Any] | None = None,
+    *,
+    markdown_renderer: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """Parse text for mentions and create properly formatted Matrix message.
 
@@ -453,6 +457,7 @@ def format_message_with_mentions(
         latest_thread_event_id: Optional latest event ID in thread (for fallback compatibility)
         tool_trace: Optional structured tool trace metadata
         extra_content: Optional custom metadata fields merged into content
+        markdown_renderer: Optional response-scoped renderer for repeated Markdown input
 
     Returns:
         Properly formatted content dict for room_send
@@ -467,7 +472,8 @@ def format_message_with_mentions(
 
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format
-    formatted_html = markdown_to_html(markdown_text)
+    render_markdown = markdown_to_html if markdown_renderer is None else markdown_renderer
+    formatted_html = render_markdown(markdown_text)
     tool_trace_content = build_tool_trace_content(tool_trace)
     merged_extra_content: dict[str, Any] = {}
     if tool_trace_content:

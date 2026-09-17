@@ -849,9 +849,11 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 ### Token Usage
 
-`GET /api/usage` returns retained token usage using the same collector as the `usage_stats` tool.
-It uses dashboard authentication; ordinary Connections users cannot access it.
-Standalone deployments should protect the dashboard with `MINDROOM_API_KEY` as described above.
+`GET /api/usage` returns organization-wide retained usage under the same standard dashboard authentication as other administrator APIs.
+`GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Trusted Upstream Authentication](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#usage-export-service).
+The two routes share report preparation and caching while authenticating every request through their own policy.
+When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
+Every report-state response uses `Cache-Control: no-store`.
 
 The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, and `user_breakdown`.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
@@ -861,7 +863,7 @@ Stored per-model details split runs that use several models; older runs fall bac
 Malformed or inconsistent model details retain the run's tokens under `unknown` and mark model coverage as incomplete.
 Requester aliases are combined; `user_id: null` holds unattributed usage.
 
-Use `GET /api/usage?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
+Use `GET /api/usage?include_daily=true` or `GET /api/usage/export?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
@@ -879,7 +881,7 @@ The `coverage`, `model_coverage`, and `user_coverage` fields describe missing so
 This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
-The administrator response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
+The organization-wide response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
 Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
 They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
@@ -889,14 +891,14 @@ Compacted history can contribute to session totals without recoverable model or 
 #### Personal Private-Agent Usage
 
 `GET /api/usage/me/private-agents?include_daily=true` returns the authenticated requester's usage across their configured private agents.
-It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an administrator `user_breakdown`.
+It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an organization-wide `user_breakdown`.
 Known requester aliases share one history; other users' databases and shared-agent databases are excluded.
 The optional `include_daily` parameter defaults to `false`.
 
 This endpoint requires trusted upstream authentication with signed JWTs and a verified Matrix identity, using the same identity checks as the personal Connections API.
 An instance API key alone cannot select a personal user.
 The requester comes only from authenticated identity; user, agent, and storage-path query overrides are rejected.
-Ordinary authenticated users can access this personal endpoint; `/api/usage` retains its existing dashboard administrator access rules.
+Ordinary authenticated users can access this personal endpoint, but their signed identity does not grant administrator dashboard access or access to the service export.
 
 ### Health & Readiness
 
@@ -2540,10 +2542,14 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 ## Agent Delegation
 
 Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
-The model-facing tools are `run_subagent(task: str, agent_name: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
+The model-facing tools are `run_subagent(task: str, agent_name: str | None = None, model: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
+The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, and tool policy.
+Pass a configured alias from `models:` as `model` to choose a different model for that child, including a fresh copy of yourself.
+An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
+Unknown model aliases are rejected before execution.
+The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
 Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
 Calls wait for the child by default.
 Enable the instance-wide root option `background_tool_jobs: true` and restart to use generic background execution; it is disabled by default.
@@ -6431,6 +6437,7 @@ Set these values on the **primary MindRoom runtime**:
 ```dotenv
 MINDROOM_WORKER_BACKEND=docker
 MINDROOM_DOCKER_WORKER_IMAGE=mindroom:dev
+MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer
 MINDROOM_WORKER_COMPUTER_ENABLED=true
 MINDROOM_COMPUTER_ALLOWED_ORIGINS=["https://chat.example.org"]
 MATRIX_HOMESERVER=https://matrix.example.org
@@ -6457,7 +6464,7 @@ agents:
     worker_scope: user_agent
 ```
 
-Interactive sessions require effective `worker_scope: user_agent` and worker-routed `browser`.
+Interactive sessions require effective `worker_scope: user_agent` and exactly one worker-routed browser provider: `browser` or `browser_mcp`.
 The normal requester/agent worker resolver supplies the same worker to Chat and tool calls.
 Keep the browser's default `target: host` for this managed worker browser.
 The connected-user `target: desktop` is a separate feature and is not supported inside the worker computer.
@@ -6478,6 +6485,134 @@ env:
 Use the chart's existing worker image, authentication secret, storage, and RBAC settings.
 The instance chart names its opt-in values `workerBackend: kubernetes` and `workerComputerEnabled: true`; supply the allowed-origin environment value to its primary runtime through your deployment's environment configuration.
 Changing the feature flag changes the worker configuration signature, so workers are replaced as needed.
+
+## Native Playwright MCP provider
+
+Select `browser_mcp` for native Playwright tools such as `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_evaluate`, `browser_tabs`, and `browser_take_screenshot`:
+
+```yaml
+agents:
+  researcher:
+    display_name: Researcher
+    role: Research with a browser and save results.
+    model: default
+    tools: [browser_mcp, shell, file]
+    worker_scope: user_agent
+```
+
+`browser_mcp` routes to workers by default and requires an enabled dedicated Computer worker.
+Assign exactly one browser provider to this scope.
+The existing `browser` action-based provider and connected user desktop extension remain available separately.
+
+The full image installs `@playwright/mcp@0.0.78` with fixed `vision,pdf` capabilities at build time.
+The native provider uses that server's bundled Chromium `151.0.7922.10` (revision `1232`), installed under root-owned `/opt/mindroom-browser-mcp` with a fixed executable path and `browser-version.json` build metadata.
+Update and test the server and bundled browser together, including a fresh download after reopening a saved profile.
+System Chromium 152 can crash during that sequence with the pipe transport; the bundled browser preserves the existing sandbox, persistent profiles, and stdio process architecture.
+The action-based `browser` provider also defaults to this bundle when bound to a Computer worker display.
+Its existing operator `BROWSER_EXECUTABLE_PATH` override remains supported; custom browser versions need the same restart/download checks.
+Ordinary headless and connected desktop browser selection is unchanged.
+The native schemas are pinned and checked against the installed server on connection.
+Runtime calls cannot install packages, choose another server, add capabilities, or change launch/init settings.
+`browser_run_code_unsafe`, browser installation, and route mutation tools are excluded.
+Page-context `browser_evaluate` remains available; it does not expose server-side Node APIs.
+
+The browser runs visibly on its worker display with sandboxing enabled.
+Its profile persists under the worker storage root at `browser-profiles/native-mcp`; automatic screenshots, PDFs, and downloads use `browser/` inside the shared workspace.
+Explicit native filenames resolve relative to the workspace; use `browser/native.png` or `browser/native.pdf` to keep named files in that directory.
+Upstream workspace file restrictions remain enabled.
+File upload and drop paths are resolved before dispatch and must name existing regular files inside the canonical worker workspace.
+This rejects symlinks to files outside the workspace while allowing symlinks to files inside it.
+This path check does not protect against concurrent filesystem changes by malicious shell code.
+Screenshots without a native `filename` return inline model-visible images; a native filename produces the upstream file result instead.
+MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media receipt.
+The primary never fetches worker paths to reconstruct images.
+
+Native tab indices can change; list tabs again before selecting one.
+The native `browser_resize` tool changes the page viewport, while the operating-system window can retain its previous size.
+The pinned upstream server can display Chromium's resolver-flag banner when using the required destination proxy.
+Worker startup still requires Chromium sandboxing and the configured container restrictions.
+
+All native calls, including snapshots and browser close, use the same takeover gate as the existing provider.
+Timeout, cancellation, and server failure close owned resources before replacement.
+On Linux, a dedicated child supervisor reaps detached Chromium descendants as well as the MCP server.
+
+The packaged init-page hook checks intercepted requests through an authenticated worker-loopback verifier.
+Private networks are denied by default.
+To allow trusted private destinations, configure:
+
+```yaml
+agents:
+  researcher:
+    tools:
+      - browser_mcp:
+          allow_private_networks: true
+    worker_scope: user_agent
+```
+
+Metadata and link-local addresses stay blocked even with this option.
+A worker-local destination proxy checks HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
+The browser keeps normal TLS, origins, and redirect behavior.
+The URL callback also restricts request schemes; callback errors and timeouts deny requests, and service workers are blocked.
+This guard does not promise DNS-rebinding protection, coverage of every network protocol, or confinement of malicious shell code.
+Persistent workspace files remain intentionally shared with the agent's other worker tools.
+
+## Browser and container sandboxing
+
+Worker computers launch Chromium with its Linux process sandbox enabled.
+A startup failure is returned to the caller; MindRoom does not retry with Chromium's sandbox disabled.
+
+Select `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer` explicitly on the primary runtime before enabling Computer.
+The Docker pool policy accepts only `runtime_default` (the default) or `computer`.
+Enabling `MINDROOM_WORKER_COMPUTER_ENABLED=true` with `runtime_default` fails configuration; there is no weaker fallback.
+Computer configuration also rejects known root worker identities, including an inherited host UID 0 and explicit `MINDROOM_DOCKER_WORKER_USER=root` or numeric UID 0 overrides.
+An empty worker-user setting uses the image default; custom images and named accounts must resolve to a non-root UID.
+The Computer worker also checks its actual effective UID at startup and refuses to serve requests as root.
+The `computer` policy drops all Linux capabilities, sets `no-new-privileges`, and uses the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
+It applies to the entire Docker worker pool, even with Computer disabled or agents that do not select a browser tool.
+Computer availability controls lazy browser/display startup separately from the pool's security policy.
+With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their previous launch settings and compatible configuration identities; upgrading alone does not replace them for this policy.
+The reviewed profile is based on Moby's maintained default policy and adds only the namespace and `chroot` operations used by the Chromium sandbox.
+Workers under the `computer` policy are replaced if their actual host security settings differ from the required policy.
+Changing the selected policy reconciles workers to the new configuration; ordinary image, authentication, configuration and mount changes still trigger their existing reconciliation.
+
+Kubernetes workers keep the pod-level `RuntimeDefault` seccomp policy.
+If that policy supports unprivileged user namespaces, no extra setting is needed.
+Runtimes that block Chromium's namespace sandbox need the packaged profile installed on every eligible node at:
+
+```text
+/var/lib/kubelet/seccomp/profiles/worker-computer-578ef2b662d8e9a8.json
+```
+
+Use immutable, versioned filenames for node profiles; this example uses the reviewed profile's SHA-256 prefix.
+Verify the installed bytes on every eligible node against the packaged profile's SHA-256:
+`578ef2b662d8e9a886132148a0b75f0388efff92ed902b16d7be2777ae3788fa`.
+A `localhostProfile` path only names a node file; MindRoom cannot verify its contents through that string.
+On profile changes, install verified bytes at a new versioned path on all eligible nodes before changing the selected path.
+
+Then select it for the main worker container:
+
+```dotenv
+MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON={"type":"Localhost","localhostProfile":"profiles/worker-computer-578ef2b662d8e9a8.json"}
+```
+
+The runtime chart accepts the same object at `workers.kubernetes.seccompProfile`; the instance chart uses `kubernetesWorkerSeccompProfile`.
+For example:
+
+```yaml
+workers:
+  kubernetes:
+    seccompProfile:
+      type: Localhost
+      localhostProfile: profiles/worker-computer-578ef2b662d8e9a8.json
+```
+
+Kubernetes applies this override only to the main worker container.
+Init and extra containers continue to inherit the pod's `RuntimeDefault` policy.
+A missing node profile causes pod startup to fail with `CreateContainerError`, which keeps the sandbox requirement explicit.
+The node kernel and its security modules must also permit unprivileged user namespaces.
+
+The Chromium process sandbox, the container runtime's seccomp filter, and the persistent worker filesystem address different boundaries.
+The browser sandbox isolates Chromium processes, seccomp limits host syscalls, and persistent storage deliberately retains the browser profile and worker files across container replacement.
 
 ## Connect MindRoom Chat
 
@@ -6552,16 +6687,21 @@ On desktop the panel sits beside the conversation and closes the Members drawer.
 On mobile it fills the screen and provides a close button.
 Keyboard input over the controlled screen stays out of the composer and command palette.
 
-The browser process persists across runner requests, including stable target IDs and native tabs opened by the user.
+The browser process persists across runner requests, including tabs opened by the user.
+The `browser` provider uses stable target IDs; `browser_mcp` exposes the native server's current tab indices.
 When the agent selects a managed tab with focus or a page action, Chromium brings that page to the visible foreground.
 A tool's screenshot or snapshot therefore observes the page shown in the viewer.
 
 ## Storage and lifetime
 
 Browser profiles live under `browser-profiles/<profile>` in the dedicated worker's persistent storage root.
-Completed downloads are copied into the agent workspace's `browser/` directory with a unique filename prefix, so the shell/file tools can read them.
+Completed downloads are available in the agent workspace's `browser/` directory, so the shell/file tools can read them.
+The `browser` provider adds a unique filename prefix; `browser_mcp` follows native download naming.
 These files survive computer stop/restart and worker recreation while the storage volume remains.
 Stopping the computer is not a sign-out or profile reset.
+
+When a storage path exceeds Linux's Unix socket limit, the display uses a unique private temporary directory
+for its RFB socket. Cleanup removes that directory after the display children are reaped; persistent storage remains in place.
 
 To reset a profile, stop the computer and recycle/stop its dedicated worker first.
 Remove only that worker's `browser-profiles/<profile>` directory from its persistent storage, then let the next browser action create a new profile.
@@ -6603,8 +6743,11 @@ uv run scripts/test-worker-computer.py --build \
 ```
 
 Use `--image <already-built-image>` without `--build` to reuse a local worker image.
+Use `--provider browser_mcp` to exercise the native provider, including uploads, inline image decoding through the primary proxy, named image/PDF files, and native typing.
+The default remains `--provider browser`.
 Use `--chromium <executable>` if host Chromium is not discoverable.
-The probe verifies same-target reuse, framebuffer pixels, rejected watch input, takeover/agent blocking, native-tab focus/navigation, downloads through shell, stop/restart persistence, and requester isolation.
+The probe verifies browser-session reuse, framebuffer pixels, rejected watch input, takeover waiting for an active browser call, agent blocking during control, tab focus/navigation, downloads through shell, stop/restart persistence, and requester isolation.
+It records the actual worker security settings and Chromium sandbox diagnostics.
 
 For the Chat desktop/mobile spec, make a local Tuwunel image available, start Chat on loopback, then start this fixture:
 
@@ -10637,11 +10780,14 @@ Automatic saving of large tool results uses the same configured policy as other 
 ### What It Does
 
 ```python
-run_subagent(task: str, agent_name: str | None = None) -> str
+run_subagent(task: str, agent_name: str | None = None, model: str | None = None) -> str
 continue_subagent(subagent_id: str, message: str) -> str
 ```
 The delegated agent is created with `create_agent()` and runs independently with no shared session or chat history from the caller.
-Fresh execution still uses the target agent's configured workspace, memory, requester scope, model, and tool policy.
+Fresh execution still uses the target agent's configured workspace, memory, requester scope, and tool policy.
+Set `model` to an alias from `models:` to override the child's model without changing its agent identity.
+The override takes precedence over thread and room model choices; omitting `model` or passing `None` uses normal model selection.
+Unknown model aliases are rejected before the child starts, with available aliases included in the error.
 When the child finishes within the foreground wait, the caller receives its answer, stable `Subagent ID`, and an audit reference.
 Include the relevant facts, constraints, and expected output in `task`, because the child cannot see the caller's conversation.
 Selecting the caller's own name starts a fresh copy if that name is explicitly allowed in `delegate_to`.
@@ -10656,7 +10802,8 @@ Empty tasks and follow-up messages are rejected.
 
 Use `continue_subagent` after the child returns to retain its own conversation history.
 The stable ID remains usable across parent turns and restarts, within the same caller, requester, and originating conversation.
-Follow-ups preserve the child session and nesting depth, recheck current permissions, and require the original storage scope.
+Follow-ups preserve the child session, selected model, and nesting depth, recheck current permissions, and require the original storage scope.
+The model choice also survives approval pauses and restarts.
 Each turn gets a fresh audit record linked by `subagent_id` and `previous_delegation_id`; earlier records remain intact.
 Calls do not queue messages into a running child or one awaiting approval.
 Finish that child's current turn before sending another message.
@@ -10777,7 +10924,7 @@ agents:
 ```
 
 ```python
-run_subagent(task="Independently review the proposed design and return its three main risks.")
+run_subagent(task="Independently review the proposed design and return its three main risks.", model="sonnet")
 
 run_subagent(
     agent_name="research",
@@ -18108,7 +18255,9 @@ MindRoom's architecture consists of several key components working together.
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
+| `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
+| `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
 | `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
@@ -18152,11 +18301,13 @@ MindRoom's architecture consists of several key components working together.
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |
+| `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `file_memory_knowledge.py` | Shared resolution for agent file-memory semantic knowledge overlays |
 | `memory_scope_ids.py` | Cycle-free canonical agent memory scope identifiers |
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |
+| `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a two-variant bounded cache, committed-generation validation, and non-blocking shutdown cleanup |
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |
@@ -18939,7 +19090,7 @@ The remaining rows include existing focused boundaries and later audit additions
 | [`src/mindroom/session_storage_preflight.py`][session-preflight] | An owned session table lacks required Agno columns. | The recovery lock, SQLite rollback recovery, and whole-directory archive complete before current storage creation. |
 | [`src/mindroom/oauth/legacy_credentials.py`][oauth-legacy-credentials] | The OAuth SQLite store normalizes a retired field or verifies a lossless requester binding. | The store retains schema, scope, revision, reset-receipt, transaction, and rollback ownership; old OAuth JSON is not adopted. |
 | [`src/mindroom/matrix/legacy_crypto_upgrade.py`][crypto-upgrade] | Nio first takes durable ownership of a pre-durable crypto store. | Nio's file lease and account/device checks protect keys and trust while only retired recovery rows are cleared. |
-| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] | Script-runtime startup encounters an unversioned recovery signature. | Only an exact recomputation of the original digest permits migration to v2; the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
+| [`src/mindroom/script_runs/legacy_recovery.py`][script-legacy-recovery] | Script-runtime startup encounters an unversioned recovery signature or a v2 digest from before the optional seccomp field. | Only an exact recomputation permits migration; pre-seccomp workers require an unset current seccomp policy, and the current store owns atomic signature replacement and rejects concurrent revocation or signature changes. |
 | [`src/mindroom/desktop/legacy_command_journal.py`][desktop-legacy-journal] | The desktop SQLite journal finds JSON v1 receipts during its one-time import. | Historical validation stays isolated; the journal retains file permissions, atomic import, replay tombstones, response delivery state, sequence maxima, and admission capacity. |
 
 ## Python provenance and regression coverage
@@ -19265,7 +19416,7 @@ Paths are relative to `src/mindroom/`.
 
 | Agno weakness | Upstream issue / PR | Local workaround and remaining scope |
 | --- | --- | --- |
-| Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `history/provider_error_compat.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
+| Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `agno_compat_provider_errors.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
 | Deleted runs survive in legacy blobs or deletion spans separate transactions. | [Issue #9934](https://github.com/agno-agi/agno/issues/9934), [PR #9939](https://github.com/agno-agi/agno/pull/9939), both open. | `agno_compat_sqlite.py`; preserve owner descendant deletion when the atomic upstream fix ships. |
 | New runs can sort before surviving runs after deletion. | [Issue #9936](https://github.com/agno-agi/agno/issues/9936), [PR #9938](https://github.com/agno-agi/agno/pull/9938), both open. | `agno_compat_sqlite.py`; verify insertion after existing indexes with the local override disabled. |
 | Team input flattens roleful messages. | [Issue #9942](https://github.com/agno-agi/agno/issues/9942), [PR #9943](https://github.com/agno-agi/agno/pull/9943), both open. | `history/agno_compat_message_builder.py`; historical-media filtering needs a separate extension point. |
@@ -19301,6 +19452,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Parsed provider responses omit terminal stop metadata. | Preserve OpenAI `finish_reason` and Claude `stop_reason` through a stable parsed-response interface. | `agno_compat_openai_chat.py`, `agno_compat_claude.py`. |
 | Hosted Responses tool-search items are omitted from replay data. | Reproduce lost hosted-search output and preserve ordered call/output items. | `agno_compat_openai_responses_items.py`. |
 | Retrying a stream can reuse partial assistant or tool state. | Establish retry ownership and test that partial output cannot be duplicated. | `agno_compat_openai_responses.py`. |
+| Native Responses error events are ignored and unread streams can remain open after parsing fails. | Preserve terminal error codes and explicitly close SDK streams on failure or consumer closure; retain incomplete-stream retry protections. | `agno_compat_openai_responses.py`. |
 | SQLite journaling is forced, and cache statistics require private access. | Propose configurable pragmas; track public cache counters separately. | `agno_compat_sqlite.py`. |
 | Cancelled runs persist in detached tasks without an awaited drain boundary. | Expose completion for the exact cancelled run before caller-owned history writes. | `agno_compat_session_persistence.py`. |
 | Knowledge insertion lacks caller-controlled error propagation and validation. | Reproduce swallowed vector failures and propose validation before publishing content status. | `agno_compat_knowledge.py`. |
@@ -19331,7 +19483,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
-| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, Claude retries, prompt caching, and participation decisions remain in their owning modules. |
+| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
@@ -19339,7 +19491,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `tool_jobs/agno_compat_execution.py` | Approved FunctionCall driver binding, provider-schema projection of shared wait metadata, and exact-call native requirement projection. | `tool_jobs/agno_execution.py`, `wait_timeout.py`, and `runtime.py` own admission, wait validation, execution, result claims, and cancellation. |
 | `tool_jobs/agno_compat_resources.py` | Agent/Team resource connection and teardown binding. | `tool_jobs/resources.py` retains shared leases and closes resources after their final execution owner releases them. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs and retained terminal metadata. | `openai_models.py` retains provider classes and canonical history/replay policy. |
-| `agno_compat_openai_responses.py` | Responses stream completion, response-ID publication, retry protection, and continuation adaptation. | `openai_models.py` retains request configuration and native/portable replay policy. |
+| `agno_compat_openai_responses.py` | Responses SDK stream ownership, completion, response-ID publication, native failure normalization, retry protection, and continuation adaptation. | `openai_models.py` retains request configuration and native/portable replay policy; `provider_stream_retry.py` owns retry limits and delays. |
 | `agno_compat_openai_responses_items.py` | Capture of provider output items lost by Agno parsing. | `openai_response_replay.py` retains canonical filtering, output ordering, and replay selection. |
 | `agno_compat_claude.py` | Claude sampling and terminal metadata adaptation. | `claude_compat.py` retains typed refusal and native-compaction behavior. |
 | `agno_compat_vertex_claude_tools.py` | Non-mutating removal of unsupported provider-level strict flags before Agno tool formatting. | `vertex_claude_compat.py` retains context fitting, token counting, and native checkpoint policy. |
@@ -19353,7 +19505,7 @@ Small owner-adjacent boundaries use the same source records:
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
-| `history/provider_error_compat.py` | Typed cause-chain inspection for ambiguous default-502 errors. | Compaction retry limits and budget decisions. |
+| `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
 
@@ -19422,7 +19574,7 @@ The [Agno compatibility inventory](https://docs.mindroom.chat/architecture/agno-
 | `tool_system/agno_compat_tool_hooks.py` | Adapts Agno's private sync/async hook chains to deferred results and owner-controlled synchronous execution; installed by `tool_system/tool_hooks.py`, which retains dispatch, approval, and cancellation ownership. |
 | `history/claude_replay_compat.py` | Removes stale signed reasoning from completed portable turns after rewriting; native checkpoint replay retains its separate provider policy. |
 | `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested Claude/OpenAI SDK retries, and classifies provider completion signals. |
-| `history/provider_error_compat.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
+| `agno_compat_provider_errors.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
 
 Importing the history engine does not install either global Agno patch.
 The explicit installers remain idempotent, and the persistence patch retains its pinned-version guard.
@@ -20288,6 +20440,43 @@ When `MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM` is set, `MINDROOM_TRUS
 When no Matrix user ID claim is configured, strict mode only accepts a Matrix identity derived from the verified email via `MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE`.
 That derivation can use the verified JWT email claim even when `MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER` is not configured.
 When no Matrix user ID claim or email-to-Matrix template is configured, strict mode rejects `MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER` because that header is not backed by a signed identity.
+
+## Usage Export Service
+
+Strict JWT deployments can expose `GET /api/usage/export` to a service client without granting that client a browser or administrator identity.
+The route prepares the same organization-wide report as the standard dashboard-authenticated `GET /api/usage` route and accepts the same optional `include_daily` query parameter.
+Both routes share background preparation and cache state while authenticating every request independently.
+It never accepts an assertion from a query parameter, and methods other than `GET` are unsupported.
+
+Configure trusted-upstream strict JWT mode as above, then add a dedicated service audience and exact client ID:
+
+```bash
+MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED=true
+MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER=Cf-Access-Authenticated-User-Email
+MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true
+MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER=Cf-Access-Jwt-Assertion
+MINDROOM_TRUSTED_UPSTREAM_JWKS_URL=https://gateway.example.org/.well-known/jwks.json
+MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE=mindroom-dashboard
+MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER=https://gateway.example.org
+MINDROOM_USAGE_SERVICE_JWT_AUDIENCE=mindroom-usage-export
+MINDROOM_USAGE_SERVICE_CLIENT_ID=usage-export-client.example.org
+```
+
+The service assertion must use `RS256` and include valid `exp`, `iat`, `iss`, and `aud` claims.
+It must also contain `type=app`, a `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and an empty `sub` claim.
+The issuer, JWKS URL, and assertion header come from the trusted-upstream settings, while `MINDROOM_USAGE_SERVICE_JWT_AUDIENCE` is separate from the browser audience.
+
+The export route returns `503` until trusted-upstream auth, strict JWT mode, every shared strict-JWT setting, and both service settings are configured.
+Missing or invalid assertions return `401`.
+A valid service assertion authorizes only `/api/usage/export`; it does not authorize `/api/usage`, configuration APIs, personal usage APIs, or any administrator route.
+
+Every request, including polls and cache hits, must include the service assertion.
+When a report needs preparation, the route promptly returns `202` with `{"status":"pending"}`, `Retry-After: 5`, and `Cache-Control: no-store`.
+Poll the same URL with the same `include_daily` value after the requested delay.
+Once preparation succeeds, an authenticated poll returns `200`, `Cache-Control: no-store`, and the existing aggregate report schema.
+The two `include_daily` variants are prepared and cached separately, successful results expire 60 seconds after completion, and only one retained-data scan runs at a time.
+Configuration or runtime changes discard earlier results.
+On either organization route, a failed scan or unavailable committed configuration returns a content-free `503` with `Cache-Control: no-store`; scan failures remain cached for five seconds before another request can start a retry.
 
 ## Connections Portal
 
@@ -21284,17 +21473,32 @@ docker ps --format '{{.Names}}\t{{.ID}}' | grep '^mindroom-worker'
 
 In a live validation, separate `code` and `research` requests produced separate worker containers, and a second `code` request reused the original `code` container.
 
+## Headless browser sessions
+
+Dedicated Docker and Kubernetes workers with `worker_scope: shared`, `user`, or `user_agent` retain headless browser sessions across calls when the visible worker computer is disabled.
+Include `browser` in the agent's `worker_tools` to use this behavior.
+Calls within one worker are serialized and reuse its open tabs and browser profile; each call still prepares its current authorization, output settings, and execution environment.
+A change to the browser configuration or prepared process environment closes the retained session before the next call.
+Cancellation and worker shutdown also clean up browser resources.
+
+Generic and unscoped runners continue to isolate browser calls in separate subprocesses.
+Browser tools configured to use a separate desktop retain their existing routing.
+For a visible browser and Chat viewer, use [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
+
 ## Environment variable reference
 
 ### Interactive worker computers
 
 [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) adds a persistent headed Chromium browser and a Chat viewer to dedicated Docker and Kubernetes workers.
-Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true` on the primary runtime, use `worker_scope: user_agent`, and include `browser` in the agent's `worker_tools`.
+For Docker, first select `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer` on the primary runtime.
+Enable `MINDROOM_WORKER_COMPUTER_ENABLED=true`, use `worker_scope: user_agent`, and select exactly one worker-routed browser provider: `browser` or `browser_mcp`.
+If the agent sets `worker_tools`, include the selected provider; `browser_mcp` routes to workers by default when that override is absent.
 Set `MINDROOM_COMPUTER_ALLOWED_ORIGINS` to an explicit JSON list of trusted Chat origins and route the public computer HTTP/WebSocket gateway to the actual runtime API.
 The shared static-runner Compose sidecar does not support interactive computers.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MINDROOM_DOCKER_WORKER_SECURITY_POLICY` | Docker pool policy: `runtime_default` or `computer`; Computer requires `computer` | `runtime_default` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the dedicated worker's persistent browser/display | `false` |
 | `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | Explicit allowed Chat origins for computer HTTP and WebSocket requests | `[]` |
 
@@ -21540,8 +21744,13 @@ Each lease is consumed on use and expires after the configured TTL.
 
   Kubernetes dedicated workers derive per-worker runner tokens from the control-plane token.
 - Credential leases are single-use by default and expire after 60 seconds.
-- Helm-managed Kubernetes worker containers drop all capabilities and disable privilege escalation.
-- Dedicated Docker workers do not currently receive the same chart-managed `securityContext`; harden their Docker host and launch policy separately.
+- Kubernetes worker containers drop all capabilities, disable privilege escalation, and inherit the pod's
+  `RuntimeDefault` seccomp policy. The optional main-container Localhost profile needed by runtimes that block
+  Chromium's namespace sandbox is documented in [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/#browser-and-container-sandboxing).
+- With `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer`, dedicated Docker workers drop all capabilities, set `no-new-privileges`, and use the packaged Chromium-compatible seccomp profile.
+  This explicit worker-pool policy applies even when Computer is disabled, regardless of which tools an agent selects.
+  Enabling Computer requires this policy; the default `runtime_default` policy fails configuration when Computer is enabled.
+  With Computer disabled and `runtime_default` selected, ordinary Docker workers retain their prior launch settings and compatible identities.
 - With `workerBackend: static_runner`, the Kubernetes sidecar uses `emptyDir` scratch space and shares access to the same agent storage directories as the main process.
 - With `workerBackend: kubernetes`, dedicated workers for `shared`, `user_agent`, and unscoped execution only mount their own agent's directory plus their worker scratch space. `user` mode intentionally mounts the broader `agents/` tree since it shares one runtime across agents.
 - The primary MindRoom runtime does not mount the sandbox-runner router, so `/api/sandbox-runner/` exists only in runner or dedicated worker processes.

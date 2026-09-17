@@ -82,6 +82,7 @@ __all__ = [
     "PausedAttempt",
     "ResponsePausedForApproval",
     "ResponseTurnContext",
+    "ResumedAttempt",
     "SkippedAttempt",
     "StandaloneReplaySnapshot",
     "StreamAttemptResolution",
@@ -317,6 +318,7 @@ class TurnSinks:
 
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
+    on_completed: Callable[[CompletedAttempt], None] | None = None
 
 
 @dataclass
@@ -367,6 +369,15 @@ class CompletedAttempt:
     tool_executions: tuple[ToolExecution, ...] = ()
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     metadata_content: dict[str, Any] | None = None
+    status: RunStatus = RunStatus.completed
+
+
+@dataclass(frozen=True)
+class ResumedAttempt:
+    """A restored completed attempt and the logical turn budget already spent."""
+
+    attempt: CompletedAttempt
+    continuation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -402,6 +413,7 @@ class PausedAttempt:
     approval_agent_name: str | None = None
     delegation_storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     requires_background_tool_jobs: bool = False
+    continuation_count: int = 0
 
 
 class ResponsePausedForApproval(StreamingLifecycleSuspensionError):  # noqa: N818
@@ -1067,7 +1079,7 @@ async def _settle_blocking_attempt(
     if isinstance(resolution, PausedAttempt):
         if sinks.turn_recorder is not None:
             sinks.turn_recorder.mark_suspended()
-        raise ResponsePausedForApproval(resolution)
+        raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
     if isinstance(resolution, ExcludedAttempt):
         _publish_run_metadata(sinks, resolution.metadata_content)
         run_metadata = _interrupted_run_metadata(ctx, sinks, run)
@@ -1156,6 +1168,8 @@ async def _settle_joined_blocking_attempt(
         assistant_text=settle.recorded_text,
         completed_tools=list(settle.recorded_tools),
     )
+    if sinks.on_completed is not None:
+        sinks.on_completed(resolution)
     return settle.response_text
 
 
@@ -1291,6 +1305,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     sinks: TurnSinks,
     *,
     continuation: DynamicContinuationRunState,
+    resumed_attempt: ResumedAttempt | None = None,
 ) -> AsyncGenerator[ChunkT | BackgroundWaitChunk, None]:
     """Run one streaming response turn, yielding the attempt chunks as they arrive."""
     run = TurnRunState()
@@ -1300,20 +1315,23 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
             set_consumption_storage(scope_context.storage_factory if scope_context is not None else None)
             if adapter.on_scope_opened is not None:
                 adapter.on_scope_opened(scope_context)
-            for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
+            initial_count = resumed_attempt.continuation_count if resumed_attempt is not None else 0
+            for continuation_count in range(initial_count, DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
                 resolution: StreamAttemptResolution | None = None
                 keep_going = False
                 try:
-                    attempt_stream = adapter.run_attempt(run, continuation)
-                    async with closing_async_stream(attempt_stream):
-                        async for item in attempt_stream:
-                            if isinstance(item, AttemptResolved):
-                                # The sentinel must be the attempt's final yield; never
-                                # break out of this loop, so attempt cleanup stays
-                                # deterministic at generator return.
-                                resolution = item.resolution
-                                continue
-                            yield item
+                    if resumed_attempt is not None:
+                        resolution = resumed_attempt.attempt
+                        resumed_attempt = None
+                    else:
+                        attempt_stream = adapter.run_attempt(run, continuation)
+                        async with closing_async_stream(attempt_stream):
+                            async for item in attempt_stream:
+                                if isinstance(item, AttemptResolved):
+                                    # Drain the producer to finish persistence and cleanup.
+                                    resolution = item.resolution
+                                    continue
+                                yield item
                     await finalize_consumption()
                     if resolution is None:
                         _raise_missing_stream_resolution(ctx.entity_label)
@@ -1323,7 +1341,7 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     if isinstance(resolution, PausedAttempt):
                         if sinks.turn_recorder is not None:
                             sinks.turn_recorder.mark_suspended()
-                        raise ResponsePausedForApproval(resolution)
+                        raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                     if isinstance(resolution, HandledAttempt):
                         _record_turn_excluded_fallback(
                             ctx,
@@ -1397,6 +1415,8 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             assistant_text=settle.recorded_text,
                             completed_tools=list(settle.recorded_tools),
                         )
+                        if sinks.on_completed is not None:
+                            sinks.on_completed(resolution)
                 finally:
                     if adapter.finalize_attempt is not None:
                         await adapter.finalize_attempt(run.scope_context)

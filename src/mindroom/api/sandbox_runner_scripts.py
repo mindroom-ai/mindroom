@@ -50,7 +50,6 @@ _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_SOURCE_BYTES = 128 * 1024
 _MAX_TOKEN_BYTES = 4096
 _RUN_ID_PATTERN = r"script-[0-9a-f]{32}"
-_LAUNCH_HANDLE_RE = re.compile(r"^Handle: (shell:[0-9a-f]{32})$", re.MULTILINE)
 
 __all__ = [
     "SandboxScriptCancelResponse",
@@ -354,13 +353,6 @@ def _validate_source_digest(source_path: Path, expected_digest: str) -> None:
         raise HTTPException(status_code=400, detail="Script source digest does not match the launch receipt.")
 
 
-def _parse_launch_message(message: str, *, expected_handle: str) -> SandboxScriptRunResponse:
-    match = _LAUNCH_HANDLE_RE.search(message)
-    if match is not None and match.group(1) == expected_handle:
-        return SandboxScriptRunResponse(ok=True)
-    return SandboxScriptRunResponse(ok=False, error=message, failure_kind="worker")
-
-
 def _parse_status_message(message: str) -> SandboxScriptStatusResponse:
     status = parse_shell_supervisor_status(message)
     if status.state == "running":
@@ -434,7 +426,8 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         socket_path = await asyncio.to_thread(ensure_shell_supervisor)
     except ShellSupervisorStartupError as exc:
         return SandboxScriptRunResponse(ok=False, error=str(exc), failure_kind="worker")
-    message = await run_command_via_supervisor(
+    supervisor_handle = supervisor_handle_for_run(payload.run_id)
+    result = await run_command_via_supervisor(
         socket_path,
         namespace=_script_namespace(payload.worker_key, payload.run_id),
         argv=[python_executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
@@ -442,10 +435,12 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         cwd=str(workspace),
         tail=200,
         timeout=0,
-        handle=supervisor_handle_for_run(payload.run_id),
+        handle=supervisor_handle,
         max_runtime_seconds=payload.max_runtime_seconds,
     )
-    return _parse_launch_message(message, expected_handle=supervisor_handle_for_run(payload.run_id))
+    if result.handle != supervisor_handle:
+        return SandboxScriptRunResponse(ok=False, error=result.message, failure_kind="worker")
+    return SandboxScriptRunResponse(ok=True)
 
 
 @router.get("/{run_id}", response_model=SandboxScriptStatusResponse)

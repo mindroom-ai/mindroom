@@ -780,6 +780,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
+    register_approval_interruption: Callable[[str, str], None]
 
 
 @dataclass(frozen=True)
@@ -1366,6 +1367,7 @@ class ResponseRunner:
                     show_tool_calls=show_tool_calls,
                     execution_identity=serialize_tool_execution_identity(execution_identity),
                     runtime_model_name=paused.runtime_model_name,
+                    continuation_count=paused.continuation_count,
                     team_member_names=team_member_names,
                     team_member_model_names=paused.team_member_model_names,
                     team_mode=team_mode,
@@ -1580,7 +1582,7 @@ class ResponseRunner:
             build_post_response_outcome=lambda final: self._approval_post_response_outcome(
                 post_effect_continuation,
                 target=target,
-                run_succeeded=final.terminal_status == "completed",
+                final=final,
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
         )
@@ -1695,12 +1697,19 @@ class ResponseRunner:
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        return await self._approval_responses.settle_failure(
+        settled = await self._approval_responses.settle_failure(
             failing,
             reason,
             visible_text=update,
             stream_status=STREAM_STATUS_ERROR,
         )
+        if settled and await self.deps.approval_store.approval_interruption_is_recoverable(
+            failing.source_event_ids[0],
+            visible_text=update,
+            failure_reason=failing.failure_reason,
+        ):
+            self.deps.register_approval_interruption(failing.source_event_ids[0], failing.room_id)
+        return settled
 
     async def _approval_interruption_update(
         self,
@@ -1762,10 +1771,10 @@ class ResponseRunner:
         )
         await lifecycle.finalize(
             recovered_outcome,
-            build_post_response_outcome=lambda _final: self._approval_post_response_outcome(
+            build_post_response_outcome=lambda final: self._approval_post_response_outcome(
                 claimed,
                 target=target,
-                run_succeeded=True,
+                final=final,
             ),
             post_response_deps=lambda: self._approval_post_response_deps(claimed),
         )
@@ -1830,7 +1839,7 @@ class ResponseRunner:
         continuation: ApprovalContinuation,
         *,
         target: MessageTarget,
-        run_succeeded: bool,
+        final: FinalDeliveryOutcome,
     ) -> ResponseOutcome:
         """Build normal post-response facts for one resumed native run."""
         execution_identity = parse_tool_execution_identity_payload(
@@ -1838,11 +1847,11 @@ class ResponseRunner:
             error_prefix="Approval continuation execution_identity",
         )
         return ResponseOutcome(
-            response_run_id=continuation.run_id,
+            response_run_id=final.response_run_id or continuation.run_id,
             session_id=continuation.session_id,
             session_type=SessionType.TEAM if continuation.entity_kind == "team" else SessionType.AGENT,
             execution_identity=execution_identity,
-            run_succeeded=run_succeeded,
+            run_succeeded=final.terminal_status == "completed",
             response_target=target,
             thread_summary_room_id=continuation.room_id if target.resolved_thread_id is not None else None,
             thread_summary_thread_id=target.resolved_thread_id,
@@ -2050,6 +2059,10 @@ class ResponseRunner:
                     typing_log_context=_response_typing_log_context(
                         request,
                         response_run_id=continuation.run_id,
+                    ),
+                    run_id_callback=lambda run_id: self.deps.stop_manager.update_run_id(
+                        continuation.response_event_id,
+                        run_id,
                     ),
                 )
         return response_text

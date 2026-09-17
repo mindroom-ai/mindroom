@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import math
 import os
-import re
 import stat
 import sys
 import uuid
@@ -82,7 +81,6 @@ _MAX_SOURCE_BYTES = 128 * 1024
 _MAX_OUTPUT_BYTES = 64 * 1024
 _LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
 _WORKER_EXECUTION_MODES = frozenset({"all", "sandbox_all", "selective", "sandbox_selective"})
-_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 _TERMINAL_STATES = frozenset(
     {
         ScriptRunState.EXITED,
@@ -877,7 +875,7 @@ class ScriptRunManager:
         )
         supervisor_handle = supervisor_handle_for_run(run.run_id)
         try:
-            message = await run_command_via_supervisor(
+            result = await run_command_via_supervisor(
                 socket_path,
                 namespace=_local_namespace(run.run_id),
                 argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
@@ -888,9 +886,14 @@ class ScriptRunManager:
                 handle=supervisor_handle,
                 max_runtime_seconds=run.max_runtime_seconds,
             )
-            _validate_local_launch_message(message, expected_handle=supervisor_handle)
         except BaseException as exc:
             return await self._resolve_ambiguous_launch_failure(context, run.run_id, exc)
+        if result.handle != supervisor_handle:
+            return await self._resolve_ambiguous_launch_failure(
+                context,
+                run.run_id,
+                ScriptRunManagerError(result.message),
+            )
         return await self._settle_spawned_run(context, run)
 
     async def _owned_run(self, context: ToolRuntimeContext, run_id: str) -> ScriptRunRecord:
@@ -1411,12 +1414,6 @@ def _parse_local_status(message: str) -> WorkerScriptStatus:
         output=status.output,
         exit_code=status.exit_code,
     )
-
-
-def _validate_local_launch_message(message: str, *, expected_handle: str) -> None:
-    match = _HANDLE_RE.search(message)
-    if match is None or match.group(0) != expected_handle:
-        raise ScriptRunManagerError(message)
 
 
 def _parse_local_cancel(message: str) -> WorkerScriptCancel:

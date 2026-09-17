@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.mcp_gateway import GatewayRuntime
+    from mindroom.api.usage_export import UsageExportRunner
     from mindroom.config_reload import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -135,6 +136,7 @@ class _MindroomAppState:
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_runtime: ComputerRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
+    usage_export_runner: UsageExportRunner | None = None
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:

@@ -1156,6 +1156,58 @@ async def test_member_filter_lookup_failure_keeps_exports_and_records_failure(tm
 
 
 @pytest.mark.asyncio
+async def test_history_failure_preserves_existing_export_and_diagnostic(tmp_path: Path) -> None:
+    """Unreadable history keeps the previous transcript and its actionable failure."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    _write_matrix_state(tmp_path)
+    output_dir = tmp_path / "exports"
+    room = _export_rooms(runtime_paths, "lobby")
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@alice:localhost",
+            body="Saved transcript",
+            event_id="$existing:localhost",
+        ),
+    ]
+    diagnostic = "Unreadable historical events: encrypted_events=2, encrypted_sessions=1"
+
+    with (
+        patch(
+            "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+            new=AsyncMock(return_value=(["$existing:localhost"], False)),
+        ),
+        patch(
+            "mindroom.thread_export.execution.fetch_projected_thread_history",
+            new=AsyncMock(side_effect=[history, RuntimeError(diagnostic)]),
+        ),
+    ):
+        await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            output_dir=output_dir,
+            rooms=room,
+        )
+        exported_file = next((output_dir / "lobby").glob("*.yaml"))
+        original_bytes = exported_file.read_bytes()
+
+        stats = await _export_threads_for_client(
+            client=Mock(),
+            config=config,
+            runtime_paths=runtime_paths,
+            output_dir=output_dir,
+            rooms=room,
+        )
+
+    assert stats.threads_exported == 0
+    assert stats.failures == 1
+    assert stats.failed_items[0].error == diagnostic
+    assert stats.failed_items[0].thread_id == "$existing:localhost"
+    assert exported_file.read_bytes() == original_bytes
+
+
+@pytest.mark.asyncio
 async def test_export_threads_continues_after_one_thread_failure(tmp_path: Path) -> None:
     """One failed thread should not stop other thread exports in the same room."""
     config = _config(tmp_path)

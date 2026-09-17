@@ -1750,6 +1750,155 @@ def test_streaming_continuation_limit_yields_limit_message() -> None:
     assert "did not produce a final answer" in chunks[0]
 
 
+@pytest.mark.parametrize(("saved_count", "expected_attempts"), [(0, 4), (2, 2), (4, 0)])
+def test_resumed_schema_change_uses_remaining_budget(saved_count: int, expected_attempts: int) -> None:
+    """Restoring a schema boundary cannot reset the logical turn budget or leak stale text."""
+    log = _AdapterLog()
+    prompts: list[str] = []
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        prompts.append(continuation.active_prompt)
+        yield AttemptResolved(
+            CompletedAttempt(attempt_run_id="fresh", tool_executions=(_dynamic_tool_execution(),)),
+        )
+
+    restored = CompletedAttempt(
+        response_text="stale",
+        attempt_run_id="saved",
+        tool_executions=(_dynamic_tool_execution(),),
+    )
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(log, attempt),
+                TurnSinks(on_completed=completed.append),
+                continuation=_continuation(),
+                resumed_attempt=response_turn_module.ResumedAttempt(restored, continuation_count=saved_count),
+            ),
+        ),
+    )
+    assert len(prompts) == expected_attempts
+    assert all("DYNAMIC TOOL CALL COMPLETED" in prompt for prompt in prompts)
+    assert len(chunks) == 1
+    assert "did not produce a final answer" in chunks[0]
+    assert "stale" not in chunks[0]
+    assert len(completed) == 1
+    assert completed[0].status is RunStatus.completed
+    assert completed[0].metadata_content is None
+
+
+def test_resumed_schema_change_preserves_count_on_next_pause() -> None:
+    """A second approval must save the consumed fresh schema step."""
+    log = _AdapterLog()
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(
+            response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={}),
+        )
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        asyncio.run(
+            _collect(
+                stream_response_turn(
+                    _ctx(),
+                    _streaming_adapter(log, attempt),
+                    TurnSinks(on_completed=completed.append),
+                    continuation=_continuation(),
+                    resumed_attempt=response_turn_module.ResumedAttempt(
+                        CompletedAttempt(tool_executions=(_dynamic_tool_execution(),)),
+                        continuation_count=2,
+                    ),
+                ),
+            ),
+        )
+    assert raised.value.paused.continuation_count == 3
+    assert completed == []
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_fresh_schema_change_saves_count_before_first_approval(streaming: bool) -> None:
+    """The budget starts with the first schema change, before any approval checkpoint."""
+    log = _AdapterLog()
+    calls = 0
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation: DynamicContinuationRunState,
+    ) -> CompletedAttempt | response_turn_module.PausedAttempt:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return CompletedAttempt(tool_executions=(_dynamic_tool_execution(),))
+        return response_turn_module.PausedAttempt(session_id="session", run_id="fresh", tools=(), toolkit_owners={})
+
+    async def streamed_attempt(
+        run: TurnRunState,
+        continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(await attempt(run, continuation))
+
+    async def execute() -> None:
+        if streaming:
+            await _collect(
+                stream_response_turn(
+                    _ctx(),
+                    _streaming_adapter(log, streamed_attempt),
+                    TurnSinks(on_completed=completed.append),
+                    continuation=_continuation(),
+                ),
+            )
+        else:
+            await run_blocking_response_turn(
+                _ctx(),
+                _blocking_adapter(log, attempt),
+                TurnSinks(on_completed=completed.append),
+                continuation=_continuation(),
+            )
+
+    with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
+        asyncio.run(execute())
+    assert raised.value.paused.continuation_count == 1
+    assert calls == 2
+    assert completed == []
+
+
+@pytest.mark.parametrize(
+    "resolution",
+    [HandledAttempt(), ExcludedAttempt(original_status=RunStatus.error), SkippedAttempt(reason="quiet")],
+)
+def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAttemptResolution) -> None:
+    """Handled errors, excluded runs and quiet turns cannot report typed success."""
+    completed: list[CompletedAttempt] = []
+
+    async def attempt(
+        _run: TurnRunState,
+        _continuation: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        yield AttemptResolved(resolution)
+
+    asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(_AdapterLog(), attempt),
+                TurnSinks(on_completed=completed.append),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+    assert completed == []
+
+
 def test_streaming_finalize_runs_when_attempt_raises() -> None:
     """The per-attempt finalize hook runs even when the attempt raises mid-stream."""
     log = _AdapterLog()

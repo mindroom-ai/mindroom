@@ -678,10 +678,14 @@ The normal Matrix and OpenAI-compatible reply paths build fresh agent instances 
 ## Agent Delegation
 
 Set `delegate_to` to the agent names allowed as subagents; the dashboard labels this list **Allowed subagents**.
-The model-facing tools are `run_subagent(task: str, agent_name: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
+The model-facing tools are `run_subagent(task: str, agent_name: str | None = None, model: str | None = None)` and `continue_subagent(subagent_id: str, message: str)`.
 When configured, a delegation tool is automatically added to the agent, so you do not need to include `"delegate"` in the `tools` list.
 
-The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
+The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, and tool policy.
+Pass a configured alias from `models:` as `model` to choose a different model for that child, including a fresh copy of yourself.
+An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
+Unknown model aliases are rejected before execution.
+The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
 Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
 Calls wait for the child by default.
 Enable the instance-wide root option `background_tool_jobs: true` and restart to use generic background execution; it is disabled by default.

@@ -38,7 +38,7 @@ import tempfile
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -46,12 +46,14 @@ from typing import Literal
 from mindroom.logging_config import get_logger
 from mindroom.shell_execution import (
     ProcessRecord,
+    ShellRunResult,
     check_command,
     discard_background_record,
     kill_all_records,
     kill_command,
     run_command,
 )
+from mindroom.shell_output_capture import ShellOutputDestination
 
 logger = get_logger(__name__)
 
@@ -109,7 +111,7 @@ async def _handle_run(
     payload: dict[str, object],
     reader: asyncio.StreamReader,
     deadline_tasks: set[asyncio.Task[None]] | None = None,
-) -> str | None:
+) -> ShellRunResult | None:
     """Run one command, cancelling it if the client disconnects mid-wait."""
     argv_payload = payload["argv"]
     env_payload = payload["env"]
@@ -121,6 +123,7 @@ async def _handle_run(
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
     response_timeout, deadline_at = _run_timings(payload)
+    output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
     command_argv = [str(item) for item in argv_payload]
     if handle_payload is not None and background_script_supervision_supported():
         command_argv = [
@@ -141,6 +144,7 @@ async def _handle_run(
             timeout=response_timeout,
             handle=handle_payload,
             handle_reservations=handle_reservations,
+            output_destination=output_destination,
         ),
     )
     # EOF before the run response means the client (a per-request tool
@@ -172,7 +176,7 @@ async def _handle_run(
             if deadline_tasks is not None:
                 deadline_tasks.add(task)
                 task.add_done_callback(deadline_tasks.discard)
-    return result.message
+    return result
 
 
 def _run_timings(payload: dict[str, object]) -> tuple[float, float | None]:
@@ -227,25 +231,30 @@ async def _handle_connection(
         payload = json.loads(line)
         op = payload.get("op")
         if op == "run":
-            message = await _handle_run(registry, handle_reservations, payload, reader, deadline_tasks)
-            if message is None:
+            result = await _handle_run(registry, handle_reservations, payload, reader, deadline_tasks)
+            if result is None:
                 return
         elif op == "check":
-            message = check_command(registry, namespace=str(payload["namespace"]), handle=str(payload["handle"]))
+            result = ShellRunResult(
+                message=check_command(registry, namespace=str(payload["namespace"]), handle=str(payload["handle"])),
+            )
         elif op == "kill":
-            message = kill_command(
-                registry,
-                namespace=str(payload["namespace"]),
-                handle=str(payload["handle"]),
-                force=bool(payload.get("force", False)),
+            result = ShellRunResult(
+                message=kill_command(
+                    registry,
+                    namespace=str(payload["namespace"]),
+                    handle=str(payload["handle"]),
+                    force=bool(payload.get("force", False)),
+                ),
             )
         else:
-            message = f"Error: Unknown shell supervisor operation '{op}'."
-        writer.write(json.dumps({"message": message}).encode("utf-8") + b"\n")
+            result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.")
+        writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
         await writer.drain()
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         with suppress(OSError):
-            writer.write(json.dumps({"message": f"Error: Invalid shell supervisor request: {exc}"}).encode() + b"\n")
+            result = ShellRunResult(message=f"Error: Invalid shell supervisor request: {exc}")
+            writer.write(json.dumps(asdict(result)).encode() + b"\n")
             await writer.drain()
     except OSError:
         logger.warning("shell_supervisor_connection_failed", exc_info=True)
@@ -310,8 +319,9 @@ async def run_command_via_supervisor(
     timeout: float,  # noqa: ASYNC109
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
-) -> str:
-    """Run one shell command through the supervisor and return its message."""
+    output_destination: ShellOutputDestination | None = None,
+) -> ShellRunResult:
+    """Run one shell command and preserve its execution and output-file ownership."""
     request = {
         "op": "run",
         "namespace": namespace,
@@ -325,18 +335,20 @@ async def run_command_via_supervisor(
         request["handle"] = handle
     if max_runtime_seconds is not None:
         request["max_runtime_seconds"] = max_runtime_seconds
+    if output_destination is not None:
+        request["output_destination"] = asdict(output_destination)
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:
-        return f"Error: Shell supervisor is unavailable: {exc}"
+        return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}")
     try:
         writer.write(json.dumps(request).encode("utf-8") + b"\n")
         await writer.drain()
         line = await asyncio.wait_for(reader.readline(), timeout=timeout + _RUN_RESPONSE_GRACE_SECONDS)
     except TimeoutError:
-        return "Error: Shell supervisor did not respond in time."
+        return ShellRunResult(message="Error: Shell supervisor did not respond in time.")
     except OSError as exc:
-        return f"Error: Shell supervisor request failed: {exc}"
+        return ShellRunResult(message=f"Error: Shell supervisor request failed: {exc}")
     finally:
         writer.close()
         with suppress(OSError):
@@ -366,7 +378,7 @@ def _sync_supervisor_request(socket_path: str, request: dict[str, object]) -> st
             line = _recv_line(conn)
     except OSError as exc:
         return f"Error: Shell supervisor is unavailable: {exc}"
-    return _parse_supervisor_response(line)
+    return _parse_supervisor_response(line).message
 
 
 def _recv_line(conn: socket.socket) -> bytes:
@@ -381,14 +393,21 @@ def _recv_line(conn: socket.socket) -> bytes:
     return bytes(buffer)
 
 
-def _parse_supervisor_response(line: bytes) -> str:
+def _parse_supervisor_response(line: bytes) -> ShellRunResult:
     if not line.strip():
-        return "Error: Shell supervisor closed the connection unexpectedly."
+        return ShellRunResult(message="Error: Shell supervisor closed the connection unexpectedly.")
     try:
         payload = json.loads(line)
-        return str(payload["message"])
+        message, handle, output_file_handled = payload["message"], payload["handle"], payload["output_file_handled"]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        return f"Error: Invalid shell supervisor response: {exc}"
+        return ShellRunResult(message=f"Error: Invalid shell supervisor response: {exc}")
+    if (
+        not isinstance(message, str)
+        or (handle is not None and not isinstance(handle, str))
+        or not isinstance(output_file_handled, bool)
+    ):
+        return ShellRunResult(message="Error: Invalid shell supervisor response: invalid result fields.")
+    return ShellRunResult(message=message, handle=handle, output_file_handled=output_file_handled)
 
 
 # ---------------------------------------------------------------------------

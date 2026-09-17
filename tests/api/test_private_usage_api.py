@@ -1,4 +1,4 @@
-"""Personal usage uses signed identity while administrator usage remains instance-wide."""
+"""Personal usage uses signed identity while organization routes use separate auth."""
 
 from __future__ import annotations
 
@@ -87,18 +87,6 @@ def test_personal_private_usage_uses_signed_requester(
     assert all("user_id" not in row for row in report["private_agent_breakdown"])
     assert ("daily_breakdown" in report) is include_daily
     assert str(tmp_path) not in response.text
-
-
-def test_private_usage_api_keeps_admin_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Adding a personal route cannot expose the administrator report to ordinary users."""
-    client, headers = _client(tmp_path, monkeypatch)
-    assert client.get("/api/usage", headers=headers["bob"]).status_code == 403
-    response = client.get("/api/usage?include_daily=true", headers=headers["alice"])
-    assert response.status_code == 200
-    rows = {(row["user_id"], row["agent_name"]): row for row in response.json()["private_agent_breakdown"]}
-    assert rows[ALICE, "code"]["totals"]["total_tokens"] == 100
-    assert rows[BOB, "code"]["totals"]["total_tokens"] == 70
-    assert rows[BOB, "code"]["daily_breakdown"][0]["totals"]["total_tokens"] == 30
 
 
 def test_private_usage_api_rejects_requester_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

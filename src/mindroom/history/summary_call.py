@@ -17,8 +17,8 @@ from agno.exceptions import ContextWindowExceededError
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
+from mindroom.agno_compat_provider_errors import is_legacy_summary_size_error, is_transient_summary_error
 from mindroom.cancellation import request_task_cancel
-from mindroom.history.provider_error_compat import is_legacy_summary_size_error, is_transient_summary_error
 from mindroom.history.summary_provider_compat import (
     configure_summary_model,
     effective_summary_timeout_seconds,

@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import (
     RuntimePaths,
@@ -17,10 +17,15 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
 )
 from mindroom.credentials import runtime_credentials_manager_key
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import (
+    KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    WORKER_COMPUTER_ENABLED_ENV,
+)
 from mindroom.tool_system.worker_routing import worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends._config_helpers import (
+    read_bool_env,
     read_env,
     read_float_env,
     read_int_env,
@@ -30,6 +35,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     build_backend_config_signature,
     validate_dedicated_worker_extra_env,
 )
+from mindroom.workers.backends.worker_security import docker_worker_security_policy_signature
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -70,6 +76,7 @@ _NAME_PREFIX_ENV = "MINDROOM_DOCKER_WORKER_NAME_PREFIX"
 _PUBLISH_HOST_ENV = "MINDROOM_DOCKER_WORKER_PUBLISH_HOST"
 _ENDPOINT_HOST_ENV = "MINDROOM_DOCKER_WORKER_ENDPOINT_HOST"
 _USER_ENV = "MINDROOM_DOCKER_WORKER_USER"
+_SECURITY_POLICY_ENV = "MINDROOM_DOCKER_WORKER_SECURITY_POLICY"
 _EXTRA_ENV_JSON_ENV = "MINDROOM_DOCKER_WORKER_ENV_JSON"
 _EXTRA_LABELS_JSON_ENV = "MINDROOM_DOCKER_WORKER_LABELS_JSON"
 DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
@@ -192,14 +199,31 @@ class _DockerWorkerBackendConfig:
     user: str | None
     extra_env: dict[str, str]
     extra_labels: dict[str, str]
+    security_policy: Literal["runtime_default", "computer"] = "runtime_default"
 
     def __post_init__(self) -> None:
+        if self.security_policy not in {"runtime_default", "computer"}:
+            msg = f"{_SECURITY_POLICY_ENV} must be runtime_default or computer; got {self.security_policy!r}."
+            raise WorkerBackendError(msg)
         validate_docker_extra_labels(self.extra_labels)
         validate_docker_mount_layout(
             storage_mount_path=self.storage_mount_path,
             config_path=self.config_path,
         )
         validate_docker_endpoint_host(endpoint_host=self.endpoint_host)
+
+    def validate_runtime_security(self, runtime_paths: RuntimePaths) -> None:
+        """Require the selected compatible pool policy before enabling Computer."""
+        computer_enabled = runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV) or read_bool_env(
+            self.extra_env,
+            WORKER_COMPUTER_ENABLED_ENV,
+        )
+        if computer_enabled and self.security_policy != "computer":
+            msg = f"{WORKER_COMPUTER_ENABLED_ENV}=true requires {_SECURITY_POLICY_ENV}=computer."
+            raise WorkerBackendError(msg)
+        if computer_enabled and self.user is not None and re.fullmatch(r"root|[+-]?0+", self.user.partition(":")[0]):
+            msg = f"{WORKER_COMPUTER_ENABLED_ENV}=true requires a non-root {_USER_ENV}; got {self.user!r}."
+            raise WorkerBackendError(msg)
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
@@ -217,7 +241,7 @@ class _DockerWorkerBackendConfig:
             backend_name="Docker",
             extra_reserved_names=_DOCKER_RESERVED_EXTRA_ENV_NAMES,
         )
-        return cls(
+        config = cls(
             image=image,
             worker_port=read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
             storage_mount_path=read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
@@ -232,7 +256,13 @@ class _DockerWorkerBackendConfig:
             user=_read_docker_user(env),
             extra_env=extra_env,
             extra_labels=read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            security_policy=cast(
+                'Literal["runtime_default", "computer"]',
+                read_env(env, _SECURITY_POLICY_ENV, "runtime_default"),
+            ),
         )
+        config.validate_runtime_security(runtime_paths)
+        return config
 
     @classmethod
     def from_env(cls) -> _DockerWorkerBackendConfig:
@@ -286,9 +316,13 @@ def docker_backend_config_signature(
     workers_root = docker_workers_root(effective_runtime_paths.storage_root)
     credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
     runtime_env = runtime_env_values(effective_runtime_paths)
+    security_policy_signature = (
+        docker_worker_security_policy_signature() if config.security_policy == "computer" else ()
+    )
     return build_backend_config_signature(
         prefix_parts=(
             "docker",
+            *security_policy_signature,
             config.image,
             str(config.worker_port),
             config.storage_mount_path,

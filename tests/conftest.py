@@ -2923,6 +2923,15 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
 
     Tests in test_authorization.py are excluded since they test authorization itself.
     """
+
+    # These defaults never need call tracking. Plain stubs avoid creating six
+    # MagicMocks (and their reference cycles) for every test in the suite.
+    def allow_reply(*_args: object, **_kwargs: object) -> _ReplyAuthorizationDecision:
+        return _ReplyAuthorizationDecision.ALLOWED
+
+    def allow_sender(*_args: object, **_kwargs: object) -> bool:
+        return True
+
     # Don't bypass authorization for tests that are specifically testing it
     if "test_authorization" in request.node.parent.name:
         yield
@@ -2932,27 +2941,27 @@ def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None
                 stack.enter_context(
                     patch(
                         "mindroom.authorization._responder_reply_authorization",
-                        return_value=_ReplyAuthorizationDecision.ALLOWED,
+                        new=allow_reply,
                     ),
                 )
-                stack.enter_context(patch("mindroom.authorization.is_sender_allowed_for_responder", return_value=True))
+                stack.enter_context(patch("mindroom.authorization.is_sender_allowed_for_responder", new=allow_sender))
                 stack.enter_context(
                     patch(
                         "mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room",
-                        return_value=True,
+                        new=allow_sender,
                     ),
                 )
                 stack.enter_context(
-                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", return_value=True),
+                    patch("mindroom.approval_inbound.is_sender_allowed_for_responder", new=allow_sender),
                 )
                 stack.enter_context(
                     patch(
                         "mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder",
-                        return_value=True,
+                        new=allow_sender,
                     ),
                 )
                 stack.enter_context(
-                    patch("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", return_value=True),
+                    patch("mindroom.delegation.lifecycle.is_sender_allowed_for_responder", new=allow_sender),
                 )
             yield
 

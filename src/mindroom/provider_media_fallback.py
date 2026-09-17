@@ -12,14 +12,16 @@ from agno.exceptions import ContextWindowExceededError, ModelProviderError, Retr
 from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_retry_cycle_hooks
+from mindroom.agno_compat_provider_errors import is_transient_stream_error
 from mindroom.error_handling import (
     TRANSIENT_PROVIDER_STATUS_CODES,
     IncompleteResponsesStreamError,
     is_model_safeguard_refusal,
 )
 from mindroom.logging_config import get_logger
+from mindroom.model_stream_output import has_meaningful_stream_output
 from mindroom.redaction import redact_sensitive_text
-from mindroom.tool_system.context_bound_streams import close_async_stream
+from mindroom.tool_system.context_bound_streams import close_async_stream, context_bound_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Mapping
@@ -117,15 +119,19 @@ async def _ainvoke_in_request_scope(
         return await original_ainvoke_with_retry(*args, **kwargs)
 
 
-async def _ainvoke_stream_in_request_scope(
+def _ainvoke_stream_in_request_scope(
     model: Model,
     original_ainvoke_stream_with_retry: Callable[..., AsyncIterator[ModelResponse]],
     *args: object,
     **kwargs: object,
-) -> AsyncGenerator[ModelResponse, None]:
-    with _media_fallback_request(model):
-        async for response in original_ainvoke_stream_with_retry(*args, **kwargs):
-            yield response
+) -> AsyncIterator[ModelResponse]:
+    # Keep retry state for this stream, but never carry a ContextVar token across
+    # a yield: consumers may resume or close the stream in another task.
+    state = _request_state(model) or _MediaFallbackRequestState()
+    return context_bound_async_stream(
+        context_factory=lambda: _media_fallback_request(model, state=state),
+        stream_factory=lambda: original_ainvoke_stream_with_retry(*args, **kwargs),
+    )
 
 
 def _is_retryable_provider_error(
@@ -250,7 +256,12 @@ async def _stream_with_fallback(
                 _learn_from_request_fallback(route, request_state)
                 return
             except Exception as error:
-                if request_state.stream_output_produced or not remaining_kinds or not _should_retry(error):
+                if (
+                    request_state.stream_output_produced
+                    or not remaining_kinds
+                    or is_transient_stream_error(error)
+                    or not _should_retry(error)
+                ):
                     raise
                 failure = error
                 break
@@ -508,12 +519,14 @@ def _active_model(model: Model) -> Iterator[None]:
 
 
 @contextmanager
-def _media_fallback_request(model: Model) -> Iterator[None]:
+def _media_fallback_request(
+    model: Model,
+    *,
+    state: _MediaFallbackRequestState | None = None,
+) -> Iterator[None]:
     states = _REQUEST_STATES.get() or {}
-    if id(model) in states:
-        yield
-        return
-    token = _REQUEST_STATES.set({**states, id(model): _MediaFallbackRequestState()})
+    state = state or states.get(id(model)) or _MediaFallbackRequestState()
+    token = _REQUEST_STATES.set({**states, id(model): state})
     try:
         yield
     finally:
@@ -536,7 +549,9 @@ async def _next_stream_response(
             error,
             output_produced=request_state.stream_output_produced,
         )
-    request_state.stream_output_produced = True
+    request_state.stream_output_produced = request_state.stream_output_produced or has_meaningful_stream_output(
+        response,
+    )
     return response
 
 

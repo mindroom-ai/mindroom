@@ -164,6 +164,7 @@ class _RecordingResponseRunner:
     suspend_source: bool = False
     complete_without_response: bool = False
     requests: list[ResponseRequest] = field(default_factory=list)
+    response_started: asyncio.Event = field(default_factory=asyncio.Event)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
@@ -222,6 +223,7 @@ class _RecordingResponseRunner:
 
     async def generate_response(self, request: ResponseRequest) -> str | None:
         self.requests.append(request)
+        self.response_started.set()
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
@@ -620,6 +622,7 @@ def _build_harness(
                     agent_name=agent_name,
                     delivery_gateway=cast("DeliveryGateway", gateway),
                     turn_store=turn_store,
+                    router_turn_records=journal_store.turn_records(ROUTER_AGENT_NAME),
                     ingress=ingress_validator,
                     wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
                 ),
@@ -4707,7 +4710,7 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
 ) -> None:
     """Actual two-human context delays text and reaches response execution as adaptive."""
     config.room_participation = {
-        _ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=1.0 if mention else 0.1),
+        _ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=30.0 if mention else 0.1),
     }
     history = thread_history_result(
         [
@@ -4725,7 +4728,7 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
         explicit = _text_event("please answer", event_id="$mention:localhost", thread_id=_THREAD_ROOT)
         explicit.source["content"]["m.mentions"] = {"user_ids": [_entity_user_id(config, "general")]}
         await harness.controller.handle_text_event(room, explicit)
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(harness.runner.response_started.wait(), timeout=5)
     await harness.runner.settle_inbox_responses()
     assert len(harness.runner.requests) == 1
     if mention:

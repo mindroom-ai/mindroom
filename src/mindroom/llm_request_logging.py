@@ -22,7 +22,7 @@ from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_SOUR
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_data
-from mindroom.tool_system.context_bound_streams import context_bound_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Sequence
@@ -648,11 +648,12 @@ def _stream_with_llm_request_logging(
                 context_factory=lambda: _model_request_scope(model, wire_tools_capture),
                 stream_factory=lambda: original_ainvoke_stream(*args, **kwargs),
             )
-            async for chunk in scoped_stream:
-                await _write_request_once()
-                if chunk.response_usage is not None:
-                    last_usage = chunk.response_usage
-                yield chunk
+            async with closing_async_stream(scoped_stream):
+                async for chunk in scoped_stream:
+                    await _write_request_once()
+                    if chunk.response_usage is not None:
+                        last_usage = chunk.response_usage
+                    yield chunk
         finally:
             await _write_request_once()
             await _write_llm_response_log_best_effort(

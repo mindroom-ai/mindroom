@@ -188,20 +188,25 @@ def readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event |
     "readable or not" rather than "decrypted or not": a caller needs to know an
     event was dropped unread, and none of them can do anything about why.
     """
-    if not isinstance(event, nio.Event):
-        return readable_legacy_file_edit(event)
-    if not isinstance(event, nio.MegolmEvent):
-        return event
-    if client.olm is None:
-        return None
-    try:
-        decrypted = client.decrypt_event(event)
-    except nio.EncryptionError:
-        return None
-    # A payload that decrypted into something malformed comes back as a
-    # `BadEvent`, which nio deliberately does not make an `Event`. Unreadable is
-    # the honest answer for it as well.
-    return decrypted if isinstance(decrypted, nio.Event) else readable_legacy_file_edit(decrypted)
+    return _readable_event(client, event)
+
+
+def _readable_event(
+    client: nio.AsyncClient,
+    event: nio.BaseEvent,
+    unreadable: _UnreadableHistory | None = None,
+) -> nio.Event | None:
+    """Classify unreadability after decryption, before discarding malformed data."""
+    if isinstance(event, nio.MegolmEvent) and client.olm is not None:
+        with contextlib.suppress(nio.EncryptionError):
+            event = client.decrypt_event(event)
+    if isinstance(event, nio.MegolmEvent):
+        readable = None
+    else:
+        readable = event if isinstance(event, nio.Event) else readable_legacy_file_edit(event)
+    if readable is None and unreadable is not None:
+        unreadable.add(event)
+    return readable
 
 
 def _projected_from_event(room_id: str, event: nio.Event, *, self_sender: str) -> ProjectedEvent | None:
@@ -283,6 +288,44 @@ def _advanced_room_cursor(*, room_id: str, start: str | None, end: str) -> str:
     return end
 
 
+@dataclass
+class _UnreadableHistory:
+    """Bounded diagnostics for fetched events, separate from live E2EE counters."""
+
+    encrypted_events: int = 0
+    invalid_events: int = 0
+    sessions: set[tuple[str, str]] = field(default_factory=set)
+    sessions_limited: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.encrypted_events or self.invalid_events)
+
+    def add(self, event: nio.BaseEvent) -> None:
+        """Count one unreadable event without retaining its payload."""
+        if not isinstance(event, nio.MegolmEvent) or event.sender_key is None or event.session_id is None:
+            self.invalid_events += 1
+            return
+        self.encrypted_events += 1
+        session = (event.sender_key, event.session_id)
+        if len(self.sessions) < 100:
+            self.sessions.add(session)
+        elif session not in self.sessions:
+            self.sessions_limited = True
+
+    def describe(self) -> str:
+        """Explain unreadability without claiming every crypto failure is a missing key."""
+        comparison = ">=" if self.sessions_limited else "="
+        summary = (
+            f"encrypted_events={self.encrypted_events}, "
+            f"encrypted_sessions{comparison}{len(self.sessions)}, invalid_events={self.invalid_events}"
+        )
+        if self.encrypted_events:
+            summary += (
+                "; historical encryption keys may be unavailable; these reads are separate from live E2EE counters"
+            )
+        return summary
+
+
 @dataclass(frozen=True, slots=True)
 class _Walk:
     """What one hydration walk collected, and whether it reached the end.
@@ -310,7 +353,7 @@ class _Walk:
 
     events: tuple[ProjectedEvent, ...]
     complete: bool
-    unreadable: bool = False
+    unreadable: _UnreadableHistory = field(default_factory=_UnreadableHistory)
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,7 +362,6 @@ class _ProjectedRoomPage:
 
     events: tuple[ProjectedEvent, ...]
     logical_messages: int
-    unreadable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,7 +369,7 @@ class _RecoveryWalk:
     """The terminal facts retained after a streamed recovery walk."""
 
     exhausted_server: bool
-    unreadable: bool
+    unreadable: _UnreadableHistory
     superseded: bool = False
 
 
@@ -337,14 +379,13 @@ def _project_room_page(
     page: Sequence[nio.BaseEvent],
     *,
     self_sender: str,
+    unreadable: _UnreadableHistory,
 ) -> _ProjectedRoomPage:
     """Project one fetched page without retaining any preceding page."""
     events: list[ProjectedEvent] = []
     logical_messages = 0
-    unreadable = False
     for event in page:
-        readable = readable_event(client, event)
-        unreadable = unreadable or readable is None
+        readable = _readable_event(client, event, unreadable)
         projected = None if readable is None else _projected_from_event(room_id, readable, self_sender=self_sender)
         if projected is None:
             continue
@@ -354,7 +395,6 @@ def _project_room_page(
     return _ProjectedRoomPage(
         events=tuple(events),
         logical_messages=logical_messages,
-        unreadable=unreadable,
     )
 
 
@@ -621,7 +661,10 @@ class ConversationHydrator:
             await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
         )
         if self.require_complete and walk.unreadable:
-            msg = f"Could not prove complete readable history for {room_id!r}/{thread_id!r}: unreadable events remain"
+            msg = (
+                f"Could not prove complete readable history for {room_id!r}/{thread_id!r}: "
+                f"unreadable events remain ({walk.unreadable.describe()})"
+            )
             raise _HydrationError(msg)
         installed = await self.store.install_hydrated_conversation(
             room_id=room_id,
@@ -688,12 +731,15 @@ class ConversationHydrator:
                 outcome=HistoryRecoveryOutcome.SUPERSEDED.value,
                 recovery_state=recovery.state.value,
                 exhausted_server=False,
-                unreadable=walk.unreadable,
+                unreadable=bool(walk.unreadable),
                 walk_complete=False,
             )
             return HistoryRecoveryOutcome.SUPERSEDED
         if walk.exhausted_server and walk.unreadable:
-            msg = f"Could not prove complete readable history for {recovery.room_id!r}: unreadable events remain"
+            msg = (
+                f"Could not prove complete readable history for {recovery.room_id!r}: "
+                f"unreadable events remain ({walk.unreadable.describe()})"
+            )
             raise _HydrationError(msg)
         outcome = await self.store.settle_room_history_recovery(
             recovery,
@@ -712,7 +758,7 @@ class ConversationHydrator:
             outcome=outcome.value,
             recovery_state=recovery.state.value,
             exhausted_server=walk.exhausted_server,
-            unreadable=walk.unreadable,
+            unreadable=bool(walk.unreadable),
             walk_complete=walk.exhausted_server and not walk.unreadable,
         )
         return outcome
@@ -727,7 +773,7 @@ class ConversationHydrator:
         logical = 0
         fetched = 0
         pages = 0
-        unreadable = False
+        unreadable = _UnreadableHistory()
         exhausted_server = False
         start: str | None = None
         client = self._client()
@@ -747,8 +793,13 @@ class ConversationHydrator:
             pages += 1
             page = response.chunk[:request_limit]
             fetched += len(page)
-            projected_page = _project_room_page(client, recovery.room_id, page, self_sender=self.self_sender)
-            unreadable = unreadable or projected_page.unreadable
+            projected_page = _project_room_page(
+                client,
+                recovery.room_id,
+                page,
+                self_sender=self.self_sender,
+                unreadable=unreadable,
+            )
             logical += projected_page.logical_messages
             installed = await self.store.install_room_history_recovery_chunk(
                 recovery,
@@ -808,7 +859,8 @@ class ConversationHydrator:
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
             raise _HydrationError(msg)
         events: list[ProjectedEvent] = []
-        readable_root = readable_event(self._client(), root.event)
+        unreadable = _UnreadableHistory()
+        readable_root = _readable_event(self._client(), root.event, unreadable)
         root_projected = (
             None
             if readable_root is None
@@ -820,16 +872,16 @@ class ConversationHydrator:
             room_id,
             thread_id,
             window_messages=self.prompt_window_messages,
+            unreadable=unreadable,
         )
         # A thread whose root could not be read is missing the message the whole
         # thread is about, which is the one event this walk refuses to spend its
         # window on precisely because a thread without it is not the thread.
-        # The relation walk has already accounted for its own unread events in
-        # both fields, so the root is all there is left to add here.
+        # Root and relations share diagnostics, classified at their read seam.
         return _Walk(
             events=(*events, *relations.events),
             complete=relations.complete and readable_root is not None,
-            unreadable=relations.unreadable or readable_root is None,
+            unreadable=relations.unreadable,
         )
 
     async def _fetch_relations(
@@ -838,6 +890,7 @@ class ConversationHydrator:
         event_id: str,
         *,
         window_messages: int | None,
+        unreadable: _UnreadableHistory | None = None,
     ) -> _Walk:
         """Walk the relation tree newest first, without filtering by relation type.
 
@@ -868,7 +921,8 @@ class ConversationHydrator:
         admitted = 0
         fetched = 0
         complete = True
-        unreadable = False
+        if unreadable is None:
+            unreadable = _UnreadableHistory()
         client = self._client()
         relations = client.room_get_event_relations(
             room_id=room_id,
@@ -884,7 +938,7 @@ class ConversationHydrator:
             async with contextlib.aclosing(relations):
                 async for event in relations:
                     fetched += 1
-                    readable = readable_event(client, event)
+                    readable = _readable_event(client, event, unreadable)
                     if readable is None:
                         # nio hands relations over exactly as they arrived, so
                         # in an encrypted room this is every one of them until
@@ -902,7 +956,6 @@ class ConversationHydrator:
                         # holding only its root, mark it whole for the entire
                         # membership epoch, and hand that to an export as the
                         # conversation.
-                        unreadable = True
                         complete = False
                     else:
                         projected = _projected_from_event(room_id, readable, self_sender=self.self_sender)
@@ -958,7 +1011,7 @@ class ConversationHydrator:
         logical = 0
         fetched = 0
         pages = 0
-        unreadable = False
+        unreadable = _UnreadableHistory()
         start: str | None = None
         client = self._client()
         while True:
@@ -975,21 +1028,15 @@ class ConversationHydrator:
             remaining = max(self.max_fetched_events - fetched, 0)
             page = response.chunk[:remaining]
             fetched += len(page)
-            for event in page:
-                # nio decrypts a `/messages` chunk on the way through
-                # `receive_response`, so unlike the relation walk this is only
-                # reached when decryption was tried and failed. The walk still
-                # cannot say it read the room.
-                readable = readable_event(client, event)
-                unreadable = unreadable or readable is None
-                projected = (
-                    None if readable is None else _projected_from_event(room_id, readable, self_sender=self.self_sender)
-                )
-                if projected is None:
-                    continue
-                events.append(projected)
-                if _is_logical_message(projected):
-                    logical += 1
+            projected_page = _project_room_page(
+                client,
+                room_id,
+                page,
+                self_sender=self.self_sender,
+                unreadable=unreadable,
+            )
+            events.extend(projected_page.events)
+            logical += projected_page.logical_messages
             if len(page) < len(response.chunk):
                 # A partial page cannot safely advance to its continuation
                 # token: that would skip the page suffix we did not retain.

@@ -17,6 +17,7 @@ from agno.run.base import RunStatus
 from agno.team import Team
 from agno.tools.function import Function
 
+from mindroom.ai import _AgentRunContext, _PreparedAgentRun
 from mindroom.approval_execution import _continue_persisted_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -26,6 +27,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import CompletedApprovalRun, ResponseTurnContext
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
@@ -42,7 +44,11 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    LiveToolDispatchContext,
+    build_execution_identity_from_runtime_context,
+    tool_runtime_context,
+)
 from tests.conftest import make_turn_context
 from tests.identity_helpers import entity_ids
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
@@ -134,20 +140,56 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
             @owned_tool_execution
             async def resume_agent() -> str:
                 set_consumption_storage(lambda: SqliteDb(db_file=db_file))
-                response, presentation = await _continue_persisted_agent(
-                    actor,
-                    continuation,
-                    paused,
-                    paused.requirements,
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=owner,
-                    refresh_scheduler=None,
-                    decisions={},
-                    denial_reasons={},
+                assert isinstance(actor, Agent)
+                scope = ScopeSessionContext(
+                    HistoryScope(kind="agent", scope_id="leader"),
+                    storage,
+                    storage.get_session(context.session_id, session_type=SessionType.AGENT),
+                    session_id=context.session_id,
+                    storage_factory=lambda: SqliteDb(db_file=db_file),
                 )
-                assert response.status is RunStatus.completed
-                return presentation.final_text()
+
+                async def prepare(ctx: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
+                    prompt = str(kwargs["prompt"])
+                    prepared = _PreparedAgentRun(
+                        agent=actor,
+                        messages=(Message(role="user", content=prompt),),
+                        unseen_event_ids=[],
+                        prepared_history=PreparedHistoryState(),
+                        runtime_model_name="default",
+                    )
+                    return _AgentRunContext(
+                        turn=ctx,
+                        session_id=context.session_id,
+                        prompt=prompt,
+                        model_prompt=None,
+                        prepared_run=prepared,
+                        run_input=prepared.run_input,
+                        metadata=ctx.matrix_run_metadata,
+                    )
+
+                with (
+                    patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
+                    patch("mindroom.ai._prepare_agent_run_context", new=prepare),
+                ):
+                    response = await _continue_persisted_agent(
+                        actor,
+                        continuation,
+                        paused,
+                        paused.requirements,
+                        config=config,
+                        runtime_paths=paths,
+                        execution_identity=owner,
+                        refresh_scheduler=None,
+                        decisions={},
+                        denial_reasons={},
+                        knowledge=None,
+                        tool_trace_collector=[],
+                        run_id_callback=None,
+                        tool_dispatch=LiveToolDispatchContext.from_runtime_context(context),
+                    )
+                assert isinstance(response, CompletedApprovalRun)
+                return response.response_text
 
             async def resume_team() -> str:
                 session = storage.get_session(context.session_id, session_type=SessionType.TEAM)

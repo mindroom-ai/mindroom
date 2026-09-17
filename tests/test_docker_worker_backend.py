@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 import pytest
@@ -28,7 +29,11 @@ from mindroom.constants import (
     runtime_paths_with_storage_root,
 )
 from mindroom.private_instance_identity_store import ensure_private_instance_identity
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, SHARED_CREDENTIALS_PATH_ENV
+from mindroom.runtime_env_policy import (
+    SANDBOX_RUNTIME_ENV_BY_KEY,
+    SHARED_CREDENTIALS_PATH_ENV,
+    WORKER_COMPUTER_ENABLED_ENV,
+)
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -209,6 +214,12 @@ class _FakeContainersApi:
             labels=dict(labels) if isinstance(labels, dict) else {},
             user=str(kwargs["user"]) if kwargs.get("user") is not None else None,
         )
+        container.attrs["HostConfig"] = {
+            "Privileged": bool(kwargs.get("privileged", False)),
+            "CapAdd": None,
+            "CapDrop": list(kwargs.get("cap_drop", [])),
+            "SecurityOpt": list(kwargs.get("security_opt", [])),
+        }
         if isinstance(volumes, list):
             container.attrs["Mounts"] = [
                 {
@@ -654,6 +665,7 @@ def _backend(
     tmp_path: Path,
     *,
     idle_timeout_seconds: float = 60.0,
+    security_policy: Literal["runtime_default", "computer"] = "runtime_default",
     config_text: str = "agents: {}\n",
     runtime_paths: RuntimePaths | None = None,
     storage_path: Path | None = None,
@@ -667,6 +679,7 @@ def _backend(
         config_path="/app/config-host/config.yaml",
         host_config_path=tmp_path / "config.yaml" if host_config_path is None else host_config_path,
         idle_timeout_seconds=idle_timeout_seconds,
+        security_policy=security_policy,
         ready_timeout_seconds=5.0,
         name_prefix="mindroom-worker",
         publish_host="127.0.0.1",
@@ -1455,6 +1468,8 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     _assert_projected_config_snapshot(projection_root, tmp_path)
     assert run_call["user"] == "1000:1000"
     assert run_call["ports"] == {"8766/tcp": ("127.0.0.1", None)}
+    assert "cap_drop" not in run_call
+    assert "security_opt" not in run_call
 
     labels = run_call["labels"]
     assert isinstance(labels, dict)
@@ -1467,6 +1482,78 @@ def test_docker_backend_ensures_worker_container_and_bind_mount(
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "ready"
     assert metadata["startup_count"] == 1
+
+
+@pytest.mark.parametrize("computer_enabled", [False, True])
+def test_docker_computer_worker_uses_argument_filtered_browser_seccomp_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    computer_enabled: bool,
+) -> None:
+    """Computer workers retain syscall filtering while allowing Chromium's namespace sandbox."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower()},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy="computer",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    assert fake_client.containers.run_calls[0]["cap_drop"] == ["ALL"]
+    security_opt = fake_client.containers.run_calls[0]["security_opt"]
+    assert isinstance(security_opt, list)
+    assert security_opt[0] == "no-new-privileges:true"
+    assert len(security_opt) == 2
+    profile = json.loads(str(security_opt[1]).removeprefix("seccomp="))
+    assert profile["defaultAction"] == "SCMP_ACT_ERRNO"
+    assert set(profile) == {"defaultAction", "defaultErrnoRet", "syscalls"}
+    assert "includes" not in json.dumps(profile)
+    assert "excludes" not in json.dumps(profile)
+    assert not any(
+        rule["action"] == "SCMP_ACT_ALLOW"
+        and not rule.get("args")
+        and {"clone", "unshare", "setns"}.intersection(rule["names"])
+        for rule in profile["syscalls"]
+    )
+    namespace_rules = [
+        rule
+        for rule in profile["syscalls"]
+        if rule["action"] == "SCMP_ACT_ALLOW" and rule.get("args") and "clone" in rule["names"]
+    ]
+    assert {
+        (rule["args"][0]["value"], rule["args"][0].get("valueTwo"))
+        for rule in namespace_rules
+        if rule["args"][0]["op"] == "SCMP_CMP_MASKED_EQ"
+    }.issuperset(
+        {
+            (0x7E020000, 0x10000000),
+            (0x7E020000, 0x20000000),
+            (0x7E020000, 0x70000000),
+        },
+    )
+    allowed_names = {
+        name for rule in profile["syscalls"] if rule["action"] == "SCMP_ACT_ALLOW" for name in rule["names"]
+    }
+    assert {
+        "bpf",
+        "delete_module",
+        "init_module",
+        "mount",
+        "perf_event_open",
+        "reboot",
+        "setns",
+        "swapon",
+        "swapoff",
+        "syslog",
+        "umount2",
+    }.isdisjoint(allowed_names)
+    assert "chroot" in allowed_names
 
 
 def test_docker_backend_writes_authoritative_worker_validation_snapshot(
@@ -3224,6 +3311,132 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
     assert second_run_call["user"] == "2000:2000"
 
 
+def test_docker_backend_recreates_container_missing_runtime_security_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An old matching container must be replaced if its effective host security is stale."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy="computer",
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    first_container.attrs["HostConfig"] = {"CapDrop": [], "SecurityOpt": []}
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "weakened_setting",
+    [
+        "privileged",
+        "cap_add",
+        "missing_drop",
+        "missing_nnp",
+        "unconfined",
+        "normalized_seccomp_marker",
+        "wrong_profile",
+        "invalid_profile",
+        "missing_host_config",
+    ],
+)
+@pytest.mark.parametrize("computer_enabled", [False, True])
+def test_docker_backend_recreates_container_with_weakened_runtime_security(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    weakened_setting: str,
+    computer_enabled: bool,
+) -> None:
+    """A matching worker must not be reused when its effective Docker policy is weaker."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower()},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy="computer",
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+    host_config = first_container.attrs["HostConfig"]
+    assert isinstance(host_config, dict)
+
+    if weakened_setting == "privileged":
+        host_config["Privileged"] = True
+    elif weakened_setting == "cap_add":
+        host_config["CapAdd"] = ["SYS_ADMIN"]
+    elif weakened_setting == "missing_drop":
+        host_config["CapDrop"] = []
+    elif weakened_setting == "missing_nnp":
+        host_config["SecurityOpt"] = host_config["SecurityOpt"][1:]
+    elif weakened_setting == "invalid_profile":
+        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp={"]
+    elif weakened_setting == "missing_host_config":
+        first_container.attrs.pop("HostConfig")
+    elif weakened_setting == "normalized_seccomp_marker":
+        host_config["SecurityOpt"] = ["no-new-privileges:true", "seccomp"]
+    else:
+        replacement = (
+            "unconfined"
+            if weakened_setting == "unconfined"
+            else json.dumps({"defaultAction": "SCMP_ACT_ALLOW", "syscalls": []})
+        )
+        host_config["SecurityOpt"] = ["no-new-privileges:true", f"seccomp={replacement}"]
+
+    backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert first_container.removed == 1
+    assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("computer_enabled", "security_policy"),
+    [(False, "runtime_default"), (False, "computer"), (True, "computer")],
+)
+def test_docker_backend_reuses_container_with_expected_runtime_security(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    computer_enabled: bool,
+    security_policy: Literal["runtime_default", "computer"],
+) -> None:
+    """An unchanged default or computer security policy permits worker reuse."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "state",
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"} if computer_enabled else {},
+    )
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        security_policy=security_policy,
+    )
+    first_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    first_container = fake_client.containers.by_name[first_handle.worker_id]
+
+    second_handle = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert second_handle.worker_id == first_handle.worker_id
+    assert first_container.removed == 0
+    assert len(fake_client.containers.run_calls) == 1
+
+
 def test_docker_backend_recreates_container_when_validation_snapshot_changes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4795,3 +5008,298 @@ def test_docker_backend_recreates_container_when_same_tag_resolves_to_new_image_
     assert replacement_container is not existing_container
     assert existing_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
+
+
+@pytest.mark.parametrize("flag", [None, "false"])
+@pytest.mark.parametrize("check", ["launch", "signature", "kwargs", "reuse"])
+def test_docker_ordinary_workers_preserve_pre_computer_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flag: str | None,
+    check: str,
+) -> None:
+    """Historical identities and default Docker HostConfig remain reusable without the opt-in."""
+    env = {
+        "MINDROOM_WORKER_BACKEND": "docker",
+        "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
+    }
+    if flag is not None:
+        env[WORKER_COMPUTER_ENABLED_ENV] = flag
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=env,
+    )
+    backend, client, _ = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    # Captured from actual main74bc modules: substitute only the test root, never
+    # reconstruct the production hash payload or require git/history at runtime.
+    baseline = json.loads((Path(__file__).parent / "fixtures/docker_pre_computer_identity.json").read_text())
+    serialized = baseline["launch_payload"].replace("__TEST_ROOT__", str(tmp_path))
+    expected_hash = hashlib.sha256(serialized.encode()).hexdigest()
+    if check == "launch":
+        assert backend._compute_launch_config_hash() == expected_hash
+        return
+    if check == "signature":
+        expected_signature = tuple(
+            part.replace("__TEST_ROOT__", str(tmp_path))
+            for part in baseline["backend_signatures"]["absent" if flag is None else flag]
+        )
+        assert docker_backend_config_signature(runtime_paths, auth_token=_TEST_AUTH_TOKEN) == expected_signature
+        return
+    first = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = client.containers.by_name[first.worker_id]
+    if check == "kwargs":
+        assert "cap_drop" not in client.containers.run_calls[0]
+        assert "security_opt" not in client.containers.run_calls[0]
+        return
+    metadata_path = worker_root_path(tmp_path, _TEST_UNSCOPED_WORKER_KEY) / "metadata/worker.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["launch_config_hash"] = expected_hash
+    metadata_path.write_text(json.dumps(metadata))
+    container.attrs["Config"]["Labels"]["mindroom.ai/launch-config-hash"] = expected_hash
+    container.attrs["HostConfig"] = {"Privileged": False, "CapAdd": None, "CapDrop": None, "SecurityOpt": None}
+
+    second = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert second.worker_id == first.worker_id
+    assert container.removed == 0
+    assert len(client.containers.run_calls) == 1
+
+
+@pytest.mark.parametrize("initial_policy", ["runtime_default", "computer"])
+def test_docker_security_policy_changes_identity_and_replaces_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    initial_policy: Literal["runtime_default", "computer"],
+) -> None:
+    """The operator policy replaces workers in either direction with Computer disabled."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        WORKER_COMPUTER_ENABLED_ENV: "false",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": initial_policy,
+    }
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    backend, client, _ = _backend(monkeypatch, tmp_path, runtime_paths=paths, security_policy=initial_policy)
+    first = backend.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=10.0)
+    container = client.containers.by_name[first.worker_id]
+    changed_policy = "computer" if initial_policy == "runtime_default" else "runtime_default"
+    changed_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={**env, "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": changed_policy},
+    )
+    replacement = DockerWorkerBackend(
+        config=replace(backend.config, security_policy=changed_policy),
+        auth_token=_TEST_AUTH_TOKEN,
+        storage_path=tmp_path,
+        runtime_paths=changed_paths,
+    )
+    monkeypatch.setattr(replacement, "_wait_for_ready", backend._wait_for_ready)
+    assert replacement._compute_launch_config_hash() != backend._compute_launch_config_hash()
+    assert docker_backend_config_signature(paths, auth_token=_TEST_AUTH_TOKEN) != docker_backend_config_signature(
+        changed_paths,
+        auth_token=_TEST_AUTH_TOKEN,
+    )
+
+    replacement.ensure_worker(WorkerSpec(_TEST_UNSCOPED_WORKER_KEY), now=20.0)
+
+    assert container.removed == 1
+    assert len(client.containers.run_calls) == 2
+    latest = client.containers.run_calls[-1]
+    if initial_policy == "computer":
+        assert "cap_drop" not in latest
+        assert "security_opt" not in latest
+    else:
+        assert latest["cap_drop"] == ["ALL"]
+        assert latest["security_opt"][0] == "no-new-privileges:true"
+
+
+@pytest.mark.parametrize("policy", [None, "runtime_default"])
+@pytest.mark.parametrize(("primary_flag", "worker_flag"), [("true", None), ("false", " YES "), ("true", "false")])
+def test_docker_computer_requires_explicit_security_policy(
+    tmp_path: Path,
+    policy: str | None,
+    primary_flag: str,
+    worker_flag: str | None,
+) -> None:
+    """Enabling Computer cannot silently select or bypass the operator security policy."""
+    env = {"MINDROOM_DOCKER_WORKER_IMAGE": "test-image", WORKER_COMPUTER_ENABLED_ENV: primary_flag}
+    if worker_flag is not None:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: worker_flag})
+    if policy is not None:
+        env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+@pytest.mark.parametrize("direct", [False, True])
+def test_docker_security_policy_rejects_unknown_choice(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    direct: bool,
+) -> None:
+    """Neither env parsing nor supplied config can bypass the bounded policy choices."""
+    backend, _, _ = _backend(monkeypatch, tmp_path)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "unconfined",
+        },
+    )
+    if direct:
+        with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY"):
+            replace(backend.config, security_policy="unconfined")
+    else:
+        with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY"):
+            _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+@pytest.mark.parametrize("worker_override", [False, True])
+def test_docker_direct_backend_rejects_incompatible_computer_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    worker_override: bool,
+) -> None:
+    """A supplied default config cannot enable Computer even when env claims a compatible policy."""
+    backend, _, _ = _backend(monkeypatch, tmp_path)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            WORKER_COMPUTER_ENABLED_ENV: "false" if worker_override else "true",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        },
+    )
+    config = (
+        replace(backend.config, extra_env={WORKER_COMPUTER_ENABLED_ENV: "true"}) if worker_override else backend.config
+    )
+
+    def forbidden_client(**_kwargs: object) -> None:
+        pytest.fail("Incompatible policy reached Docker client construction")
+
+    monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
+    with pytest.raises(WorkerBackendError, match="MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer"):
+        DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+
+
+@pytest.mark.parametrize(
+    ("computer_enabled", "worker_flag", "policy", "expected"),
+    [
+        (False, None, None, "runtime_default"),
+        (False, None, "runtime_default", "runtime_default"),
+        (False, None, "computer", "computer"),
+        (True, None, "computer", "computer"),
+        (False, "false", None, "runtime_default"),
+        (False, "true", "computer", "computer"),
+    ],
+)
+def test_docker_security_policy_resolution(
+    tmp_path: Path,
+    *,
+    computer_enabled: bool,
+    worker_flag: str | None,
+    policy: str | None,
+    expected: str,
+) -> None:
+    """Availability cannot override the explicit pool policy or its historical default."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
+        WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower(),
+    }
+    if worker_flag is not None:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: worker_flag})
+    if policy is not None:
+        env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    assert _DockerWorkerBackendConfig.from_runtime(paths).security_policy == expected
+
+
+@pytest.mark.parametrize("user", ["0", "0:0", "000:1000", "+0:0", "-0:0", "root", "root:users"])
+@pytest.mark.parametrize("worker_override", [False, True])
+def test_docker_computer_rejects_root_user(tmp_path: Path, user: str, *, worker_override: bool) -> None:
+    """Known root identities fail configuration before sandboxed Chromium starts."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        "MINDROOM_DOCKER_WORKER_USER": user,
+        WORKER_COMPUTER_ENABLED_ENV: "false" if worker_override else "true",
+    }
+    if worker_override:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: "true"})
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+def test_docker_computer_rejects_inherited_root_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The POSIX host-user default must pass the same Computer identity check."""
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: 0)
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        WORKER_COMPUTER_ENABLED_ENV: "true",
+    }
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+@pytest.mark.parametrize("user", ["0:0", "root"])
+def test_docker_direct_computer_rejects_root_before_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    user: str,
+) -> None:
+    """Supplied configuration cannot skip the user check at backend construction."""
+    backend, _, _ = _backend(monkeypatch, tmp_path)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
+    )
+    config = replace(backend.config, user=user, security_policy="computer")
+
+    def forbidden_client(**_kwargs: object) -> None:
+        pytest.fail("Root Computer configuration reached Docker client construction")
+
+    monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "policy", "user"),
+    [
+        (False, "runtime_default", "root"),
+        (False, "computer", "0:0"),
+        (True, "computer", "1000:0"),
+        (True, "computer", "mindroom:users"),
+        (True, "computer", ""),
+    ],
+)
+def test_docker_computer_identity_validation_preserves_supported_users(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    policy: str,
+    user: str,
+) -> None:
+    """Ordinary workers, nonroot identities and the image default remain configurable."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": policy,
+            "MINDROOM_DOCKER_WORKER_USER": user,
+            WORKER_COMPUTER_ENABLED_ENV: str(enabled).lower(),
+        },
+    )
+    assert _DockerWorkerBackendConfig.from_runtime(paths).user == (user or None)

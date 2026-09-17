@@ -42,6 +42,10 @@ class IngressAdmissionClosedError(RuntimeError):
     """Raised when ingress tries to admit through a released or closed lane slot."""
 
 
+class IngressRetryError(RuntimeError):
+    """Return unresolved readiness to its durable owner without consuming the source."""
+
+
 @dataclass
 class LaneDelivery:
     """Conversation-assigned payload waiting for its lane turn."""
@@ -416,15 +420,16 @@ class IngressLanes:
                     return _LaneDeliveryOutcome.RETRY
                 raise
             except Exception as error:
-                logger.exception(
-                    "ingress_lane_ready_task_failed",
-                    source_event_id=delivery.source_event_id,
-                    room_id=slot.room_id,
-                    sender_id=slot.sender_id,
-                    age_ms=elapsed_ms_since(delivery.received_at, clock=time.time),
-                    exception_type=error.__class__.__name__,
-                    error_message=str(error),
-                )
+                if not isinstance(error, IngressRetryError):
+                    logger.exception(
+                        "ingress_lane_ready_task_failed",
+                        source_event_id=delivery.source_event_id,
+                        room_id=slot.room_id,
+                        sender_id=slot.sender_id,
+                        age_ms=elapsed_ms_since(delivery.received_at, clock=time.time),
+                        exception_type=error.__class__.__name__,
+                        error_message=str(error),
+                    )
                 return _LaneDeliveryOutcome.RETRY
         # Only after the exception split: a successful None result intentionally
         # consumed this source without entering the gate.

@@ -53,6 +53,12 @@ It is deleted when the current question revision is cleared, and its foreign key
 
 `turn_records.record_json` retains durable turn identity, outcome, and regeneration content.
 
+Its optional `prepared_voice_sources` field holds the prepared body, Matrix content, batching scope, and preparation/echo thread needed to retry a voice source without repeating transcription.
+It stores no live ingress timing objects and is not copied into agent run metadata.
+Turn completion or source redaction removes the checkpoint, including redaction through a source's discovery alias.
+Checkpoint-only records remain protected while their journal source is unsettled; after settlement they follow ordinary turn-record age and count cleanup.
+Records with other unfinished turn facts retain the existing recovery protections.
+
 `unresolved_edits.content_json` holds an edit whose target has not arrived yet, and it is deleted the moment the target lands or is redacted.
 Redacting the held edit itself clears its payload immediately but retains its identity and ordering until the target arrives, so the target requests a refetch for any earlier surviving revision.
 

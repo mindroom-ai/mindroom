@@ -808,6 +808,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 resolve_result(str(error))
                 continue
             args = application_arguments(tool.tool_args) or {}
+            model = args.get("model") if tool.tool_name == "run_subagent" else None
             retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             previous_child = None
             background_job = None
@@ -861,6 +862,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 runtime_paths=runtime_paths,
                 execution_identity=caller_identity,
                 depth=delegation_depth,
+                model=model,
             )
             output_request = None
             if not isinstance(authorization, str):
@@ -947,6 +949,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     config=config,
                     runtime_paths=runtime_paths,
                     depth=delegation_depth,
+                    model=model,
                     previous=previous_child,
                     parent_tool_call_id=tool.tool_call_id,
                     parent_requirement_id=requirement.id,

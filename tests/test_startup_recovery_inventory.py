@@ -9,8 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.event_journal import DeliveryStage, DepartureSource
 from mindroom.matrix.stale_stream_cleanup import recover_stale_streaming_messages
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from tests.conftest import delivered_matrix_side_effect, runtime_paths_for
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_event_journal_store import ROOM, admit
@@ -57,31 +59,65 @@ async def _initial(principal: PrincipalStore, source: str, *, acknowledged: bool
 async def test_inventory_keeps_ack_before_turn_binding_and_excludes_other_owners(
     journal_store: EventJournalStore,
 ) -> None:
-    """Recovery owns acknowledged orphans, not pending sends or FINAL-owned work."""
+    """Candidates include error FINALs, excluding pending sends and successful replies."""
     principal = journal_store.principal("agent@alice")
     await _initial(principal, "$orphan")
     await _initial(principal, "$unacknowledged", acknowledged=False)
     await _initial(journal_store.principal("other@alice"), "$other")
-    for source in ("$owed", "$finished"):
+    for source in ("$owed", "$finished", "$unsuccessful"):
         await _initial(principal, source)
         await principal.enqueue_matrix_delivery(
             delivery_id=source,
             stage=DeliveryStage.FINAL,
             room_id=ROOM,
             thread_id=None,
-            payload={"msgtype": "m.text", "body": "Answer"},
+            payload={
+                "msgtype": "m.text",
+                "body": "partial\n\n" + RESTART_INTERRUPTED_RESPONSE_NOTE if source == "$unsuccessful" else "Answer",
+                STREAM_STATUS_KEY: STREAM_STATUS_ERROR if source == "$unsuccessful" else STREAM_STATUS_COMPLETED,
+            },
+            result={"body": "Answer"} if source == "$finished" else None,
         )
-    await principal.claim_matrix_delivery(delivery_id="$finished", stage=DeliveryStage.FINAL)
-    await principal.acknowledge_matrix_delivery(
-        delivery_id="$finished",
-        stage=DeliveryStage.FINAL,
-        event_id="$answer",
-        delivered_projections=(),
-    )
+    for source in ("$finished", "$unsuccessful"):
+        await principal.claim_matrix_delivery(delivery_id=source, stage=DeliveryStage.FINAL)
+        await principal.acknowledge_matrix_delivery(
+            delivery_id=source,
+            stage=DeliveryStage.FINAL,
+            event_id=f"{source}-final",
+            delivered_projections=(),
+        )
     candidates = await principal.recovery_initial_deliveries()
-    assert [item.delivery_id for item in candidates] == ["$orphan"]
+    assert [item.delivery_id for item in candidates] == ["$orphan", "$unsuccessful"]
     assert candidates[0].acknowledged_event_id == "$orphan-response"
     assert await journal_store.turn_records("agent").load_all() == ()
+
+
+@pytest.mark.parametrize("nested_edit", [False, True])
+async def test_inventory_excludes_completed_final_without_result(
+    journal_store: EventJournalStore,
+    nested_edit: bool,
+) -> None:
+    """Ordinary successful replies without result metadata must not grow startup inventory."""
+    principal = journal_store.principal("agent@alice")
+    await _initial(principal, "$completed")
+    content = {"msgtype": "m.text", "body": "Answer"}
+    if nested_edit:
+        content[STREAM_STATUS_KEY] = STREAM_STATUS_COMPLETED
+    await principal.enqueue_matrix_delivery(
+        delivery_id="$completed",
+        stage=DeliveryStage.FINAL,
+        room_id=ROOM,
+        thread_id=None,
+        payload={"body": "* Answer", "m.new_content": content} if nested_edit else content,
+    )
+    await principal.claim_matrix_delivery(delivery_id="$completed", stage=DeliveryStage.FINAL)
+    await principal.acknowledge_matrix_delivery(
+        delivery_id="$completed",
+        stage=DeliveryStage.FINAL,
+        event_id="$completed-final",
+        delivered_projections=(),
+    )
+    assert await principal.recovery_initial_deliveries() == ()
 
 
 async def test_inventory_advances_past_a_full_page_and_revisits_late_ack(

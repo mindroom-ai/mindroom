@@ -199,7 +199,7 @@ def test_ordered_team_pause_rejects_a_coordinator_tool_in_a_member_scope() -> No
 
 
 @pytest.mark.asyncio
-async def test_agent_continuation_appends_terminal_only_content() -> None:
+async def test_agent_continuation_defers_terminal_only_content() -> None:
     """A provider completion event is the continuation delta when no content events were emitted."""
     presentation = CollectedStreamPresentation(show_tool_calls=True, response_text="Before approval. ")
     terminal = RunOutput(run_id="run-1", session_id="session-1", status=RunStatus.completed)
@@ -210,8 +210,9 @@ async def test_agent_continuation_appends_terminal_only_content() -> None:
 
     response = await _collect_agent_continuation(events(), presentation)
 
-    assert response is terminal
-    assert presentation.final_text() == "Before approval. After approval."
+    assert response.response is terminal
+    assert response.terminal_content == "After approval."
+    assert presentation.final_text() == "Before approval. "
 
 
 @pytest.mark.asyncio
@@ -273,7 +274,8 @@ async def test_agent_continuation_keeps_text_after_a_stripped_tool_marker() -> N
         yield RunCompletedEvent(content="After approval.")
         yield terminal
 
-    await _collect_agent_continuation(events(), presentation)
+    collected = await _collect_agent_continuation(events(), presentation)
+    presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
 
@@ -304,7 +306,8 @@ async def test_agent_continuation_reuses_an_existing_visible_tool_separator() ->
         yield RunCompletedEvent(content="After approval.")
         yield terminal
 
-    await _collect_agent_continuation(events(), presentation)
+    collected = await _collect_agent_continuation(events(), presentation)
+    presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval."
 
@@ -336,7 +339,8 @@ async def test_hidden_agent_continuation_separates_text_across_the_tool_boundary
         yield RunCompletedEvent(content="After approval.")
         yield terminal
 
-    await _collect_agent_continuation(events(), presentation)
+    collected = await _collect_agent_continuation(events(), presentation)
+    presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before approval.\n\nAfter approval."
 
@@ -365,7 +369,8 @@ async def test_hidden_agent_continuation_separates_text_across_a_new_tool_bounda
         yield RunCompletedEvent(content="After tool.")
         yield terminal
 
-    await _collect_agent_continuation(events(), presentation)
+    collected = await _collect_agent_continuation(events(), presentation)
+    presentation.append_text(collected.terminal_content)
 
     assert presentation.final_text() == "Before tool.\n\nAfter tool."
 

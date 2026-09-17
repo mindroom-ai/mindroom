@@ -8,6 +8,7 @@ import os
 import stat
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -445,9 +446,9 @@ class _FakeResponsesAPI:
         self._event_batches = iter(event_batches)
         self.captured_kwargs: list[dict[str, object]] = []
 
-    def create(self, **kwargs: object) -> Iterator[object]:
+    def create(self, **kwargs: object) -> nullcontext[Iterator[object]]:
         self.captured_kwargs.append(kwargs)
-        return iter(next(self._event_batches))
+        return nullcontext(iter(next(self._event_batches)))
 
 
 class _FakeCodexClient:

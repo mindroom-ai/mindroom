@@ -441,6 +441,7 @@ class AgentBot:
         # every claim; before login there is no answer, and `None` says so.
         self._sending_device_id: str | None = None
         self._sync_shutting_down = False
+        self._entity_removed = False
         self._sync_shutdown_budget = None
         self._deferred_stop_required = False
         self._deferred_stop_phase = None
@@ -742,6 +743,7 @@ class AgentBot:
                 approval_store=self._journal_store.principal(self._journal_principal_id),
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
+                register_approval_interruption=self._register_approval_interruption,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -788,6 +790,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 delivery_gateway=self._delivery_gateway,
                 turn_store=self._turn_store,
+                router_turn_records=self._journal_store.turn_records(ROUTER_AGENT_NAME),
                 ingress=self._ingress_validator,
                 wait_for_admission_or_shutdown=self._response_runner.wait_for_admission_or_shutdown,
             ),
@@ -1037,6 +1040,28 @@ class AgentBot:
     def pending_sync_restart_retry_room_ids(self) -> frozenset[str]:
         """Return rooms with interrupted turns awaiting replacement recovery."""
         return self._interrupted_turn_rooms.pending_room_ids
+
+    def _register_approval_interruption(self, source_event_id: str, room_id: str) -> None:
+        """Wake fleet recovery after the settled approval's owner releases its claims."""
+        if self._entity_removed or not self._interrupted_turn_rooms.register(source_event_id, room_id=room_id):
+            return
+        orchestrator = self.orchestrator
+        if orchestrator is None:
+            return
+
+        def notify(_done: asyncio.Task | None = None) -> None:
+            if not self._entity_removed:
+                orchestrator.request_interrupted_turn_recovery(self.agent_name, room_id)
+
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            # Synchronous registration stays available to later fleet capture.
+            return
+        if task is None:
+            notify()
+        else:
+            task.add_done_callback(notify)
 
     @property
     def approval_room_ids(self) -> frozenset[str]:
@@ -2303,6 +2328,8 @@ class AgentBot:
         shutdown_intent: RuntimeShutdownIntent = GENERIC_SHUTDOWN,
     ) -> None:
         """Cancel work that must not outlive the Matrix sync loop."""
+        if shutdown_intent.stop_reason == "entity_removed":
+            self._entity_removed = True
         if not self._sync_shutting_down:
             self.logger.info(
                 "matrix_agent_response_runtime_shutdown",

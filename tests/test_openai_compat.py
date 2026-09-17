@@ -25,6 +25,7 @@ from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat
+from agno.models.response import ModelResponse
 from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.team import RunContentEvent as TeamContentEvent
 from agno.run.team import TeamRunOutput
@@ -62,6 +63,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.provider_media_fallback import install_provider_media_fallback
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
 from mindroom.tool_approval import shutdown_approval_runtime
@@ -1681,6 +1683,64 @@ class TestStreamingCompletion:
         assert response.status_code == 200
         assert len(observed_session_ids) == 2
         assert all(session_id is not None for session_id in observed_session_ids)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+    async def test_prefetched_provider_stream_completes_under_asgi(
+        self,
+        test_config: Config,
+        spec_version: str,
+    ) -> None:
+        """The real API prefetch and ASGI response may advance a model in different tasks."""
+        model = Ollama(id="synthetic-model")
+        closed = False
+
+        async def provider(**_kwargs: object) -> AsyncIterator[ModelResponse]:
+            nonlocal closed
+            try:
+                yield ModelResponse(content="Hello")
+                yield ModelResponse(content=" world")
+            finally:
+                closed = True
+
+        model.ainvoke_stream = provider
+        install_provider_media_fallback(model, fallback_prompt="Continue without inline media.")
+
+        async def agent_stream(_ctx: object, **_kwargs: object) -> AsyncIterator[RunContentEvent]:
+            async for chunk in model._ainvoke_stream_with_retry(messages=[Message(role="user", content="Hello")]):
+                yield RunContentEvent(content=chunk.content)
+
+        with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=agent_stream):
+            response = await openai_compat._stream_completion(
+                "general",
+                "Hello",
+                "session-123",
+                test_config,
+                _runtime_paths(),
+                None,
+                None,
+            )
+
+        assert isinstance(response, openai_compat._OpenAIStreamingResponse)
+        sent: list[bytes] = []
+
+        async def receive() -> dict[str, object]:
+            await asyncio.Event().wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.body":
+                sent.append(cast("bytes", message["body"]))
+
+        await response({"type": "http", "asgi": {"spec_version": spec_version}}, receive, send)
+
+        assert closed
+        assert response.completion_predicate is not None
+        assert response.completion_predicate()
+        body = b"".join(sent).decode()
+        assert '"content":"Hello"' in body
+        assert '"content":" world"' in body
+        assert body.endswith("data: [DONE]\n\n")
 
     @pytest.mark.asyncio
     async def test_streaming_close_from_other_task_keeps_execution_identity(self, test_config: Config) -> None:

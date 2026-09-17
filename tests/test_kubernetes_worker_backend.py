@@ -67,6 +67,8 @@ from mindroom.workers.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.workers.backends.kubernetes_config import _WorkerSeccompProfile
+
 _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _TEST_SCOPED_WORKER_KEY_A = "v1:tenant-123:shared:code"
 _TEST_SCOPED_WORKER_KEY_B = "v1:tenant-123:shared:research"
@@ -496,6 +498,67 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     assert backend.script_recovery_signature() == initial
 
 
+@pytest.mark.parametrize("seccomp_enabled", [False, True])
+def test_pre_seccomp_recovery_preserves_exact_backend_authority(tmp_path: Path, seccomp_enabled: bool) -> None:
+    """Only an unset seccomp policy can match the historical backend serialization."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        process_env={},
+    )
+    backend, _apps, _core = _backend(
+        runtime_paths=runtime_paths,
+        config_snapshot={},
+        seccomp_profile={"type": "Localhost", "localhostProfile": "worker.json"} if seccomp_enabled else None,
+    )
+    historical_payload = {
+        "config": {
+            "namespace": "chat",
+            "worker_port": 8766,
+            "service_account_name": "mindroom-worker",
+            "storage_pvc_name": "mindroom-storage",
+            "storage_mount_path": "/app/worker",
+            "storage_subpath_prefix": "workers",
+            "config_map_name": "mindroom-config",
+            "config_key": "config.yaml",
+            "config_path": "/app/config.yaml",
+            "idle_timeout_seconds": 60.0,
+            "ready_timeout_seconds": 5.0,
+            "name_prefix": "mindroom-worker",
+            "node_name": None,
+            "colocate_with_control_plane_node": False,
+            "extra_env": {},
+            "extra_labels": {"mindroom.ai/tenant": "test"},
+            "extra_annotations": {},
+            "owner_deployment_name": None,
+            "enable_service_links": False,
+            "auth_secret_name": None,
+            "reconcile_pod_templates": True,
+            "agent_vault": None,
+            "extra_containers": [],
+            "extra_volumes": [],
+        },
+        "owner": None,
+        "auth_token": _TEST_AUTH_TOKEN,
+        "encryption_key": None,
+        "storage_root": str(tmp_path / "storage"),
+        "grantable_credentials": [],
+    }
+    expected = hashlib.sha256(
+        json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    historical = backend.legacy_pre_seccomp_script_recovery_signature()
+    if seccomp_enabled:
+        assert historical is None
+    else:
+        assert historical == expected
+        assert historical != backend.script_recovery_signature()
+        backend.config = replace(backend.config, extra_env={"SCRIPT_ACCESS": "changed"})
+        assert backend.legacy_pre_seccomp_script_recovery_signature() != historical
+
+
 def test_script_recovery_contract_survives_unrelated_tool_catalog_upgrade() -> None:
     """A new tool or UI label cannot revoke an unchanged script process authority."""
     original, _apps, _core = _backend(config_snapshot={})
@@ -671,6 +734,7 @@ def _backend(
     enable_service_links: bool = False,
     auth_secret_name: str | None = None,
     reconcile_pod_templates: bool = True,
+    seccomp_profile: _WorkerSeccompProfile | None = None,
     agent_vault: KubernetesAgentVaultConfig | None = None,
     config_snapshot: dict[str, object] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
@@ -707,6 +771,7 @@ def _backend(
         enable_service_links=enable_service_links,
         auth_secret_name=auth_secret_name,
         reconcile_pod_templates=reconcile_pod_templates,
+        seccomp_profile=seccomp_profile,
         agent_vault=agent_vault,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
@@ -982,6 +1047,28 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
         "httpGet": {"path": "/healthz", "port": "api"},
         "periodSeconds": 5,
         "failureThreshold": 60,
+    }
+
+
+def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_path: Path) -> None:
+    """A browser-compatible Localhost profile must not broaden pod-level or helper-container policy."""
+    profile: _WorkerSeccompProfile = {"type": "Localhost", "localhostProfile": "profiles/worker-computer.json"}
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+        seccomp_profile=profile,
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    pod_spec = apps_api.created_bodies[0]["spec"]["template"]["spec"]
+    assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
+    assert pod_spec["containers"][0]["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+        "seccompProfile": profile,
     }
 
 

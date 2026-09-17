@@ -16,6 +16,7 @@ import pytest
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 from nio.crypto import DeviceStore, OlmDevice
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.access import ResponderAccessConfig
@@ -25,6 +26,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import ModelConfig
 from mindroom.config.voice import SpeechServiceConfig
+from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import (
     _MAX_PENDING_KEYS_PER_ROOM,
@@ -4409,3 +4411,55 @@ def test_manager_fails_closed_when_live_room_resolves_multiple_call_agents(tmp_p
     room.canonical_alias = "#voice:example.org"
 
     assert not manager._is_configured_call_room(room)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signal", ["sync", "active", "cached", "expired", "left_call", "invited", "departed", "self"])
+async def test_manager_ownership_warning_requires_live_call_signal(tmp_path: Path, signal: str) -> None:
+    """Idle ambiguity stays diagnostic without new I/O; a live caller still warns."""
+    config = _config()
+    config.agents["helper"].rooms = []
+    config.agents["helper"].accept_invites = True
+    config.agents["other"] = AgentConfig(display_name="Other", accept_invites=True)
+    config.calls.agents["other"] = "realtime"
+    client = _client()
+    room = _room()
+    client.rooms = {ROOM_ID: room}
+    caller = BOT_USER if signal == "self" else "@alice:example.org"
+    if signal not in {"departed", "cached"}:
+        room.add_member(caller, "Caller", None, invited=signal == "invited")
+    if signal == "cached":
+        client.joined_members.return_value = nio.JoinedMembersResponse(
+            [nio.RoomMember(caller, "Caller", None)],
+            ROOM_ID,
+        )
+        assert await ensure_room_membership_synced(client, room, sender_id=caller)
+        assert caller not in room.users
+        client.joined_members.reset_mock()
+    source = _remote_member_event(user=caller, created_ts=0 if signal == "expired" else None)
+    source["event_id"] = "$call-member"
+    if signal == "left_call":
+        source["content"] = {}
+    event = nio.UnknownEvent(source, CALL_MEMBER_EVENT_TYPE)
+    bridge = FakeBridge()
+    manager = _manager(
+        client,
+        bridge,
+        tmp_path,
+        config,
+        invited_rooms_by_agent={"helper": {ROOM_ID}, "other": {ROOM_ID}},
+    )
+
+    with capture_logs() as logs:
+        if signal == "sync":
+            await manager.reconcile_joined_rooms()
+        else:
+            await manager.on_room_event(room, event)
+
+    diagnostics = [row for row in logs if row["event"] == "call_room_ownership_ambiguous"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["log_level"] == ("warning" if signal in {"active", "cached"} else "debug")
+    assert manager._sessions == {}
+    assert bridge.connected_grant is None
+    client.room_get_state.assert_not_awaited()
+    client.joined_members.assert_not_awaited()
