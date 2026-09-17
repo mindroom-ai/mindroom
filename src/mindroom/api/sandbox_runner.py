@@ -74,6 +74,7 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
     visible_state_roots_for_worker_key,
 )
+from mindroom.worker_browser import WorkerBrowserRuntime
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.workers.backends.local import get_local_worker_manager
@@ -1657,8 +1658,8 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     )
 
 
-async def _execute_computer_browser(
-    computer: WorkerComputerRuntime,
+async def _execute_worker_browser(
+    computer: WorkerComputerRuntime | WorkerBrowserRuntime,
     payload: SandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     config: Config,
@@ -1674,8 +1675,9 @@ async def _execute_computer_browser(
         prepared_worker is None
         or not sandbox_exec.runner_uses_dedicated_worker(runtime_paths)
         or payload.worker_key is None
-        or resolved_worker_key_scope(payload.worker_key) != "user_agent"
-        or payload.worker_scope != "user_agent"
+        or payload.worker_scope is None
+        or resolved_worker_key_scope(payload.worker_key) != payload.worker_scope
+        or (isinstance(computer, WorkerComputerRuntime) and payload.worker_scope != "user_agent")
     ):
         raise HTTPException(
             status_code=400,
@@ -1716,6 +1718,20 @@ async def _execute_computer_browser(
         if type(toolkit) is not BrowserTools:
             raise HTTPException(status_code=400, detail="Worker computer requires the built-in browser tool.")
         try:
+            if isinstance(computer, WorkerBrowserRuntime):
+                process_env = _prepare_subprocess_context(prepared_context).subprocess_env or {}
+                browser_config_key = toolkit.bind_worker_headless(Path(workspace), process_env)
+
+                async def execute_current() -> object:
+                    async with asyncio.timeout(sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)):
+                        return await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
+
+                result = await computer.run(
+                    toolkit,
+                    (browser_config_key, tuple(sorted(process_env.items()))),
+                    execute_current,
+                )
+                return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
             browser_config_key = toolkit.bind_worker_display(computer.display.display, Path(workspace))
 
             async def execute(*args: object, **kwargs: object) -> object:
@@ -1786,8 +1802,13 @@ async def execute_tool_call(  # noqa: C901 - validated dispatch branches
             computer = request.app.state.worker_computer
         except AttributeError:
             computer = None
-        if isinstance(computer, WorkerComputerRuntime):
-            return await _execute_computer_browser(
+        if not isinstance(computer, WorkerComputerRuntime):
+            try:
+                computer = request.app.state.worker_browser
+            except AttributeError:
+                computer = None
+        if isinstance(computer, (WorkerComputerRuntime, WorkerBrowserRuntime)):
+            return await _execute_worker_browser(
                 computer,
                 payload,
                 runtime_paths,

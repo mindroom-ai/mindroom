@@ -1376,6 +1376,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.worker_browser",
     "mindroom.worker_computer.runtime",
     "mindroom.worker_computer.protocol",
     "mindroom.api.sandbox_env_assembly",
@@ -1404,6 +1405,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_runner_app"
 depends_on = [
+    "mindroom.tool_system.worker_routing",
+    "mindroom.worker_browser",
     "mindroom.api.sandbox_exec",
     "mindroom.api.worker_computer",
     "mindroom.worker_computer.display",
@@ -6032,6 +6035,10 @@ path = "mindroom.event_journal.legacy_response_attempts"
 depends_on = ["mindroom.event_journal", "mindroom.legacy_delivery_payloads", "mindroom.response_sources"]
 visibility = ["mindroom.event_journal"]
 
+
+[[modules]]
+path = "mindroom.worker_browser"
+depends_on = ["mindroom.background_tasks"]
 
 [[modules]]
 path = "mindroom.worker_computer.protocol"
