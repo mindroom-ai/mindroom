@@ -600,7 +600,7 @@ Delegation now shares resolved-child completion emission and terminal result/rec
 
 These changes affect 15 production Python files and leave production size effectively unchanged.
 The benefit comes from removing reconstruction dependencies and duplicated rules.
-The whole PR now changes 63 production Python files with +4,814/-157 lines, or net +4,657.
+Before integrating the newer main changes, the whole PR changed 63 production Python files with +4,814/-157 lines, or net +4,657.
 The additional touched files include the existing MCP filter owners and approval journal forwarding path; the shared filter predicate is the only new Python module in this pass.
 
 ### Refactor verification
@@ -625,3 +625,27 @@ No unrelated production or test changes were added for these timing failures.
 
 Tests caught two implementation errors before the approval refactor was committed: filtering a streaming pause down to pending tools lost earlier wait metadata, and unconditional interpretation of a native `wait_timeout` argument falsely marked an ordinary disabled-mode approval.
 Both now have regression coverage.
+
+### Integration with current main
+
+Current main shares normal and approved-agent execution through the response lifecycle.
+The feature now uses that shared driver, removing its obsolete agent-specific result-join loop while retaining the team continuation owner.
+Persisted background-job ownership is combined with main's runtime-model and continuation-budget fields.
+Execution/resource ownership, interruptible waiting, durable consumption, and disabled startup behavior remain intact.
+
+Against the integrated main revision, the PR changes 63 production Python files with +4,784/-156 lines, or net +4,628.
+Reusing the newer approved-agent driver reduces the feature diff by another 29 net lines beyond the three original simplifications.
+
+The focused integration suite passed 1,488 tests with two optional skips.
+All repository pre-commit hooks and Tach dependencies/interfaces passed.
+A fresh live Matrix/backend run passed the same six scenarios and all 21 assertions, including exact result delivery and approval parking across restarts.
+Independent review approved the merge's conflict resolutions and lifecycle integration with no findings.
+Final full non-Matrix verification passed 22,267 tests with 13 skips across nonoverlapping groups: 22,240 cases using xdist load scheduling, followed by 27 cases sequentially.
+The parallel group finished in 324.78 seconds with 27 warnings; the sequential group finished in 5.01 seconds.
+The sequential group contains the 24-case storage suite and the three previously identified timing-sensitive cases; no tests were omitted.
+
+An earlier full attempt stalled near completion and exposed an order-sensitive cache-diagnostics assertion in unchanged code.
+The assertion counts all process-local adapters, so an unrelated retained empty adapter reproduces its failure; closing that adapter makes the test pass.
+The storage suite passes alone, and the new approval suites followed by the diagnostic test leave no surviving adapters.
+The original adapter owner and scheduler stall were not established; the interrupted run is not completion evidence.
+The final load-scheduled run and isolated group passed without production or test changes for those issues.
