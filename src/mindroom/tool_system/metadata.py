@@ -28,6 +28,7 @@ from mindroom.tool_system.declarations import (
     ToolValidationInfo,
 )
 from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
+from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.registry_state import (
     BUILTIN_TOOL_METADATA,
     BUILTIN_TOOL_REGISTRY,
@@ -572,7 +573,7 @@ def _apply_implicit_toolkit_filters(
     excluded_names = set(exclude_tools or ())
     for registered_functions in (toolkit.functions, toolkit.async_functions):
         for function_name in tuple(registered_functions):
-            if (included_names is not None and function_name not in included_names) or function_name in excluded_names:
+            if not tool_name_allowed(function_name, include=included_names, exclude=excluded_names):
                 del registered_functions[function_name]
 
 

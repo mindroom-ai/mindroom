@@ -2572,6 +2572,7 @@ depends_on = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.dynamic_toolkits",
+    "mindroom.tool_system.filters",
 ]
 visibility = ["mindroom.mcp.manager"]
 
@@ -2582,6 +2583,7 @@ depends_on = [
     "mindroom.mcp.registry",
     "mindroom.mcp.surface_projection",
     "mindroom.oauth.credential_lifecycle",
+    "mindroom.tool_system.filters",
 ]
 
 [[modules]]
@@ -2594,7 +2596,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.mcp.toolkit"
-depends_on = ["mindroom.mcp.function_surface"]
+depends_on = ["mindroom.mcp.function_surface", "mindroom.tool_system.filters"]
 visibility = ["mindroom.tool_jobs.provenance",
     "mindroom.approval_tools",
     "mindroom.mcp_gateway.toolkits",
@@ -3846,11 +3848,23 @@ depends_on = [
     "mindroom.mcp.registry",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.filters",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.tool_system.filters"
+depends_on = []
+visibility = [
+    "mindroom.mcp.manager",
+    "mindroom.mcp.surface_projection",
+    "mindroom.mcp.toolkit",
+    "mindroom.tool_jobs.authorization",
+    "mindroom.tool_system.metadata",
 ]
 
 [[modules]]
@@ -6611,7 +6625,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.tool_jobs.authorization"
-depends_on = ["mindroom.tool_system.construction", "mindroom.mcp.registry", "mindroom.tool_system.dynamic_toolkits", "mindroom.tool_system.registry_state", "mindroom.agent_policy"]
+depends_on = ["mindroom.tool_system.construction", "mindroom.mcp.registry", "mindroom.tool_system.dynamic_toolkits", "mindroom.tool_system.filters", "mindroom.tool_system.registry_state", "mindroom.agent_policy"]
 
 visibility = [
     "mindroom.agents",

@@ -10,6 +10,7 @@ from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
+from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origins
 
 if TYPE_CHECKING:
@@ -155,9 +156,11 @@ def _configured_tool_allowed(
     filtered_name = tool_name
     authored_filter: dict[str, Any] = dict(entry.tool_config_overrides)
     if server_id is None:
-        return (
-            authored_filter.get("include_tools") is None or filtered_name in authored_filter["include_tools"]
-        ) and filtered_name not in (authored_filter.get("exclude_tools") or [])
+        return tool_name_allowed(
+            filtered_name,
+            include=authored_filter.get("include_tools"),
+            exclude=authored_filter.get("exclude_tools"),
+        )
     filters: list[dict[str, Any]] = [authored_filter]
     if server_id is not None:
         server = config.mcp_servers.get(server_id)
@@ -168,7 +171,10 @@ def _configured_tool_allowed(
             return True  # OAuth status/list operations do not invoke a remote tool.
         filters.append({"include_tools": server.include_tools, "exclude_tools": server.exclude_tools})
     return all(
-        (not item.get("include_tools") or filtered_name in item["include_tools"])
-        and filtered_name not in (item.get("exclude_tools") or [])
+        tool_name_allowed(
+            filtered_name,
+            include=item.get("include_tools") or None,
+            exclude=item.get("exclude_tools"),
+        )
         for item in filters
     )
