@@ -80,8 +80,14 @@ def _resolve_target(
 ) -> ComputerTarget:
     if primary_worker_backend_name(runtime_paths) not in {"docker", "kubernetes"}:
         raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes worker backend.")
-    if not config.agent_has_tool_at_execution_scope(name, "browser", "user_agent"):
-        raise ComputerError(409, "Computer requires browser tools and explicit user_agent worker scope.")
+    providers = [
+        provider
+        for provider in ("browser", "browser_mcp")
+        if config.agent_has_tool_at_execution_scope(name, provider, "user_agent")
+    ]
+    if len(providers) != 1:
+        raise ComputerError(409, "Computer requires exactly one browser provider and explicit user_agent worker scope.")
+    provider = providers[0]
 
     # Match normal toolkit materialization without adding heavy tool imports to API startup.
     from mindroom.agents import resolve_runtime_worker_tools  # noqa: PLC0415
@@ -93,7 +99,7 @@ def _resolve_target(
         runtime_paths,
         list(config.resolve_entity(name).available_tools),
     )
-    if not sandbox_proxy_enabled_for_tool("browser", runtime_paths=runtime_paths, worker_tools_override=worker_tools):
+    if not sandbox_proxy_enabled_for_tool(provider, runtime_paths=runtime_paths, worker_tools_override=worker_tools):
         raise ComputerError(503, "Computer requires browser tools routed to the worker.")
     identity = build_tool_execution_identity(
         channel="matrix",

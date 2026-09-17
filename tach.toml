@@ -1370,6 +1370,17 @@ depends_on = []
 path = "mindroom.api.worker_responses"
 depends_on = []
 
+[[modules]]
+path = "mindroom.api.computer_browser_binding"
+depends_on = [
+    "mindroom.custom_tools.browser_mcp",
+    "mindroom.tools.browser_mcp",
+    "mindroom.worker_computer.mcp_catalog",
+    "mindroom.worker_computer.mcp_results",
+    "mindroom.worker_computer.protocol",
+]
+visibility = ["mindroom.api.sandbox_runner"]
+
 # NOTE (arch-b-7): sandbox modules currently depend on the concrete
 # workers.backends.local backend. Honest definition-site encoding for
 # now; ARCH-B-9 will lift the shared sandbox-relevant types into a
@@ -1377,9 +1388,9 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.api.computer_browser_binding",
     "mindroom.worker_browser",
     "mindroom.worker_computer.runtime",
-    "mindroom.worker_computer.protocol",
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_forkserver",
@@ -2900,7 +2911,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.desktop.playwright_mcp"
-depends_on = []
+depends_on = ["mindroom.playwright_mcp_session"]
 
 [[modules]]
 path = "mindroom.desktop.command_journal"
@@ -3943,6 +3954,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
+    "mindroom.worker_computer.mcp_results",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registry_state",
@@ -6220,6 +6232,41 @@ depends_on = [
 ]
 visibility = ["mindroom.custom_tools.matrix_message"]
 
+[[modules]]
+path = "mindroom.playwright_mcp_session"
+depends_on = []
+
+[[modules]]
+path = "mindroom.playwright_mcp_process"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.mcp_catalog"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.mcp_results"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.browser_guard"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.browser_proxy"
+depends_on = []
+
+[[modules]]
+path = "mindroom.worker_computer.mcp_provider"
+depends_on = ["mindroom.browser_profile", "mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
+
+[[modules]]
+path = "mindroom.custom_tools.browser_mcp"
+depends_on = ["mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.mcp_provider"]
+
+[[modules]]
+path = "mindroom.tools.browser_mcp"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.mcp_catalog", "mindroom.custom_tools.browser_mcp"]
 
 [[modules]]
 path = "mindroom.agno_compat_approval"
@@ -6378,3 +6425,17 @@ expose = ["AgnoGoogleAuthBindingMixin"]
 path = "mindroom.knowledge.collection_lifetime"
 depends_on = ["mindroom.file_locks", "mindroom.knowledge.index_metadata", "mindroom.knowledge.indexing_config"]
 visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.read_worker", "mindroom.knowledge.read_proxy"]
+
+[[modules]]
+path = "mindroom.worker_computer.browser_bundle"
+depends_on = []
+visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_provider"]
+
+[[modules]]
+path = "mindroom.browser_profile"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_provider"]
+
+[[interfaces]]
+from = ["mindroom.browser_profile"]
+expose = ["clear_stale_singleton_locks"]

@@ -375,13 +375,16 @@ async def stream(websocket: WebSocket, session_id: str) -> None:
                 task.result()
     except ComputerError as error:
         if not accepted:
-            await websocket.send_denial_response(
-                JSONResponse(
-                    {"detail": error.detail},
-                    status_code=error.status_code,
-                    headers={"Cache-Control": "no-store"},
-                ),
+            response = JSONResponse(
+                {"detail": error.detail},
+                status_code=error.status_code,
+                headers={"Cache-Control": "no-store"},
             )
+            # The WebSocket transport supplies denial framing/type. Sansio appends
+            # application headers, so duplicating these produces malformed HTTP.
+            del response.headers["content-length"]
+            del response.headers["content-type"]
+            await websocket.send_denial_response(response)
     except (HTTPException, WebSocketDisconnect, OSError, aiohttp.ClientError):
         pass
     except Exception as error:

@@ -13,6 +13,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from mindroom.api import sandbox_runner, sandbox_runner_app, sandbox_worker_prep
+from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import browser as browser_module
@@ -325,3 +326,21 @@ async def test_generic_and_unscoped_runners_keep_subprocess_isolation(
         )
         assert response.status_code == 200, response.text
         assert response.json()["result"] == "isolated"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headless_client", ["user_agent"], indirect=True)
+async def test_headless_browser_ignores_computer_provider_selection(
+    headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
+    browser_processes: list[BrowserProcess],
+) -> None:
+    """Computer provider exclusivity does not disable ordinary headless calls."""
+    client, payload, _root, config = headless_client
+    config.agents["writer"] = AgentConfig(
+        display_name="Writer",
+        tools=["browser", "browser_mcp"],
+        worker_scope="user_agent",
+    )
+    await _call(client, payload, action="start")
+    assert len(browser_processes) == 1
+    assert browser_processes[0].launch["headless"] is True

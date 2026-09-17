@@ -10,9 +10,15 @@
   <input id="shared-input" aria-label="Remote text">
   <p><a id="download" href="/download" download>Download fixture</a></p>
   <output id="typed-value" role="status"></output>
+  <input id="upload" type="file" aria-label="Upload fixture" style="display:block;font-size:16px">
   <script>
     document.querySelector('#shared-input').addEventListener('input', (event) => {
       document.querySelector('#typed-value').textContent = event.target.value;
+    });
+    document.querySelector('#upload').addEventListener('change', async (event) => {
+      const file = event.target.files[0];
+      window.uploadName = file.name;
+      window.uploadContent = await file.text();
     });
   </script>
 </html>

@@ -222,6 +222,38 @@ def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_defaul
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
+    assert "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON" not in env_values
+
+
+def test_instance_chart_passes_localhost_seccomp_profile_to_worker_manager() -> None:
+    """Hosted instances can select the node-installed profile for main worker containers."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        "kubernetesWorkerSeccompProfile.type=Localhost",
+        "kubernetesWorkerSeccompProfile.localhostProfile=profiles/worker-computer.json",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    env = _env_by_name(_container(deployment, "mindroom"))
+
+    assert json.loads(env["MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON"]["value"]) == {
+        "type": "Localhost",
+        "localhostProfile": "profiles/worker-computer.json",
+    }
+
+
+def test_instance_chart_rejects_unsupported_worker_seccomp_profile() -> None:
+    """The hosted chart rejects profiles that would disable syscall filtering."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        "kubernetesWorkerSeccompProfile.type=Unconfined",
+    )
+
+    assert completed.returncode != 0
+    assert "kubernetesWorkerSeccompProfile" in completed.stderr
 
 
 def test_instance_chart_sets_public_url_for_oauth_redirects() -> None:
@@ -2654,6 +2686,42 @@ def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default
     env_values = {env["name"]: env.get("value") for env in container["env"]}
 
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
+    assert "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON" not in env_values
+
+
+def test_runtime_chart_passes_localhost_seccomp_profile_to_worker_manager() -> None:
+    """The runtime chart serializes the optional main worker container profile exactly."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "workers.kubernetes.seccompProfile.type=Localhost",
+        "workers.kubernetes.seccompProfile.localhostProfile=profiles/worker-computer.json",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    env = _env_by_name(_container(deployment, "mindroom"))
+
+    assert json.loads(env["MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON"]["value"]) == {
+        "type": "Localhost",
+        "localhostProfile": "profiles/worker-computer.json",
+    }
+
+
+def test_runtime_chart_rejects_unsupported_worker_seccomp_profile() -> None:
+    """The runtime chart refuses a profile that would turn syscall filtering off."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "workers.kubernetes.seccompProfile.type=Unconfined",
+        release_name="mindroom-runtime",
+    )
+
+    assert completed.returncode != 0
+    assert "workers.kubernetes.seccompProfile" in completed.stderr
 
 
 def test_runtime_chart_worker_manager_can_only_patch_default_worker_auth_secret() -> None:

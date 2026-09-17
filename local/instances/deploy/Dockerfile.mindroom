@@ -2,6 +2,17 @@
 FROM ghcr.io/astral-sh/uv:latest AS uv
 FROM oven/bun:1 AS bun
 
+# Install the fixed native browser server at build time. Runtime stays offline.
+FROM public.ecr.aws/docker/library/node:22-slim AS browser-mcp
+WORKDIR /opt/mindroom-browser-mcp
+COPY local/instances/deploy/browser-mcp/package*.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/mindroom-browser-mcp/browsers
+COPY local/instances/deploy/browser-mcp/package-browser.cjs ./package-browser.cjs
+RUN node node_modules/playwright/cli.js install chromium --no-shell \
+    && node package-browser.cjs
+COPY src/mindroom/worker_computer/browser_guard.cjs ./browser_guard.cjs
+
 # Builder stage with uv for dependencies
 FROM public.ecr.aws/docker/library/python:3.13-slim AS builder
 # Copy uv from the uv image
@@ -70,6 +81,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash bzip2 chro
     && install -d -m 1777 /tmp/.X11-unix \
     && printf 'set-option -g exit-empty off\n' > /etc/tmux.conf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Root-owned MCP package and init hook stay outside agent-writable workspaces.
+COPY --from=browser-mcp /opt/mindroom-browser-mcp /opt/mindroom-browser-mcp
 
 # Create non-root user before copying files
 RUN useradd -u 1000 -U -m mindroom

@@ -26,6 +26,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
+from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
@@ -39,6 +40,7 @@ from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
+from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 
 if TYPE_CHECKING:
     from playwright.async_api import Download
@@ -307,30 +309,6 @@ def _persistent_launch_kwargs(
     if executable:
         launch_kwargs["executable_path"] = executable
     return launch_kwargs
-
-
-def _clear_stale_singleton_locks(_profile_dir: Path) -> None:
-    """Best-effort cleanup for stale Chromium singleton lock symlinks."""
-    for entry_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-        entry = _profile_dir / entry_name
-        try:
-            if not entry.is_symlink():
-                continue
-            target = entry.readlink()
-            match = re.fullmatch(r".+-(\d+)", target.name)
-            if match is None:
-                continue
-            pid = int(match.group(1))
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                entry.unlink()
-        except OSError as exc:
-            logger.warning(
-                "Failed to clean Chromium singleton lock",
-                entry=str(entry),
-                error=str(exc),
-            )
 
 
 def _browser_help_payload(action: str) -> dict[str, Any]:
@@ -1621,10 +1599,16 @@ class BrowserTools(Toolkit):
                     self._runtime_paths,
                     profile_name,
                     headless=self._worker_display is None,
+                    executable_override=(
+                        self._runtime_paths.env_value("BROWSER_EXECUTABLE_PATH") or COMPUTER_BROWSER_EXECUTABLE
+                        if self._worker_display is not None
+                        else None
+                    ),
                 )
                 if self._worker_process_env is not None:
                     launch_kwargs["env"] = self._worker_process_env
                 if self._worker_display is not None:
+                    launch_kwargs["chromium_sandbox"] = True
                     launch_kwargs["env"] = {
                         **os.environ,
                         **self._runtime_paths.process_env,
@@ -1633,7 +1617,7 @@ class BrowserTools(Toolkit):
                     launch_kwargs["viewport"] = {"width": 1280, "height": 800}
                     launch_kwargs["downloads_path"] = str(self._resolve_output_dir())
                 user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
-                _clear_stale_singleton_locks(user_data_dir)
+                clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
                 await context.route(
                     "**/*",
