@@ -20,6 +20,7 @@ from mindroom.config.main import (
 from mindroom.event_journal_open import describe_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_data
+from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -364,6 +365,13 @@ async def apply_config_change(
         # The event journal is opened once, at startup, and every bot shares
         # that one store; saying the change affects new interactions would be
         # untrue for this one field.
+        if pending_background_tool_jobs_restart(saved, runtime_paths):
+            return (
+                f"✅ **Configuration updated successfully!**\n\n"
+                f"Changes saved to {path}.\n\n"
+                "⚠️ Background tool jobs keep their startup setting until MindRoom restarts. "
+                "Other hot-reloadable changes apply normally."
+            )
         if pending_event_journal_restart(saved, runtime_paths):
             return (
                 f"✅ **Configuration updated successfully!**\n\n"

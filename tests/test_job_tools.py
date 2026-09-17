@@ -79,6 +79,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     """Managed agent has one job schema."""
     paths = _runtime_paths(tmp_path)
     config = Config(
+        background_tool_jobs=True,
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"] if delegate else [])},
         models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
         memory={"backend": "none"},

@@ -149,6 +149,7 @@ from .scheduling import (
 from .startup_errors import PermanentStartupError
 from .sync_restart_retry import InterruptedTurnRooms
 from .tool_jobs.completion import completion_event
+from .tool_jobs.disabled import event_is_parked
 from .turn_controller import TurnController, TurnControllerDeps
 from .turn_policy import IngressHookRunner, TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -684,6 +685,7 @@ class AgentBot:
                 on_redaction=self._on_redaction,
                 on_approval_continuation=lambda event_id: self._response_runner.handoff_approval_source(event_id),
                 on_tool_job_completion=lambda event: self._response_runner.handoff_tool_job_completion(event),
+                event_is_parked=lambda event: event_is_parked(self.config, self.runtime_paths, self.agent_name, event),
                 source_has_live_owner=lambda event_id: (
                     self._coalescing_gate.has_pending_source_event(event_id)
                     or self._response_runner.has_live_inbox_response(event_id)

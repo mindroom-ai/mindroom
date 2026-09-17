@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.agent_storage import (
+    agent_session_state_root,
     create_session_storage,
     create_state_storage,
     get_agent_runtime_state_dbs,
@@ -28,6 +30,8 @@ if TYPE_CHECKING:
 
     from agno.agent import Agent
     from agno.db.base import BaseDb
+    from agno.run.agent import RunOutput
+    from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
     from agno.session.team import TeamSession
 
@@ -327,6 +331,56 @@ def create_scope_session_storage(
         session_table=f"{storage_name}_sessions",
         prompt_roles=prompt_roles_for_history_storage(),
     )
+
+
+def read_scope_session_run(
+    *,
+    agent_name: str,
+    scope: HistoryScope,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    session_id: str,
+    run_id: str,
+    requester_id: str,
+) -> RunOutput | TeamRunOutput | None:
+    """Inspect one saved run without preflight, schema migration, or writable handles."""
+    # Keep provider run types out of history helper import time.
+    from agno.db.base import SessionType  # noqa: PLC0415
+    from agno.db.sqlite import SqliteDb  # noqa: PLC0415
+    from agno.run.agent import RunOutput  # noqa: PLC0415
+    from agno.run.team import TeamRunOutput  # noqa: PLC0415
+    from agno.session.agent import AgentSession  # noqa: PLC0415
+    from agno.session.team import TeamSession  # noqa: PLC0415
+    from sqlalchemy import create_engine  # noqa: PLC0415
+
+    if scope.kind == "agent":
+        name = agent_name
+        root = agent_session_state_root(agent_name, config, runtime_paths, execution_identity)
+    else:
+        name = _scope_session_storage_name(scope)
+        root = resolve_session_state_root(
+            _team_scope_state_root(storage_name=name, runtime_paths=runtime_paths),
+            runtime_paths,
+        )
+    database = root / "sessions" / f"{name}.db"
+    if not database.exists():
+        return None
+    uri = database.resolve().as_uri() + "?mode=ro"
+    storage = SqliteDb(
+        db_engine=create_engine("sqlite://", creator=lambda: sqlite3.connect(uri, uri=True)),
+        session_table=f"{name}_sessions",
+    )
+    try:
+        session = storage.get_session(
+            session_id,
+            session_type=SessionType.AGENT if scope.kind == "agent" else SessionType.TEAM,
+            user_id=requester_id,
+        )
+        run = session.get_run(run_id) if isinstance(session, (AgentSession, TeamSession)) else None
+        return run if isinstance(run, (RunOutput, TeamRunOutput)) else None
+    finally:
+        storage.close()
 
 
 def close_execution_storage(storage: BaseDb) -> None:

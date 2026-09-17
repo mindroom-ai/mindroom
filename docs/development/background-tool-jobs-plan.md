@@ -4,9 +4,10 @@
 > This document is the shared scope and progress record for PR #2113.
 > Update checkboxes, decisions, and verification evidence as work lands; an unchecked item is not implemented or verified.
 
-**Reassessment status (2026-09-17):** The published implementation below is a verified baseline, not proof of a substantially simpler architecture.
-The architecture audit at the end recommends removing automatic joining, subject to the explicit reply-timing decision described there.
-PR #2113 remains open and unmerged; this audit changes documentation only.
+**Current status (2026-09-17):** Add a restart-only, instance-wide `background_tool_jobs` option, disabled by default.
+The earlier proposal to remove automatic joining is withdrawn because staggered completions could create excessive replies.
+Keep the existing waiting and grouping behavior while making the feature opt-in.
+PR #2113 remains open and unmerged.
 
 **Goal:** Let tools keep working while the conversation moves forward, with predictable waiting and quiet result handling.
 
@@ -20,6 +21,9 @@ Stored job outcomes provide recovery and discovery without replaying interrupted
 
 ## Agreed behavior
 
+- Generic background tool jobs require `background_tool_jobs: true`; the default is false, and changing it requires a restart.
+- When disabled, ordinary tools use their existing execution path without the generic job schema, management tool, SDK adapters, or background execution resource ownership.
+- Saved work from an earlier enabled process stays parked while disabled; disabling must never replay accepted side effects or erase saved outcomes.
 - Every managed application tool call exposes an optional `wait_timeout`, expressed in seconds.
 - Omitted or null waits until completion or a human follow-up.
 - Zero returns a job handle immediately; a positive finite value bounds waiting without cancelling the execution.
@@ -247,7 +251,8 @@ The completed local full suite, hooks, task reviews, whole-branch review, and li
 
 ## Architecture reassessment: 2026-09-17
 
-**Status:** Audited implementation `7dd9a9359`; the following is a proposal, not implemented behavior.
+**Status:** Audited implementation `7dd9a9359`; the following proposal was withdrawn after the reply-volume discussion.
+It remains here as an audit record, not authorized implementation work.
 The core question is whether we can remove competing completion paths while retaining the agreed tool-execution contract.
 The existing verification record applies to the published implementation, not to this proposed reduction.
 
@@ -342,8 +347,8 @@ The principal benefit is removing one completion mechanism and its approval/stre
 
 ### Next work and acceptance criteria
 
-The user's reply-timing decision is required before changing automatic joining, because that changes the agreed behavior above.
-Until that decision arrives, these steps are proposed work only.
+The user raised the case of one hundred jobs finishing at different times.
+Keep automatic waiting and existing result grouping; the following reduction checklist is superseded and must not be executed as part of the configuration gate.
 
 - [ ] Record whether a detached result may arrive in a later assistant reply.
 - [ ] Implement one completion-path change with tests covering ordinary Agent/Team calls and resumed approvals; remove obsolete join-only tests and keep all retained guarantees covered.
@@ -355,3 +360,97 @@ Until that decision arrives, these steps are proposed work only.
 
 A cross-model consultation was attempted once for the architectural alternatives, but the external model's OAuth session had expired and no advice was returned.
 The recommendation is based on the repository inspection and existing regression/live evidence, not on an independent consultation approval.
+
+## Task 6: opt-in configuration and safe disabled startup
+
+**Status:** Implemented and reviewed; final branch verification is recorded under Task 7.
+
+**Requirements and global constraints:**
+
+- Add one root boolean, `background_tool_jobs: bool = False`, to `Config`.
+- Pin its effective value at instance startup; config reload may apply unrelated changes but must report restart required for a changed value.
+- Reuse existing restart-status reporting in the config lifecycle, API, and config command; do not build a generic flag framework.
+- A fresh disabled instance must not create the tool-job runtime, install its SDK adapters, enter execution-resource/consumption owners, advertise `wait_timeout`, install `job`, or start completion scheduling.
+- Ordinary Agent and Team tools, delegation, streaming, native approvals, and existing shell-specific background behavior must keep working while disabled.
+- Prompts must describe the capabilities actually available in that process.
+- Enabled behavior, including automatic joining and interruption behavior, remains unchanged.
+- Disabling after restart parks existing feature-owned sources and internal completion events before they can resume tools or original ingress.
+- Preserve outcomes and pending ownership for recovery on a later enabled restart; do not delete records, acknowledge unread results, or run cleanup that replays tools.
+- Cover native approval continuations for generic job calls and calls carrying reserved wait metadata, including pending approvals that have no job snapshot yet.
+- Unrelated ordinary approvals and new human messages remain usable while disabled.
+- Prefer a small startup-only index of saved source ownership, using existing validated snapshot parsing, and a guard at the existing journal dispatch boundary before approval handoff.
+- Avoid per-event scans, another persistence format, and another scheduler.
+- Use existing current-authorization checks when re-enabled; do not expose stored results through the disabled guard.
+- Keep changes to `bot.py` and `orchestrator.py` limited to lifecycle wiring.
+- No merge, force push, amendment, new PR, or unrelated architecture reduction.
+
+**Implementation surfaces:**
+
+- `src/mindroom/config/main.py`: authored option.
+- `src/mindroom/orchestration/tool_job_runtime.py` and a small leaf helper under `tool_jobs/` if needed: effective startup setting and passive recovery ownership.
+- `src/mindroom/orchestration/config_lifecycle.py`, `src/mindroom/api/config_lifecycle.py`, and `src/mindroom/commands/config_commands.py`: restart-required reporting.
+- `src/mindroom/agents.py`, `src/mindroom/teams.py`, and `src/mindroom/tool_jobs/execution_scope.py`: bypass adapter installation and resource ownership when disabled.
+- `src/mindroom/journal_dispatch.py` and its existing bot callback wiring: park saved feature-owned work before approval or ingress dispatch, with stable deferral rather than retry errors.
+- Existing approval owner code only where needed to identify and fence pending feature calls without a saved job.
+- `src/mindroom/custom_tools/delegate.py` and `src/mindroom/prompts.py`: conditional generic-job instructions.
+- Extend existing config, orchestrator, job, journal, and approval tests; use a focused flag test file if clearer.
+
+**Verification sequence:**
+
+1. Write and run focused failing tests against the current implementation before production edits.
+2. Verify default-off startup and actual ordinary tool/delegation execution, both blocking and streaming, with no generic-job schema or resource owners.
+3. Verify explicit opt-in preserves the existing tool-job behavior and schemas.
+4. Verify reload in either direction leaves the effective mode unchanged and reports restart required; a restarted instance applies the change.
+5. Recover saved ordinary, delegated, completion, and approval work with the flag disabled; assert no original side effect executes and no retry-error loop is started.
+6. Re-enable against the same saved state and verify outcome discovery/recovery without replay.
+7. Verify unrelated ordinary approval execution remains functional while disabled.
+8. Run focused affected regressions and import-boundary tests; report any fixtures that needed explicit opt-in.
+
+- [x] Focused red/green tests and minimal implementation.
+- [x] Task review and verified fixes.
+
+The first review found that removing an agent could let cleanup discard a saved pre-execution approval with reserved wait metadata.
+The passive reader now checks the finite supported canonical session locations when current configuration cannot locate the exact saved run, including shared, private per-user, and private per-user-agent storage.
+It preserves the exact requester, session, and run match, without scanning directories or reconstructing executable capabilities.
+The scoped re-review approved this fix and the corrected startup test fixtures.
+The gate changes 23 production files by +417/−51 lines, or net +366, including the passive recovery safeguards.
+That exceeds the initial 100–200-line estimate because saved approvals and coalesced sources require protection even when no job runtime is created.
+The complete production feature against integrated main `3bfed6570` is now 58 files, +4,774/−112 lines, or net +4,662.
+
+## Task 7: live verification, documentation, and PR update
+
+**Status:** Implementation, live checks, full verification, and independent branch review are complete.
+The existing PR carries publication and hosted-review status.
+
+- Update operator and tool documentation with the root option, default, restart requirement, and parked old-work behavior.
+- Run isolated live Matrix/backend scenarios with real tool side effects for off, on, reload, and enabled-to-disabled-to-enabled restart transitions.
+- Keep existing interruption, newer-turn, streaming, cancellation, delegation, and native approval coverage explicitly enabled.
+- Verify fresh default-off and ordinary native approval behavior, not merely model schemas.
+- Run the complete non-Matrix test suite, repository hooks, and Tach after focused checks pass.
+- Obtain independent review of the final flag patch and its integration with the existing branch.
+- Record measured additions/deletions separately for production, tests, and documentation.
+- Update the existing PR, push ordinary commits, address valid review findings, and leave the PR unmerged.
+
+- [x] Live cases and evidence.
+- [x] Full checks and independent review.
+- [x] Documentation, measured diff, and PR update prepared.
+
+### Configuration gate verification
+
+| Check | Result |
+| --- | --- |
+| Focused flag and startup regressions after review fixes | 316 passed, 5 skipped; all five initial full-suite fixture failures corrected |
+| Full non-Matrix suite | 21,470 passed, 12 skipped, 27 warnings in 310.80 seconds |
+| Final repository checks | All-files pre-commit passed after regenerating documentation references; Tach dependencies/interfaces passed |
+| Independent review | Whole-branch review approved with no remaining findings after the scoped fixes |
+| Default-off live calls | Actual synchronous, asynchronous, delegated, streaming, blocking, and approved tools execute without generic schemas, resource owners, or SDK resource bindings |
+| Live config reload | Both directions preserve the running mode and expose the existing restart-required API status |
+| Live disabled restart | Saved ordinary/delegated jobs and a pre-execution approval stay parked, including while a new message in the same thread executes |
+| Live enabled restart | Preserved jobs recover without replay; a pending approved call executes exactly once after re-enabling |
+| Removed-agent approval | Feature approval remains parked while disabled; ordinary unavailable-owner cleanup still runs; after restoration native membership revocation expires the stale card and a fresh approval executes once |
+| Enabled lifecycle regression | Timeout budgets, repeated human follow-ups, child continuity, long streaming, newer turns, cancellation, direct/delegated approvals, STOP, and restart remain covered |
+| Combined live evidence | 35 passing scenarios, 453 Matrix events, zero synthetic completion notices |
+
+Live checks use a real local Matrix server, backend, and application tools with a deterministic local model endpoint.
+The full suite retains pre-existing dependency deprecations and mock-coroutine warnings; it is not warning-free.
+Private local test evidence and exact run identifiers remain in persistent worktree storage.

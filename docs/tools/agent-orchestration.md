@@ -222,9 +222,9 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
-Fast calls return the child's response inline.
-Managed Matrix calls wait until completion or a human follow-up by default.
-Set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
+Calls wait for the child's response by default.
+With the instance-wide `background_tool_jobs: true` option, managed Matrix calls wait until completion or a human follow-up, and expose the shared waiting controls below.
+In that mode, set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
 OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
@@ -259,6 +259,13 @@ After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is 
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
 
 ### Background jobs
+
+This experimental feature requires the root configuration option `background_tool_jobs: true` and a restart.
+It is disabled by default for the whole instance.
+When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function.
+This does not disable shell tools' own background commands.
+Changing the option during hot reload takes effect only after a restart.
+Previously accepted job sources and related approvals stay parked while disabled; their saved outcomes remain available after re-enabling and restarting, without replaying the original tool calls.
 
 Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
 Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.

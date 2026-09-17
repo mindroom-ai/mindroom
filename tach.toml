@@ -4617,6 +4617,7 @@ from = ["mindroom.agents"]
 
 [[interfaces]]
 expose = [
+    "agent_session_state_root",
     "create_session_storage",
     "create_state_storage",
     "get_agent_runtime_state_dbs",

@@ -109,6 +109,7 @@ from mindroom.response_turn import (
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.completion import report_background_wait
 from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
     BackgroundWaitChunk,
@@ -1729,7 +1730,7 @@ async def ai_response(  # noqa: C901, PLR0915
     )
     try:
         return await run_blocking_response_turn(
-            ctx,
+            replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths)),
             adapter,
             TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
             continuation=_initial_agent_continuation(
@@ -2351,7 +2352,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     response_stream = stream_response_turn(
-        ctx,
+        replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths)),
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_agent_continuation(

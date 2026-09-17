@@ -4439,6 +4439,7 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
         old_cards = MagicMock()
         router_cards = MagicMock()
+        orchestrator.config = config
         orchestrator.agent_bots = {ROUTER_AGENT_NAME: MagicMock(approval_store=router_cards)}
         store = initialize_approval_store(runtime_paths, cards=old_cards)
 

@@ -458,6 +458,7 @@ class Config(BaseModel):
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
+    background_tool_jobs: bool = False
     event_journal: EventJournalConfig = Field(
         default_factory=EventJournalConfig,
         description="Durable Matrix event-journal store",

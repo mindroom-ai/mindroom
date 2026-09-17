@@ -129,6 +129,7 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import join_approval_jobs
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import (
     BackgroundWaitChunk,
     StreamingToolTracker,
@@ -2305,10 +2306,17 @@ def _create_team_instance(
         agent.add_session_summary_to_context = False
 
     install_message_builder_patch()
-    install_tool_job_execution(model)
+    if background_tool_jobs_enabled(config, runtime_paths):
+        install_tool_job_execution(model)
     team_members: list[Agent | Team] = [*agents]
     job_tools = []
-    JobTools.install(job_tools, runtime_paths, execution_identity, depth=0, enabled=True)
+    JobTools.install(
+        job_tools,
+        runtime_paths,
+        execution_identity,
+        depth=0,
+        enabled=background_tool_jobs_enabled(config, runtime_paths),
+    )
     team = Team(
         members=team_members,
         tools=job_tools,
@@ -2658,7 +2666,10 @@ async def _retrieve_team_job_results(
     return await _collect_team_continuation(events, presentation)
 
 
-@owned_tool_execution
+@partial(
+    owned_tool_execution,
+    enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
+)
 async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cleanup boundaries.
     *,
     member_names: tuple[str, ...],
@@ -3356,7 +3367,10 @@ async def team_response(  # noqa: C901, PLR0915
         discard_empty_run=discard_team_empty_run,
     )
     return await run_blocking_response_turn(
-        ctx,
+        replace(
+            ctx,
+            background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
+        ),
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_team_continuation(
@@ -4088,7 +4102,10 @@ async def team_response_stream(  # noqa: C901, PLR0915
         discard_empty_run=discard_team_empty_run,
     )
     response_stream = stream_response_turn(
-        ctx,
+        replace(
+            ctx,
+            background_tool_jobs=background_tool_jobs_enabled(orchestrator.config, orchestrator.runtime_paths),
+        ),
         adapter,
         TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
         continuation=_initial_team_continuation(

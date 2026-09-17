@@ -89,6 +89,7 @@ class JournalCallbacks:
     turn_has_live_claim: Callable[[str], bool]
     on_rtc: _RtcCallback | None = None
     on_tool_job_completion: Callable[[JournalEvent], Awaitable[bool]] | None = None
+    event_is_parked: Callable[[JournalEvent], bool] = lambda _event: False
 
 
 @dataclass
@@ -188,6 +189,8 @@ class JournalDispatcher:
         this replaces; a wrong "gone" costs a re-dispatch that ``TurnStore``
         then has to refuse.
         """
+        if self.callbacks.event_is_parked(event):
+            return True
         needs_turn_replay = _needs_turn_replay(event)
         if not needs_turn_replay and event.event_id not in self._deferred_reaction_ids:
             # A completing callback settles or raises. It never defers, so a
@@ -199,7 +202,7 @@ class JournalDispatcher:
             return True
         return self._has_live_owner(event.event_id)
 
-    async def _run_event(self, event: JournalEvent) -> bool:
+    async def _run_event(self, event: JournalEvent) -> bool:  # noqa: PLR0911 - Ordered dispatch ownership gates.
         """Run one journal event's callback and report whether it may settle.
 
         True means the event's semantic work is over. False means something in
@@ -214,6 +217,8 @@ class JournalDispatcher:
         journal was meant to remove, and it answered the wrong question: a turn
         can be terminal with nothing durable behind it.
         """
+        if self.callbacks.event_is_parked(event):
+            return False
         needs_turn_replay = _needs_turn_replay(event)
         if needs_turn_replay and not self._turn_replay_released:
             # Turn work waits until the orchestrator has started responders.

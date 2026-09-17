@@ -31,7 +31,8 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
-from mindroom.tool_jobs.runtime import JobAccessError
+from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
@@ -130,14 +131,32 @@ class DelegateTools(Toolkit):
         for target_name in self._delegate_to:
             description = describe_agent(target_name, self._config)
             lines.append(description)
-        return self._config.render_prompt(
+        instructions = self._config.render_prompt(
             "DELEGATE_TOOLKIT_INSTRUCTIONS_TEMPLATE",
             agent_descriptions="\n\n".join(lines),
+        )
+        if self._background_jobs_available():
+            instructions += "\n" + self._config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS")
+        return instructions
+
+    def _background_jobs_available(self) -> bool:
+        return (
+            background_tool_jobs_enabled(self._config, self._runtime_paths)
+            and self._execution_identity is not None
+            and self._execution_identity.channel == "matrix"
+            and get_background_runtime(self._runtime_paths) is not None
         )
 
     def _build_run_subagent_description(self) -> str:
         """Build the model-facing function description with this caller's allowlist."""
         available_targets = ", ".join(self._delegate_to)
+        background_guidance = (
+            "Managed Matrix calls accept wait_timeout: null waits, zero returns a Job ID immediately, "
+            "and a positive number bounds the wait while work continues. "
+            "A human follow-up releases the wait while the child keeps working. "
+            if self._background_jobs_available()
+            else ""
+        )
         return (
             "Run one allowed configured agent as a fresh subagent and wait for its result.\n"
             f"Allowed subagents for this caller: {available_targets}.\n"
@@ -145,9 +164,7 @@ class DelegateTools(Toolkit):
             "the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\n"
             "Selecting your own name starts a fresh copy of yourself, if listed. "
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
-            "Managed Matrix calls accept wait_timeout: null waits, zero returns a Job ID immediately, "
-            "and a positive number bounds the wait while work continues. "
-            "A human follow-up releases the wait while the child keeps working. "
+            f"{background_guidance}"
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session.\n"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
             "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."

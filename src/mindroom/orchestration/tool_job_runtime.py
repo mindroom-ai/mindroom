@@ -16,6 +16,7 @@ from mindroom.delegation.recovery import interrupt_child
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
+from mindroom.tool_jobs.disabled import clear_parked_work, index_parked_work
 from mindroom.tool_jobs.execution_authority import set_execution_authorizer
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
@@ -26,6 +27,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     register_background_runtime,
 )
+from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot, TeamBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import EventJournalStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -53,6 +56,18 @@ class ToolJobRuntimeCoordinator:
     agent_reply_memberships: AgentReplyMembershipIndex
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
+    _initialized: bool = field(default=False, init=False)
+
+    async def initialize(self, journal: EventJournalStore | None = None) -> None:
+        """Pin execution mode and index parked ownership before dispatch can start."""
+        if self._initialized:
+            return
+        config = self.config_provider()
+        if config is None:
+            return
+        if not pin_background_tool_jobs(config, self.runtime_paths):
+            await index_parked_work(config, self.runtime_paths, journal)
+        self._initialized = True
 
     @property
     def runtime(self) -> ToolJobRuntime:
@@ -181,8 +196,12 @@ class ToolJobRuntimeCoordinator:
 
     async def sync(self) -> None:
         """Recover once, publish the service, and wake it after config changes."""
-        if self.config_provider() is None:
+        await self.initialize()
+        config = self.config_provider()
+        if config is None:
             await self.stop()
+            return
+        if not pin_background_tool_jobs(config, self.runtime_paths):
             return
         if self._task is None or self._task.done():
             if self._task is not None and not self._task.cancelled():
@@ -206,6 +225,9 @@ class ToolJobRuntimeCoordinator:
         if self._runtime is not None:
             await self._runtime.shutdown()
             self._runtime = None
+        release_background_tool_jobs(self.runtime_paths)
+        clear_parked_work(self.runtime_paths)
+        self._initialized = False
 
     async def _run(self) -> None:
         while True:

@@ -63,7 +63,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     human_release: bool,
 ) -> None:
     """Approved work stays owned and visibly waiting until a result or human release."""
-    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
@@ -241,7 +241,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_ordinary_team_autojoin_persists_exact_result_receipt(tmp_path: Path, streaming: bool) -> None:  # noqa: PLR0915
     """Both ordinary team entry points acknowledge only their saved native result receipt."""
-    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
     paths = _runtime_paths(tmp_path)
     identities = entity_ids(config, paths)
     context = _delegate_runtime_context(config, paths)

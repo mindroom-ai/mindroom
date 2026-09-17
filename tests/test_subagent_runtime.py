@@ -107,6 +107,7 @@ def _config(tmp_path: Path) -> Config:
     access = ResponderAccessConfig(users=["@human:localhost"], current_room_members=False)
     return bind_runtime_paths(
         Config(
+            background_tool_jobs=True,
             agents={
                 "lead": AgentConfig(display_name="Lead", delegate_to=["worker"], access=access),
                 "worker": AgentConfig(display_name="Worker", access=access),

@@ -23,6 +23,7 @@ import sys
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
@@ -303,6 +304,7 @@ class ResponseTurnContext:
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
+    background_tool_jobs: bool = False
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
@@ -893,7 +895,7 @@ async def _open_scope_off_event_loop(
         await run_blocking_until_complete(manager.__exit__, None, None, None)
 
 
-@owned_tool_execution
+@partial(owned_tool_execution, enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def run_blocking_response_turn(
     ctx: ResponseTurnContext,
     adapter: BlockingTurnAdapter,
@@ -1246,7 +1248,7 @@ def _settle_completed_attempt(
     )
 
 
-@owned_tool_execution
+@partial(owned_tool_execution, enabled=lambda ctx, *_args, **_kwargs: ctx.background_tool_jobs)
 async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     ctx: ResponseTurnContext,
     adapter: StreamingTurnAdapter[ChunkT],

@@ -146,6 +146,7 @@ from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_r
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
+from .tool_jobs.disabled import approval_is_parked
 
 if TYPE_CHECKING:
     import socket
@@ -506,6 +507,7 @@ class _MultiAgentOrchestrator:
                 self.config is not None and (name in self.config.agents or name in self.config.teams)
             ),
             entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
+            approval_is_parked=lambda approval_id: approval_is_parked(self.runtime_paths, approval_id),
             recover_unavailable_final=self._recover_unavailable_final,
             cancel_delegations=lambda continuation, reason: cancel_approval_delegations(
                 continuation,
@@ -1014,6 +1016,7 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
+        await self._tool_job_runtime.initialize(self._shared_journal_store())
         await self._tool_job_runtime.sync()
         self._thread_export_runner.start()
         if self.running:
@@ -1376,6 +1379,7 @@ class _MultiAgentOrchestrator:
         self.config = config
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
+        await self._tool_job_runtime.initialize(self._shared_journal_store())
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()

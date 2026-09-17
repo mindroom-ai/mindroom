@@ -98,6 +98,21 @@ class BackgroundJob:
     wait_acknowledged: bool = False
 
 
+def read_job_snapshot(path: Path) -> BackgroundJob:
+    """Validate one existing snapshot without claiming or changing its execution."""
+    if path.is_symlink() or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", path.stem) is None:
+        raise JobAccessError(_UNAVAILABLE)
+    payload = json.loads(path.read_text())
+    if payload.pop("schema_version") != 1 or payload["job_id"] != path.stem:
+        msg = "Invalid background subagent snapshot."
+        raise ValueError(msg)
+    payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
+    # Retired schema-1 fields carry no execution or consumption authority.
+    payload.pop("human_paused", None)
+    payload.pop("deliveries", None)
+    return BackgroundJob(**payload)
+
+
 def format_job_handle(
     job: BackgroundJob,
     *,
@@ -254,11 +269,6 @@ class ToolJobRuntime:
                     continue
                 if path != self._path(path.stem):
                     raise ValueError(_UNAVAILABLE)
-                payload = json.loads(await asyncio.to_thread(path.read_text))
-                if payload.pop("schema_version") != 1 or payload["job_id"] != path.stem:
-                    msg = "Invalid background subagent snapshot."
-                    raise ValueError(msg)
-                payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
                 # LEGACY_COMPAT: Discard retired pause and Matrix receipt fields in job snapshots.
                 # Legacy format: Schema 1 included human_paused and deliveries before internal completion handling.
                 # Last legacy release: Unreleased; neither the original nor restored writer is in a release tag.
@@ -266,9 +276,7 @@ class ToolJobRuntime:
                 # Handling: Drop obsolete metadata; retain result, approval, generation, and consumption evidence.
                 # Coverage: tests/test_tool_jobs.py::test_legacy_job_snapshot_preserves_outcome_and_consumption
                 # Coverage: tests/test_tool_jobs.py::test_legacy_paused_execution_is_interrupted_without_replay
-                payload.pop("human_paused", None)
-                payload.pop("deliveries", None)
-                job = BackgroundJob(**payload)
+                job = await asyncio.to_thread(read_job_snapshot, path)
                 entry = _Entry(job)
                 if job.status not in _READY:
                     outcome = await self._cancel(job) if self._cancel is not None else None

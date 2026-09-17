@@ -683,9 +683,10 @@ When configured, a delegation tool is automatically added to the agent, so you d
 
 The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
 Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
-Managed Matrix calls wait until completion or human input by default.
-The shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
-Human input releases the wait while the child keeps working; it does not automatically pause the child.
+Calls wait for the child by default.
+Enable the instance-wide root option `background_tool_jobs: true` and restart to use generic background execution; it is disabled by default.
+In that mode, managed Matrix calls wait until completion or human input, and the shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
+Human input then releases the wait while the child keeps working; it does not automatically pause the child.
 Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
 The accepted `action` values are `list`, `inspect`, `wait`, and `cancel`; every action except `list` requires `job_id`.
 The `wait` action accepts the same optional `wait_timeout` budget.

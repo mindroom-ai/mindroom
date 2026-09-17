@@ -14,12 +14,18 @@ from mindroom.tool_jobs.resources import ExecutionResources, bind_execution_reso
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 
 
-def owned_tool_execution[FunctionT: Callable[..., object]](function: FunctionT) -> FunctionT:
+def owned_tool_execution[FunctionT: Callable[..., object]](
+    function: FunctionT,
+    *,
+    enabled: Callable[..., bool] = lambda *_args, **_kwargs: True,
+) -> FunctionT:
     """Own resources and durable result claims for a coroutine or async stream."""
     if inspect.isasyncgenfunction(function):
 
         @wraps(function)
         def streaming(*args: object, **kwargs: object) -> AsyncIterator[object]:
+            if not enabled(*args, **kwargs):
+                return cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
             resources = ExecutionResources()
             consumption = ConsumptionOwner()
 
@@ -46,6 +52,8 @@ def owned_tool_execution[FunctionT: Callable[..., object]](function: FunctionT) 
 
     @wraps(function)
     async def blocking(*args: object, **kwargs: object) -> object:
+        if not enabled(*args, **kwargs):
+            return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
         async with execution_resources(), _consumption_context_async():
             return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
 

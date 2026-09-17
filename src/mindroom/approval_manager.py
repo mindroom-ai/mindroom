@@ -885,6 +885,8 @@ class ApprovalManager:
         stored: StoredApprovalCard | UnreadableApprovalCard,
     ) -> bool | None:
         """Settle due recovery work, or return None when none is currently due."""
+        if self.recovery is not None and self.recovery.approval_is_parked(stored.continuation_id):
+            return None
         if isinstance(stored, UnreadableApprovalCard):
             return False
         if stored.resolution is not None:

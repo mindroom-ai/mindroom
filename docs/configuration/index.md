@@ -22,6 +22,28 @@ You can also validate a specific file directly:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+## Background Tool Jobs
+
+Generic background tool jobs are experimental and disabled by default.
+Enable them for the whole instance with this root option:
+
+```yaml
+background_tool_jobs: true
+```
+
+Restart MindRoom after changing this option.
+Hot reload saves the requested value and reports that a restart is required; other configuration changes can still take effect.
+When enabled, managed Matrix tools gain a shared `wait_timeout` argument and one `job` tool for listing, inspecting, waiting for, or cancelling accepted work.
+Ordinary calls still wait by default, and a human follow-up can release the wait while work continues.
+See [Background jobs](../tools/agent-orchestration.md#background-jobs) for the complete waiting and result behavior.
+
+With the option off, tools and delegation use their ordinary execution paths without these generic job controls.
+Existing shell-specific background commands remain available.
+If an earlier enabled run left unfinished jobs or related approvals, those sources stay parked while the feature is disabled.
+Their saved outcomes remain on disk, and their original tools are not replayed.
+Re-enable the option and restart to recover that work; abandoned local execution is reported as interrupted.
+Recovery still checks current permissions and room membership, so an approval invalidated by an agent leaving a room cannot authorize a later tool call.
+
 ## Adaptive Room Participation
 
 By default, threads with multiple human participants require explicit agent mentions.

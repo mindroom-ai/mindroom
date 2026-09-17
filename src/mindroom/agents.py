@@ -37,6 +37,7 @@ from mindroom.timing import timed, timed_block
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot, bind_toolkit_authority
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     default_worker_routed_tools,
@@ -1545,7 +1546,7 @@ def _assemble_agent_toolkits(
         runtime_paths,
         execution_identity,
         depth=delegation_depth,
-        enabled=not disable_runtime_capabilities,
+        enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
     )
     return _AgentToolAssembly(
         tools=tools,
@@ -1975,7 +1976,8 @@ def create_agent(
     )
     if history_policy.mode == "all":
         enable_all_history_replay(agent)
-    install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
+    if background_tool_jobs_enabled(config, runtime_paths):
+        install_tool_job_execution(model, agent.fallback_config, depth=delegation_depth)
 
     logger.info(
         "Created agent",

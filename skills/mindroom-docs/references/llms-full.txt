@@ -956,6 +956,28 @@ You can also validate a specific file directly:
 mindroom config validate --path /path/to/config.yaml
 ```
 
+## Background Tool Jobs
+
+Generic background tool jobs are experimental and disabled by default.
+Enable them for the whole instance with this root option:
+
+```yaml
+background_tool_jobs: true
+```
+
+Restart MindRoom after changing this option.
+Hot reload saves the requested value and reports that a restart is required; other configuration changes can still take effect.
+When enabled, managed Matrix tools gain a shared `wait_timeout` argument and one `job` tool for listing, inspecting, waiting for, or cancelling accepted work.
+Ordinary calls still wait by default, and a human follow-up can release the wait while work continues.
+See [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) for the complete waiting and result behavior.
+
+With the option off, tools and delegation use their ordinary execution paths without these generic job controls.
+Existing shell-specific background commands remain available.
+If an earlier enabled run left unfinished jobs or related approvals, those sources stay parked while the feature is disabled.
+Their saved outcomes remain on disk, and their original tools are not replayed.
+Re-enable the option and restart to recover that work; abandoned local execution is reported as interrupted.
+Recovery still checks current permissions and room membership, so an approval invalidated by an agent leaving a room cannot authorize a later tool call.
+
 ## Adaptive Room Participation
 
 By default, threads with multiple human participants require explicit agent mentions.
@@ -2523,9 +2545,10 @@ When configured, a delegation tool is automatically added to the agent, so you d
 
 The delegated agent starts its own session with no inherited caller history while retaining its configured workspace, memory, requester scope, model, and tool policy.
 Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
-Managed Matrix calls wait until completion or human input by default.
-The shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
-Human input releases the wait while the child keeps working; it does not automatically pause the child.
+Calls wait for the child by default.
+Enable the instance-wide root option `background_tool_jobs: true` and restart to use generic background execution; it is disabled by default.
+In that mode, managed Matrix calls wait until completion or human input, and the shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
+Human input then releases the wait while the child keeps working; it does not automatically pause the child.
 Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
 The accepted `action` values are `list`, `inspect`, `wait`, and `cancel`; every action except `list` requires `job_id`.
 The `wait` action accepts the same optional `wait_timeout` budget.
@@ -10604,9 +10627,9 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 ## [`delegate`]
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
-Fast calls return the child's response inline.
-Managed Matrix calls wait until completion or a human follow-up by default.
-Set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
+Calls wait for the child's response by default.
+With the instance-wide `background_tool_jobs: true` option, managed Matrix calls wait until completion or a human follow-up, and expose the shared waiting controls below.
+In that mode, set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
 OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
 Automatic saving of large tool results uses the same configured policy as other tools, including after a child approval resumes.
@@ -10641,6 +10664,13 @@ After a crash, MindRoom recovers the exact saved outcome; an unfinished turn is 
 Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions/`; editable workspace receipts do not grant continuation authority.
 
 ### Background jobs
+
+This experimental feature requires the root configuration option `background_tool_jobs: true` and a restart.
+It is disabled by default for the whole instance.
+When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function.
+This does not disable shell tools' own background commands.
+Changing the option during hot reload takes effect only after a restart.
+Previously accepted job sources and related approvals stay parked while disabled; their saved outcomes remain available after re-enabling and restarting, without replaying the original tool calls.
 
 Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
 Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
@@ -18741,7 +18771,10 @@ The child uses the normal agent response envelope, so its history, tools, and mo
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
 Managed application calls and native delegation share a durable tool-job owner that retains execution after the foreground wait ends.
 Job IDs identify exact tool calls or delegation turns, while subagent IDs retain child conversations.
-Completed jobs admit nonprojected internal event-journal sources carrying the original requester and exact recipient into the existing response owner.
+Generic background execution is enabled only by the root `background_tool_jobs: true` option, which defaults to false and is pinned at startup.
+Disabled instances bypass the generic execution adapters, resource ownership, schemas, and completion worker.
+Sources belonging to previously accepted jobs or their pending approvals remain parked before journal dispatch while disabled, preserving recovery without side-effect replay.
+Completed jobs in enabled instances admit nonprojected internal event-journal sources carrying the original requester and exact recipient into the existing response owner.
 Completion does not send Matrix messages back through ingress.
 Foreground waits and automatic joining share durable parent-result readback, while the response lifecycle lock serializes internal completions with human turns.
 The runtime waits outside the model and supplies one ready-result continuation at a response boundary.
