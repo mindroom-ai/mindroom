@@ -147,6 +147,7 @@ Matrix sync callback
 | `oauth/reset_execution.py` | MCP retirement and durable reset execution |
 | `custom_tools/oauth_connections.py` | Requester-bound agent tool for issuing OAuth reset confirmation links |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
+| `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
@@ -178,6 +179,7 @@ Matrix sync callback
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
 | `provider_media_fallback.py` | Provider-boundary inline-media retry and process-local capability learning per model route |
+| `model_stream_output.py` | Shared policy for streamed output that makes provider retries unsafe |
 | `agent_storage.py` | Agent session and learning SQLite storage helpers |
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |

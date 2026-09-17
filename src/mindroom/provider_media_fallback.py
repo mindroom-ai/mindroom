@@ -18,6 +18,7 @@ from mindroom.error_handling import (
     is_model_safeguard_refusal,
 )
 from mindroom.logging_config import get_logger
+from mindroom.model_stream_output import has_meaningful_stream_output
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import close_async_stream
 
@@ -536,7 +537,9 @@ async def _next_stream_response(
             error,
             output_produced=request_state.stream_output_produced,
         )
-    request_state.stream_output_produced = True
+    request_state.stream_output_produced = request_state.stream_output_produced or has_meaningful_stream_output(
+        response,
+    )
     return response
 
 

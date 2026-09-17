@@ -539,6 +539,7 @@ class BrowserTools(Toolkit):
         self._profiles: dict[str, _BrowserProfileState] = {}
         self._worker_display: str | None = None
         self._worker_workspace: Path | None = None
+        self._worker_process_env: dict[str, str] | None = None
         self._lock = asyncio.Lock()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         if self._configured_output_dir is not None:
@@ -549,10 +550,28 @@ class BrowserTools(Toolkit):
 
     def bind_worker_display(self, display: str, workspace: Path) -> str:
         """Bind a fresh controller to its prepared workspace and return its config key."""
+        return self._bind_worker_browser(display, workspace)
+
+    def bind_worker_headless(self, workspace: Path, process_env: dict[str, str]) -> str:
+        """Use a prepared child environment without mutating the runner's environment."""
+        binding = self._bind_worker_browser(None, workspace)
+        self._worker_process_env = dict(process_env)
+        return binding
+
+    def take_worker_session(self, previous: BrowserTools) -> None:
+        """Move resources between serialized worker calls, retaining fresh request policy."""
+        if self._profiles or self._startup_cleanup_tasks:
+            msg = "Only a fresh browser toolkit can receive a worker session."
+            raise ValueError(msg)
+        self._profiles, previous._profiles = previous._profiles, {}
+        self._startup_cleanup_tasks, previous._startup_cleanup_tasks = previous._startup_cleanup_tasks, set()
+        self._lock, previous._lock = previous._lock, asyncio.Lock()
+
+    def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
         if self._profiles:
             msg = "Bind the worker display before starting browser profiles."
             raise ValueError(msg)
-        if self._default_target != "host":
+        if display is not None and self._default_target != "host":
             msg = "Worker computer does not support default_target=desktop."
             raise ValueError(msg)
         workspace = workspace.resolve()
@@ -1586,6 +1605,8 @@ class BrowserTools(Toolkit):
                         else None
                     ),
                 )
+                if self._worker_process_env is not None:
+                    launch_kwargs["env"] = self._worker_process_env
                 if self._worker_display is not None:
                     launch_kwargs["chromium_sandbox"] = True
                     launch_kwargs["env"] = {
@@ -1695,7 +1716,7 @@ class BrowserTools(Toolkit):
         page.on("console", lambda message: self._record_console(tab, message))
         page.on("dialog", lambda dialog: asyncio.create_task(self._handle_dialog(tab, dialog)))
         page.on("close", lambda _: self._remove_tab(state, target_id))
-        if self._worker_display is not None:
+        if self._worker_workspace is not None:
             page.on("download", self._save_worker_download)
         return target_id
 

@@ -21,6 +21,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
+from mindroom.worker_browser import WorkerBrowserRuntime
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
@@ -330,6 +331,7 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
     app = FastAPI()
     initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
     computer = WorkerComputerRuntime(FakeDisplay())
+    app.state.worker_browser = WorkerBrowserRuntime()
     if enabled:
         app.state.worker_computer = computer
     app.include_router(sandbox_runner.router)

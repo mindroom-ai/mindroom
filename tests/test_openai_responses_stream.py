@@ -121,7 +121,9 @@ async def _model(*streams: str | httpx.Response, store: bool = True) -> AsyncIte
             max_retries=0,
             http_client=httpx.AsyncClient(transport=transport),
         ) as async_client:
-            yield MindRoomOpenAIResponses(id="gpt-6-astra", client=client, async_client=async_client, store=store)
+            model = MindRoomOpenAIResponses(id="gpt-6-astra", client=client, async_client=async_client, store=store)
+            install_provider_media_fallback(model, fallback_prompt=INLINE_MEDIA_FALLBACK_PROMPT)
+            yield model
 
 
 async def _invoke(model: MindRoomOpenAIResponses, *, sync: bool) -> AsyncIterator[ModelResponse]:
@@ -552,6 +554,56 @@ async def test_agent_still_retries_transient_provider_errors(
 
     assert not any(isinstance(event, RunErrorEvent) for event in events)
     assert [event.content for event in events if isinstance(event, RunCompletedEvent)] == ["Ready"]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "recovered"),
+    [
+        pytest.param(_created(), True, id="created-only"),
+        pytest.param(
+            _created() + _event("response.in_progress", response=_response("resp_unfinished", "in_progress")),
+            True,
+            id="in-progress-only",
+        ),
+        pytest.param(_created() + _text(), False, id="partial-text"),
+        pytest.param(
+            _created()
+            + _event("response.reasoning_summary_text.delta", item_id="rs_check", output_index=0, delta="Checking"),
+            False,
+            id="partial-reasoning",
+        ),
+        pytest.param(_tool_stream().split("event: response.output_item.done")[0], False, id="partial-tool"),
+        pytest.param(
+            _created() + _event("response.web_search_call.in_progress", item_id="ws_search", output_index=0),
+            False,
+            id="hosted-tool-started",
+        ),
+    ],
+)
+async def test_media_hook_preserves_safe_followup_retries(prefix: str, *, recovered: bool) -> None:
+    """Retry only empty follow-up streams without executing a completed tool again."""
+    executed_tools: list[str] = []
+
+    def get_status() -> str:
+        """Return the local status."""
+        executed_tools.append("get_status")
+        return "ready"
+
+    failed = prefix + _event("error", error={"type": "server_error", "message": "Temporarily overloaded"})
+    completed = (
+        _created("resp_answer") + _text() + _event("response.completed", response=_response("resp_answer", "completed"))
+    )
+    async with _model(_tool_stream(), failed, completed) as model:
+        model.retries = 1
+        model.delay_between_retries = 0
+        agent = Agent(model=model, tools=[get_status])
+        events = [event async for event in agent.arun("Check status", stream=True, stream_events=True)]
+
+    assert executed_tools == ["get_status"]
+    assert [event.content for event in events if isinstance(event, RunCompletedEvent)] == (
+        ["Ready"] if recovered else []
+    )
+    assert any(isinstance(event, RunErrorEvent) for event in events) is not recovered
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])

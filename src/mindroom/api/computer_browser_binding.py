@@ -34,6 +34,19 @@ class _ComputerBrowserProvider:
         assert isinstance(toolkit, self.toolkit_type)
         return toolkit
 
+    def bind_headless(
+        self,
+        toolkit: BrowserTools | BrowserMCPTools,
+        workspace: Path,
+        process_env: dict[str, str],
+    ) -> tuple[BrowserTools, str]:
+        """Bind only the built-in headless browser, keeping its current request wrappers."""
+        from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
+
+        if type(toolkit) is not BrowserTools:
+            raise HTTPException(status_code=400, detail="Headless workers require the built-in browser tool.")
+        return toolkit, toolkit.bind_worker_headless(workspace, process_env)
+
     def bind(
         self,
         toolkit: BrowserTools | BrowserMCPTools,
