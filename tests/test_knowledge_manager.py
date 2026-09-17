@@ -525,6 +525,108 @@ def test_missing_shared_knowledge_schedules_refresh_and_returns_none(tmp_path: P
     assert scheduler.schedule_refresh.call_args.kwargs["config"] is config
 
 
+def test_unpublished_knowledge_logs_info_and_keeps_semantic_availability_notice(tmp_path: Path) -> None:
+    """A new scope is awaiting publication, not a failed lookup or completed search."""
+    config = _config(tmp_path, bases={"docs": tmp_path / "docs"}, agent_bases=["docs"])
+
+    with capture_logs() as logs:
+        resolution = resolve_agent_knowledge_access("helper", config, runtime_paths_for(config))
+
+    assert resolution.knowledge is None
+    assert resolution.unavailable == {
+        "docs": KnowledgeAvailabilityDetail(availability=KnowledgeAvailability.INITIALIZING, search_available=False),
+    }
+    notice = knowledge_utils.format_knowledge_availability_notice(resolution.unavailable)
+    assert notice is not None
+    assert "unavailable for semantic search" in notice
+    assert "Do not claim to have searched it" in notice
+    assert not [entry for entry in logs if entry["log_level"] in {"warning", "error"}]
+    assert any(entry["log_level"] == "info" and entry.get("knowledge_bases") == ["docs"] for entry in logs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_knowledge_binding_failure_is_not_reported_as_initializing(tmp_path: Path, asynchronous: bool) -> None:
+    """A rejected private binding must not look like normal first-publication delay."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    private=AgentPrivateConfig(
+                        per="user",
+                        root="workspace",
+                        knowledge=AgentPrivateKnowledgeConfig(path="knowledge"),
+                    ),
+                ),
+            },
+            models={},
+        ),
+        runtime_paths,
+    )
+    base_id = config.resolve_entity("helper").private_knowledge_base_id
+    assert base_id is not None
+    with pytest.raises(ValueError, match="requires an active execution identity"):
+        get_published_index(base_id, config=config, runtime_paths=runtime_paths)
+
+    with capture_logs() as logs:
+        resolution = (
+            await knowledge_utils.resolve_agent_knowledge_access_async("helper", config, runtime_paths)
+            if asynchronous
+            else resolve_agent_knowledge_access("helper", config, runtime_paths)
+        )
+
+    assert resolution.knowledge is None
+    assert resolution.unavailable[base_id].availability is KnowledgeAvailability.REFRESH_FAILED
+    assert not resolution.unavailable[base_id].search_available
+    assert not [entry for entry in logs if entry["log_level"] == "info" and "knowledge_bases" in entry]
+    warning = next(entry for entry in logs if entry.get("event") == "Knowledge bases not available for agent")
+    assert warning["log_level"] == "warning"
+    assert warning["availability"] == {base_id: "refresh_failed"}
+    notice = knowledge_utils.format_knowledge_availability_notice(resolution.unavailable)
+    assert notice is not None
+    assert "unavailable for semantic search" in notice
+    assert "initializing" not in notice
+
+
+@pytest.mark.parametrize("failure", ["refresh_failed", "config_mismatch", "corrupt_metadata"])
+def test_failed_knowledge_still_warns_alongside_unpublished_scope(tmp_path: Path, failure: str) -> None:
+    """A cold scope must not hide a real failure in another assigned knowledge base."""
+    config = _config(
+        tmp_path,
+        bases={"cold": tmp_path / "cold", "broken": tmp_path / "broken"},
+        agent_bases=["cold", "broken"],
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("broken", config=config, runtime_paths=runtime_paths)
+    metadata_path = published_index_metadata_path(key)
+    if failure == "corrupt_metadata":
+        metadata_path.parent.mkdir(parents=True)
+        metadata_path.write_text("{", encoding="utf-8")
+    else:
+        settings = (
+            replace(key.indexing_settings, chunk_size="1") if failure == "config_mismatch" else key.indexing_settings
+        )
+        save_published_index_state(
+            metadata_path,
+            PublishedIndexState(settings=settings, status="failed" if failure == "refresh_failed" else "indexing"),
+        )
+
+    with capture_logs() as logs:
+        resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+
+    expected_availability = (
+        KnowledgeAvailability.CONFIG_MISMATCH if failure == "config_mismatch" else KnowledgeAvailability.REFRESH_FAILED
+    )
+    assert resolution.knowledge is None
+    assert resolution.unavailable["broken"].availability is expected_availability
+    warning = next(entry for entry in logs if entry.get("event") == "Knowledge bases not available for agent")
+    assert warning["log_level"] == "warning"
+    assert warning["knowledge_bases"] == ["broken"]
+    assert warning["availability"] == {"broken": expected_availability.value}
+
+
 def test_file_mode_knowledge_skips_semantic_lookup_and_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
