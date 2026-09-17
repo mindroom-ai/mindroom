@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
 
 import pytest
 from agno.models.response import ModelResponse, ToolExecution
@@ -33,7 +31,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation, serialize_t
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
 from tests.conftest import bind_runtime_paths, unwrap_extracted_collaborator
-from tests.response_runner_helpers import _bot, _noop_typing
+from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping, Sequence
@@ -237,12 +235,6 @@ async def test_approved_run_continues_after_loading_a_tool(  # noqa: C901, PLR09
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
-    monkeypatch.setattr(
-        execution.knowledge_access,
-        "resolve_for_agent_async",
-        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
-    )
-    monkeypatch.setattr("mindroom.approval_execution.typing_indicator", _noop_typing)
     dispatch = ToolDispatchContext(execution_identity=identity)
     if switch_when:
         context = execution.tool_runtime.build_context(
