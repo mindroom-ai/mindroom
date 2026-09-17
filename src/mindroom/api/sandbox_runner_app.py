@@ -1,5 +1,6 @@
 """Minimal FastAPI app for sandbox runner sidecar."""
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -50,6 +51,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
         if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths) or root is None:
             msg = "Worker computer requires a dedicated worker."
+            raise RuntimeError(msg)
+        if os.name == "posix" and os.geteuid() == 0:
+            msg = "Worker computer requires a non-root effective user."
             raise RuntimeError(msg)
         computer = WorkerComputerRuntime(WorkerDisplay(root / ".computer"))
     app.state.worker_computer = computer

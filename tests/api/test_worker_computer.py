@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Never
 
 import pytest
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from structlog.testing import capture_logs
 
-from mindroom.api import sandbox_runner, sandbox_worker_prep, worker_computer
+from mindroom.api import sandbox_runner, sandbox_runner_app, sandbox_worker_prep, worker_computer
 from mindroom.api.sandbox_runner import initialize_sandbox_runner_app
 from mindroom.api.worker_computer import router
 from mindroom.config.main import Config
@@ -439,3 +440,47 @@ def test_computer_execute_rejects_malformed_agent_name(
         )
     assert response.status_code == 400, response.text
     assert "agent_name" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "effective_uid", "platform"),
+    [(True, 0, "posix"), (True, 1000, "posix"), (False, 0, "posix"), (True, 0, "nt")],
+)
+def test_computer_startup_requires_nonroot_effective_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool,
+    effective_uid: int,
+    platform: str,
+) -> None:
+    """Actual worker identity covers named/image users before any requests are prepared."""
+    process = SimpleNamespace(name=platform)
+    if platform == "posix":
+        process.geteuid = lambda: effective_uid
+    monkeypatch.setattr(sandbox_runner_app, "os", process)
+    prepared = []
+
+    async def prepare(_app: FastAPI) -> None:
+        prepared.append(True)
+
+    monkeypatch.setattr(sandbox_runner_app, "prepare_script_worker_before_serving", prepare)
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_COMPUTER_ENABLED": str(enabled).lower(),
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:default:user_agent:~@alice:example.org:writer",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(tmp_path),
+        },
+    )
+    app = FastAPI(lifespan=sandbox_runner_app._lifespan)
+    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
+    if enabled and platform == "posix" and effective_uid == 0:
+        with pytest.raises(RuntimeError, match="non-root"), TestClient(app):
+            pass
+        assert not prepared
+    else:
+        with TestClient(app):
+            assert isinstance(app.state.worker_computer, WorkerComputerRuntime) is enabled
+            assert prepared == [True]

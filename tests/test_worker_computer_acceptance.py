@@ -16,6 +16,7 @@ from agno.tools.function import ToolResult
 from mindroom.api import computers
 from mindroom.config.main import Config
 from mindroom.worker_computer.mcp_results import encode_browser_mcp_result
+from mindroom.workers.backend import WorkerBackendError
 from tests.test_docker_worker_backend import _backend
 
 
@@ -129,7 +130,7 @@ def test_fixture_security_rejects_root_worker(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: 0)
     args = SimpleNamespace(output=tmp_path, provider="browser", matrix_fixture=None, chat_origin=None, image="fixture")
 
-    with pytest.raises(ValueError, match="non-root"):
+    with pytest.raises(WorkerBackendError, match="non-root"):
         module.Fixture(args, "http://127.0.0.1:8765")
 
 
