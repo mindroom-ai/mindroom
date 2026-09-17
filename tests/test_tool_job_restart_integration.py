@@ -7,6 +7,7 @@ import json
 from contextlib import nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agno.agent import Agent
@@ -20,7 +21,6 @@ from agno.tools.function import Function
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_session_storage
-from mindroom.approval_execution import _continue_persisted_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools
@@ -28,6 +28,7 @@ from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
     ApprovalDecision,
+    DeliveryStage,
     EventClass,
     EventKind,
     InboundEvent,
@@ -41,7 +42,6 @@ from mindroom.response_turn import (
     CompletedAttempt,
     TurnRunState,
     TurnSinks,
-    apply_local_approval_decisions,
     run_blocking_response_turn,
 )
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
@@ -52,7 +52,8 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, serialize_tool_execution_identity
-from tests.response_runner_helpers import _bot
+from tests.conftest import delivered_matrix_side_effect, unwrap_extracted_collaborator
+from tests.response_runner_helpers import _bot, _target
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_response_turn import _AdapterLog, _blocking_adapter, _continuation, _ctx
@@ -285,12 +286,13 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approved", [True, False], ids=["approve", "deny"])
-async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C901, PLR0915 - Real pause and two startups.
+async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C901, PLR0912, PLR0915 - Real pause and two startups.
     tmp_path: Path,
     approved: bool,
 ) -> None:
     """Disabled startup preserves a real pause; enabled reconstruction settles the exact call once."""
     bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
     config = bot.config
     config.background_tool_jobs = True
     paths = bot.runtime_paths
@@ -301,12 +303,13 @@ async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C9
         room_id="!room:localhost",
         thread_id="$thread",
         resolved_thread_id="$thread",
-        session_id="!room:localhost_$thread",
+        session_id="!room:localhost:$thread",
+        transport_agent_name="general",
     )
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
         agent_name="general",
-        transport_agent_name=None,
+        transport_agent_name="general",
         membership_turn_id="$approval-source",
     )
     runtime = ToolJobRuntime(paths.storage_root)
@@ -323,6 +326,7 @@ async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C9
 
     function = Function.from_callable(write_report)
     function.requires_confirmation = True
+    function.owning_toolkit = "test_toolkit"
     paused_model = DelegationModel(
         id="test",
         responses=[
@@ -369,7 +373,7 @@ async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C9
         storage.upsert_run(paused, session_id=owner.session_id, user_id=owner.requester_id)
         storage.close()
 
-        store = bot._journal_store.principal(bot._journal_principal_id)
+        store = runner.deps.approval_store
         await store.admit(
             InboundEvent(
                 "$approval-source",
@@ -408,13 +412,16 @@ async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C9
                     tool_call_id="approval-call",
                     tool_name="write_report",
                     invoking_agent="general",
+                    toolkit_name="test_toolkit",
                     expires_at_ns=2**62,
                     decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
+                    reason=None if approved else "Denied for this test.",
                 ),
             ),
             state="ready",
             execution_identity=serialize_tool_execution_identity(owner),
             history_scope=HistoryScope(kind="agent", scope_id="general"),
+            thread_summary_message_count_hint=0,
         )
         assert await store.create_approval_continuation(continuation) is not None
         event = await store.load_event("$approval-source")
@@ -465,50 +472,77 @@ async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C9
         assert isinstance(session, AgentSession)
         assert session.user_id == "@history-owner:localhost"
         assert persisted.user_id == owner.requester_id
+        restart_storage.close()
+        restart_storage = None
 
         resumed_function = Function.from_callable(write_report)
         resumed_function.requires_confirmation = True
+        resumed_function.owning_toolkit = "test_toolkit"
         resumed_model = DelegationModel(id="test", responses=[ModelResponse(content="Approval settled.")])
         install_tool_job_execution(resumed_model)
-        resumed_actor = Agent(
-            id="general",
-            model=resumed_model,
-            tools=[resumed_function, JobTools(paths, owner)],
-            db=restart_storage,
-            telemetry=False,
-        )
-        decisions = {"approval-call": approved}
-        denial_reasons = {"approval-call": None if approved else "Denied for this test."}
-        requirements = apply_local_approval_decisions(
-            persisted,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
-        )
 
-        @owned_tool_execution
-        async def resume() -> RunOutput:
-            set_consumption_storage(storage_factory)
-            response, _presentation = await _continue_persisted_agent(
-                resumed_actor,
-                claimed,
-                persisted,
-                requirements,
-                config=config,
-                runtime_paths=paths,
-                execution_identity=owner,
-                refresh_scheduler=None,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
+        def reconstruct_agent(*_args: object, **kwargs: object) -> Agent:
+            history_storage = cast("BaseDb", kwargs["history_storage"])
+            return Agent(
+                id="general",
+                model=resumed_model,
+                tools=[resumed_function, JobTools(paths, owner)],
+                db=history_storage,
+                telemetry=False,
             )
-            return response
 
-        with tool_runtime_context(context):
-            resume_task = asyncio.create_task(resume())
+        with (
+            patch(
+                "mindroom.approval_execution.required_approval_tool_names",
+                new=AsyncMock(return_value=("test_toolkit",)),
+            ),
+            patch("mindroom.approval_execution.create_agent", side_effect=reconstruct_agent),
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$approval-final")),
+            ),
+        ):
+            resume_task = asyncio.create_task(
+                runner._run_claimed_approval_lifecycle(
+                    claimed,
+                    target=_target(thread_id="$thread", reply_to_event_id="$approval-source"),
+                ),
+            )
             if approved:
-                await asyncio.wait_for(approval_started.wait(), 2)
+                started_waiter = asyncio.create_task(approval_started.wait())
+                try:
+                    done, _pending = await asyncio.wait(
+                        {resume_task, started_waiter},
+                        timeout=2,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    assert done, "approval execution did not start before its deadline"
+                    if resume_task in done:
+                        early_delivery = resume_task.result()
+                        pytest.fail(f"approval ended before tool start: {early_delivery!r}")
+                    assert started_waiter in done
+                    await started_waiter
+                finally:
+                    started_waiter.cancel()
+                    await asyncio.gather(started_waiter, return_exceptions=True)
                 approval_release.set()
-            response = await asyncio.wait_for(resume_task, 3)
-        assert response.status is RunStatus.completed
+            delivery = await asyncio.wait_for(resume_task, 3)
+        assert delivery.terminal_status == "completed"
+        assert delivery.event_id == "$approval-response"
+        final_delivery = await store.load_matrix_delivery(
+            delivery_id="$approval-source",
+            stage=DeliveryStage.FINAL,
+        )
+        assert final_delivery is not None
+        assert final_delivery.acknowledged_event_id == "$approval-final"
+        assert final_delivery.edits_event_id == "$approval-response"
+        verification_storage = storage_factory()
+        try:
+            response = verification_storage.get_run(paused.run_id)
+        finally:
+            verification_storage.close()
+        assert isinstance(response, RunOutput)
+        assert response.status == RunStatus.completed
         assert executions == int(approved)
         assert response.tools is not None
         settled_tool = next(tool for tool in response.tools if tool.tool_call_id == "approval-call")
@@ -520,14 +554,15 @@ async def test_native_approval_is_parked_disabled_then_resumed_once(  # noqa: C9
             assert settled_tool.result is None
             assert settled_tool.confirmation_note == "Denied for this test."
             assert "Denied for this test." in _provider_tool_content(resumed_model, "approval-call")
-        job_owner = replace(owner, transport_agent_name="general")
-        jobs = await restarted_runtime.list_jobs(owner=job_owner, depth=0)
+        jobs = await restarted_runtime.list_jobs(owner=owner, depth=0)
         assert len(jobs) == int(approved)
         if approved:
             assert jobs[0].status == "completed"
             assert jobs[0].result == "approved report"
             assert jobs[0].wait_acknowledged
         assert await restarted_runtime.pending_outcomes() == []
+        assert await store.approval_continuation("approval") is None
+        assert not await store.is_pending("$approval-source")
     finally:
         approval_release.set()
         if resume_task is not None and not resume_task.done():

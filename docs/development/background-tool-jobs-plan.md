@@ -487,11 +487,12 @@ Do not add production test hooks, a new scheduling abstraction, or a reusable te
 The six cases cover a human-released job crossing into a newer turn, success and failure during active streaming, interrupted consumption followed by runtime reconstruction, and approved or denied native continuations across disabled and enabled startup.
 The approval cases retain a shared session row owned by a different requester from the exact paused run.
 Assertions check actual side effects, provider-visible tool results, exact durable receipts, and pending outcomes.
+Both approval cases exercise `ResponseRunner` and `AgentApprovalExecution` through real final-delivery acknowledgment, consumption finalization, and terminal source and continuation settlement.
 
-Final verification: `uv run pytest -m 'not requires_matrix' -n 10 --no-cov` passed 21,504 tests with 12 skips and 27 warnings in 316.10 seconds.
+Final verification: `uv run pytest -m 'not requires_matrix' -n 10 --no-cov` passed 21,504 tests with 12 skips and 27 warnings in 340.77 seconds.
 All repository pre-commit hooks passed, including type checks and module boundaries.
-Independent review approved the tests after adding exact provider-message assertions and guaranteed response-task cleanup.
-Five subprocess-local mutations failed as intended when human release, response joining, receipt confirmation, parked-approval indexing, or provider-visible result delivery was broken.
+Independent review approved the tests after adding exact provider-message assertions, guaranteed response-task cleanup, and full approval lifecycle coverage.
+Six subprocess-local mutations failed as intended when human release, response joining, receipt confirmation, parked-approval indexing, provider-visible result delivery, or terminal approval settlement was broken.
 
 These tests use real SDK execution, durable job snapshots, SQLite sessions, and approval journals with deterministic model responses and local tool side effects.
 They reconstruct runtimes in one process and do not exercise Matrix transport or simulate a process kill.
