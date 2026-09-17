@@ -12,6 +12,7 @@ from agno.exceptions import ContextWindowExceededError, ModelProviderError, Retr
 from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_retry_cycle_hooks
+from mindroom.agno_compat_provider_errors import is_transient_stream_error
 from mindroom.error_handling import (
     TRANSIENT_PROVIDER_STATUS_CODES,
     IncompleteResponsesStreamError,
@@ -19,7 +20,6 @@ from mindroom.error_handling import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.model_stream_output import has_meaningful_stream_output
-from mindroom.provider_error_compat import is_transient_stream_error
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import close_async_stream
 

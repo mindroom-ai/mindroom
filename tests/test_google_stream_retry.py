@@ -15,8 +15,8 @@ from google.oauth2.credentials import Credentials
 from openai import APIStatusError
 
 from mindroom import provider_stream_retry
+from mindroom.agno_compat_provider_errors import is_transient_stream_error
 from mindroom.google_gemini import MindRoomGoogleGemini
-from mindroom.provider_error_compat import is_transient_stream_error
 from mindroom.provider_stream_retry import install_provider_stream_retry_hook
 
 

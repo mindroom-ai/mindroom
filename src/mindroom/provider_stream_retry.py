@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING
 from agno.exceptions import ModelProviderError
 
 from mindroom.agno_compat_model_hooks import install_stream_invocation_hooks
+from mindroom.agno_compat_provider_errors import is_transient_stream_error
 from mindroom.logging_config import get_logger
 from mindroom.model_stream_output import has_meaningful_stream_output
-from mindroom.provider_error_compat import is_transient_stream_error
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:

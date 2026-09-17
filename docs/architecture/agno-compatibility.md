@@ -23,7 +23,7 @@ Paths are relative to `src/mindroom/`.
 
 | Agno weakness | Upstream issue / PR | Local workaround and remaining scope |
 | --- | --- | --- |
-| Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `provider_error_compat.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
+| Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `agno_compat_provider_errors.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
 | Deleted runs survive in legacy blobs or deletion spans separate transactions. | [Issue #9934](https://github.com/agno-agi/agno/issues/9934), [PR #9939](https://github.com/agno-agi/agno/pull/9939), both open. | `agno_compat_sqlite.py`; preserve owner descendant deletion when the atomic upstream fix ships. |
 | New runs can sort before surviving runs after deletion. | [Issue #9936](https://github.com/agno-agi/agno/issues/9936), [PR #9938](https://github.com/agno-agi/agno/pull/9938), both open. | `agno_compat_sqlite.py`; verify insertion after existing indexes with the local override disabled. |
 | Team input flattens roleful messages. | [Issue #9942](https://github.com/agno-agi/agno/issues/9942), [PR #9943](https://github.com/agno-agi/agno/pull/9943), both open. | `history/agno_compat_message_builder.py`; historical-media filtering needs a separate extension point. |
@@ -108,7 +108,7 @@ Small owner-adjacent boundaries use the same source records:
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
-| `provider_error_compat.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
+| `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
 

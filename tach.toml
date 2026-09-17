@@ -1755,7 +1755,7 @@ depends_on = [
 path = "mindroom.history.summary_call"
 depends_on = [
     "mindroom.cancellation",
-    "mindroom.provider_error_compat",
+    "mindroom.agno_compat_provider_errors",
     "mindroom.history.summary_provider_compat",
     "mindroom.history.types",
     "mindroom.logging_config",
@@ -1844,7 +1844,7 @@ depends_on = [
     "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
-    "mindroom.provider_error_compat",
+    "mindroom.agno_compat_provider_errors",
     "mindroom.history.replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
@@ -3809,7 +3809,7 @@ visibility = [
 [[modules]]
 path = "mindroom.provider_media_fallback"
 depends_on = [
-    "mindroom.provider_error_compat",
+    "mindroom.agno_compat_provider_errors",
     "mindroom.agno_compat_model_hooks",
     "mindroom.error_handling",
     "mindroom.logging_config",
@@ -5917,7 +5917,7 @@ depends_on = ["mindroom.token_budget"]
 visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
 
 [[modules]]
-path = "mindroom.provider_error_compat"
+path = "mindroom.agno_compat_provider_errors"
 depends_on = ["mindroom.error_handling", "mindroom.model_instance_checks"]
 visibility = ["mindroom.history.runtime", "mindroom.history.summary_call", "mindroom.provider_stream_retry", "mindroom.provider_media_fallback"]
 

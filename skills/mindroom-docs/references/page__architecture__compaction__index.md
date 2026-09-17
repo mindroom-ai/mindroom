@@ -39,7 +39,7 @@ The [Agno compatibility inventory](https://docs.mindroom.chat/architecture/agno-
 | `tool_system/agno_compat_tool_hooks.py` | Adapts Agno's private sync/async hook chains to deferred results and owner-controlled synchronous execution; installed by `tool_system/tool_hooks.py`, which retains dispatch, approval, and cancellation ownership. |
 | `history/claude_replay_compat.py` | Removes stale signed reasoning from completed portable turns after rewriting; native checkpoint replay retains its separate provider policy. |
 | `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested Claude/OpenAI SDK retries, and classifies provider completion signals. |
-| `provider_error_compat.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
+| `agno_compat_provider_errors.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
 
 Importing the history engine does not install either global Agno patch.
 The explicit installers remain idempotent, and the persistence patch retains its pinned-version guard.
