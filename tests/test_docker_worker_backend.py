@@ -5208,10 +5208,98 @@ def test_docker_security_policy_resolution(
     expected: str,
 ) -> None:
     """Availability cannot override the explicit pool policy or its historical default."""
-    env = {"MINDROOM_DOCKER_WORKER_IMAGE": "test-image", WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower()}
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_USER": "1000:1000",
+        WORKER_COMPUTER_ENABLED_ENV: str(computer_enabled).lower(),
+    }
     if worker_flag is not None:
         env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: worker_flag})
     if policy is not None:
         env["MINDROOM_DOCKER_WORKER_SECURITY_POLICY"] = policy
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
     assert _DockerWorkerBackendConfig.from_runtime(paths).security_policy == expected
+
+
+@pytest.mark.parametrize("user", ["0", "0:0", "000:1000", "+0:0", "-0:0", "root", "root:users"])
+@pytest.mark.parametrize("worker_override", [False, True])
+def test_docker_computer_rejects_root_user(tmp_path: Path, user: str, *, worker_override: bool) -> None:
+    """Known root identities fail configuration before sandboxed Chromium starts."""
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        "MINDROOM_DOCKER_WORKER_USER": user,
+        WORKER_COMPUTER_ENABLED_ENV: "false" if worker_override else "true",
+    }
+    if worker_override:
+        env["MINDROOM_DOCKER_WORKER_ENV_JSON"] = json.dumps({WORKER_COMPUTER_ENABLED_ENV: "true"})
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+def test_docker_computer_rejects_inherited_root_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The POSIX host-user default must pass the same Computer identity check."""
+    monkeypatch.setattr("mindroom.workers.backends.docker_config.os.getuid", lambda: 0)
+    env = {
+        "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+        "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": "computer",
+        WORKER_COMPUTER_ENABLED_ENV: "true",
+    }
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env=env)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        _DockerWorkerBackendConfig.from_runtime(paths)
+
+
+@pytest.mark.parametrize("user", ["0:0", "root"])
+def test_docker_direct_computer_rejects_root_before_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    user: str,
+) -> None:
+    """Supplied configuration cannot skip the user check at backend construction."""
+    backend, _, _ = _backend(monkeypatch, tmp_path)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={WORKER_COMPUTER_ENABLED_ENV: "true"},
+    )
+    config = replace(backend.config, user=user, security_policy="computer")
+
+    def forbidden_client(**_kwargs: object) -> None:
+        pytest.fail("Root Computer configuration reached Docker client construction")
+
+    monkeypatch.setattr("mindroom.workers.backends.docker._load_docker_client_and_errors", forbidden_client)
+    with pytest.raises(WorkerBackendError, match="non-root"):
+        DockerWorkerBackend(config=config, auth_token=_TEST_AUTH_TOKEN, runtime_paths=paths)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "policy", "user"),
+    [
+        (False, "runtime_default", "root"),
+        (False, "computer", "0:0"),
+        (True, "computer", "1000:0"),
+        (True, "computer", "mindroom:users"),
+        (True, "computer", ""),
+    ],
+)
+def test_docker_computer_identity_validation_preserves_supported_users(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    policy: str,
+    user: str,
+) -> None:
+    """Ordinary workers, nonroot identities and the image default remain configurable."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_DOCKER_WORKER_IMAGE": "test-image",
+            "MINDROOM_DOCKER_WORKER_SECURITY_POLICY": policy,
+            "MINDROOM_DOCKER_WORKER_USER": user,
+            WORKER_COMPUTER_ENABLED_ENV: str(enabled).lower(),
+        },
+    )
+    assert _DockerWorkerBackendConfig.from_runtime(paths).user == (user or None)

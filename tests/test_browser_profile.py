@@ -9,12 +9,13 @@ from mindroom.browser_profile import clear_stale_singleton_locks
 
 
 @pytest.mark.parametrize("name", ["SingletonLock", "SingletonCookie", "SingletonSocket"])
-def test_clear_stale_singleton_locks_unlinks_stale_symlink(tmp_path: Path, name: str) -> None:
+@pytest.mark.parametrize("pid", [999999999, 999999999999999999999999])
+def test_clear_stale_singleton_locks_unlinks_stale_symlink(tmp_path: Path, name: str, pid: int) -> None:
     """Stale Chromium singleton lock symlinks should be removed."""
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir()
     lock = profile_dir / name
-    target = tmp_path / "mindroom-999999999"
+    target = tmp_path / f"mindroom-{pid}"
     target.write_text("preserve target")
     lock.symlink_to(target)
 

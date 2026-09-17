@@ -6529,6 +6529,8 @@ A startup failure is returned to the caller; MindRoom does not retry with Chromi
 Select `MINDROOM_DOCKER_WORKER_SECURITY_POLICY=computer` explicitly on the primary runtime before enabling Computer.
 The Docker pool policy accepts only `runtime_default` (the default) or `computer`.
 Enabling `MINDROOM_WORKER_COMPUTER_ENABLED=true` with `runtime_default` fails configuration; there is no weaker fallback.
+Computer configuration also rejects known root worker identities, including an inherited host UID 0 and explicit `MINDROOM_DOCKER_WORKER_USER=root` or numeric UID 0 overrides.
+An empty worker-user setting uses the image default; custom images and named accounts must resolve to a non-root UID.
 The `computer` policy drops all Linux capabilities, sets `no-new-privileges`, and uses the packaged `src/mindroom/workers/backends/seccomp/worker-computer.json` profile.
 It applies to the entire Docker worker pool, even with Computer disabled or agents that do not select a browser tool.
 Computer availability controls lazy browser/display startup separately from the pool's security policy.

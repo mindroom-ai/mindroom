@@ -23,7 +23,7 @@ def clear_stale_singleton_locks(profile_dir: Path) -> None:
             pid = int(match.group(1))
             try:
                 os.kill(pid, 0)
-            except ProcessLookupError:
+            except (ProcessLookupError, OverflowError):
                 entry.unlink()
         except OSError as exc:
             logger.warning(

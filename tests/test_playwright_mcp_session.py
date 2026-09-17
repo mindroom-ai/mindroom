@@ -79,8 +79,9 @@ async def test_stuck_call_releases_transport(transport: list[str], operation: st
     """Abandoned work cannot block bounded closure of the owning transport."""
     actor = PlaywrightMCPSession(StdioServerParameters(command="unused"), call_timeout_seconds=0.05)
     call = asyncio.create_task(actor.call_tool("stuck", {}))
-    while "stuck" not in transport:  # noqa: ASYNC110 - observe fake collaborator dispatch
-        await asyncio.sleep(0)
+    async with asyncio.timeout(1):
+        while "stuck" not in transport:  # noqa: ASYNC110 - observe fake collaborator dispatch
+            await asyncio.sleep(0)
     if operation == "cancel":
         call.cancel()
     elif operation == "close":

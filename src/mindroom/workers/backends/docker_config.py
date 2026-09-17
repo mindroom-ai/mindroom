@@ -221,6 +221,9 @@ class _DockerWorkerBackendConfig:
         if computer_enabled and self.security_policy != "computer":
             msg = f"{WORKER_COMPUTER_ENABLED_ENV}=true requires {_SECURITY_POLICY_ENV}=computer."
             raise WorkerBackendError(msg)
+        if computer_enabled and self.user is not None and re.fullmatch(r"root|[+-]?0+", self.user.partition(":")[0]):
+            msg = f"{WORKER_COMPUTER_ENABLED_ENV}=true requires a non-root {_USER_ENV}; got {self.user!r}."
+            raise WorkerBackendError(msg)
 
     @classmethod
     def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
