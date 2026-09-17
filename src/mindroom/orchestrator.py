@@ -1473,7 +1473,11 @@ class _MultiAgentOrchestrator:
         recovery_bots = {bot.agent_name: bot for bot in bots if bot.client is not None}
 
         def response_recovery_scope(agent_name: str, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
-            return recovery_bots[agent_name].response_recovery_scope(room_id, event_id)
+            return recovery_bots[agent_name].response_recovery_scope(
+                room_id,
+                event_id,
+                allow_interrupted_final=target_room_ids is not None,
+            )
 
         result = await recover_stale_streaming_messages(
             actors,

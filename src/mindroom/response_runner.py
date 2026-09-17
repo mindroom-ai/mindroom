@@ -113,7 +113,7 @@ from mindroom.streaming import (
     clean_partial_reply_text,
     strip_visible_tool_markers,
 )
-from mindroom.sync_restart_retry import interrupted_source_needs_retry
+from mindroom.sync_restart_retry import InterruptedTurnRooms, interrupted_source_needs_retry
 from mindroom.teams import (
     TeamMode,
     continue_paused_team_run,
@@ -769,6 +769,7 @@ class ResponseRunnerDeps:
     approval_store: PrincipalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
     approval_runtime_generation: str
+    interrupted_turn_rooms: InterruptedTurnRooms
 
 
 @dataclass(frozen=True)
@@ -1660,12 +1661,19 @@ class ResponseRunner:
         update = await self._approval_interruption_update(failing, cancel_source=cancel_source)
         if update is None:
             return False
-        return await self._approval_responses.settle_failure(
+        settled = await self._approval_responses.settle_failure(
             failing,
             reason,
             visible_text=update,
             stream_status=STREAM_STATUS_ERROR,
         )
+        if settled and await self.deps.approval_store.approval_interruption_is_recoverable(
+            failing.source_event_ids[0],
+            visible_text=update,
+            failure_reason=failing.failure_reason,
+        ):
+            self.deps.interrupted_turn_rooms.register(failing.source_event_ids[0], room_id=failing.room_id)
+        return settled
 
     async def _approval_interruption_update(
         self,

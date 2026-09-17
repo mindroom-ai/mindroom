@@ -50,6 +50,7 @@ from mindroom.response_runner import (
     ResponseRunnerDeps,
 )
 from mindroom.response_sources import ResponseSources
+from mindroom.sync_restart_retry import InterruptedTurnRooms
 from mindroom.team_scope import ad_hoc_team_scope_id
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
@@ -532,6 +533,7 @@ def _build_response_runner(
             approval_store=approval_store,
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
             approval_runtime_generation="test-runtime",
+            interrupted_turn_rooms=InterruptedTurnRooms(),
         ),
     )
 

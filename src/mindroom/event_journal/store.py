@@ -1077,10 +1077,16 @@ class PrincipalStore:
         self,
         *,
         after: tuple[int, str] | None = None,
+        include_interrupted_finals: bool = False,
     ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
         """Page exact acknowledged INITIALs still lacking FINAL delivery ownership."""
         return await self._backend.read(
-            lambda transaction: outbox.recovery_initials(transaction, self._principal_id, after=after),
+            lambda transaction: outbox.recovery_initials(
+                transaction,
+                self._principal_id,
+                after=after,
+                include_interrupted_finals=include_interrupted_finals,
+            ),
         )
 
     async def retire_deleted_initial(self, *, delivery_id: str) -> None:
@@ -1509,6 +1515,24 @@ class PrincipalStore:
                 expected_state=expected_state,
                 expected_generation=expected_generation,
                 expected_runtime_generation=expected_runtime_generation,
+            ),
+        )
+
+    async def approval_interruption_is_recoverable(
+        self,
+        delivery_id: str,
+        *,
+        visible_text: str,
+        failure_reason: str | None = None,
+    ) -> bool:
+        """Prove an acknowledged interruption still belongs to this response attempt."""
+        return await self._backend.read(
+            lambda transaction: approval_continuations.interruption_is_recoverable(
+                transaction,
+                self._principal_id,
+                delivery_id,
+                visible_text=visible_text,
+                failure_reason=failure_reason,
             ),
         )
 

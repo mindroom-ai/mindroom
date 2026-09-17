@@ -737,6 +737,7 @@ class AgentBot:
                 approval_store=self._journal_store.principal(self._journal_principal_id),
                 retry_approval_sources=self.retry_approval_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
+                interrupted_turn_rooms=self._interrupted_turn_rooms,
             ),
         )
         self._edit_regenerator = EditRegenerator(
@@ -1902,9 +1903,19 @@ class AgentBot:
             unsettled_source_event_ids=await self._journal_dispatcher.unsettled_event_ids(),
         )
 
-    def response_recovery_scope(self, room_id: str, event_id: str) -> AbstractAsyncContextManager[bool]:
+    def response_recovery_scope(
+        self,
+        room_id: str,
+        event_id: str,
+        *,
+        allow_interrupted_final: bool = False,
+    ) -> AbstractAsyncContextManager[bool]:
         """Expose the delivery owner's startup operation to fleet discovery."""
-        return self._delivery_gateway.response_recovery_scope(room_id, event_id)
+        return self._delivery_gateway.response_recovery_scope(
+            room_id,
+            event_id,
+            allow_interrupted_final=allow_interrupted_final,
+        )
 
     async def _response_recovery_ready(self, turn_record: TurnRecord) -> bool:
         """Prove that a terminal response is complete or still durably owned."""

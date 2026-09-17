@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.event_journal import DeliveryStage
 from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.journal_ingress import replayable_redaction_target
 from mindroom.message_target import MessageTarget
+from mindroom.streaming import INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -70,13 +72,32 @@ class ResponseDeliveryRecovery:
             for record in state.turn_records
         )
 
-    async def permits_continuation(self, delivery: MatrixDelivery) -> bool:
+    async def permits_continuation(
+        self,
+        delivery: MatrixDelivery,
+        *,
+        allow_interrupted_final: bool = False,
+    ) -> bool:
         """Only genuinely orphaned work may acquire synthetic startup continuation."""
         state = await self.state(delivery)
+        interrupted_final = False
+        if allow_interrupted_final and (final := state.final_delivery) is not None:
+            content = final.payload.get("m.new_content", final.payload)
+            content = cast("dict[str, object]", content) if isinstance(content, dict) else {}
+            body = content.get("body")
+            if (
+                isinstance(body, str)
+                and content.get(STREAM_STATUS_KEY) == STREAM_STATUS_ERROR
+                and body.rstrip().endswith((RESTART_INTERRUPTED_RESPONSE_NOTE, INTERRUPTED_RESPONSE_NOTE))
+            ):
+                interrupted_final = await self.principal.approval_interruption_is_recoverable(
+                    delivery.delivery_id,
+                    visible_text=body,
+                )
         return not (
             state.approval_owned
             or any(state.source_tombstones)
-            or self._final_owned(state)
+            or (self._final_owned(state) and not interrupted_final)
             or any(state.pending_sources)
             or state.sources_settled_by_departure
             or any(

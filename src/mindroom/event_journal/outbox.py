@@ -663,6 +663,7 @@ def recovery_initials(
     principal_id: str,
     *,
     after: tuple[int, str] | None = None,
+    include_interrupted_finals: bool = False,
 ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
     """Enumerate owned visible INITIALs without a FINAL, not arbitrary room history."""
     cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
@@ -681,10 +682,12 @@ def recovery_initials(
             WHERE final.principal_id = delivery.principal_id AND final.delivery_id = delivery.delivery_id
               AND final.stage = 'final' AND (final.acknowledged_event_id IS NOT NULL
                 OR (final.retired = 0 AND final.permanent_failure_reason IS NULL))
+              AND NOT (? = 1 AND final.acknowledged_event_id IS NOT NULL AND final.result_json IS NULL
+                AND final.retired = 0 AND final.permanent_failure_reason IS NULL)
           ){cursor_clause}
         ORDER BY created_at_ns, delivery_id/*bytes*/ LIMIT 100
         """,  # noqa: S608 - fixed columns and cursor clause
-        (principal_id, *(after or ())),
+        (principal_id, int(include_interrupted_finals), *(after or ())),
     )
     return tuple(_recovery_delivery(row) for row in rows)
 
