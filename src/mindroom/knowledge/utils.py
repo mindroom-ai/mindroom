@@ -286,7 +286,8 @@ def _finish_base_knowledge_resolution(
     # One instant per resolve: the poll-interval boundary must not be evaluated
     # against two different clock readings within a single turn.
     wall_now = datetime.now(tz=UTC)
-    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    # A cold index has a resolution; None means the binding lookup raised.
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.REFRESH_FAILED
     if lookup is not None and availability is KnowledgeAvailability.READY:
         availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
