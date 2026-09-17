@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from mindroom.constants import RuntimePaths
+    from mindroom.streaming import StreamingPresentation
 
 
 @pytest.mark.asyncio
@@ -208,8 +209,8 @@ async def test_collected_wait_updates_owner_before_requesting_next_chunk() -> No
     """A nonstream Matrix response must expose wait progress before its generator parks."""
     notices: list[str] = []
 
-    async def notice(text: str) -> None:
-        notices.append(text)
+    async def notice(presentation: StreamingPresentation) -> None:
+        notices.append(presentation.response_text)
 
     async def stream() -> AsyncGenerator[object, None]:
         yield "Independent work done."

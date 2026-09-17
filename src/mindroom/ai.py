@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing, asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -105,6 +106,7 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.completion import report_background_wait
 from mindroom.tool_jobs.resources import defer_execution_cleanup
@@ -114,6 +116,7 @@ from mindroom.tool_system.events import (
     BackgroundWaitChunk,
     CollectedStreamPresentation,
     StreamingToolTracker,
+    StructuredStreamChunk,
     complete_pending_tool_block,
     format_tool_combined,
 )
@@ -158,7 +161,13 @@ __all__ = [
     "stream_agent_response",
 ]
 AIStreamChunk = (
-    str | BackgroundWaitChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+    str
+    | BackgroundWaitChunk
+    | StructuredStreamChunk
+    | RunContentEvent
+    | RunCompletedEvent
+    | ToolCallStartedEvent
+    | ToolCallCompletedEvent
 )
 
 
@@ -517,7 +526,7 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
-async def collect_streamed_response_content(
+async def collect_streamed_response_content(  # noqa: C901 - Explicit stream event variants.
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     presentation: CollectedStreamPresentation,
@@ -527,8 +536,16 @@ async def collect_streamed_response_content(
         async for chunk in response_stream:
             if isinstance(chunk, str):
                 presentation.append_text(chunk)
+            elif isinstance(chunk, StructuredStreamChunk):
+                presentation.append_text(chunk.content)
+                presentation.tool_trace.extend(deepcopy(chunk.tool_trace or ()))
             elif isinstance(chunk, BackgroundWaitChunk):
-                await report_background_wait(presentation.final_text() + chunk.content)
+                await report_background_wait(
+                    StreamingPresentation(
+                        response_text=presentation.final_text() + chunk.content,
+                        tool_trace=tuple(deepcopy(presentation.tool_trace)) if presentation.show_tool_calls else (),
+                    ),
+                )
             elif isinstance(chunk, RunContentEvent):
                 presentation.append_text(chunk.content)
             elif isinstance(chunk, RunCompletedEvent):
@@ -1474,7 +1491,7 @@ async def ai_response(  # noqa: C901, PLR0915
     """
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
-    if collect_streamed_response:
+    if collect_streamed_response or ctx.initial_presentation is not None:
         return await _collect_response_body_with_trace(
             stream_agent_response(
                 ctx,
@@ -2377,7 +2394,22 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     # its cleanup does not wait for event-loop async-generator finalization.
     try:
         async with aclosing(response_stream) as closing_stream:
+            if ctx.initial_presentation is not None:
+                initial = ctx.initial_presentation
+                yield StructuredStreamChunk(
+                    content=initial.response_text.rstrip() + "\n\n" if initial.response_text else "",
+                    tool_trace=list(deepcopy(initial.tool_trace)),
+                )
+            attempt_has_content = False
             async for chunk in closing_stream:
+                if isinstance(chunk, RunContentEvent) and chunk.content:
+                    attempt_has_content = True
+                elif isinstance(chunk, RunCompletedEvent):
+                    # A restored prefix must not suppress an SDK provider that
+                    # reports its new answer only on the terminal event.
+                    if ctx.initial_presentation is not None and not attempt_has_content and chunk.content:
+                        yield RunContentEvent(content=str(chunk.content))
+                    attempt_has_content = False
                 yield chunk
     finally:
         _reset_reusable_agent_context(reusable_agent, reusable_agent_base_context)

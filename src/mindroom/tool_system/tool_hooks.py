@@ -136,7 +136,7 @@ _SYNC_TOOL_COMPLETION_TRACKER: ContextVar[SyncToolCompletionTracker | None] = Co
 
 
 @contextmanager
-def track_sync_tool_completion(tracker: SyncToolCompletionTracker) -> Iterator[None]:
+def track_sync_tool_completion(tracker: SyncToolCompletionTracker | None) -> Iterator[None]:
     """Bind synchronous leaf completion ownership to one tool call."""
     token = _SYNC_TOOL_COMPLETION_TRACKER.set(tracker)
     try:

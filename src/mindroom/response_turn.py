@@ -51,7 +51,7 @@ from mindroom.tool_jobs.completion import join_conversation_jobs, report_backgro
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_system.context_bound_streams import closing_async_stream
-from mindroom.tool_system.events import BackgroundWaitChunk
+from mindroom.tool_system.events import BackgroundWaitChunk, append_stream_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -306,6 +306,7 @@ class ResponseTurnContext:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
     background_tool_jobs: bool = False
+    initial_presentation: StreamingPresentation | None = None
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
     # prompt-owning event while capping this turn without changing authored config.
@@ -1147,7 +1148,18 @@ async def _settle_joined_blocking_attempt(
     if continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
         async for joined in join_conversation_jobs(run.attempted_job_outcomes):
             if isinstance(joined, str):
-                await report_background_wait(settle.response_text + joined)
+                initial = ctx.initial_presentation
+                response_text = (
+                    append_stream_text(initial.response_text, settle.response_text, separate=True)
+                    if initial is not None
+                    else settle.response_text
+                )
+                await report_background_wait(
+                    StreamingPresentation(
+                        response_text=response_text + joined,
+                        tool_trace=initial.tool_trace if initial is not None else (),
+                    ),
+                )
             else:
                 joined_continuation = _advance_turn_continuation(
                     sinks,

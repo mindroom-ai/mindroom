@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, ResponseTurnContext
+from mindroom.streaming import StreamingPresentation
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
     TeamMode,
@@ -43,7 +45,7 @@ from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
-from mindroom.tool_system.events import BackgroundWaitChunk
+from mindroom.tool_system.events import BackgroundWaitChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     build_execution_identity_from_runtime_context,
@@ -87,8 +89,8 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
         await release.wait()
         return "retained actual result"
 
-    async def notice(text: str) -> None:
-        notices.append(text)
+    async def notice(presentation: StreamingPresentation) -> None:
+        notices.append(presentation.response_text)
         waiting.set()
 
     model = DelegationModel(
@@ -280,8 +282,12 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("streaming", [False, True])
-async def test_ordinary_team_autojoin_persists_exact_result_receipt(tmp_path: Path, streaming: bool) -> None:  # noqa: PLR0915
+@pytest.mark.parametrize(("streaming", "recovered"), [(False, False), (True, False), (False, True)])
+async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C901, PLR0915 - One native job lifecycle across delivery modes.
+    tmp_path: Path,
+    streaming: bool,
+    recovered: bool,
+) -> None:
     """Both ordinary team entry points acknowledge only their saved native result receipt."""
     config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
     paths = _runtime_paths(tmp_path)
@@ -291,6 +297,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(tmp_path: Pa
     runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
     release, waiting = asyncio.Event(), asyncio.Event()
+    notices: list[StreamingPresentation] = []
     calls = 0
 
     async def slow_tool() -> str:
@@ -299,7 +306,8 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(tmp_path: Pa
         await release.wait()
         return "actual result"
 
-    async def report_wait(_text: str) -> None:
+    async def report_wait(presentation: StreamingPresentation) -> None:
+        notices.append(presentation)
         waiting.set()
 
     model = DelegationModel(
@@ -337,6 +345,12 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(tmp_path: Pa
         thread_id=owner.resolved_thread_id,
         requester_id=owner.requester_id,
     )
+    prefix = StreamingPresentation(
+        "Earlier team answer.\n\n🔧 `original_tool` [1]",
+        tool_trace=(ToolTraceEntry("tool_call_completed", "original_tool", result_preview="earlier result"),),
+    )
+    if recovered:
+        ctx = replace(ctx, initial_presentation=prefix)
 
     async def prepare(*_args: object, **kwargs: object) -> _PreparedMaterializedTeamExecution:
         return _PreparedMaterializedTeamExecution(
@@ -393,6 +407,10 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(tmp_path: Pa
                 if pending.done():
                     pending.result()
                 assert waiting.is_set()
+                if recovered:
+                    assert notices[-1].response_text.startswith(prefix.response_text + "\n\n")
+                    assert notices[-1].response_text.count(prefix.response_text) == 1
+                    assert notices[-1].tool_trace == prefix.tool_trace
             finally:
                 notice_waiter.cancel()
                 await asyncio.gather(notice_waiter, return_exceptions=True)
@@ -409,6 +427,9 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(tmp_path: Pa
             release.set()
             answer = await asyncio.wait_for(pending, 2)
             assert "Final result received." in answer
+            if recovered:
+                assert answer.startswith(prefix.response_text + "\n\n")
+                assert answer.count(prefix.response_text) == 1
             assert calls == 1
             assert await runtime.pending_outcomes() == []
     finally:
