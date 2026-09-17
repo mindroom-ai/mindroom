@@ -15,9 +15,12 @@ from mindroom.error_handling import (
     IncompleteResponsesStreamError,
     ModelSafeguardRefusalError,
 )
+from mindroom.model_instance_checks import isinstance_of_loaded
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from google.genai.errors import APIError as GoogleAPIError
 
 # AGNO_COMPAT: Unclassified ModelProviderError failures default to HTTP 502.
 # Reason: A generic 502 does not prove a transient provider failure; inspect its
@@ -87,6 +90,9 @@ def _is_transient_sdk_error(error: BaseException) -> bool:
 
     if isinstance(error, (AnthropicAPIStatusError, OpenAIAPIStatusError)):
         return error.status_code in TRANSIENT_PROVIDER_STATUS_CODES
+    if isinstance_of_loaded(error, ("google.genai.errors", "APIError")):
+        google_error: GoogleAPIError = cast("GoogleAPIError", error)
+        return google_error.code in TRANSIENT_PROVIDER_STATUS_CODES
     if not isinstance(error, OpenAIAPIError) or not isinstance(error.body, dict):
         return False
     body = cast("dict[str, object]", error.body)

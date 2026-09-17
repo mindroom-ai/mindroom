@@ -5918,7 +5918,7 @@ visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mind
 
 [[modules]]
 path = "mindroom.provider_error_compat"
-depends_on = ["mindroom.error_handling"]
+depends_on = ["mindroom.error_handling", "mindroom.model_instance_checks"]
 visibility = ["mindroom.history.runtime", "mindroom.history.summary_call", "mindroom.provider_stream_retry", "mindroom.provider_media_fallback"]
 
 [[modules]]

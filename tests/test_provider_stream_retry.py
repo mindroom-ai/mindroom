@@ -6,7 +6,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 import pytest
@@ -21,7 +21,7 @@ from mindroom import provider_stream_retry
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.model_loading import get_model_instance
-from mindroom.openai_models import MindRoomOpenAIChat
+from mindroom.openai_models import MindRoomOpenAIChat, MindRoomOpenAIResponses
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -84,13 +84,18 @@ def _answer(content: str) -> str:
 
 
 @asynccontextmanager
-async def _model(provider: _Provider, tmp_path: Path) -> AsyncIterator[MindRoomOpenAIChat]:
+async def _model(
+    provider: _Provider,
+    tmp_path: Path,
+    *,
+    api: Literal["chat_completions", "responses"] = "chat_completions",
+) -> AsyncIterator[MindRoomOpenAIChat | MindRoomOpenAIResponses]:
     config = bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="openai", id="test-model", api_key="test-key")}),
+        Config(models={"default": ModelConfig(provider="openai", id="test-model", api=api, api_key="test-key")}),
         test_runtime_paths(tmp_path),
     )
     model = get_model_instance(config, runtime_paths_for(config))
-    assert isinstance(model, MindRoomOpenAIChat)
+    assert isinstance(model, MindRoomOpenAIResponses if api == "responses" else MindRoomOpenAIChat)
     async with AsyncOpenAI(
         api_key="test-key",
         max_retries=0,
