@@ -354,7 +354,11 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
             "origin": {"module": "agno.tools.calculator", "qualname": "CalculatorTools.add"},
             "authority": {
                 **authority_snapshot(config, "lead"),
-                "construction": {"name": "calculator", "factory_origin": tool_registry_origins()["calculator"]},
+                "construction": {
+                    "name": "calculator",
+                    "factory_origin": tool_registry_origins()["calculator"],
+                    "config_signature": "{}",
+                },
             },
         },
     )

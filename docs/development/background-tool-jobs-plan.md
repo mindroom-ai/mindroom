@@ -779,3 +779,9 @@ Only the accepted relative output path is added to the existing native adapter s
 Completed result retrieval reads the saved receipt without validating or rewriting the old destination.
 Integration coverage includes explicit and automatic output, blocking and detached execution, approval recovery after runtime reconstruction, invalid resumed paths, and retrieval after the completed file is moved.
 The unused session-root forwarding helper and its exports were removed, restoring direct use of the existing storage resolver.
+
+Current-grant checks now include the authored constructor settings captured by each concrete non-MCP toolkit.
+The existing immutable construction snapshot retains their canonical value; changing these settings invalidates retained calls and outcomes until the settings match again.
+This closes constructor-controlled grants such as file and shell enable flags without enumerating tool-specific options or rebuilding remote clients during authorization.
+Include/exclude filters retain their existing per-function checks.
+Real SDK integration tests mutate eager and deferred file/shell settings while an outer job is active, verify that the side effect never occurs after revocation, and exercise discovery and result access before and after restoring the original settings.

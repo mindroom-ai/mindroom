@@ -8,7 +8,7 @@ from agno.tools import Toolkit
 
 from mindroom.agent_policy import resolve_agent_policy_from_data
 from mindroom.mcp.registry import mcp_server_id_from_tool_name
-from mindroom.tool_system.construction import get_toolkit_construction
+from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
 from mindroom.tool_system.filters import tool_name_allowed
 from mindroom.tool_system.registry_state import TOOL_METADATA, tool_registry_origins
@@ -51,6 +51,7 @@ def function_authority(function: Function) -> dict[str, Any]:
         "construction": (
             {
                 "name": construction.name,
+                "config_signature": construction.config_signature,
                 "factory_origin": list(construction.factory_origin)
                 if construction.factory_origin is not None
                 else None,
@@ -163,7 +164,7 @@ def _configured_tool_allowed(
     filtered_name = tool_name
     authored_filter: dict[str, Any] = dict(entry.tool_config_overrides)
     if server_id is None:
-        return tool_name_allowed(
+        return construction.get("config_signature") == tool_config_signature(authored_filter) and tool_name_allowed(
             filtered_name,
             include=authored_filter.get("include_tools"),
             exclude=authored_filter.get("exclude_tools"),

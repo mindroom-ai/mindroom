@@ -662,7 +662,12 @@ def _build_tool_instance(
 
     metadata = TOOL_METADATA[tool_name]
     factory = TOOL_REGISTRY[tool_name]
-    construction = ToolConstruction.from_factory(tool_name, factory)
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
+    construction = ToolConstruction.from_factory(
+        tool_name,
+        factory,
+        tool_config_overrides=validated_tool_config_overrides,
+    )
     tool_class = factory()
     resolved_credentials_manager = _resolve_tool_credentials_manager(
         metadata,
@@ -681,7 +686,6 @@ def _build_tool_instance(
     ) or {}
     if credential_overrides:
         credentials = {**credentials, **credential_overrides}
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
     safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
     init_kwargs = _build_tool_config_init_kwargs(
         tool_name,
