@@ -307,6 +307,9 @@ User and model breakdowns cover retained top-level runs.
 They can differ from session totals, which may include compacted history and nested team-member usage.
 Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
+`scanned_sources` counts discovered database candidates, including absent configured databases.
+`unavailable_sources` also includes discovery failures and sources with incomplete metrics or attribution, so it is not a missing-token percentage or necessarily a subset of `scanned_sources`.
+Verified historical aliases are ignored because their canonical directories are scanned separately; unverified symlinks remain coverage warnings.
 This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
@@ -316,6 +319,22 @@ They include `daily_breakdown` when `include_daily=true`, with the same input, o
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
 Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
 Compacted history can contribute to session totals without recoverable model or daily detail.
+
+For an ownership-based view, combine private-agent session usage attributed to owners with retained usage outside private-agent instances attributed to requesters.
+Group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
+For each token counter and user, calculate `user_breakdown.totals - private_agent_breakdown.retained_run_totals + private_agent_breakdown.totals`, summing private-agent rows first and treating missing rows as zero.
+Calculate over the union of users in both breakdowns; users with no private-agent row retain their full `user_breakdown.totals`.
+Use values from the same response and retain `user_id: null` as unattributed usage.
+For example, 60 retained tokens containing 20 private-agent tokens, plus a private-agent session total of 50, gives 90 tokens: `60 - 20 + 50`.
+This includes private history whose detailed runs were compacted without counting its retained runs twice.
+It also replaces recorded-requester attribution for private runs with session ownership: if Bob requested 20 retained tokens from Alice's private instance with 100 session tokens, this view assigns those 100 tokens to Alice and none to Bob.
+Keep `user_breakdown` unchanged when reporting who made the retained requests; the combined view answers a different ownership question.
+Usage outside private-agent instances still relies on retained requester-attributed runs; a shared conversation's recorded requester is not the owner of every run.
+This combined view does not recover historical dates or per-model splits for the additional private session totals, and incomplete coverage still applies.
+
+Consumers should tolerate additional response fields and preserve the distinction between session totals and retained-run breakdowns.
+Coverage corrections can change counter values without changing the response shape.
+Treat each export as a snapshot, rather than adding successive all-time totals together.
 
 #### Personal Private-Agent Usage
 

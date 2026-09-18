@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
+from mindroom.legacy_private_storage_aliases import is_verified_private_instance_alias
 from mindroom.legacy_session_storage import (
     decode_persisted_session_json,
     legacy_session_runs_projection,
@@ -302,6 +303,8 @@ def _private_agent_sources(
     for worker_directory in entries:
         if _WORKER_DIRECTORY.fullmatch(worker_directory.name) is None:
             continue
+        if worker_directory.is_symlink() and is_verified_private_instance_alias(state_root, worker_directory):
+            continue  # Its canonical directory is scanned separately.
         if worker_directory.is_symlink() or not worker_directory.is_dir():
             sources.append(
                 _diagnostic(

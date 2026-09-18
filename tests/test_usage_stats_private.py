@@ -19,9 +19,10 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.usage_stats import UsageStatsTools
-from mindroom.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.legacy_private_storage_aliases import historical_private_instance_worker_key
+from mindroom.private_instance_identity_store import ensure_private_instance_identity, load_private_instance_identity
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.tool_system.worker_routing import build_tool_execution_identity, private_instance_scope_root_path
 from tests.conftest import seed_session
 from tests.test_usage_stats import _config, _metrics, _paths, _row, _run, _source, _wire
 from tests.test_usage_stats_tool import _context
@@ -165,6 +166,10 @@ def test_admin_private_usage_splits_users_and_preserves_compacted_totals(
     assert report["totals"]["total_tokens"] == 720
     users = {row["user_id"]: row for row in report["user_breakdown"]}
     assert users[ALICE]["totals"]["total_tokens"] == 430
+    private_retained = sum(row["retained_run_totals"]["total_tokens"] for row in rows.values())
+    private_sessions = sum(row["totals"]["total_tokens"] for row in rows.values())
+    retained_users = sum(row["totals"]["total_tokens"] for row in users.values())
+    assert retained_users - private_retained + private_sessions == 620
 
 
 @pytest.mark.parametrize("include_daily", [False, True])
@@ -275,6 +280,45 @@ def test_private_rows_share_report_wide_run_deduplication(tmp_path: Path, monkey
     assert {row["user_id"] for row in rows} == {ALICE}
 
 
+def test_combined_private_ownership_differs_from_recorded_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Combining private session totals changes attribution only for private usage."""
+    private_source = replace(_source(scope="private_agent", requester_isolated=True), owner_id=ALICE)
+    shared_source = _source()
+    shared_only_user = "@carol:example.test"
+    private_row = _row(private_source, _run(requester_id=BOB, total_tokens=20), session_metrics=_metrics(100))
+    shared_row = _row(
+        shared_source,
+        _run(requester_id=BOB, total_tokens=30),
+        _run(requester_id=shared_only_user, run_id="shared-only", total_tokens=40),
+        session_metrics=_metrics(80),
+    )
+    _wire(
+        monkeypatch,
+        (private_source, shared_source),
+        {private_source.path_label: (private_row,), shared_source.path_label: (shared_row,)},
+    )
+
+    report = usage_stats.collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+
+    users = {row["user_id"]: row["totals"]["total_tokens"] for row in report["user_breakdown"]}
+    assert users == {BOB: 50, shared_only_user: 40}
+    private = {row["user_id"]: row for row in report["private_agent_breakdown"]}
+    assert private[ALICE]["totals"]["total_tokens"] == 100
+    assert private[ALICE]["retained_run_totals"]["total_tokens"] == 0
+    assert private[BOB]["totals"]["total_tokens"] == 0
+    assert private[BOB]["retained_run_totals"]["total_tokens"] == 20
+    private_retained = {user: row["retained_run_totals"]["total_tokens"] for user, row in private.items()}
+    private_sessions = {user: row["totals"]["total_tokens"] for user, row in private.items()}
+    combined = {
+        user: users.get(user, 0) - private_retained.get(user, 0) + private_sessions.get(user, 0)
+        for user in users.keys() | private.keys()
+    }
+    assert combined == {ALICE: 100, BOB: 30, shared_only_user: 40}
+
+
 def test_private_rows_report_unreadable_run_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unavailable retained runs must not make private coverage look complete."""
     source = _source(scope="private_agent", requester_isolated=True)
@@ -301,6 +345,70 @@ def test_private_coverage_reports_unreadable_namespace(tmp_path: Path, monkeypat
     assert report["totals"]["total_tokens"] == 500
     assert report["coverage"]["unavailable_sources"] == 1
     assert report["private_agent_breakdown"] == []
+    assert report["private_agent_coverage"]["unavailable_sources"] == 1
+
+
+def _publish_legacy_usage_alias(data: PrivateUsageData) -> tuple[Path, Path]:
+    """Publish the exact owner-bound primary alias and optional session mirror."""
+    database = seed_private_usage(
+        data,
+        "code",
+        ALICE,
+        session_tokens=100,
+        run_tokens=20,
+        stored_requester=None,
+    )
+    session_directory = database.parents[2]
+    primary_directory = data.paths.storage_root / "private_instances" / session_directory.name
+    owner = load_private_instance_identity(data.paths.storage_root, primary_directory)
+    assert owner is not None
+    historical_key = historical_private_instance_worker_key(owner.worker_key, owner.requester_id)
+    primary_alias = private_instance_scope_root_path(data.paths.storage_root, historical_key)
+    primary_alias.symlink_to(primary_directory.name, target_is_directory=True)
+    session_alias = session_directory.parent / primary_alias.name
+    if session_alias != primary_alias:
+        session_alias.symlink_to(session_directory.name, target_is_directory=True)
+    return primary_alias, session_alias
+
+
+@pytest.mark.parametrize("separate_sessions", [False, True])
+def test_private_coverage_does_not_count_verified_alias_as_missing(tmp_path: Path, separate_sessions: bool) -> None:
+    """Historical aliases must neither duplicate totals nor report unreadable storage."""
+    data = private_usage_data(tmp_path, separate_sessions=separate_sessions)
+    _publish_legacy_usage_alias(data)
+
+    report = usage_stats.collect_admin_usage(config=data.config, runtime_paths=data.paths, include_daily=True).to_dict()
+
+    assert report["totals"]["total_tokens"] == 720
+    assert report["coverage"]["scanned_sources"] == 4
+    assert report["private_agent_coverage"]["scanned_sources"] == 3
+    for field in ("coverage", "model_coverage", "user_coverage", "daily_coverage", "private_agent_coverage"):
+        assert report[field]["unavailable_sources"] == 0
+
+
+@pytest.mark.parametrize("damage", ["unverified_name", "absolute_target", "missing_primary", "different_target"])
+def test_private_coverage_preserves_warning_for_unverified_alias(tmp_path: Path, damage: str) -> None:
+    """A readable symlink target alone must not suppress discovery warnings."""
+    data = private_usage_data(tmp_path)
+    primary_alias, session_alias = _publish_legacy_usage_alias(data)
+    target = session_alias.resolve()
+    if damage == "unverified_name":
+        session_alias.rename(session_alias.with_name("unverified-0000000000000000"))
+    elif damage == "absolute_target":
+        session_alias.unlink()
+        session_alias.symlink_to(target, target_is_directory=True)
+    elif damage == "missing_primary":
+        primary_alias.unlink()
+    else:
+        other = next(
+            path for path in target.parent.iterdir() if path.is_dir() and not path.is_symlink() and path != target
+        )
+        session_alias.unlink()
+        session_alias.symlink_to(other.name, target_is_directory=True)
+
+    report = usage_stats.collect_admin_usage(config=data.config, runtime_paths=data.paths).to_dict()
+    assert report["totals"]["total_tokens"] == 720
+    assert report["coverage"]["unavailable_sources"] == 1
     assert report["private_agent_coverage"]["unavailable_sources"] == 1
 
 

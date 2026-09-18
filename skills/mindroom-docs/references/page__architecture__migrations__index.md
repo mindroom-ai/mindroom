@@ -222,6 +222,7 @@ Interrupted visible replies are excluded; eligible in-progress text is cleaned b
 A journal replacement must coordinate its generation binding with the next Nio baseline.
 Agno sessions may still contain current handled-turn recovery facts and historical run blobs, while Matrix keeps visible messages and state independently of local storage.
 Private storage moves require stopped primaries and absent managed workers, as described in [Private Storage Migration](https://docs.mindroom.chat/deployment/private-storage-upgrade/).
+Usage discovery ignores verified historical primary and session aliases because their canonical directories are scanned separately; unverified symlinks still report incomplete coverage.
 The Nio cutoff abandons pre-durable pending transport work while preserving crypto material, as described in [Nio 1.0 Upgrade](https://docs.mindroom.chat/deployment/nio-upgrade/).
 Dependency migrations use their dependency's schema and locking contract, and SaaS databases are never treated as reconstructible caches.
 
