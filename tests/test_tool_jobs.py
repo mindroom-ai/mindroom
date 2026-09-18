@@ -60,6 +60,30 @@ async def test_scoped_listing_keeps_consumed_outcomes_across_turns_and_restart(t
 
 
 @pytest.mark.asyncio
+async def test_recent_outcome_order_and_timestamps_survive_restart(tmp_path: Path) -> None:
+    """Flushing unchanged outcomes must not make filename order look like completion order."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    for job_id in ("zolder", "anewer"):
+        await runtime.start(JobSpec(job_id, "read", 0), owner=_owner(), operation=completed)
+        waited = await runtime.wait(job_id, owner=_owner(), depth=0)
+        await runtime.acknowledge_wait(job_id, waited.token)
+    before = await runtime.list_jobs(owner=_owner(), depth=0)
+    assert [job.job_id for job in before] == ["anewer", "zolder"]
+    await runtime.shutdown()
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        after = await restored.list_jobs(owner=_owner(), depth=0)
+        assert [(job.job_id, job.updated_at) for job in after] == [(job.job_id, job.updated_at) for job in before]
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_failed_admission_rolls_back_without_subscription_or_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

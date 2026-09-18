@@ -707,3 +707,19 @@ Unknown job IDs receiving the scoped unavailable-job message and shell error tex
 
 This exploratory run did not cover 24 hours of elapsed retention, other providers, worker-container routing, media, or approvals.
 Earlier deterministic approval and Python 3.14 coverage remains separate evidence; the real-model run does not replace it.
+
+### Rebase and fresh review after the shell fix
+
+PR #2130 was squash-merged, and this branch was rebased onto `main` at `d697d2a7b`.
+The rebase retains the new subagent model selection alongside managed wait budgets.
+A real-model Matrix run verified all 2,500,000 generated shell-output bytes, the requested child model in durable session state, human follow-ups, Stop, and recovery of the same visible message without replaying its interrupted command.
+The rebased baseline passed 22,549 tests with 13 skips across parallel and isolated groups.
+
+Fresh independent review found four additional gaps, now covered by regression tests:
+
+- Skill access must retain its concrete source through the output-file wrapper. Configured skill grants are rechecked; workspace script execution remains blocked by the existing skill policy.
+- Ad hoc teams use an ordinary agent as their Matrix transport. Managed execution and durable discovery accept that runtime-owned actor/transport pair while retaining requester, configured-team membership, and native delegation checks.
+- Fresh blocking replies can publish progress while waiting. Stop and restart cancellation preserve the latest owned Matrix presentation, just as recovery does, and leave it intact if it cannot be read.
+- Restart and shutdown flushes preserve unchanged job timestamps so recent-result ordering survives recovery.
+
+These corrections reuse the existing ownership and presentation boundaries; they do not introduce another team roster or mutable presentation cache.

@@ -2161,7 +2161,10 @@ class ResponseRunner:
             interrupted_message=interrupted_message,
         )
         if message_id:
-            if initial_presentation is not None:
+            if initial_presentation is not None or background_tool_jobs_enabled(
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+            ):
                 try:
                     initial_presentation = await self._read_response_presentation(
                         room_id=delivery_target.room_id,
@@ -2172,7 +2175,7 @@ class ResponseRunner:
                     initial_presentation = None
                 if initial_presentation is None:
                     # A blocking wait may have published newer text. Never replace it
-                    # with the saved prefix when Matrix cannot prove the current body.
+                    # when Matrix cannot prove the current body.
                     return FinalDeliveryOutcome(
                         terminal_status="cancelled",
                         event_id=message_id,

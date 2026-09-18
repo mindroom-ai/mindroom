@@ -65,6 +65,13 @@ def _framework_tool_allowed(config: Config, agent_name: str, tool_name: str, ori
     agent = config.agents[agent_name]
     module = str(origin.get("module", ""))
     qualname = str(origin.get("qualname", ""))
+    skill_tools = {
+        "get_skill_instructions": ("agno.skills.agent_skills", "Skills._get_skill_instructions"),
+        "get_skill_reference": ("agno.skills.agent_skills", "Skills._get_skill_reference"),
+        "get_skill_script": ("mindroom.tool_system.skills", "_MindroomSkills._get_skill_script"),
+    }
+    if (module, qualname) == skill_tools.get(tool_name):
+        return origin.get("workspace_skill") is True or origin.get("skill_name") in agent.skills
     if (
         module == "agno.agent._default_tools"
         and tool_name == "search_knowledge_base"
@@ -112,7 +119,7 @@ def locally_allowed(
         if authority.get("scope") != policy.effective_execution_scope:
             return False
     if toolkit_name is None:
-        # Framework-owned knowledge and memory functions have no authored toolkit.
+        # Framework-owned knowledge, memory, and skill functions have no authored toolkit.
         return _framework_tool_allowed(config, owner.agent_name, tool_name, origin)
     construction = authority.get("construction")
     if not isinstance(construction, dict):

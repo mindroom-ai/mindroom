@@ -5728,6 +5728,7 @@ expose = [
     "resolve_skill_listing",
     "set_plugin_skill_roots",
     "skill_can_edit",
+    "skill_access_origin",
 ]
 from = ["mindroom.tool_system.skills"]
 
@@ -6768,7 +6769,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.tool_jobs.provenance"
-depends_on = ["mindroom.mcp", "mindroom.mcp.toolkit"]
+depends_on = ["mindroom.mcp", "mindroom.mcp.toolkit", "mindroom.tool_system.declarations", "mindroom.tool_system.skills"]
 visibility = ["mindroom.tool_jobs.agno_execution", "mindroom.orchestration.tool_job_runtime"]
 
 [[modules]]
