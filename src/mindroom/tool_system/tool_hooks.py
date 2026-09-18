@@ -999,6 +999,9 @@ def build_tool_hook_bridge(
             ),
         )
 
+    # Agno repeatedly inspects hooks while injecting arguments on every call.
+    # This owned wrapper has a fixed signature for its lifetime.
+    sync_bridge.__dict__["__signature__"] = inspect.signature(sync_bridge)
     _SYNC_BRIDGES[bridge] = sync_bridge
     return bridge
 

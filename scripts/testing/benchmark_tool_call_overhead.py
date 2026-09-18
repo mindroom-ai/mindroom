@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from agno.tools import Toolkit
+from agno.tools.function import FunctionCall
 
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import (
@@ -25,7 +27,7 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -96,20 +98,38 @@ async def _run_case(
     hook_registry: HookRegistry,
     iterations: int,
     warmup: int,
+    include_agno: bool = False,
 ) -> dict[str, object]:
     bridge = build_tool_hook_bridge(hook_registry, agent_name="benchmark")
+
+    if include_agno:
+        toolkit = Toolkit(name="benchmark", tools=[func])
+        function = next(iter((*toolkit.functions.values(), *toolkit.async_functions.values())))
+        function.name = "noop"
+        function.process_entrypoint()
+        prepend_tool_hook_bridge(toolkit, bridge)
+
+    async def invoke() -> None:
+        if include_agno:
+            result = await FunctionCall(function=function, arguments={"value": 1}).aexecute()
+            if result.status != "success" or result.result != 1:
+                msg = f"Agno benchmark returned unexpected result: {result}"
+                raise RuntimeError(msg)
+        else:
+            await bridge("noop", func, {"value": 1})
+
     for _ in range(warmup):
-        await bridge("noop", func, {"value": 1})
+        await invoke()
 
     samples: list[float] = []
     for _ in range(iterations):
         started_at = time.perf_counter()
-        await bridge("noop", func, {"value": 1})
+        await invoke()
         samples.append((time.perf_counter() - started_at) * 1000)
-    return {"case": label, **summarize_samples(samples)}
+    return {"case": f"agno_{label}" if include_agno else label, **summarize_samples(samples)}
 
 
-async def _run_benchmark(iterations: int, warmup: int) -> list[dict[str, object]]:
+async def _run_benchmark(iterations: int, warmup: int, *, include_agno: bool = False) -> list[dict[str, object]]:
     return [
         await _run_case(
             label="async_no_hooks",
@@ -117,6 +137,7 @@ async def _run_benchmark(iterations: int, warmup: int) -> list[dict[str, object]
             hook_registry=HookRegistry.empty(),
             iterations=iterations,
             warmup=warmup,
+            include_agno=include_agno,
         ),
         await _run_case(
             label="sync_no_hooks",
@@ -124,6 +145,7 @@ async def _run_benchmark(iterations: int, warmup: int) -> list[dict[str, object]
             hook_registry=HookRegistry.empty(),
             iterations=iterations,
             warmup=warmup,
+            include_agno=include_agno,
         ),
         await _run_case(
             label="async_with_hooks",
@@ -131,6 +153,7 @@ async def _run_benchmark(iterations: int, warmup: int) -> list[dict[str, object]
             hook_registry=_registry_with_hooks(),
             iterations=iterations,
             warmup=warmup,
+            include_agno=include_agno,
         ),
         await _run_case(
             label="sync_with_hooks",
@@ -138,6 +161,7 @@ async def _run_benchmark(iterations: int, warmup: int) -> list[dict[str, object]
             hook_registry=_registry_with_hooks(),
             iterations=iterations,
             warmup=warmup,
+            include_agno=include_agno,
         ),
     ]
 
@@ -318,6 +342,11 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=50)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
+        "--agno",
+        action="store_true",
+        help="Include prepared Agno FunctionCall.aexecute and its hook dispatch.",
+    )
+    modes.add_argument(
         "--shell",
         action="store_true",
         help="Benchmark real local shell calls (argv and command strings).",
@@ -357,7 +386,7 @@ def main() -> None:
     elif args.sandbox_dispatch:
         results = [_run_sandbox_dispatch_case(mode, args.iterations, args.warmup) for mode in args.sandbox_dispatch]
     else:
-        results = asyncio.run(_run_benchmark(iterations=args.iterations, warmup=args.warmup))
+        results = asyncio.run(_run_benchmark(iterations=args.iterations, warmup=args.warmup, include_agno=args.agno))
     print(json.dumps(results, indent=2, sort_keys=True))
 
 

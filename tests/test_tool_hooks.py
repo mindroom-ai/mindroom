@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import threading
 import time
@@ -419,6 +420,33 @@ async def test_emit_gate_fails_open_on_errors_and_timeouts(tmp_path: Path) -> No
 def test_build_tool_hook_bridge_returns_bridge_without_tool_hooks() -> None:
     """Failure logging should keep the bridge installed even without plugin hooks."""
     assert build_tool_hook_bridge(HookRegistry.empty(), agent_name="code") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_entrypoint", [False, True])
+async def test_agno_tool_calls_reuse_bridge_signature(async_entrypoint: bool) -> None:
+    """Repeated real tool calls must not re-read the owned bridge's annotations."""
+
+    def echo(value: str) -> str:
+        return value
+
+    async def async_echo(value: str) -> str:
+        return value
+
+    toolkit = Toolkit(name="signature", tools=[async_echo if async_entrypoint else echo])
+    function = _first_function(toolkit)
+    function.process_entrypoint()
+    prepend_tool_hook_bridge(toolkit, build_tool_hook_bridge(HookRegistry.empty(), agent_name="code"))
+    assert function.tool_hooks is not None
+    installed_bridge = function.tool_hooks[0]
+
+    with patch("inspect.get_annotations", wraps=inspect.get_annotations) as annotation_reads:
+        for value in ("first", "second"):
+            result = await FunctionCall(function=function, arguments={"value": value}).aexecute()
+            assert result.status == "success"
+            assert result.result == value
+
+    assert not [call for call in annotation_reads.call_args_list if call.args[0] is installed_bridge]
 
 
 @pytest.mark.asyncio
