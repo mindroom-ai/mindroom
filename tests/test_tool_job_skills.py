@@ -31,7 +31,9 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("workspace", [False, True])
 @pytest.mark.parametrize("wait_timeout", [None, 0])
 async def test_skill_access_through_managed_sdk_calls(
-    tmp_path: Path, workspace: bool, wait_timeout: int | None
+    tmp_path: Path,
+    workspace: bool,
+    wait_timeout: int | None,
 ) -> None:
     """Configured and workspace skills retain instructions, references, and script policy."""
     config = _config(tmp_path)
@@ -57,7 +59,11 @@ async def test_skill_access_through_managed_sdk_calls(
     calls = [
         _call("get_skill_instructions", "instructions", skill_name="demo", wait_timeout=wait_timeout),
         _call(
-            "get_skill_reference", "reference", skill_name="demo", reference_path="guide.md", wait_timeout=wait_timeout
+            "get_skill_reference",
+            "reference",
+            skill_name="demo",
+            reference_path="guide.md",
+            wait_timeout=wait_timeout,
         ),
         _call("get_skill_script", "script", skill_name="demo", script_path="hello.sh", wait_timeout=wait_timeout),
         _call(

@@ -723,3 +723,4 @@ Fresh independent review found four additional gaps, now covered by regression t
 - Restart and shutdown flushes preserve unchanged job timestamps so recent-result ordering survives recovery.
 
 These corrections reuse the existing ownership and presentation boundaries; they do not introduce another team roster or mutable presentation cache.
+They passed 348 focused tests with two optional skips and ten further real-model Matrix checks for skill access, workspace script policy, fresh blocking Stop preservation, and ad hoc member tools.
