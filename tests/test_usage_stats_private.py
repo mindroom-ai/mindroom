@@ -287,8 +287,14 @@ def test_combined_private_ownership_differs_from_recorded_requester(
     """Combining private session totals changes attribution only for private usage."""
     private_source = replace(_source(scope="private_agent", requester_isolated=True), owner_id=ALICE)
     shared_source = _source()
+    shared_only_user = "@carol:example.test"
     private_row = _row(private_source, _run(requester_id=BOB, total_tokens=20), session_metrics=_metrics(100))
-    shared_row = _row(shared_source, _run(requester_id=BOB, total_tokens=30), session_metrics=_metrics(40))
+    shared_row = _row(
+        shared_source,
+        _run(requester_id=BOB, total_tokens=30),
+        _run(requester_id=shared_only_user, run_id="shared-only", total_tokens=40),
+        session_metrics=_metrics(80),
+    )
     _wire(
         monkeypatch,
         (private_source, shared_source),
@@ -298,17 +304,19 @@ def test_combined_private_ownership_differs_from_recorded_requester(
     report = usage_stats.collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
 
     users = {row["user_id"]: row["totals"]["total_tokens"] for row in report["user_breakdown"]}
-    assert users == {BOB: 50}
+    assert users == {BOB: 50, shared_only_user: 40}
     private = {row["user_id"]: row for row in report["private_agent_breakdown"]}
     assert private[ALICE]["totals"]["total_tokens"] == 100
     assert private[ALICE]["retained_run_totals"]["total_tokens"] == 0
     assert private[BOB]["totals"]["total_tokens"] == 0
     assert private[BOB]["retained_run_totals"]["total_tokens"] == 20
+    private_retained = {user: row["retained_run_totals"]["total_tokens"] for user, row in private.items()}
+    private_sessions = {user: row["totals"]["total_tokens"] for user, row in private.items()}
     combined = {
-        user: users.get(user, 0) - row["retained_run_totals"]["total_tokens"] + row["totals"]["total_tokens"]
-        for user, row in private.items()
+        user: users.get(user, 0) - private_retained.get(user, 0) + private_sessions.get(user, 0)
+        for user in users.keys() | private.keys()
     }
-    assert combined == {ALICE: 100, BOB: 30}
+    assert combined == {ALICE: 100, BOB: 30, shared_only_user: 40}
 
 
 def test_private_rows_report_unreadable_run_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

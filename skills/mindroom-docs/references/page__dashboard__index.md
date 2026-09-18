@@ -319,6 +319,7 @@ Compacted history can contribute to session totals without recoverable model or 
 For an ownership-based view, combine private-agent session usage attributed to owners with retained usage outside private-agent instances attributed to requesters.
 Group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
 For each token counter and user, calculate `user_breakdown.totals - private_agent_breakdown.retained_run_totals + private_agent_breakdown.totals`, summing private-agent rows first and treating missing rows as zero.
+Calculate over the union of users in both breakdowns; users with no private-agent row retain their full `user_breakdown.totals`.
 Use values from the same response and retain `user_id: null` as unattributed usage.
 For example, 60 retained tokens containing 20 private-agent tokens, plus a private-agent session total of 50, gives 90 tokens: `60 - 20 + 50`.
 This includes private history whose detailed runs were compacted without counting its retained runs twice.
