@@ -326,6 +326,8 @@ SDK toolkit disconnects retain Agno's existing best-effort behavior: logged tear
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
 Native delegation also rechecks the saved caller and child storage bindings; changing either storage scope blocks discovery, controls, and completion delivery.
+Output redirection and automatic output saving apply to the completed child result, while released waits return the job handle directly.
+The accepted output path survives approval recovery and is revalidated before resumed execution; retrieving a completed result only reads its saved receipt.
 Run IDs do not define ownership, so `job(action="list")` can rediscover handles after compaction, later turns, and runtime restart.
 A team must route management through the member that started the job; a leader cannot read another member's jobs directly.
 Still-authorized deferred tools remain discoverable without loading them or connecting to remote services.
