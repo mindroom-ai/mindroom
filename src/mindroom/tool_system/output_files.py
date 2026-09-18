@@ -8,6 +8,7 @@ import os
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -86,6 +87,22 @@ class ToolOutputFileRequest:
     policy: ToolOutputFilePolicy
     tool_name: str
     path: _ValidatedOutputPath | None
+
+
+@dataclass(frozen=True)
+class ToolOutputFileHandled:
+    """A tool owner has accepted responsibility for publishing its output file."""
+
+    result: object
+
+
+_active_output_request: ContextVar[ToolOutputFileRequest | None] = ContextVar("tool_output_file_request", default=None)
+
+
+def current_tool_output_file_request() -> ToolOutputFileRequest | None:
+    """Return the current explicit redirect, for tools that capture before returning."""
+    request = _active_output_request.get()
+    return request if request is not None and request.path is not None else None
 
 
 @dataclass(frozen=True)
@@ -678,6 +695,8 @@ def prepare_tool_output_file(
 
 def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
     """Apply the shared explicit redirect or large-result policy after execution."""
+    if isinstance(result, ToolOutputFileHandled):
+        return result.result
     if request.path is None:
         return _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
     return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
@@ -696,7 +715,11 @@ def _wrap_entrypoint(
             request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
             if isinstance(request, dict):
                 return request
-            result = await async_entrypoint(*args, **kwargs)
+            token = _active_output_request.set(request)
+            try:
+                result = await async_entrypoint(*args, **kwargs)
+            finally:
+                _active_output_request.reset(token)
             return finalize_tool_output_file(request, result)
 
         wrapper = async_wrapper
@@ -706,7 +729,11 @@ def _wrap_entrypoint(
             request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
             if isinstance(request, dict):
                 return request
-            result = entrypoint(*args, **kwargs)
+            token = _active_output_request.set(request)
+            try:
+                result = entrypoint(*args, **kwargs)
+            finally:
+                _active_output_request.reset(token)
             return finalize_tool_output_file(request, result)
 
         wrapper = sync_wrapper

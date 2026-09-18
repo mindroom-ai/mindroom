@@ -38,7 +38,7 @@ import tempfile
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 from typing import Literal
@@ -52,6 +52,7 @@ from mindroom.shell_execution import (
     kill_command,
     run_command,
 )
+from mindroom.shell_output_capture import ShellOutputDestination
 
 logger = get_logger(__name__)
 
@@ -121,6 +122,7 @@ async def _handle_run(
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
     response_timeout, deadline_at = _run_timings(payload)
+    output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
     command_argv = [str(item) for item in argv_payload]
     if handle_payload is not None and background_script_supervision_supported():
         command_argv = [
@@ -141,6 +143,7 @@ async def _handle_run(
             timeout=response_timeout,
             handle=handle_payload,
             handle_reservations=handle_reservations,
+            output_destination=output_destination,
         ),
     )
     # EOF before the run response means the client (a per-request tool
@@ -310,6 +313,7 @@ async def run_command_via_supervisor(
     timeout: float,  # noqa: ASYNC109
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
+    output_destination: ShellOutputDestination | None = None,
 ) -> str:
     """Run one shell command through the supervisor and return its message."""
     request = {
@@ -325,6 +329,8 @@ async def run_command_via_supervisor(
         request["handle"] = handle
     if max_runtime_seconds is not None:
         request["max_runtime_seconds"] = max_runtime_seconds
+    if output_destination is not None:
+        request["output_destination"] = asdict(output_destination)
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:

@@ -25,6 +25,7 @@ from mindroom.shell_execution import (
     kill_command,
     run_command,
 )
+from mindroom.shell_output_capture import ShellOutputDestination
 from mindroom.shell_supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     check_command_via_supervisor,
@@ -39,6 +40,7 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolStatus,
 )
+from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
@@ -384,7 +386,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             args: list[str] | str,
             tail: int = 100,
             timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS,  # noqa: ASYNC109
-        ) -> str:
+        ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
             If the command completes within ``timeout`` seconds the last ``tail``
@@ -392,6 +394,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             the timeout is exceeded the process keeps running in the background
             and a handle string is returned that can be polled with
             ``check_shell_command`` or stopped with ``kill_shell_command``.
+
+            With ``mindroom_output_path``, capture the complete supported output
+            within the redirect byte limit instead of applying ``tail``. If the
+            command backgrounds, it saves to that destination when it finishes;
+            ``check_shell_command`` then returns the file receipt.
 
             Command strings use non-login Bash with the prepared execution environment.
             Use explicit ``["bash", "-lc", command]`` only when login startup is needed.
@@ -417,6 +424,16 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
             )
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
+            output_request = current_tool_output_file_request()
+            output_destination = (
+                ShellOutputDestination(
+                    workspace_root=str(output_request.policy.workspace_root),
+                    path=output_request.path.requested_path,
+                    max_bytes=output_request.policy.max_bytes,
+                )
+                if output_request is not None and output_request.path is not None
+                else None
+            )
             if self._supervisor_socket is not None:
                 message = await run_command_via_supervisor(
                     self._supervisor_socket,
@@ -426,6 +443,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     cwd=cwd,
                     tail=tail,
                     timeout=timeout,
+                    output_destination=output_destination,
                 )
             else:
                 result = await run_command(
@@ -436,8 +454,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     cwd=cwd,
                     tail=tail,
                     timeout=timeout,
+                    output_destination=output_destination,
                 )
                 message = result.message
+            if output_destination is not None:
+                return ToolOutputFileHandled(message)
             if cwd is None:
                 return message
             return f"[cwd: {cwd}]\n{message}"
