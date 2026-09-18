@@ -7,12 +7,14 @@ import json
 import re
 from datetime import UTC, datetime
 from functools import partial
+from traceback import walk_tb
 from typing import TYPE_CHECKING, Any, Never, Protocol
 
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from mindroom.json_utils import object_with_unique_keys
+from mindroom.logging_config import get_logger
 from mindroom.mcp_gateway.accounts import (
     AccountConflictError,
     AccountNotFoundError,
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
 
     from mindroom.mcp_gateway.accounts import GatewayAccounts
 
+logger = get_logger(__name__)
 _BASE = "/mcp/scim/v2"
 _CORE = "urn:ietf:params:scim:schemas:core:2.0:"
 _MESSAGES = "urn:ietf:params:scim:api:messages:2.0:"
@@ -415,7 +418,12 @@ def scim_routes(runtime_for_request: Callable[[Request], _ScimRuntime]) -> list[
             return _error(_ScimError(409, "The userName already exists.", "uniqueness"))
         except AccountNotFoundError:
             return _error(_ScimError(404, "Account not found."))
-        except AccountValidationError:
+        except AccountValidationError as error:
+            logger.warning(
+                "SCIM account validation failed",
+                method=request.method,
+                validation_frames=[f"{frame.f_code.co_name}:{line}" for frame, line in walk_tb(error.__traceback__)],
+            )
             return _error(_ScimError(400, "Invalid or missing supported account attributes.", "invalidValue"))
         except _ScimError as error:
             return _error(error)
