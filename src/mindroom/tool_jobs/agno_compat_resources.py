@@ -70,6 +70,14 @@ def _sync_bindings[Actor: _Actor](
     return open_tools, close_tools
 
 
+async def _release_async_tools(actor: _Actor) -> None:
+    """Transfer or close every SDK acquisition in one cancellation-safe batch."""
+    captured = actor._mcp_tools_initialized_on_run or []
+    actor._mcp_tools_initialized_on_run = []
+    for toolkit in captured:
+        await disconnect_async_execution_resource(toolkit)
+
+
 def _async_bindings[Actor: _Actor](
     connect: _AsyncConnect[Actor],
     disconnect: _AsyncConnect[Actor],
@@ -106,10 +114,7 @@ def _async_bindings[Actor: _Actor](
         if current_execution_resources() is None:
             await disconnect(actor)
             return
-        captured = actor._mcp_tools_initialized_on_run or []
-        actor._mcp_tools_initialized_on_run = []
-        for toolkit in captured:
-            await disconnect_async_execution_resource(toolkit)
+        await run_coroutine_until_complete(_release_async_tools(actor))
 
     return open_tools, close_tools
 

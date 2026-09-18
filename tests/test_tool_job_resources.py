@@ -16,6 +16,8 @@ from agno.tools import Toolkit
 from mindroom.tool_jobs import agno_compat_resources
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
 from mindroom.tool_jobs.resources import (
+    ExecutionResources,
+    bind_execution_resources,
     connect_async_execution_resource,
     disconnect_async_execution_resource,
     execution_resources,
@@ -270,6 +272,51 @@ async def _disconnect_mcp_actor(actor: Agent | Team) -> None:
         await team_init._disconnect_mcp_tools(actor)
     else:
         await agent_init.disconnect_mcp_tools(actor)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("teams", [False, True])
+@pytest.mark.parametrize("detached_child", [False, True])
+async def test_cancelled_teardown_drains_every_sdk_connection(*, teams: bool, detached_child: bool) -> None:
+    """Repeated cancellation cannot abandon later immediate or deferred closes."""
+    install_execution_resource_bindings()
+    toolkits = [MCPTools("first"), MCPTools("second")]
+    for toolkit in toolkits:
+        toolkit.allow_close.clear()
+    actor = Team(id="actor", members=[], tools=toolkits) if teams else Agent(id="actor", tools=toolkits)
+    resources = ExecutionResources()
+    child = resources.acquire() if detached_child else None
+
+    with bind_execution_resources(resources):
+        await _connect_mcp_actor(actor)
+        if child is not None:
+            await _disconnect_mcp_actor(actor)
+            await resources.release_parent()
+            closing = asyncio.create_task(child.release())
+        else:
+            closing = asyncio.create_task(_disconnect_mcp_actor(actor))
+        try:
+            for toolkit in toolkits:
+                await asyncio.wait_for(toolkit.close_started.wait(), 2)
+                assert not closing.done()
+                closing.cancel()
+                toolkit.allow_close.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(closing, 2)
+            assert actor._mcp_tools_initialized_on_run == []
+            assert all(not toolkit.initialized for toolkit in toolkits)
+            assert all(toolkit.connects == toolkit.closes == 1 for toolkit in toolkits)
+            if child is not None:
+                await child.release()
+        finally:
+            for toolkit in toolkits:
+                toolkit.allow_close.set()
+            await asyncio.gather(closing, return_exceptions=True)
+            for toolkit in toolkits:
+                if toolkit.initialized:
+                    await disconnect_async_execution_resource(toolkit)
+            if child is None:
+                await resources.release_parent()
 
 
 @pytest.mark.asyncio

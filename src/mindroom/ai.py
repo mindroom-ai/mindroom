@@ -626,12 +626,16 @@ def _attach_blocking_pause_presentation(
     response: RunOutput,
     *,
     show_tool_calls: bool,
+    initial_presentation: StreamingPresentation | None = None,
 ) -> PausedAttempt:
     """Render a blocking pause once, before it crosses the approval boundary."""
     presentation = CollectedStreamPresentation(
         show_tool_calls=show_tool_calls,
         track_hidden_tools=True,
+        response_text=initial_presentation.response_text if initial_presentation is not None else "",
+        tool_trace=list(deepcopy(initial_presentation.tool_trace)) if initial_presentation is not None else [],
     )
+    presentation.separate_next_text = bool(presentation.response_text)
     presentation.append_text(_extract_replayable_response_text(response))
     pending_by_id: dict[str, ToolExecution] = {}
     for tool in paused.tools:
@@ -1688,6 +1692,10 @@ async def ai_response(  # noqa: C901, PLR0915
                         paused_attempt,
                         response,
                         show_tool_calls=show_tool_calls,
+                        initial_presentation=StreamingPresentation(
+                            response_text=run.prior_response_text,
+                            tool_trace=tuple(run.turn_state.prior_completed_tools),
+                        ),
                     ),
                     runtime_model_name=prepared_run.runtime_model_name,
                 )
@@ -2405,9 +2413,9 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 if isinstance(chunk, RunContentEvent) and chunk.content:
                     attempt_has_content = True
                 elif isinstance(chunk, RunCompletedEvent):
-                    # A restored prefix must not suppress an SDK provider that
-                    # reports its new answer only on the terminal event.
-                    if ctx.initial_presentation is not None and not attempt_has_content and chunk.content:
+                    # Prior attempts or recovery text must not hide an answer
+                    # reported only in this attempt's terminal event.
+                    if not attempt_has_content and chunk.content:
                         yield RunContentEvent(content=str(chunk.content))
                     attempt_has_content = False
                 yield chunk

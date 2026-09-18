@@ -75,15 +75,8 @@ class ExecutionResources:
             callbacks = self._callbacks if self._references == 0 else []
             if callbacks:
                 self._callbacks = []
-        failures = []
-        for callback in callbacks:
-            try:
-                await run_coroutine_until_complete(_await_cleanup(callback))
-            except Exception as error:
-                failures.append(error)
-        if failures:
-            msg = "Tool execution resource cleanup failed"
-            raise ExceptionGroup(msg, failures)
+        if callbacks:
+            await run_coroutine_until_complete(_drain_cleanup(callbacks))
 
 
 def current_execution_resources() -> ExecutionResources | None:
@@ -242,5 +235,14 @@ async def _join_connection(task: asyncio.Task[None]) -> None:
     await asyncio.shield(task)
 
 
-async def _await_cleanup(callback: Callable[[], Awaitable[None]]) -> None:
-    await callback()
+async def _drain_cleanup(callbacks: list[Callable[[], Awaitable[None]]]) -> None:
+    """Finish the entire captured release batch before cancellation escapes."""
+    failures = []
+    for callback in callbacks:
+        try:
+            await callback()
+        except Exception as error:
+            failures.append(error)
+    if failures:
+        msg = "Tool execution resource cleanup failed"
+        raise ExceptionGroup(msg, failures)

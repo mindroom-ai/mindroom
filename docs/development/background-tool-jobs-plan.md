@@ -754,3 +754,11 @@ The shared turn state now retains completed semantic text, while blocking respon
 Terminal SDK summaries keep the structured live document and its trace.
 Regression assertions inspect the final document and canonical recorder, including repeated joins, recovered prefixes, cancellation, and quiet control tokens; approved continuations retain their existing collector.
 Quiet continuations preserve substantive findings without concatenating `NO_REPLY` into a visible report.
+
+Subsequent review found that cancellation could finish one resource close but abandon the rest of its captured batch.
+The resource owner and SDK teardown adapter now drain each complete release batch before propagating caller cancellation.
+Agent and team regressions cancel both successive closes in immediate and detached cleanup paths.
+
+Blocking agent approval pauses also retain the completed background-join presentation through the existing pause builder, including hidden tool identities and visible marker numbering.
+The agent stream adapter applies terminal-only content fallback to every attempt, so a normal background continuation retains its answer even when the provider emits no text delta.
+Regression coverage exercises actual SDK approval pauses and both collected and Matrix streaming delivery.
