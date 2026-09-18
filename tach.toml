@@ -4070,6 +4070,7 @@ depends_on = [
     "mindroom.legacy_streaming",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.mentions",
+    "mindroom.matrix.message_builder",
     "mindroom.message_target",
     "mindroom.orchestration.runtime",
     "mindroom.streaming_warmup",
