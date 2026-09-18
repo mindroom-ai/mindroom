@@ -91,6 +91,7 @@ async def start_delegation(
     human_signal: HumanMessageSignal | None = None,
     initial_wait_token: str | None = None,
     cancel: Callable[[DelegationChild], Awaitable[None]] | None = None,
+    output_path: str | None = None,
 ) -> BackgroundJob:
     """Accept native child ownership without exposing its live object in a generic record."""
     if child.caller_agent_name != owner.agent_name:
@@ -101,6 +102,7 @@ async def start_delegation(
         "child": asdict(child),
         "source_event_id": context.membership_turn_id if context is not None else None,
         "source_kind": context.source_kind if context is not None else None,
+        "output_path": output_path,
     }
 
     async def run() -> BackgroundOutcome:

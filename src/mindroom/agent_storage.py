@@ -47,7 +47,6 @@ _CACHE_DIAGNOSTICS: weakref.WeakKeyDictionary[_ConversationSqliteDb, tuple[int, 
 
 
 __all__ = [
-    "agent_session_state_root",
     "configure_state_engine_pragmas",
     "create_session_storage",
     "create_state_engine",
@@ -184,16 +183,6 @@ def create_session_storage(
     )
 
 
-def agent_session_state_root(
-    agent_name: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> Path:
-    """Locate canonical session state for both ordinary and read-only access."""
-    return resolve_agent_storage(agent_name, config, runtime_paths, execution_identity).session_state_root
-
-
 def _create_agent_session_db(
     agent_name: str,
     config: Config,
@@ -204,7 +193,12 @@ def _create_agent_session_db(
     prompt_roles: frozenset[str] | None = None,
 ) -> BaseDb:
     """Create persistent session storage for one agent."""
-    session_state_root = agent_session_state_root(agent_name, config, runtime_paths, execution_identity)
+    session_state_root = resolve_agent_storage(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=execution_identity,
+    ).session_state_root
     return create_state_storage(
         storage_name=agent_name,
         state_root=session_state_root,

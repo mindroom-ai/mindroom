@@ -772,3 +772,10 @@ Registered agent and team model-switch regressions cover both timing choices, hu
 Native job access now applies the same frozen storage-binding comparison as native retrieval.
 Tests change either the caller or child worker scope and require discovery, controls, automatic joining, and completion lookup to withdraw access.
 The job runtime does not gain another storage policy or migration layer.
+
+Native delegation output-file policy now follows accepted child execution instead of the foreground wait.
+The early handle remains visible, and the operation applies the shared finalizer once to its completed result.
+Only the accepted relative output path is added to the existing native adapter snapshot; approval recovery resolves and revalidates the caller's current output policy before resuming.
+Completed result retrieval reads the saved receipt without validating or rewriting the old destination.
+Integration coverage includes explicit and automatic output, blocking and detached execution, approval recovery after runtime reconstruction, invalid resumed paths, and retrieval after the completed file is moved.
+The unused session-root forwarding helper and its exports were removed, restoring direct use of the existing storage resolver.

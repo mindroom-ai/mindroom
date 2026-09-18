@@ -585,6 +585,12 @@ def _prepare_delegation_output(
     return prepare_tool_output_file(policy, tool_name=tool_name, output_path=raw_path)
 
 
+def _finalize_delegation_output(result: str, request: ToolOutputFileRequest | None) -> str:
+    """Apply the shared file policy once and keep the native result text-serializable."""
+    formatted = finalize_tool_output_file(request, result) if request is not None else result
+    return formatted if isinstance(formatted, str) else json.dumps(formatted)
+
+
 def _resolve_delegation_requirement(
     requirement: RunRequirement,
     result: str,
@@ -595,9 +601,7 @@ def _resolve_delegation_requirement(
     output_request: ToolOutputFileRequest | None = None,
 ) -> str:
     """Resolve one external call and close its live tool trace, including rejections."""
-    if output_request is not None:
-        formatted = finalize_tool_output_file(output_request, result)
-        result = formatted if isinstance(formatted, str) else json.dumps(formatted)
+    result = _finalize_delegation_output(result, output_request)
     requirement.set_external_execution_result(result)
     if on_event is not None:
         on_event(
@@ -631,6 +635,7 @@ async def _background_child_outcome(
     denial_reasons: dict[str, str | None] | None,
     approval_calls: Sequence[ApprovalCall],
     fresh: bool,
+    output_request: ToolOutputFileRequest | None = None,
 ) -> BackgroundOutcome:
     """Keep child execution, liveness and settlement owned by its background job."""
     async with subagent_liveness(child, runtime_paths):
@@ -678,8 +683,9 @@ async def _background_child_outcome(
                 )
                 return BackgroundOutcome(
                     status="failed",
-                    result=(
-                        f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}"
+                    result=_finalize_delegation_output(
+                        f"{error}\n\nDelegation cleanup did not complete; recovery may still be required: {cleanup_error}",
+                        output_request,
                     ),
                 )
         try:
@@ -695,15 +701,19 @@ async def _background_child_outcome(
             )
             return BackgroundOutcome(
                 status="failed",
-                result=(
+                result=_finalize_delegation_output(
                     f"{primary_error}\n\n"
-                    f"Delegation settlement did not complete; recovery may still be required: {settlement_error}"
+                    f"Delegation settlement did not complete; recovery may still be required: {settlement_error}",
+                    output_request,
                 ),
             )
         status = child.status
         assert status != "running"
         assert status != "paused"
-        return BackgroundOutcome(status=status, result=_child_result_text(child, receipt))
+        return BackgroundOutcome(
+            status=status,
+            result=_finalize_delegation_output(_child_result_text(child, receipt), output_request),
+        )
 
 
 async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -865,14 +875,22 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 model=model,
             )
             output_request = None
-            if not isinstance(authorization, str):
+            if not isinstance(authorization, str) and (
+                background_job is None or background_job.status == "awaiting_approval"
+            ):
+                output_path = args.get(OUTPUT_PATH_ARGUMENT)
+                output_tool_name = tool.tool_name or "run_subagent"
+                if background_job is not None:
+                    output_path = background_job.adapter.get("output_path")
+                    assert retained is not None
+                    output_tool_name = "continue_subagent" if retained.previous_delegation_id else "run_subagent"
                 prepared_output = _prepare_delegation_output(
                     caller,
                     config,
                     runtime_paths,
                     caller_identity,
-                    args.get(OUTPUT_PATH_ARGUMENT),
-                    tool_name=tool.tool_name or "run_subagent",
+                    output_path,
+                    tool_name=output_tool_name,
                 )
                 if isinstance(prepared_output, dict):
                     authorization = json.dumps(prepared_output)
@@ -1023,6 +1041,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                             denial_reasons=child_reasons,
                             approval_calls=child_calls,
                             fresh=fresh,
+                            output_request=output_request,
                         )
                         initial_wait_token = uuid4().hex if child_decisions is None and background_job is None else None
                         try:
@@ -1041,6 +1060,11 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     owner=caller_identity,
                                     operation=operation,
                                     initial_wait_token=initial_wait_token,
+                                    output_path=(
+                                        output_request.path.requested_path
+                                        if output_request is not None and output_request.path is not None
+                                        else None
+                                    ),
                                     cancel=partial(
                                         interrupt_child,
                                         config=config,
@@ -1091,7 +1115,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 subagent_id=child.subagent_id,
                                 delivery_queued=waited.delivery_queued,
                             )
-                            result = resolve_result(result)
+                            result = resolve_result(result, output_request=None)
                             state.children = [
                                 item for item in state.children if item.delegation_id != child.delegation_id
                             ]
