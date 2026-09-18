@@ -21,12 +21,13 @@ from mindroom.error_handling import IncompleteResponsesStreamError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
+    from agno.metrics import MessageMetrics
     from agno.models.message import Message
     from agno.models.openai import OpenAIResponses
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.tools.function import Function
-    from openai.types.responses import ResponseInputParam, ResponseStreamEvent
+    from openai.types.responses import ResponseInputParam, ResponseStreamEvent, ResponseUsage
     from pydantic import BaseModel
 
 _RESPONSE_ITEMS_BUFFER_KEY = "mindroom_response_items"
@@ -73,6 +74,15 @@ _LIFECYCLE_ONLY_KEY = "mindroom_stream_lifecycle_only"
 # Coverage: tests/test_openai_models.py::test_responses_continue_tool_calls_independently_of_model_name;
 # tests/test_openai_models.py::test_explicit_reasoning_respects_disabled_response_storage.
 
+# AGNO_COMPAT: Responses usage parsing drops cache-write input tokens.
+# Reason: Agno 3.0.9 copies cached and reasoning token details but omits
+# OpenAI's input_tokens_details.cache_write_tokens counter.
+# Upstream issue: No matching issue identified; this metrics gap is untracked.
+# Upstream PR: None identified.
+# Remove when: The pinned Agno parser preserves cache-write tokens while still
+# accepting provider payloads that predate the newer field.
+# Coverage: tests/test_openai_models.py::test_openai_metrics_preserve_sdk_input_details.
+
 
 def _stream_error_types(error: BaseException) -> str:
     """Keep causal exception types without exposing provider payloads or URLs."""
@@ -95,6 +105,13 @@ class OpenAIResponsesProviderCompat:
     def _using_reasoning_model(self) -> bool:
         """Enable the Responses continuation capability for every model ID."""
         return True
+
+    def _get_metrics(self, response_usage: ResponseUsage) -> MessageMetrics:
+        """Preserve cache-write tokens alongside Agno's other usage counters."""
+        metrics = super()._get_metrics(response_usage)  # ty: ignore[unresolved-attribute]
+        if input_tokens_details := response_usage.input_tokens_details:
+            metrics.cache_write_tokens = input_tokens_details.cache_write_tokens or 0
+        return metrics
 
     def _is_retryable_error(self, error: ModelProviderError) -> bool:
         """Reject retry only after an incomplete stream has retained output."""
