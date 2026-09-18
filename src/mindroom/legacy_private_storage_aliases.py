@@ -7,6 +7,7 @@
 # Real historical directories grant no alias access, including preserved recordless scopes.
 # Coverage: tests/test_private_storage_migration.py::test_completed_aliases_reject_tampering.
 # Coverage: tests/test_private_storage_migration.py::test_worker_mount_plan_never_infers_historical_access.
+# Coverage: tests/test_usage_stats_private.py::test_private_coverage_does_not_count_verified_alias_as_missing.
 
 from __future__ import annotations
 
@@ -86,3 +87,28 @@ def load_private_instance_legacy_alias(base_storage_path: Path, worker_key: str)
 def _raise_invalid_record(reason: str) -> NoReturn:
     msg = f"Private instance identity record {reason}"
     raise PrivateInstanceIdentityError(msg)
+
+
+def is_verified_private_instance_alias(base_storage_path: Path, alias: Path) -> bool:
+    """Recognize a historical primary or session mirror without following its data.
+
+    A session mirror must name the same canonical sibling as the protected,
+    owner-verified primary alias. Other symlinks remain untrusted.
+    """
+    base = shared_storage_root(base_storage_path)
+    try:
+        target_name = os.readlink(alias)  # noqa: PTH115 - Verify the exact stored sibling name.
+        if target_name in {"", ".", ".."} or "/" in target_name:
+            return False
+        target = alias.parent / target_name
+        if target.is_symlink() or not target.is_dir():
+            return False
+        owner = load_private_instance_identity(base, base / "private_instances" / target_name)
+        if owner is None:
+            return False
+        primary_alias = load_private_instance_legacy_alias(base, owner.worker_key)
+        return (
+            primary_alias is not None and primary_alias.name == alias.name and os.readlink(primary_alias) == target_name  # noqa: PTH115 - Compare the literal mirror target.
+        )
+    except (OSError, PrivateInstanceIdentityError):
+        return False

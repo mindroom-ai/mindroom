@@ -5757,7 +5757,7 @@ depends_on = [
     "mindroom.private_instance_identity_store",
     "mindroom.tool_system.worker_routing",
 ]
-visibility = ["mindroom.legacy_private_storage", "mindroom.private_storage_paths"]
+visibility = ["mindroom.legacy_private_storage", "mindroom.private_storage_paths", "mindroom.usage_stats_storage"]
 
 [[modules]]
 path = "mindroom.private_storage_paths"
