@@ -1547,7 +1547,7 @@ def _assemble_agent_toolkits(
     JobTools.install(
         tools,
         runtime_paths,
-        execution_identity,
+        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
     )

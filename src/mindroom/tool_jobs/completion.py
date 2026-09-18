@@ -151,7 +151,11 @@ class _ReadyJobContinuation:
     prompt: str
 
 
-async def join_conversation_jobs(attempted: set[tuple[str, int]]) -> AsyncIterator[str | _ReadyJobContinuation]:
+async def join_conversation_jobs(
+    attempted: set[tuple[str, int]],
+    *,
+    agent_names: Sequence[str] | None = None,
+) -> AsyncIterator[str | _ReadyJobContinuation]:
     """Wait outside the model, yielding visible progress and at most one ready prompt."""
     context = get_tool_runtime_context()
     if context is None or job_owns_execution():
@@ -159,6 +163,7 @@ async def join_conversation_jobs(attempted: set[tuple[str, int]]) -> AsyncIterat
     runtime = get_background_runtime(context.runtime_paths)
     if runtime is None:
         return
+    participants = {context.agent_name, *(agent_names or ())}
     signal = current_human_message_signal()
     human = asyncio.Event()
     if signal is not None:
@@ -171,7 +176,11 @@ async def join_conversation_jobs(attempted: set[tuple[str, int]]) -> AsyncIterat
             thread_id=context.resolved_thread_id,
             requester_id=context.requester_id,
         )
-        return [job for job in jobs if (job.job_id, job.generation) not in attempted]
+        return [
+            job
+            for job in jobs
+            if job.owner.agent_name in participants and (job.job_id, job.generation) not in attempted
+        ]
 
     try:
         jobs = await pending()
@@ -222,6 +231,7 @@ async def join_approval_jobs[RunT](
     is_complete: Callable[[RunT], bool],
     continue_response: Callable[[RunT, str], Awaitable[RunT]],
     presentation: Callable[[], StreamingPresentation],
+    agent_names: Sequence[str] | None = None,
 ) -> RunT:
     """Keep reconstructed agent/team approvals at the ordinary bounded join boundary."""
     attempted: set[tuple[str, int]] = set()
@@ -229,7 +239,7 @@ async def join_approval_jobs[RunT](
         if not is_complete(response):
             break
         prompt = None
-        async for joined in join_conversation_jobs(attempted):
+        async for joined in join_conversation_jobs(attempted, agent_names=agent_names):
             if isinstance(joined, str):
                 current = presentation()
                 await report_background_wait(replace(current, response_text=current.response_text + joined))

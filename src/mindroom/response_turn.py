@@ -307,6 +307,7 @@ class ResponseTurnContext:
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()
     allow_no_report_response: bool = False
     background_tool_jobs: bool = False
+    tool_job_agent_names: tuple[str, ...] | None = None
     initial_presentation: StreamingPresentation | None = None
     participation: ParticipationGate | None = None
     # Set only for scheduled fires that carry a history limit; identifies the
@@ -1148,7 +1149,7 @@ async def _settle_joined_blocking_attempt(
     )
     joined_continuation = None
     if continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
-        async for joined in join_conversation_jobs(run.attempted_job_outcomes):
+        async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
             if isinstance(joined, str):
                 initial = ctx.initial_presentation
                 response_text = (
@@ -1409,7 +1410,10 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     if settle.response_text:
                         yield adapter.make_text_chunk(settle.response_text)
                     if not keep_going and continuation_count < DYNAMIC_TOOL_CONTINUATION_LIMIT:
-                        async for joined in join_conversation_jobs(run.attempted_job_outcomes):
+                        async for joined in join_conversation_jobs(
+                            run.attempted_job_outcomes,
+                            agent_names=ctx.tool_job_agent_names,
+                        ):
                             if isinstance(joined, str):
                                 yield BackgroundWaitChunk(joined)
                             else:

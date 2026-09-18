@@ -724,3 +724,13 @@ Fresh independent review found four additional gaps, now covered by regression t
 
 These corrections reuse the existing ownership and presentation boundaries; they do not introduce another team roster or mutable presentation cache.
 They passed 348 focused tests with two optional skips and ten further real-model Matrix checks for skill access, workspace script policy, fresh blocking Stop preservation, and ad hoc member tools.
+
+A second independent review identified a cross-turn ad hoc team gap: an idle completion resumed only the transport agent, which could not retrieve another member's exact-owned result.
+Completion now reconstructs the currently authorized owners of outstanding jobs from their existing records.
+Ordinary turns join only their own jobs; team turns and approval continuations also join their materialized members' jobs.
+No separate persistent team roster is added.
+
+Real-model testing exposed the other half of that path: member job controls had been constructed with the transport agent's identity.
+They now bind the actual member while retaining the original requester, transport, and conversation.
+The regression test uses normal agent construction and actual SDK result consumption, and was observed failing before that binding correction.
+A fresh Matrix run passed six checks: a human follow-up ended the original team wait, its single-agent reply finished while the other member's command was still running, and a later team continuation consumed and delivered the exact result without repeating the command.
