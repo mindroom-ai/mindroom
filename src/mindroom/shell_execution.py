@@ -559,8 +559,17 @@ async def _monitor_process(
     try:
         await process.wait()
     finally:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
+        record = registry.get(handle)
+        capture = record.output_capture if record is not None else None
+        try:
+            if capture is not None and not capture.closed:
+                # Group cleanup can create EOF by killing a writer. Decide
+                # completeness before that EOF can look like normal completion.
+                _done, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
+                capture.incomplete |= bool(pending)
+        finally:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
         await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
         await _cancel_pending_tasks(stdout_reader, stderr_reader)
         record = registry.get(handle)

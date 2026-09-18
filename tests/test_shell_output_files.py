@@ -537,7 +537,12 @@ async def test_publication_io_failure_settles_capture(
 
 
 @pytest.mark.asyncio
-async def test_inherited_pipe_cannot_publish_partial_capture(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+@pytest.mark.parametrize("wait_seconds", [0, 30])
+async def test_inherited_pipe_cannot_publish_partial_capture(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+    wait_seconds: int,
+) -> None:
     """A descendant retaining a pipe beyond the existing grace period must not overwrite the destination."""
     destination = tmp_path / "inherited.txt"
     destination.write_text("keep existing")
@@ -546,18 +551,56 @@ async def test_inherited_pipe_cannot_publish_partial_capture(shell_toolkit: Tool
             result = await FunctionCall(
                 function=shell_toolkit.async_functions["run_shell_command"],
                 arguments={
-                    "args": "sleep 30 & echo $! > child.pid; printf early",
+                    "args": "sleep 30 & echo $! > child.pid; printf early; sleep 0.05",
+                    "timeout": wait_seconds,
                     "mindroom_output_path": "inherited.txt",
                 },
             ).aexecute()
-        assert '"status": "error"' in str(result.result)
-        assert "saved_to_file" not in str(result.result)
+            status = str(result.result)
+            if wait_seconds == 0:
+                handle = status.split("Handle: ")[1].splitlines()[0]
+                check = shell_toolkit.functions["check_shell_command"].entrypoint
+                assert check is not None
+                while True:
+                    status = await asyncio.to_thread(check, handle)
+                    if "Status: RUNNING" not in status:
+                        break
+                    await asyncio.sleep(0.02)
+        assert '"status": "error"' in status
+        assert "saved_to_file" not in status
         assert destination.read_text() == "keep existing"
     finally:
         pid_file = tmp_path / "child.pid"
         if pid_file.exists():
             with contextlib.suppress(ProcessLookupError):
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_background_capture_includes_descendant_output_within_grace(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+) -> None:
+    """A short-lived descendant can finish writing before background process-group cleanup."""
+    result = await FunctionCall(
+        function=shell_toolkit.async_functions["run_shell_command"],
+        arguments={
+            "args": "(sleep 0.2; printf late) & printf early; sleep 0.05",
+            "timeout": 0,
+            "mindroom_output_path": "descendant.txt",
+        },
+    ).aexecute()
+    handle = str(result.result).split("Handle: ")[1].splitlines()[0]
+    check = shell_toolkit.functions["check_shell_command"].entrypoint
+    assert check is not None
+    async with asyncio.timeout(10):
+        while True:
+            status = await asyncio.to_thread(check, handle)
+            if "Status: RUNNING" not in status:
+                break
+            await asyncio.sleep(0.02)
+    assert "saved_to_file" in status
+    assert (tmp_path / "descendant.txt").read_text().split("\n", 1)[-1] == "earlylate"
 
 
 @pytest.mark.asyncio
