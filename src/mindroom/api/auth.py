@@ -837,6 +837,55 @@ async def require_personal_user(request: Request) -> dict[str, Any]:
     return await _require_signed_matrix_user(request, label="Personal APIs")
 
 
+async def require_usage_service(request: Request) -> None:
+    """Authenticate the dedicated usage-export service without creating a user identity."""
+    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    settings = auth_state.settings.trusted_upstream
+    jwt_settings = settings.jwt
+    audience = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_JWT_AUDIENCE")
+    client_id = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_CLIENT_ID")
+    if (
+        not settings.enabled
+        or settings.user_id_header is None
+        or not jwt_settings.require_jwt
+        or jwt_settings.header is None
+        or jwt_settings.jwks_url is None
+        or jwt_settings.audience is None
+        or jwt_settings.issuer is None
+        or audience is None
+        or client_id is None
+        or auth_state.trusted_upstream_jwt_client is None
+    ):
+        raise HTTPException(status_code=503, detail="Usage export service authentication is not configured")
+
+    token = _get_configured_header(request, jwt_settings.header)
+    if token is None:
+        raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {jwt_settings.header}")
+    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
+        raise HTTPException(status_code=401, detail="Invalid usage service JWT")
+
+    try:
+        signing_key = await asyncio.to_thread(auth_state.trusted_upstream_jwt_client.get_signing_key_from_jwt, token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=audience,
+            issuer=jwt_settings.issuer,
+            options={"require": ["exp", "iat", "iss", "aud", "type", "common_name", "sub"]},
+        )
+    except PyJWTError as exc:
+        raise HTTPException(status_code=401, detail="Invalid usage service JWT") from exc
+
+    if (
+        claims.get("type") != "app"
+        or claims.get("sub") != ""
+        or not isinstance(claims.get("common_name"), str)
+        or not secrets.compare_digest(claims["common_name"], client_id)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid usage service JWT")
+
+
 async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[str, Any]:
     auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
     settings = auth_state.settings.trusted_upstream
