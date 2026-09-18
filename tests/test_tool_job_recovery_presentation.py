@@ -17,6 +17,7 @@ from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.response_runner import _EarlyPlaceholderState
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingPresentation, send_streaming_response
+from mindroom.tool_jobs.completion import _ReadyJobContinuation
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.events import (
     BackgroundWaitChunk,
@@ -203,15 +204,24 @@ async def test_recovered_agent_retains_prose_and_trace_through_real_tool_executi
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("has_delta", [False, True])
-async def test_recovered_prefix_does_not_hide_terminal_only_answer(
+@pytest.mark.parametrize("joined", [False, True])
+async def test_prior_prose_does_not_hide_terminal_only_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     streaming: bool,
     has_delta: bool,
+    joined: bool,
 ) -> None:
-    """Restored text is not evidence that this new generation emitted its final answer."""
+    """Recovery and job-join prose cannot suppress the next attempt's terminal answer."""
+    attempts = 0
 
     async def events(*_args: object, **_kwargs: object) -> AsyncIterator[RunContentEvent | RunCompletedEvent]:
+        nonlocal attempts
+        attempts += 1
+        if joined and attempts == 1:
+            yield RunContentEvent(content="Earlier visible answer.")
+            yield RunCompletedEvent(content="Earlier visible answer.", run_id="first", session_id="session1")
+            return
         if has_delta:
             yield RunContentEvent(content="Fresh streamed answer.")
         yield RunCompletedEvent(content="Fresh terminal answer.", run_id="recovery", session_id="session1")
@@ -219,11 +229,19 @@ async def test_recovered_prefix_does_not_hide_terminal_only_answer(
     agent = MagicMock()
     agent.arun = MagicMock(side_effect=events)
     monkeypatch.setattr("mindroom.ai._prepare_agent_and_prompt", AsyncMock(return_value=_prepared_prompt_result(agent)))
-    ctx = replace(
-        make_turn_context("general", session_id="session1"),
-        initial_presentation=StreamingPresentation("Earlier visible answer."),
-    )
+    ctx = make_turn_context("general", session_id="session1")
     config = _config()
+    if joined:
+        config.background_tool_jobs = True
+
+        async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
+            if not attempted:
+                attempted.add(("job", 0))
+                yield _ReadyJobContinuation("Retrieve completed background result")
+
+        monkeypatch.setattr("mindroom.response_turn.join_conversation_jobs", join)
+    else:
+        ctx = replace(ctx, initial_presentation=StreamingPresentation("Earlier visible answer."))
     paths = _runtime_paths(tmp_path)
     if streaming:
         bot = _bot(tmp_path / "matrix")
@@ -250,9 +268,20 @@ async def test_recovered_prefix_does_not_hide_terminal_only_answer(
         )
         body = outcome.visible_body_text
     else:
-        body = await ai_response(ctx, prompt="Continue.", runtime_paths=paths, config=config)
+        body = await ai_response(
+            ctx,
+            prompt="Continue.",
+            runtime_paths=paths,
+            config=config,
+            collect_streamed_response=True,
+        )
     expected = "Fresh streamed answer." if has_delta else "Fresh terminal answer."
-    assert body.strip() == "Earlier visible answer.\n\n" + expected
+    assert body.count("Earlier visible answer.") == 1
+    assert body.strip().endswith(expected)
+    if not joined:
+        assert body.strip() == "Earlier visible answer.\n\n" + expected
+    assert body.count("Fresh terminal answer.") == int(not has_delta)
+    assert attempts == (2 if joined else 1)
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ from agno.run.base import RunStatus
 from agno.team import Team
 from agno.tools.function import Function
 
+from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
 from mindroom.approval_execution import _continue_persisted_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -27,7 +28,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedApprovalRun, ResponseTurnContext
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, ResponseTurnContext
 from mindroom.streaming import StreamingPresentation
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import (
@@ -237,6 +238,147 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                 assert text.count("Independent work done.") == 1
                 assert await runtime.pending_outcomes() == []
             assert executions == 1
+    finally:
+        release.set()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [False, True])
+async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  # noqa: PLR0915
+    tmp_path: Path,
+    show_tool_calls: bool,
+) -> None:
+    """A later native approval retains prose already published during a job wait."""
+    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    release, waiting = asyncio.Event(), asyncio.Event()
+    notices: list[StreamingPresentation] = []
+    executions = 0
+
+    async def slow_tool() -> str:
+        await release.wait()
+        return "actual result"
+
+    async def approved_tool() -> str:
+        nonlocal executions
+        executions += 1
+        return "approved action"
+
+    async def report_wait(presentation: StreamingPresentation) -> None:
+        notices.append(presentation)
+        waiting.set()
+
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(tool_calls=[_call("slow_tool", "ordinary-call", wait_timeout=0)]),
+            ModelResponse(content="Independent answer already shown."),
+        ],
+    )
+    install_tool_job_execution(model)
+    function = Function.from_callable(approved_tool)
+    function.requires_confirmation = True
+    db_file = str(tmp_path / "agent.db")
+    storage = SqliteDb(db_file=db_file)
+    actor = Agent(
+        id="leader",
+        model=model,
+        tools=[slow_tool, function, JobTools(paths, owner)],
+        db=storage,
+        telemetry=False,
+    )
+    scope = ScopeSessionContext(
+        HistoryScope(kind="agent", scope_id="leader"),
+        storage,
+        None,
+        session_id=context.session_id,
+        storage_factory=lambda: SqliteDb(db_file=db_file),
+    )
+    ctx = make_turn_context(
+        entity_label="leader",
+        session_id=context.session_id,
+        room_id=owner.room_id,
+        thread_id=owner.resolved_thread_id,
+        requester_id=owner.requester_id,
+    )
+
+    async def prepare(turn: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
+        prompt = str(kwargs["prompt"])
+        prepared = _PreparedAgentRun(
+            agent=actor,
+            messages=(Message(role="user", content=prompt),),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+            runtime_model_name="default",
+        )
+        return _AgentRunContext(
+            turn=turn,
+            session_id=context.session_id,
+            prompt=prompt,
+            model_prompt=None,
+            prepared_run=prepared,
+            run_input=prepared.run_input,
+            metadata=turn.matrix_run_metadata,
+        )
+
+    @owned_tool_execution
+    async def run() -> str:
+        set_consumption_storage(lambda: SqliteDb(db_file=db_file))
+        return await ai_response(
+            ctx,
+            prompt="Start",
+            runtime_paths=paths,
+            config=config,
+            execution_identity=owner,
+            show_tool_calls=show_tool_calls,
+            supports_native_tool_approval=True,
+        )
+
+    pending = None
+    try:
+        with (
+            tool_runtime_context(context),
+            background_wait_notice(report_wait),
+            patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
+            patch("mindroom.ai._prepare_agent_run_context", new=prepare),
+        ):
+            pending = asyncio.create_task(run())
+            await asyncio.wait_for(waiting.wait(), 2)
+            assert "Independent answer already shown." in notices[-1].response_text
+            jobs = await runtime.list_jobs(owner=owner, depth=0)
+            assert len(jobs) == 1
+            model.responses.extend(
+                [
+                    ModelResponse(tool_calls=[_call("job", "retrieve", action="wait", job_id=jobs[0].job_id)]),
+                    ModelResponse(
+                        content="Need approval to continue.",
+                        tool_calls=[_call("approved_tool", "approval")],
+                    ),
+                ],
+            )
+            release.set()
+            with pytest.raises(ResponsePausedForApproval) as raised:
+                await asyncio.wait_for(pending, 2)
+            paused = raised.value.paused
+            assert paused.response_text.count("Independent answer already shown.") == 1
+            assert "Need approval to continue." in paused.response_text
+            assert "Waiting for background work" not in paused.response_text
+            assert [tool.tool_call_id for tool in paused.tools] == ["approval"]
+            assert [entry.tool_name for entry in paused.tool_trace] == ["slow_tool", "job", "approved_tool"]
+            assert paused.tool_trace[-1].type == "tool_call_started"
+            assert executions == 0
+            if show_tool_calls:
+                assert "`approved_tool` [3]" in paused.response_text
+            else:
+                assert "🔧" not in paused.response_text
     finally:
         release.set()
         if pending is not None:
