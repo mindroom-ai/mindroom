@@ -232,6 +232,9 @@ async def _consume_result(
     result = FunctionExecutionResult(status="success" if success is True else "failure", result=value, error=call.error)
     replay = decode_tool_result(payload["replay"]) if payload.get("replay") else []
     if replay:
+        # Consumption can append a state-conflict notice to the saved text.
+        if isinstance(value, ToolResult) and value.content != job.result:
+            replay.append({"text": value.content.removeprefix(job.result or "")})
         call.result = iter(
             _EVENT_TYPES[item["event"]["event"]].from_dict(item["event"])
             if "event" in item
@@ -301,6 +304,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         adapter = {
             "source_event_id": context.membership_turn_id,
+            "source_kind": context.source_kind,
             "run_id": run_context.run_id,
             "tool_call_id": call.call_id,
             "arguments": encode_tool_result(call.arguments),

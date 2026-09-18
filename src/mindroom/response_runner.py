@@ -2915,6 +2915,7 @@ class ResponseRunner:
                 room_id=event.room_id,
                 thread_id=event.thread_id,
                 requester_id=envelope.requester_id,
+                source_kind=envelope.source_kind,
             )
             # Ad hoc teams have no configured roster. Reconstruct the actors
             # that own outstanding work so each result keeps its exact owner.
@@ -3515,7 +3516,10 @@ class ResponseRunner:
                 "\nContinue after the following already-displayed response; it will be preserved automatically. "
                 "Do not repeat it:\n" + initial_presentation.response_text
             )
-        origin = completion_envelope(jobs[0], sender_id=self.deps.matrix_full_id).origin
+        origin = replace(
+            completion_envelope(jobs[0], sender_id=self.deps.matrix_full_id).origin,
+            source_kind=envelope.source_kind,
+        )
         return replace(
             request,
             prompt=prompt,

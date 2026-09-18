@@ -11681,7 +11681,8 @@ The management function never backgrounds itself.
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.
 Cancellation does not undo external side effects or forcibly stop arbitrary Python threads.
-A cleanup failure is retained as a failure instead of claiming successful cancellation.
+Cleanup exceptions reported to the job runtime are retained as failures.
+SDK toolkit disconnects retain Agno's existing best-effort behavior: logged teardown errors do not change the job outcome.
 
 For delegation, `job_id` identifies one turn and `subagent_id` identifies the reusable child conversation.
 Job access requires the original requester, caller, transport, canonical conversation, and current local tool or delegation permission.
@@ -11706,6 +11707,9 @@ Ready outcomes or approval boundaries cause one internal continuation using the 
 A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
 Idle completion work uses an internal event-journal source and the existing serialized conversation runner, without sending a synthetic completion message to Matrix.
 Runtime updates retain requester authorization but are identified separately from human input.
+Silent scheduled work retains its quiet delivery policy and run receipts across later completions and restarts.
+Automatic joins keep quiet and ordinary results separate.
+As with ordinary silent schedules, `NO_REPLY` suppresses the final message; findings, failures, and other final reports can still be sent.
 
 A result is consumed only after exact persisted parent tool-result evidence is verified.
 Inspecting, listing, or scheduling internal completion work does not consume it.

@@ -6734,6 +6734,7 @@ path = "mindroom.tool_jobs.runtime"
 depends_on = [
     "mindroom.ai_runtime",
     "mindroom.background_tasks",
+    "mindroom.dispatch_source",
     "mindroom.tool_jobs.control",
     "mindroom.durable_write",
     "mindroom.tool_system.worker_routing",

@@ -106,7 +106,7 @@ def completion_envelope(job: BackgroundJob, *, sender_id: str) -> MessageEnvelop
             sender_kind=SenderKind.MANAGED_ENTITY,
             requester_kind=SenderKind.USER,
             intent=TurnIntent.TOOL_JOB_COMPLETION,
-            source_kind="tool_job_completion",
+            source_kind=job.adapter.get("source_kind") or "tool_job_completion",
             trust=TurnTrust.TRUSTED_INTERNAL,
         ),
         hook_source="tool_job_completion",
@@ -175,6 +175,7 @@ async def join_conversation_jobs(
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
             requester_id=context.requester_id,
+            source_kind=context.source_kind,
         )
         return [
             job

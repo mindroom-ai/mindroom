@@ -97,7 +97,11 @@ async def start_delegation(
         msg = "Child caller does not match its job owner."
         raise SubagentSessionError(msg)
     context = get_tool_runtime_context()
-    adapter = {"child": asdict(child), "source_event_id": context.membership_turn_id if context is not None else None}
+    adapter = {
+        "child": asdict(child),
+        "source_event_id": context.membership_turn_id if context is not None else None,
+        "source_kind": context.source_kind if context is not None else None,
+    }
 
     async def run() -> BackgroundOutcome:
         try:
