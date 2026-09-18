@@ -281,7 +281,7 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 `GET /api/usage` returns organization-wide retained usage under the same standard dashboard authentication as other administrator APIs.
 `GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Trusted Upstream Authentication](deployment/trusted-upstream-auth.md#usage-export-service).
 The two routes share report preparation and caching while authenticating every request through their own policy.
-When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; an authenticated poll returns the completed report.
+When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
 Every report-state response uses `Cache-Control: no-store`.
 
 The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, and `user_breakdown`.

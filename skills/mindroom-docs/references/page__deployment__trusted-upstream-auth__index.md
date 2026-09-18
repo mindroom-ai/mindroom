@@ -107,7 +107,7 @@ A valid service assertion authorizes only `/api/usage/export`; it does not autho
 Every request, including polls and cache hits, must include the service assertion.
 When a report needs preparation, the route promptly returns `202` with `{"status":"pending"}`, `Retry-After: 5`, and `Cache-Control: no-store`.
 Poll the same URL with the same `include_daily` value after the requested delay.
-Once preparation finishes, an authenticated poll returns `200`, `Cache-Control: no-store`, and the existing aggregate report schema.
+Once preparation succeeds, an authenticated poll returns `200`, `Cache-Control: no-store`, and the existing aggregate report schema.
 The two `include_daily` variants are prepared and cached separately, successful results expire 60 seconds after completion, and only one retained-data scan runs at a time.
 Configuration or runtime changes discard earlier results.
 On either organization route, a failed scan or unavailable committed configuration returns a content-free `503` with `Cache-Control: no-store`; scan failures remain cached for five seconds before another request can start a retry.
