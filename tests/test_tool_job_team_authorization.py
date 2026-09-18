@@ -54,7 +54,8 @@ def _calculator_agent(config: Config, paths: RuntimePaths) -> Agent:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("configured", [False, True])
 async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
-    tmp_path: Path, configured: bool
+    tmp_path: Path,
+    configured: bool,
 ) -> None:
     """A non-transport team member can execute tools, until its requester grant is withdrawn."""
     config = _config(tmp_path)
@@ -72,7 +73,7 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
         id="test",
         responses=[
             ModelResponse(
-                tool_calls=[_call("delegate_task_to_member", "member", member_id="worker", task="Add 2 and 3")]
+                tool_calls=[_call("delegate_task_to_member", "member", member_id="worker", task="Add 2 and 3")],
             ),
             ModelResponse(content="team done"),
         ],
@@ -110,7 +111,11 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
     child_owner = replace(owner, agent_name="worker", session_id=child.session_id)
     child.execution_identity = serialize_tool_execution_identity(child_owner)
     await start_child_turn(
-        child, parent_run_id="parent", config=config, runtime_paths=paths, caller_execution_identity=owner
+        child,
+        parent_run_id="parent",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=owner,
     )
     agent = _calculator_agent(config, paths)
     context = replace(
