@@ -119,16 +119,19 @@ class ProcessRecord:
 
 
 @dataclass(frozen=True)
-class _RunResult:
+class ShellRunResult:
     """Outcome of one run_command call.
 
     ``handle`` is set only when the command timed out and was registered as a
     background record, so callers that could not deliver the message can roll
     the registration back with ``discard_background_record``.
+    ``output_file_handled`` means execution owns publication or its error receipt;
+    the generic output-file wrapper must not write the returned message again.
     """
 
     message: str
     handle: str | None = None
+    output_file_handled: bool = False
 
 
 async def run_command(
@@ -143,7 +146,7 @@ async def run_command(
     handle: str | None = None,
     handle_reservations: set[str] | None = None,
     output_destination: ShellOutputDestination | None = None,
-) -> _RunResult:
+) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
     When the command completes within ``timeout`` seconds the last ``tail``
@@ -155,11 +158,11 @@ async def run_command(
     _sweep_stale_records(registry)
     if handle is not None:
         if _CALLER_HANDLE_RE.fullmatch(handle) is None:
-            return _RunResult(message="Error: Invalid caller-supplied shell handle.")
+            return ShellRunResult(message="Error: Invalid caller-supplied shell handle.")
         if handle in registry or (handle_reservations is not None and handle in handle_reservations):
-            return _RunResult(message=f"Error: Shell handle '{handle}' is already registered.")
+            return ShellRunResult(message=f"Error: Shell handle '{handle}' is already registered.")
         if handle_reservations is None:
-            return _RunResult(message="Error: Caller-supplied shell handle reservations are unavailable.")
+            return ShellRunResult(message="Error: Caller-supplied shell handle reservations are unavailable.")
         handle_reservations.add(handle)
 
     try:
@@ -190,7 +193,7 @@ async def _run_command_after_reservation(  # noqa: C901
     timeout: float,  # noqa: ASYNC109
     handle: str | None,
     output_destination: ShellOutputDestination | None,
-) -> _RunResult:
+) -> ShellRunResult:
     """Spawn one command after any caller-supplied handle is reserved."""
     capture = None
     try:
@@ -210,7 +213,7 @@ async def _run_command_after_reservation(  # noqa: C901
     except Exception as exc:
         if capture is not None:
             capture.close()
-        return _RunResult(message=f"Error: {exc}")
+        return ShellRunResult(message=f"Error: {exc}")
 
     stdout_buf = _OutputBuffer()
     stderr_buf = _OutputBuffer()
@@ -252,12 +255,12 @@ async def _run_command_after_reservation(  # noqa: C901
     if capture is not None:
         capture.incomplete = stdout_reader.cancelled() or stderr_reader.cancelled()
         try:
-            return _RunResult(message=capture.publish(process.returncode))
+            return ShellRunResult(message=capture.publish(process.returncode), output_file_handled=True)
         finally:
             capture.close()
     if process.returncode != 0:
-        return _RunResult(message=f"Error: {stderr_buf.render()}")
-    return _RunResult(message=stdout_buf.render(tail=tail))
+        return ShellRunResult(message=f"Error: {stderr_buf.render()}")
+    return ShellRunResult(message=stdout_buf.render(tail=tail))
 
 
 async def _background_process(
@@ -274,13 +277,13 @@ async def _background_process(
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
     output_capture: ShellOutputCapture | None,
-) -> _RunResult:
+) -> ShellRunResult:
     active = sum(1 for record in registry.values() if not record.finished)
     if active >= _MAX_BACKGROUNDED:
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
-        return _RunResult(
+        return ShellRunResult(
             message=(
                 f"Error: Too many backgrounded processes ({active}/{_MAX_BACKGROUNDED}). "
                 "Kill or wait for existing ones before running more."
@@ -291,7 +294,7 @@ async def _background_process(
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
-        return _RunResult(message=f"Error: Shell handle '{handle}' is already registered.")
+        return ShellRunResult(message=f"Error: Shell handle '{handle}' is already registered.")
     record = ProcessRecord(
         namespace=namespace,
         handle=handle,
@@ -319,7 +322,7 @@ async def _background_process(
         with contextlib.suppress(asyncio.CancelledError):
             await monitor_task
         raise
-    return _RunResult(
+    return ShellRunResult(
         message=(
             f"Command timed out after {timeout}s. Still running (PID {process.pid}).\n"
             f"Handle: {handle}\n"
@@ -327,6 +330,7 @@ async def _background_process(
             f"kill_shell_command('{handle}') to stop."
         ),
         handle=handle,
+        output_file_handled=output_capture is not None,
     )
 
 

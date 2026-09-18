@@ -342,7 +342,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             handle=supervisor_handle_for_run(_RUN_ID),
             max_runtime_seconds=4,
         )
-        process_group_leader = int(re.search(r"PID (\d+)", launch).group(1))  # type: ignore[union-attr]
+        process_group_leader = int(re.search(r"PID (\d+)", launch.message).group(1))  # type: ignore[union-attr]
         first_progress = await _read_progress(progress_path)
         script_pid = int(pid_path.read_text(encoding="utf-8"))
         os.kill(script_pid, 0)

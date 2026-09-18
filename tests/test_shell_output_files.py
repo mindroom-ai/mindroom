@@ -9,6 +9,7 @@ import os
 import signal
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -22,12 +23,15 @@ from mindroom.shell_output_capture import ShellOutputDestination
 from mindroom.shell_supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
+from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
     from agno.tools.toolkit import Toolkit
+
+    from mindroom.shell_execution import ShellRunResult
 
 
 @pytest.fixture(params=[False, True], ids=["local", "supervisor"])
@@ -53,6 +57,44 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
         )
     finally:
         manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start_fails", [False, True])
+async def test_output_ownership_is_independent_of_message_wording(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start_fails: bool,
+) -> None:
+    """Changing a run's display text cannot skip an error file or overwrite captured output."""
+    display_message = "Unable to start this command." if start_fails else "Error: this is only display text."
+    execute = (
+        shell_module.run_command_via_supervisor
+        if os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV)
+        else shell_module.run_command
+    )
+
+    def reword[**P](run: Callable[P, Awaitable[ShellRunResult]]) -> Callable[P, Awaitable[ShellRunResult]]:
+        async def reworded_run(*args: P.args, **kwargs: P.kwargs) -> ShellRunResult:
+            result = await run(*args, **kwargs)
+            return replace(result, message=display_message)
+
+        return reworded_run
+
+    monkeypatch.setattr(shell_module, execute.__name__, reword(execute))
+    destination = tmp_path / "wording.txt"
+    destination.write_text("previous contents")
+    await FunctionCall(
+        function=shell_toolkit.async_functions["run_shell_command"],
+        arguments={
+            "args": [str(tmp_path / "missing-command")] if start_fails else "printf complete",
+            "mindroom_output_path": "wording.txt",
+        },
+    ).aexecute()
+
+    expected = display_message if start_fails else "complete"
+    assert destination.read_text().split("\n", 1)[-1] == expected
 
 
 @pytest.mark.asyncio

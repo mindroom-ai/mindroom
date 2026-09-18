@@ -435,7 +435,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                 else None
             )
             if self._supervisor_socket is not None:
-                message = await run_command_via_supervisor(
+                result = await run_command_via_supervisor(
                     self._supervisor_socket,
                     namespace=self._handle_namespace,
                     argv=argv,
@@ -456,11 +456,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     timeout=timeout,
                     output_destination=output_destination,
                 )
-                message = result.message
-            # The existing shell protocol uses plain Error: replies before a
-            # run is accepted. Preserve generic redirection for those errors;
-            # accepted captures return a running handle or a JSON file receipt.
-            if output_destination is not None and not message.startswith("Error:"):
+            message = result.message
+            if result.output_file_handled:
                 return ToolOutputFileHandled(message)
             if cwd is None:
                 return message
