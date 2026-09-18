@@ -58,7 +58,7 @@ def _sdk_usage(route: _OpenAIRoute, *, include_cache_write: bool) -> CompletionU
                     "id": "chatcmpl_test",
                     "object": "chat.completion",
                     "created": 1,
-                    "model": "gpt-test",
+                    "model": "gpt-6-astra",
                     "choices": [
                         {
                             "index": 0,
@@ -81,7 +81,7 @@ def _sdk_usage(route: _OpenAIRoute, *, include_cache_write: bool) -> CompletionU
                 "id": "resp_test",
                 "object": "response",
                 "created_at": 1,
-                "model": "gpt-test",
+                "model": "gpt-6-astra",
                 "status": "completed",
                 "output": [],
                 "parallel_tool_calls": True,
@@ -105,11 +105,11 @@ def _sdk_usage(route: _OpenAIRoute, *, include_cache_write: bool) -> CompletionU
     ) as client:
         if route == "chat":
             response = client.chat.completions.create(
-                model="gpt-test",
+                model="gpt-6-astra",
                 messages=[{"role": "user", "content": "Hello"}],
             )
         else:
-            response = client.responses.create(model="gpt-test", input="Hello")
+            response = client.responses.create(model="gpt-6-astra", input="Hello")
     assert response.usage is not None
     return response.usage
 
@@ -119,7 +119,7 @@ def _sdk_usage(route: _OpenAIRoute, *, include_cache_write: bool) -> CompletionU
 def test_openai_metrics_preserve_sdk_input_details(route: _OpenAIRoute, *, include_cache_write: bool) -> None:
     """Dropping an SDK input counter makes persisted usage and billing inaccurate."""
     usage = _sdk_usage(route, include_cache_write=include_cache_write)
-    model = MindRoomOpenAIChat(id="gpt-test") if route == "chat" else MindRoomOpenAIResponses(id="gpt-test")
+    model = MindRoomOpenAIChat(id="gpt-6-astra") if route == "chat" else MindRoomOpenAIResponses(id="gpt-6-astra")
 
     metrics = model._get_metrics(usage)
 
