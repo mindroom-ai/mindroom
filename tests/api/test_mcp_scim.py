@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
+from structlog.testing import capture_logs
 
 from mindroom.api.mcp_scim import scim_routes
 from mindroom.mcp_gateway.accounts import GatewayAccounts
@@ -147,6 +148,78 @@ def test_invalid_user_fields_are_safe_errors(client: TestClient, payload: object
     response = client.post(BASE + "/Users", json=payload)
     assert response.status_code == 400
     assert response.json()["schemas"] == [ERROR_SCHEMA]
+
+
+@pytest.mark.parametrize(
+    ("method", "changes", "origin"),
+    [
+        ("POST", {"schemas": [USER_SCHEMA, "urn:example:unsupported"]}, "_body"),
+        ("PUT", {"displayName": None}, "_text"),
+        (
+            "PATCH",
+            {"schemas": [PATCH_SCHEMA], "Operations": [{"op": "replace", "path": "displayName", "value": None}]},
+            "_text",
+        ),
+        ("PUT", None, "_body"),
+    ],
+    ids=["schema", "profile", "patch", "malformed-json"],
+)
+def test_validation_failure_logs_only_code_locations(
+    client: TestClient,
+    method: str,
+    changes: dict[str, object] | None,
+    origin: str,
+) -> None:
+    """Rejected writes identify validation code without exposing submitted data or changing the account."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    payload = {
+        "schemas": [USER_SCHEMA],
+        "userName": "private-profile@example.org",
+        "active": True,
+        "password": "private-password-marker",
+        **(changes or {}),
+    }
+    content = json.dumps(payload) if changes is not None else '{"private-json-marker":'
+    with capture_logs() as logs:
+        response = client.request(
+            method,
+            BASE + "/Users" if method == "POST" else path,
+            content=content,
+            headers={"Content-Type": "application/scim+json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "schemas": [ERROR_SCHEMA],
+        "status": "400",
+        "detail": "Invalid or missing supported account attributes.",
+        "scimType": "invalidValue",
+    }
+    assert client.get(path).json() == account
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM account validation failed"]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert set(diagnostic) == {"event", "log_level", "method", "validation_frames"}
+    assert diagnostic["log_level"] == "warning"
+    assert diagnostic["method"] == method
+    frames = diagnostic["validation_frames"]
+    assert frames[-1].split(":")[0] == origin
+    assert all(
+        name.strip("<>").isidentifier() and int(line) > 0 for name, line in (frame.rsplit(":", 1) for frame in frames)
+    )
+    encoded = json.dumps(diagnostic)
+    for private in (TOKEN, account["id"], "private-profile", "private-password-marker", "private-json-marker"):
+        assert private not in encoded
+
+
+def test_success_and_authentication_failure_do_not_log_validation_diagnostics(client: TestClient) -> None:
+    """Only authenticated requests that fail account validation produce diagnostics."""
+    with capture_logs() as logs:
+        assert _create(client).status_code == 201
+        client.headers.pop("Authorization")
+        assert _create(client, displayName=None).status_code == 401
+    assert not [entry for entry in logs if entry["event"] == "SCIM account validation failed"]
 
 
 @pytest.mark.parametrize(
