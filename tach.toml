@@ -3251,6 +3251,7 @@ depends_on = ["mindroom.matrix_rtc.call_manager"]
 [[modules]]
 path = "mindroom.matrix_rtc.call_manager"
 depends_on = [
+    "mindroom.matrix.room_membership",
     "mindroom.matrix.olm_to_device",
     "mindroom.authorization",
     "mindroom.config.voice",

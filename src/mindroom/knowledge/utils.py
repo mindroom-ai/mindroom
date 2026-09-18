@@ -286,7 +286,8 @@ def _finish_base_knowledge_resolution(
     # One instant per resolve: the poll-interval boundary must not be evaluated
     # against two different clock readings within a single turn.
     wall_now = datetime.now(tz=UTC)
-    availability = lookup.availability if lookup is not None else KnowledgeAvailability.INITIALIZING
+    # A cold index has a resolution; None means the binding lookup raised.
+    availability = lookup.availability if lookup is not None else KnowledgeAvailability.REFRESH_FAILED
     if lookup is not None and availability is KnowledgeAvailability.READY:
         availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
     knowledge = lookup.index.knowledge if lookup is not None and lookup.index is not None else None
@@ -376,6 +377,7 @@ def _merge_agent_knowledge_resolutions(
     resolved_bases: list[tuple[Knowledge | None, KnowledgeAvailability, str | None]],
 ) -> _KnowledgeResolution:
     """Merge per-base resolution results into one agent knowledge handle."""
+    initializing_base_ids: list[str] = []
     missing_base_ids: list[str] = []
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     knowledges: list[Knowledge] = []
@@ -387,15 +389,25 @@ def _merge_agent_knowledge_resolutions(
                 last_error=last_error,
             )
         if knowledge is None:
-            missing_base_ids.append(base_id)
+            if availability is KnowledgeAvailability.INITIALIZING:
+                initializing_base_ids.append(base_id)
+            else:
+                missing_base_ids.append(base_id)
             continue
         knowledges.append(knowledge)
 
+    if initializing_base_ids:
+        logger.info(
+            "Knowledge bases awaiting first publication for agent",
+            agent_name=agent_name,
+            knowledge_bases=initializing_base_ids,
+        )
     if missing_base_ids:
         logger.warning(
             "Knowledge bases not available for agent",
             agent_name=agent_name,
             knowledge_bases=missing_base_ids,
+            availability={base_id: unavailable_bases[base_id].availability.value for base_id in missing_base_ids},
         )
     return _KnowledgeResolution(
         knowledge=_merge_knowledge(agent_name, knowledges),
