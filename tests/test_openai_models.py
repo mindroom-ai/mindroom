@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal
+
+import httpx
 import pytest
 from agno.models.azure.openai_chat import AzureOpenAI
 from agno.models.deepseek import DeepSeek
@@ -10,6 +13,7 @@ from agno.models.message import Message
 from agno.models.openai import OpenAIChat
 from agno.models.openai.like import OpenAILike
 from agno.models.openrouter import OpenRouter
+from openai import OpenAI
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
@@ -23,6 +27,10 @@ from mindroom.openai_models import (
     MindRoomOpenRouter,
 )
 
+if TYPE_CHECKING:
+    from openai.types.completion_usage import CompletionUsage
+    from openai.types.responses import ResponseUsage
+
 _CHAT_WIRE_PAIRS = [
     (MindRoomOpenAIChat, OpenAIChat),
     (MindRoomOpenAILike, OpenAILike),
@@ -31,6 +39,99 @@ _CHAT_WIRE_PAIRS = [
     (MindRoomDeepSeek, DeepSeek),
     (MindRoomLlamaCpp, LlamaCpp),
 ]
+
+type _OpenAIRoute = Literal["chat", "responses"]
+
+
+def _sdk_usage(route: _OpenAIRoute, *, include_cache_write: bool) -> CompletionUsage | ResponseUsage:
+    """Parse provider usage through the real OpenAI client without network I/O."""
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        input_details = {"cached_tokens": 12_000}
+        if include_cache_write:
+            input_details["cache_write_tokens"] = 3_000
+        if route == "chat":
+            input_details["audio_tokens"] = 11
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl_test",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": "gpt-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "Ready"},
+                        },
+                    ],
+                    "usage": {
+                        "prompt_tokens": 15_000,
+                        "completion_tokens": 50,
+                        "total_tokens": 15_050,
+                        "prompt_tokens_details": input_details,
+                        "completion_tokens_details": {"audio_tokens": 13, "reasoning_tokens": 7},
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-test",
+                "status": "completed",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "error": None,
+                "incomplete_details": None,
+                "usage": {
+                    "input_tokens": 15_000,
+                    "output_tokens": 50,
+                    "total_tokens": 15_050,
+                    "input_tokens_details": input_details,
+                    "output_tokens_details": {"reasoning_tokens": 7},
+                },
+            },
+        )
+
+    with OpenAI(
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    ) as client:
+        if route == "chat":
+            response = client.chat.completions.create(
+                model="gpt-test",
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+        else:
+            response = client.responses.create(model="gpt-test", input="Hello")
+    assert response.usage is not None
+    return response.usage
+
+
+@pytest.mark.parametrize("include_cache_write", [True, False], ids=["current", "older"])
+@pytest.mark.parametrize("route", ["responses", "chat"])
+def test_openai_metrics_preserve_sdk_input_details(route: _OpenAIRoute, *, include_cache_write: bool) -> None:
+    """Dropping an SDK input counter makes persisted usage and billing inaccurate."""
+    usage = _sdk_usage(route, include_cache_write=include_cache_write)
+    model = MindRoomOpenAIChat(id="gpt-test") if route == "chat" else MindRoomOpenAIResponses(id="gpt-test")
+
+    metrics = model._get_metrics(usage)
+
+    assert metrics.input_tokens == 15_000
+    assert metrics.output_tokens == 50
+    assert metrics.total_tokens == 15_050
+    assert metrics.cache_read_tokens == 12_000
+    assert metrics.cache_write_tokens == (3_000 if include_cache_write else 0)
+    assert metrics.reasoning_tokens == 7
+    assert metrics.audio_input_tokens == (11 if route == "chat" else 0)
+    assert metrics.audio_output_tokens == (13 if route == "chat" else 0)
+    assert metrics.audio_total_tokens == (24 if route == "chat" else 0)
 
 
 def _assistant_with_argumentless_tool_call() -> Message:
