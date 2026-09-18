@@ -18149,6 +18149,7 @@ MindRoom's architecture consists of several key components working together.
 | `session_storage_preflight.py` | Required session-column checks and retained archives for incompatible owned session stores |
 | `agent_descriptions.py` | Shared agent description rendering for routing and delegation |
 | `agent_policy.py` | Derives canonical execution policies from authored agent config |
+| `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, context file resolution |
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |

@@ -35,6 +35,7 @@ from mindroom.script_runs.worker_client import (
     WorkerScriptCancel,
     WorkerScriptStatus,
 )
+from mindroom.shell_execution import ShellRunResult
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
@@ -558,11 +559,11 @@ async def test_shutdown_fence_drains_admitted_launch_and_rejects_racing_launch(
         client.launch_release = release_launch
     else:
 
-        async def launch_local(*_args: object, **_kwargs: object) -> str:
+        async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
             launch_entered.set()
             await release_launch.wait()
             handle = str(_kwargs["handle"])
-            return f"Started background process\nHandle: {handle}"
+            return ShellRunResult(message="Started background process", handle=handle)
 
         monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
         monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
@@ -1093,7 +1094,7 @@ async def test_unsafe_local_launch_rejects_uncontained_platform_before_durable_w
     """Unsafe-local scripts fail closed when supervisor hard-crash containment is unavailable."""
     manager, backend, _client = _manager(tmp_path, mode="off")
     monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: False, raising=False)
-    launch = AsyncMock(return_value=f"Handle: shell:{'a' * 32}")
+    launch = AsyncMock(return_value=ShellRunResult(message="Started background process", handle=f"shell:{'a' * 32}"))
     monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch)
 
     with pytest.raises(ScriptRunManagerError, match="Linux"):
@@ -1180,10 +1181,10 @@ async def test_post_spawn_store_read_failure_signals_local_process_before_failin
     killed_handles: list[str] = []
     original_get_run = manager.store.get_run
 
-    async def launch_local(*_args: object, **_kwargs: object) -> str:
+    async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
         nonlocal spawned
         spawned = True
-        return f"Handle: shell:{manager.store.list_runs()[0].run_id.removeprefix('script-')}"
+        return ShellRunResult(message="Started background process", handle=str(_kwargs["handle"]))
 
     def fail_first_post_spawn_read(run_id: str) -> ScriptRunRecord:
         nonlocal failed_read
@@ -1237,10 +1238,10 @@ async def test_post_spawn_task_cancellation_signals_local_process_before_propaga
     killed_handles: list[str] = []
     original_get_run = manager.store.get_run
 
-    async def launch_local(*_args: object, **_kwargs: object) -> str:
+    async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
         nonlocal spawned
         spawned = True
-        return f"Handle: shell:{manager.store.list_runs()[0].run_id.removeprefix('script-')}"
+        return ShellRunResult(message="Started background process", handle=str(_kwargs["handle"]))
 
     def block_first_post_spawn_read(run_id: str) -> ScriptRunRecord:
         nonlocal blocked_read
@@ -1511,8 +1512,8 @@ async def test_local_cancel_waits_for_snapshot_write_and_removes_capability(
         assert release_write.wait(timeout=5)
         return original_write_snapshot(*args, **kwargs)
 
-    async def launch_local(*_args: object, **kwargs: object) -> str:
-        return f"Started background process\nHandle: {kwargs['handle']}"
+    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
+        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
 
     monkeypatch.setattr(manager_module, "_write_snapshot", blocked_write_snapshot)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
@@ -2459,7 +2460,7 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
         max_runtime_seconds: float | None = None,
-    ) -> str:
+    ) -> ShellRunResult:
         assert max_runtime_seconds is not None
         assert max_runtime_seconds > 0
         observed.update(
@@ -2475,7 +2476,7 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         assert handle is not None
         starting = manager.store.list_runs(include_finished=False)[0]
         assert handle == f"shell:{starting.run_id.removeprefix('script-')}"
-        return f"Started background process\nHandle: {handle}"
+        return ShellRunResult(message="Started background process", handle=handle)
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
     monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
@@ -2535,12 +2536,12 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
         max_runtime_seconds: float | None = None,
-    ) -> str:
+    ) -> ShellRunResult:
         assert max_runtime_seconds is not None
         assert max_runtime_seconds > 0
         del namespace, argv, env, cwd, tail, timeout
         assert handle is not None
-        return f"Started background process\nHandle: {handle}"
+        return ShellRunResult(message="Started background process", handle=handle)
 
     monkeypatch.setattr(manager_module, "_agent_workspace", blocking_workspace)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
@@ -2574,9 +2575,9 @@ async def test_local_launch_rechecks_durable_intent_immediately_before_spawn(
         manager.store.request_cancel(run_id, reason="cancelled during snapshot")
         return paths
 
-    async def launch_local(*_args: object, **_kwargs: object) -> str:
+    async def launch_local(*_args: object, **_kwargs: object) -> ShellRunResult:
         launch_calls.append("called")
-        return "unexpected launch"
+        return ShellRunResult(message="unexpected launch")
 
     monkeypatch.setattr(manager_module, "_write_snapshot", snapshot_then_cancel)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
@@ -2599,7 +2600,7 @@ async def test_ambiguous_local_launch_failure_remains_retryable_until_exit(
     killed_handles: list[str] = []
     termination_confirmed = False
 
-    async def failed_launch(*_args: object, **_kwargs: object) -> str:
+    async def failed_launch(*_args: object, **_kwargs: object) -> ShellRunResult:
         message = "launch response lost"
         raise RuntimeError(message)
 
@@ -2668,14 +2669,14 @@ async def test_local_launch_adopts_cancellation_before_running_transition(
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
         max_runtime_seconds: float | None = None,
-    ) -> str:
+    ) -> ShellRunResult:
         assert max_runtime_seconds is not None
         assert max_runtime_seconds > 0
         del namespace, argv, env, cwd, tail, timeout
         assert handle is not None
         launch_entered.set()
         await launch_release.wait()
-        return f"Started background process\nHandle: {handle}"
+        return ShellRunResult(message="Started background process", handle=handle)
 
     def kill_local(
         _socket_path: str,
@@ -2738,14 +2739,14 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
         timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
         max_runtime_seconds: float | None = None,
-    ) -> str:
+    ) -> ShellRunResult:
         assert max_runtime_seconds is not None
         assert max_runtime_seconds > 0
         del namespace, argv, env, cwd, tail, timeout
         assert handle is not None
         launch_entered.set()
         await launch_release.wait()
-        return f"Started background process\nHandle: {handle}"
+        return ShellRunResult(message="Started background process", handle=handle)
 
     def kill_local(
         _socket_path: str,

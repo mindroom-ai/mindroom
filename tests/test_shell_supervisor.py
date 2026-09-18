@@ -67,6 +67,24 @@ def test_supervisor_status_parser_is_canonical(
     assert status.exit_code == exit_code
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "Finished", "handle": None, "output_file_handled": "false"},
+        {"message": "Started", "handle": 123, "output_file_handled": True},
+        {"message": {}, "handle": None, "output_file_handled": False},
+        {"message": "Missing ownership metadata"},
+    ],
+)
+def test_invalid_result_metadata_cannot_claim_output_ownership(payload: dict[str, object]) -> None:
+    """Malformed supervisor fields must not suppress the caller's normal error handling."""
+    result = shell_supervisor._parse_supervisor_response(json.dumps(payload).encode())
+
+    assert result.output_file_handled is False
+    assert result.handle is None
+    assert result.message.startswith("Error: Invalid shell supervisor response:")
+
+
 @contextlib.asynccontextmanager
 async def _running_server(
     registry: dict[str, ProcessRecord],
@@ -100,7 +118,7 @@ async def _run(
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
 ) -> str:
-    return await run_command_via_supervisor(
+    result = await run_command_via_supervisor(
         socket_path,
         namespace=namespace,
         argv=argv,
@@ -111,6 +129,7 @@ async def _run(
         handle=handle,
         max_runtime_seconds=max_runtime_seconds,
     )
+    return result.message
 
 
 def _extract_handle(message: str) -> str:
@@ -863,7 +882,7 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
         argv = kwargs["argv"]
         assert isinstance(argv, list)
         observed_argv.extend(str(item) for item in argv)
-        return shell_execution_module._RunResult(message="ordinary result")
+        return shell_execution_module.ShellRunResult(message="ordinary result")
 
     monkeypatch.setattr(shell_supervisor, "run_command", record_run)
     reader = asyncio.StreamReader()
@@ -879,7 +898,8 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
 
     message = await shell_supervisor._handle_run({}, set(), payload, reader)
 
-    assert message == "ordinary result"
+    assert message is not None
+    assert message.message == "ordinary result"
     assert observed_argv == ["echo", "ordinary"]
 
 

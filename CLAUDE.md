@@ -89,6 +89,7 @@ Matrix sync callback
 **Key modules**:
 | Module | Purpose |
 |--------|---------|
+| `atomic_file.py` | Shared atomic byte publication and cleanup relative to an opened directory |
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
@@ -208,6 +209,7 @@ Matrix sync callback
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice_handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup |
 | `tool_system/sandbox_proxy.py` | Container sandbox proxy for isolating shell/python tools |
+| `shell_output_capture.py` | Bounded shell output spools, completion validation, and atomic output-file publication |
 | `shell_execution.py` | Shell command execution core: spawning, output buffering, background handle registry |
 | `shell_supervisor.py` | Worker-local shell supervisor process owning background shell handles across sandbox request subprocesses |
 | `script_runs/legacy_recovery.py` | Exact pre-v2 recovery digest verification for script-runtime startup migration; the current store owns atomic replacement and unverifiable records remain rejected |
