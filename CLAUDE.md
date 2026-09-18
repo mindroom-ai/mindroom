@@ -220,6 +220,7 @@ Matrix sync callback
 | `attachment_media.py` | Convert attachment records to Agno media objects |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
+| `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a two-variant bounded cache, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |

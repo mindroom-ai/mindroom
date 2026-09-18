@@ -274,9 +274,11 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 
 ### Token Usage
 
-`GET /api/usage` returns retained token usage using the same collector as the `usage_stats` tool.
-It uses dashboard authentication; ordinary Connections users cannot access it.
-Standalone deployments should protect the dashboard with `MINDROOM_API_KEY` as described above.
+`GET /api/usage` returns organization-wide retained usage under the same standard dashboard authentication as other administrator APIs.
+`GET /api/usage/export` exposes the same report to a collector through the dedicated signed service assertion described in [Trusted Upstream Authentication](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#usage-export-service).
+The two routes share report preparation and caching while authenticating every request through their own policy.
+When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
+Every report-state response uses `Cache-Control: no-store`.
 
 The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, and `user_breakdown`.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
@@ -286,7 +288,7 @@ Stored per-model details split runs that use several models; older runs fall bac
 Malformed or inconsistent model details retain the run's tokens under `unknown` and mark model coverage as incomplete.
 Requester aliases are combined; `user_id: null` holds unattributed usage.
 
-Use `GET /api/usage?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
+Use `GET /api/usage?include_daily=true` or `GET /api/usage/export?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
@@ -304,7 +306,7 @@ The `coverage`, `model_coverage`, and `user_coverage` fields describe missing so
 This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
-The administrator response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
+The organization-wide response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
 Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
 They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
@@ -314,14 +316,14 @@ Compacted history can contribute to session totals without recoverable model or 
 #### Personal Private-Agent Usage
 
 `GET /api/usage/me/private-agents?include_daily=true` returns the authenticated requester's usage across their configured private agents.
-It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an administrator `user_breakdown`.
+It shares the collector used by `get_my_private_usage()` and returns the same private rows, without `user_id` or an organization-wide `user_breakdown`.
 Known requester aliases share one history; other users' databases and shared-agent databases are excluded.
 The optional `include_daily` parameter defaults to `false`.
 
 This endpoint requires trusted upstream authentication with signed JWTs and a verified Matrix identity, using the same identity checks as the personal Connections API.
 An instance API key alone cannot select a personal user.
 The requester comes only from authenticated identity; user, agent, and storage-path query overrides are rejected.
-Ordinary authenticated users can access this personal endpoint; `/api/usage` retains its existing dashboard administrator access rules.
+Ordinary authenticated users can access this personal endpoint, but their signed identity does not grant administrator dashboard access or access to the service export.
 
 ### Health & Readiness
 

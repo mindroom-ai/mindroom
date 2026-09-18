@@ -350,6 +350,45 @@ def _trusted_upstream_required_jwt_setting(value: str | None, env_name: str) -> 
     return value
 
 
+async def _verified_trusted_upstream_jwt_claims(
+    request: Request,
+    jwt_client: PyJWKClient,
+    *,
+    header: str,
+    audience: str,
+    issuer: str,
+    required_claims: tuple[str, ...],
+    invalid_detail: str,
+    algorithms: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Verify one configured upstream JWT and return its claims."""
+    token = _get_configured_header(request, header)
+    if token is None:
+        raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
+    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
+        raise HTTPException(status_code=401, detail=invalid_detail)
+
+    try:
+        signing_key = await asyncio.to_thread(jwt_client.get_signing_key_from_jwt, token)
+        accepted_algorithms = algorithms
+        if accepted_algorithms is None:
+            algorithm = signing_key.algorithm_name
+            if algorithm is None:
+                raise jwt.InvalidTokenError
+            accepted_algorithms = (algorithm,)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=accepted_algorithms,
+            audience=audience,
+            issuer=issuer,
+            options={"require": list(required_claims)},
+        )
+    except PyJWTError as exc:
+        raise HTTPException(status_code=401, detail=invalid_detail) from exc
+    return claims
+
+
 async def _verified_trusted_upstream_jwt_identity(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
@@ -382,32 +421,20 @@ async def _verified_trusted_upstream_jwt_identity(
             detail="Trusted upstream strict JWT auth is enabled but JWKS validation is not configured",
         )
 
-    token = _get_configured_header(request, header)
-    if token is None:
-        raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
-    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT")
-
-    try:
-        signing_key = await asyncio.to_thread(jwt_client.get_signing_key_from_jwt, token)
-        algorithm = signing_key.algorithm_name
-        if algorithm is None:
-            raise jwt.InvalidTokenError
-        required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
-        if jwt_settings.user_id_claim is not None:
-            required_claims.append(jwt_settings.user_id_claim)
-        if jwt_settings.matrix_user_id_claim is not None:
-            required_claims.append(jwt_settings.matrix_user_id_claim)
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=[algorithm],
-            audience=audience,
-            issuer=issuer,
-            options={"require": required_claims},
-        )
-    except PyJWTError as exc:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT") from exc
+    required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
+    if jwt_settings.user_id_claim is not None:
+        required_claims.append(jwt_settings.user_id_claim)
+    if jwt_settings.matrix_user_id_claim is not None:
+        required_claims.append(jwt_settings.matrix_user_id_claim)
+    claims = await _verified_trusted_upstream_jwt_claims(
+        request,
+        jwt_client,
+        header=header,
+        audience=audience,
+        issuer=issuer,
+        required_claims=tuple(required_claims),
+        invalid_detail="Invalid trusted upstream JWT",
+    )
 
     email = _trusted_upstream_jwt_string_claim(claims, jwt_settings.email_claim)
     user_id = (
@@ -835,6 +862,47 @@ async def require_connections_user(request: Request) -> dict[str, Any]:
 async def require_personal_user(request: Request) -> dict[str, Any]:
     """Authenticate personal read APIs without granting administrator access."""
     return await _require_signed_matrix_user(request, label="Personal APIs")
+
+
+async def require_usage_service(request: Request) -> None:
+    """Authenticate the dedicated usage-export service without creating a user identity."""
+    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    settings = auth_state.settings.trusted_upstream
+    jwt_settings = settings.jwt
+    audience = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_JWT_AUDIENCE")
+    client_id = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_CLIENT_ID")
+    if (
+        not settings.enabled
+        or settings.user_id_header is None
+        or not jwt_settings.require_jwt
+        or jwt_settings.header is None
+        or jwt_settings.jwks_url is None
+        or jwt_settings.audience is None
+        or jwt_settings.issuer is None
+        or audience is None
+        or client_id is None
+        or auth_state.trusted_upstream_jwt_client is None
+    ):
+        raise HTTPException(status_code=503, detail="Usage export service authentication is not configured")
+
+    claims = await _verified_trusted_upstream_jwt_claims(
+        request,
+        auth_state.trusted_upstream_jwt_client,
+        header=jwt_settings.header,
+        audience=audience,
+        issuer=jwt_settings.issuer,
+        algorithms=("RS256",),
+        required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
+        invalid_detail="Invalid usage service JWT",
+    )
+
+    if (
+        claims.get("type") != "app"
+        or claims.get("sub") != ""
+        or not isinstance(claims.get("common_name"), str)
+        or claims["common_name"] != client_id
+    ):
+        raise HTTPException(status_code=401, detail="Invalid usage service JWT")
 
 
 async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[str, Any]:
