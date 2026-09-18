@@ -250,9 +250,10 @@ class ToolJobRuntime:
             raise JobAccessError(_UNAVAILABLE)
         return entry
 
-    async def _persist(self, entry: _Entry) -> None:
+    async def _persist(self, entry: _Entry, *, update_timestamp: bool = True) -> None:
         job = entry.job
-        job.updated_at = datetime.now(UTC).isoformat()
+        if update_timestamp:
+            job.updated_at = datetime.now(UTC).isoformat()
         payload = {"schema_version": 1, **deepcopy(asdict(job))}
         await run_blocking_until_complete(write_json_file_durable, self._path(job.job_id), payload)
         entry.notify_changed()
@@ -278,7 +279,8 @@ class ToolJobRuntime:
                 # Coverage: tests/test_tool_jobs.py::test_legacy_paused_execution_is_interrupted_without_replay
                 job = await asyncio.to_thread(read_job_snapshot, path)
                 entry = _Entry(job)
-                if job.status not in _READY:
+                interrupted = job.status not in _READY
+                if interrupted:
                     outcome = await self._cancel(job) if self._cancel is not None else None
                     self._settle_stopped(
                         entry,
@@ -286,7 +288,7 @@ class ToolJobRuntime:
                         reason="Tool execution was interrupted by a runtime restart; it was not replayed.",
                         outcome=outcome,
                     )
-                await self._persist(entry)
+                await self._persist(entry, update_timestamp=interrupted)
                 self._entries[job.job_id] = entry
                 self._restore_approval_signal(entry)
             self._recovered = True
@@ -803,7 +805,7 @@ class ToolJobRuntime:
                     entry.stopping = True
                     entry.control.cancel()
                 else:
-                    await self._persist(entry)
+                    await self._persist(entry, update_timestamp=False)
                     entry.cancel_settlement_pending = False
                 self._release_control(entry)
                 cancellation = entry.cancel_task

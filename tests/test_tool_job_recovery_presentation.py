@@ -297,14 +297,19 @@ async def test_recovered_blocking_cancellation_keeps_visible_body_and_trace(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("latest_state", ["readable", "unreadable", "error", "wrong_sender"])
-async def test_recovered_blocking_wait_cancellation_preserves_latest_presentation(  # noqa: PLR0915
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize("cancel_source", ["sync_restart", "user_stop"])
+async def test_blocking_wait_cancellation_preserves_latest_presentation(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     latest_state: str,
+    recovered: bool,
+    cancel_source: str,
 ) -> None:
     """A published wait is the cancellation baseline, including newly numbered tools."""
     bot = _bot(tmp_path)
     bot.config.memory.backend = "none"
+    bot.config.background_tool_jobs = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread")
     old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="saved result")
@@ -312,7 +317,7 @@ async def test_recovered_blocking_wait_cancellation_preserves_latest_presentatio
     request = replace(
         _plain_request(target),
         existing_event_id="$response",
-        initial_presentation=StreamingPresentation(prefix, tool_trace=(old_trace,)),
+        initial_presentation=StreamingPresentation(prefix, tool_trace=(old_trace,)) if recovered else None,
     )
     sender = "@other:localhost" if latest_state == "wrong_sender" else bot.matrix_id.full_id
     original = _make_message_event(
@@ -360,8 +365,7 @@ async def test_recovered_blocking_wait_cancellation_preserves_latest_presentatio
             tool=ToolExecution(tool_call_id="new-call", tool_name="retrieve", result="new result"),
         )
         yield BackgroundWaitChunk("\n\nWaiting for background work.")
-        cancel_reason = "sync_restart"
-        raise asyncio.CancelledError(cancel_reason)
+        raise asyncio.CancelledError(cancel_source)
 
     monkeypatch.setattr("mindroom.delivery_gateway.edit_message_outcome", edit)
     monkeypatch.setattr("mindroom.ai.stream_response_turn", events)
@@ -382,7 +386,7 @@ async def test_recovered_blocking_wait_cancellation_preserves_latest_presentatio
     assert len(outcomes) == 1
     outcome = outcomes[0]
     assert outcome.terminal_status == "cancelled"
-    assert outcome.cancel_source == "sync_restart"
+    assert outcome.cancel_source == cancel_source
     if latest_state != "readable":
         assert len(edits) == 1, "An unreadable latest response must stay intact"
         assert outcome.final_visible_body is None
@@ -390,12 +394,17 @@ async def test_recovered_blocking_wait_cancellation_preserves_latest_presentatio
         assert len(edits) == 2
         assert outcome.final_visible_body is not None
         assert "New recovery analysis." in outcome.final_visible_body
-        assert outcome.final_visible_body.endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
+        note = (
+            RESTART_INTERRUPTED_RESPONSE_NOTE if cancel_source == "sync_restart" else "**[Response cancelled by user]**"
+        )
+        assert outcome.final_visible_body.endswith(note)
     wait_content = edits[0].source["content"]["m.new_content"]
-    assert wait_content["body"].startswith(prefix)
-    assert "`retrieve` [2]" in wait_content["body"]
+    assert wait_content["body"].startswith(prefix if recovered else "New recovery analysis.")
+    assert f"`retrieve` [{2 if recovered else 1}]" in wait_content["body"]
     trace = deserialize_tool_trace(wait_content.get("io.mindroom.tool_trace", {}).get("events", []))
-    assert trace == [old_trace, ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result")]
+    assert trace == ([old_trace] if recovered else []) + [
+        ToolTraceEntry("tool_call_completed", "retrieve", result_preview="new result"),
+    ]
     if latest_state == "readable":
         assert outcome.tool_trace == tuple(trace)
         final_content = edits[-1].source["content"]["m.new_content"]

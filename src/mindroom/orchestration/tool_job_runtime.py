@@ -46,6 +46,18 @@ logger = get_logger(__name__)
 _RETRY_SECONDS = 5.0
 
 
+def _transport_allows_actor(config: Config, recipient: str, actor: str) -> bool:
+    """Validate a runtime-owned actor against its configured or ad hoc transport."""
+    if recipient == actor:
+        return True
+    team = config.teams.get(recipient)
+    if team is not None:
+        return actor in team.agents
+    # Ad hoc teams use an ordinary agent's Matrix account. Their actual members
+    # are materialized by the team driver; requester access is rechecked below.
+    return recipient in config.agents and actor in config.agents
+
+
 @dataclass
 class ToolJobRuntimeCoordinator:
     """Own background jobs and wake their serialized conversation response owner."""
@@ -124,10 +136,8 @@ class ToolJobRuntimeCoordinator:
         ):
             return False
         recipient = owner.transport_agent_name or owner.agent_name
-        if recipient != owner.agent_name:
-            team = config.teams.get(recipient)
-            if team is None or owner.agent_name not in team.agents:
-                return False
+        if not _transport_allows_actor(config, recipient, owner.agent_name):
+            return False
         return all(
             is_sender_allowed_for_responder(
                 owner.requester_id,
@@ -169,8 +179,7 @@ class ToolJobRuntimeCoordinator:
             raise JobAccessError(msg)
         root = edges[0][0] if edges else owner.agent_name
         recipient = owner.transport_agent_name or root
-        team = config.teams.get(recipient)
-        valid_transport = recipient == root or (team is not None and root in team.agents)
+        valid_transport = _transport_allows_actor(config, recipient, root)
         callers = {owner.agent_name, recipient, *(caller for caller, _ in edges)}
         allowed_edges = all(
             caller in config.agents and child in config.agents[caller].delegate_to for caller, child in edges
