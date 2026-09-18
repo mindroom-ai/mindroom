@@ -316,12 +316,15 @@ Session totals use a validated private-instance owner or the recorded session re
 Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
 Compacted history can contribute to session totals without recoverable model or daily detail.
 
-For a broader per-person view, group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
+For an ownership-based view, combine private-agent session usage attributed to owners with retained usage outside private-agent instances attributed to requesters.
+Group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
 For each token counter and user, calculate `user_breakdown.totals - private_agent_breakdown.retained_run_totals + private_agent_breakdown.totals`, summing private-agent rows first and treating missing rows as zero.
 Use values from the same response and retain `user_id: null` as unattributed usage.
 For example, 60 retained tokens containing 20 private-agent tokens, plus a private-agent session total of 50, gives 90 tokens: `60 - 20 + 50`.
 This includes private history whose detailed runs were compacted without counting its retained runs twice.
-Shared-conversation usage still relies on retained requester-attributed runs; a conversation's recorded requester is not the owner of every run.
+It also replaces recorded-requester attribution for private runs with session ownership: if Bob requested 20 retained tokens from Alice's private instance with 100 session tokens, this view assigns those 100 tokens to Alice and none to Bob.
+Keep `user_breakdown` unchanged when reporting who made the retained requests; the combined view answers a different ownership question.
+Usage outside private-agent instances still relies on retained requester-attributed runs; a shared conversation's recorded requester is not the owner of every run.
 This combined view does not recover historical dates or per-model splits for the additional private session totals, and incomplete coverage still applies.
 
 Consumers should tolerate additional response fields and preserve the distinction between session totals and retained-run breakdowns.

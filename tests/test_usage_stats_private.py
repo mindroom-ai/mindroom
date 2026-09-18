@@ -280,6 +280,37 @@ def test_private_rows_share_report_wide_run_deduplication(tmp_path: Path, monkey
     assert {row["user_id"] for row in rows} == {ALICE}
 
 
+def test_combined_private_ownership_differs_from_recorded_requester(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Combining private session totals changes attribution only for private usage."""
+    private_source = replace(_source(scope="private_agent", requester_isolated=True), owner_id=ALICE)
+    shared_source = _source()
+    private_row = _row(private_source, _run(requester_id=BOB, total_tokens=20), session_metrics=_metrics(100))
+    shared_row = _row(shared_source, _run(requester_id=BOB, total_tokens=30), session_metrics=_metrics(40))
+    _wire(
+        monkeypatch,
+        (private_source, shared_source),
+        {private_source.path_label: (private_row,), shared_source.path_label: (shared_row,)},
+    )
+
+    report = usage_stats.collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+
+    users = {row["user_id"]: row["totals"]["total_tokens"] for row in report["user_breakdown"]}
+    assert users == {BOB: 50}
+    private = {row["user_id"]: row for row in report["private_agent_breakdown"]}
+    assert private[ALICE]["totals"]["total_tokens"] == 100
+    assert private[ALICE]["retained_run_totals"]["total_tokens"] == 0
+    assert private[BOB]["totals"]["total_tokens"] == 0
+    assert private[BOB]["retained_run_totals"]["total_tokens"] == 20
+    combined = {
+        user: users.get(user, 0) - row["retained_run_totals"]["total_tokens"] + row["totals"]["total_tokens"]
+        for user, row in private.items()
+    }
+    assert combined == {ALICE: 100, BOB: 30}
+
+
 def test_private_rows_report_unreadable_run_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unavailable retained runs must not make private coverage look complete."""
     source = _source(scope="private_agent", requester_isolated=True)

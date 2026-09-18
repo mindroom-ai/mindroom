@@ -5,6 +5,8 @@
 # Last legacy release: v2026.9.36; verified historical aliases introduced in v2026.9.37.
 # Handling: accept only aliases proven by the current owner and exact historical reconstruction.
 # Real historical directories grant no alias access, including preserved recordless scopes.
+# Usage discovery skips verified primary aliases and exact session mirrors; canonical
+# directories remain scanned, and unverified aliases retain coverage warnings.
 # Coverage: tests/test_private_storage_migration.py::test_completed_aliases_reject_tampering.
 # Coverage: tests/test_private_storage_migration.py::test_worker_mount_plan_never_infers_historical_access.
 # Coverage: tests/test_usage_stats_private.py::test_private_coverage_does_not_count_verified_alias_as_missing.
