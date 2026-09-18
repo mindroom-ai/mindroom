@@ -12,6 +12,7 @@ from agno.exceptions import ContextWindowExceededError, ModelProviderError, Retr
 from agno.models.message import Message
 
 from mindroom.agno_compat_model_hooks import install_retry_cycle_hooks
+from mindroom.agno_compat_provider_errors import is_transient_stream_error
 from mindroom.error_handling import (
     TRANSIENT_PROVIDER_STATUS_CODES,
     IncompleteResponsesStreamError,
@@ -255,7 +256,12 @@ async def _stream_with_fallback(
                 _learn_from_request_fallback(route, request_state)
                 return
             except Exception as error:
-                if request_state.stream_output_produced or not remaining_kinds or not _should_retry(error):
+                if (
+                    request_state.stream_output_produced
+                    or not remaining_kinds
+                    or is_transient_stream_error(error)
+                    or not _should_retry(error)
+                ):
                     raise
                 failure = error
                 break

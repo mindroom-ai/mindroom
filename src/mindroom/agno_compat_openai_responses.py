@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from agno.exceptions import ModelProviderError
+from agno.exceptions import ContextWindowExceededError, ModelAuthenticationError, ModelProviderError
+from agno.utils.log import log_warning
+from openai import APIStatusError
 from openai.types.responses import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseErrorEvent,
+    ResponseFailedEvent,
     ResponseInProgressEvent,
     ResponseOutputItemDoneEvent,
 )
@@ -15,12 +19,14 @@ from openai.types.responses import (
 from mindroom.error_handling import IncompleteResponsesStreamError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator
+    from collections.abc import AsyncIterator, Iterator
 
     from agno.models.message import Message
+    from agno.models.openai import OpenAIResponses
     from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
-    from openai.types.responses import ResponseStreamEvent
+    from agno.tools.function import Function
+    from openai.types.responses import ResponseInputParam, ResponseStreamEvent
     from pydantic import BaseModel
 
 _RESPONSE_ITEMS_BUFFER_KEY = "mindroom_response_items"
@@ -35,6 +41,17 @@ _LIFECYCLE_ONLY_KEY = "mindroom_stream_lifecycle_only"
 # response IDs only for complete turns across sync and async streams.
 # Coverage: tests/test_openai_responses_stream.py::test_unsuccessful_stream_raises_without_publishing_response_id;
 # tests/test_openai_responses_stream.py::test_completed_text_publishes_response_id_only_at_completion.
+
+# AGNO_COMPAT: Native Responses error events are ignored by Agno's stream parser.
+# Reason: Typed error/response.failed events otherwise become incomplete EOF,
+# hiding transient failures from the provider retry owner before output starts.
+# Own raw SDK streams because Agno's invocation loops do not close unread HTTP
+# bodies when parsing fails or consumers close; retain provider request callbacks.
+# Upstream issue: No matching issue identified for native stream error events.
+# Upstream PR: None identified; the lifecycle PR above does not classify errors.
+# Remove when: Agno preserves native failure codes and typed context limits and
+# deterministically closes SDK streams on parsing errors and consumer closure.
+# Coverage: tests/test_responses_stream_retry.py.
 
 # AGNO_COMPAT: Stream retries can reuse caller-visible partial output.
 # Reason: Agno's generic retry loop can restart a stream after the caller has
@@ -85,6 +102,55 @@ class OpenAIResponsesProviderCompat:
             error,
         )
 
+    def _stream_request_params(
+        self,
+        messages: list[Message],
+        response_format: dict[Any, Any] | type[BaseModel] | None,
+        tools: list[dict[str, Any]] | None,
+        tool_choice: str | dict[str, Any] | None,
+        run_response: RunOutput | None,
+    ) -> dict[str, Any]:
+        """Reuse provider request construction while retaining Agno's streaming policy."""
+        params = cast("OpenAIResponses", self).get_request_params(
+            messages=messages,
+            response_format=response_format,
+            tools=tools,
+            tool_choice=tool_choice,
+            run_response=run_response,
+        )
+        if params.pop("background", None):
+            log_warning("Background mode is not supported for streaming requests. Ignoring `background=True`.")
+        return params
+
+    def _stream_input(
+        self,
+        messages: list[Message],
+        compress_tool_results: bool,
+        tools: list[dict[str, Any]] | None,
+    ) -> ResponseInputParam:
+        """Keep subclass formatting while adapting Agno's broad input annotation."""
+        return cast(
+            "ResponseInputParam",
+            cast("OpenAIResponses", self)._format_messages(
+                messages,
+                compress_tool_results,
+                tools=cast("list[Function | dict[str, Any]] | None", tools),
+            ),
+        )
+
+    def _stream_provider_error(self, error: Exception) -> ModelProviderError:
+        """Preserve provider statuses and SDK causes without copying Agno's repeated catches."""
+        if isinstance(error, ModelProviderError):
+            return error
+        status = error.status_code if isinstance(error, APIStatusError) else 502
+        error_type = (
+            ContextWindowExceededError
+            if isinstance(error, APIStatusError) and error.code == "context_length_exceeded"
+            else ModelProviderError
+        )
+        message = error.message if isinstance(error, APIStatusError) else str(error)
+        return error_type(message=message, status_code=status, model_name=self.name, model_id=self.id)
+
     def invoke_stream(
         self,
         messages: list[Message],
@@ -95,33 +161,40 @@ class OpenAIResponsesProviderCompat:
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> Iterator[ModelResponse]:
-        """Require a successful terminal event for each provider invocation."""
+        """Own the SDK stream until completion, failure, or consumer closure."""
         completed = False
         yielded = False
-        stream = super().invoke_stream(  # ty: ignore[unresolved-attribute]
-            messages,
-            assistant_message,
-            response_format,
-            tools,
-            tool_choice,
-            run_response,
-            compress_tool_results,
-        )
+        model = cast("OpenAIResponses", self)
+        tool_use: dict[str, Any] = {}
         try:
-            for chunk in stream:
-                lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
-                yielded = yielded or not lifecycle_only
-                completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
-                yield chunk
-        except ModelProviderError as error:
+            params = self._stream_request_params(messages, response_format, tools, tool_choice, run_response)
+            assistant_message.metrics.start_timer()
+            with model.get_client().responses.create(
+                **model._get_model_request_kwargs(),
+                input=self._stream_input(messages, compress_tool_results, tools),
+                stream=True,
+                **params,
+            ) as stream:
+                for event in stream:
+                    chunk, tool_use = self._parse_provider_response_delta(event, assistant_message, tool_use)
+                    lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
+                    yielded = yielded or not lifecycle_only
+                    completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
+                    yield chunk
+        except ModelAuthenticationError:
+            raise
+        except Exception as cause:
+            error = self._stream_provider_error(cause)
             if not yielded:
                 if not str(error).strip():
-                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(error)})"
-                raise
-            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(error)})"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
+                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(cause)})"
+                if error is cause:
+                    raise
+                raise error from cause
+            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(cause)})"
+            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from cause
         finally:
-            cast("Generator[ModelResponse, None, None]", stream).close()
+            assistant_message.metrics.stop_timer()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
@@ -136,33 +209,40 @@ class OpenAIResponsesProviderCompat:
         run_response: RunOutput | None = None,
         compress_tool_results: bool = False,
     ) -> AsyncIterator[ModelResponse]:
-        """Require a successful terminal event for each async provider invocation."""
+        """Own the async SDK stream until completion, failure, or cancellation."""
         completed = False
         yielded = False
-        stream = super().ainvoke_stream(  # ty: ignore[unresolved-attribute]
-            messages,
-            assistant_message,
-            response_format,
-            tools,
-            tool_choice,
-            run_response,
-            compress_tool_results,
-        )
+        model = cast("OpenAIResponses", self)
+        tool_use: dict[str, Any] = {}
         try:
-            async for chunk in stream:
-                lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
-                yielded = yielded or not lifecycle_only
-                completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
-                yield chunk
-        except ModelProviderError as error:
+            params = self._stream_request_params(messages, response_format, tools, tool_choice, run_response)
+            assistant_message.metrics.start_timer()
+            async with await model.get_async_client().responses.create(
+                **model._get_model_request_kwargs(),
+                input=self._stream_input(messages, compress_tool_results, tools),
+                stream=True,
+                **params,
+            ) as stream:
+                async for event in stream:
+                    chunk, tool_use = self._parse_provider_response_delta(event, assistant_message, tool_use)
+                    lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
+                    yielded = yielded or not lifecycle_only
+                    completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
+                    yield chunk
+        except ModelAuthenticationError:
+            raise
+        except Exception as cause:
+            error = self._stream_provider_error(cause)
             if not yielded:
                 if not str(error).strip():
-                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(error)})"
-                raise
-            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(error)})"
-            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from error
+                    error.message = f"OpenAI Responses stream failed ({_stream_error_types(cause)})"
+                if error is cause:
+                    raise
+                raise error from cause
+            msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(cause)})"
+            raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from cause
         finally:
-            await cast("AsyncGenerator[ModelResponse, None]", stream).aclose()
+            assistant_message.metrics.stop_timer()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
@@ -174,6 +254,17 @@ class OpenAIResponsesProviderCompat:
         tool_use: dict[str, Any],
     ) -> tuple[ModelResponse, dict[str, Any]]:
         """Publish response IDs only at completion and preserve output for owner callbacks."""
+        if isinstance(stream_event, (ResponseErrorEvent, ResponseFailedEvent)):
+            failure = stream_event if isinstance(stream_event, ResponseErrorEvent) else stream_event.response.error
+            code = failure.code if failure is not None else None
+            message = failure.message if failure is not None else "OpenAI Responses stream failed"
+            status = (
+                {"server_error": 500, "rate_limit_exceeded": 429, "vector_store_timeout": 504}.get(code, 400)
+                if isinstance(code, str)
+                else 400
+            )
+            error_type = ContextWindowExceededError if code == "context_length_exceeded" else ModelProviderError
+            raise error_type(message=message, status_code=status, model_name=self.name, model_id=self.id)
         response_items = tool_use.pop(_RESPONSE_ITEMS_BUFFER_KEY, {})
         model_response, tool_use = super()._parse_provider_response_delta(  # ty: ignore[unresolved-attribute]
             stream_event,

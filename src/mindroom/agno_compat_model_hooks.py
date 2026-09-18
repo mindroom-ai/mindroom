@@ -183,7 +183,7 @@ def install_tool_result_callback(
 # Upstream PR: None identified for this extension point.
 # Remove when: Public invocation hooks compose sync/async streams and request context
 # with the same ordering; logging, retry limits, and stream cleanup remain owners.
-# Coverage: tests/test_llm_request_logging.py; tests/test_claude_stream_retry.py.
+# Coverage: tests/test_llm_request_logging.py; tests/test_claude_stream_retry.py; tests/test_provider_stream_retry.py.
 def install_async_invocation_hooks(
     model: Model,
     *,

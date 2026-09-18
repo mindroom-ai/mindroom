@@ -682,7 +682,7 @@ depends_on = [
     "mindroom.tool_system.dependencies",
     "mindroom.azure_openai_model",
     "mindroom.claude_prompt_cache",
-    "mindroom.claude_stream_retry",
+    "mindroom.provider_stream_retry",
     "mindroom.codex_model",
     "mindroom.kimi_model",
     "mindroom.openai_models",
@@ -1755,7 +1755,7 @@ depends_on = [
 path = "mindroom.history.summary_call"
 depends_on = [
     "mindroom.cancellation",
-    "mindroom.history.provider_error_compat",
+    "mindroom.agno_compat_provider_errors",
     "mindroom.history.summary_provider_compat",
     "mindroom.history.types",
     "mindroom.logging_config",
@@ -1844,7 +1844,7 @@ depends_on = [
     "mindroom.history.native",
     "mindroom.history.policy",
     "mindroom.history.prompt_tokens",
-    "mindroom.history.provider_error_compat",
+    "mindroom.agno_compat_provider_errors",
     "mindroom.history.replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
@@ -3810,6 +3810,7 @@ visibility = [
 [[modules]]
 path = "mindroom.provider_media_fallback"
 depends_on = [
+    "mindroom.agno_compat_provider_errors",
     "mindroom.agno_compat_model_hooks",
     "mindroom.error_handling",
     "mindroom.logging_config",
@@ -3821,7 +3822,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.model_stream_output"
 depends_on = []
-visibility = ["mindroom.claude_stream_retry", "mindroom.provider_media_fallback"]
+visibility = ["mindroom.provider_stream_retry", "mindroom.provider_media_fallback"]
 
 [[interfaces]]
 from = ["mindroom.model_stream_output"]
@@ -5917,9 +5918,9 @@ depends_on = ["mindroom.token_budget"]
 visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
 
 [[modules]]
-path = "mindroom.history.provider_error_compat"
-depends_on = ["mindroom.error_handling"]
-visibility = ["mindroom.history.runtime", "mindroom.history.summary_call"]
+path = "mindroom.agno_compat_provider_errors"
+depends_on = ["mindroom.error_handling", "mindroom.model_instance_checks"]
+visibility = ["mindroom.history.runtime", "mindroom.history.summary_call", "mindroom.provider_stream_retry", "mindroom.provider_media_fallback"]
 
 [[modules]]
 path = "mindroom.history.replay"
@@ -6304,7 +6305,7 @@ visibility = [
     "mindroom.approval_receipt",
     "mindroom.llm_request_logging",
     "mindroom.provider_media_fallback",
-    "mindroom.claude_stream_retry",
+    "mindroom.provider_stream_retry",
     "mindroom.claude_prompt_cache",
 ]
 
