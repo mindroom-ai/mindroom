@@ -7,6 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.response_turn import (
     AttemptResolved,
@@ -40,6 +41,64 @@ from mindroom.event_journal import EventKind
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
 from tests.response_runner_helpers import _bot
 from tests.test_subagent_runtime import _job
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "last", "expected"),
+    [
+        ("First finding", "NO_REPLY", "First finding"),
+        ("NO_REPLY", "Second finding", "Second finding"),
+        ("NO_REPLY", "NO_REPLY", "NO_REPLY"),
+        ("First finding", "Second finding", "First finding\n\nSecond finding"),
+    ],
+)
+async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
+    tmp_path: Path,
+    first: str,
+    last: str,
+    expected: str,
+) -> None:
+    """Quiet continuations retain substantive findings while treating NO_REPLY as control data."""
+    paths, owner = test_runtime_paths(tmp_path), _job().owner
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    context = replace(
+        _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+        source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+    )
+    recorder = TurnRecorder(user_message="Quiet check")
+    answers = iter((first, last))
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved result")
+
+    async def attempt(_run: TurnRunState, _state: DynamicContinuationRunState) -> CompletedAttempt:
+        text = next(answers)
+        return CompletedAttempt(response_text=text, replayable_text=text, has_visible_content=True)
+
+    try:
+        await runtime.start(
+            JobSpec("quiet", "tool", 0, adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND}),
+            owner=owner,
+            operation=operation,
+        )
+        waited = await runtime.wait("quiet", owner=owner, depth=0)
+        await runtime.release_wait("quiet", waited.token)
+        with tool_runtime_context(context):
+            answer = await run_blocking_response_turn(
+                _ctx(allow_no_report_response=True),
+                _blocking_adapter(_AdapterLog(), attempt),
+                TurnSinks(turn_recorder=recorder),
+                continuation=_continuation(),
+            )
+        assert answer == expected
+        assert recorder.assistant_text == expected
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -580,6 +639,7 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
             with pytest.raises(expected):
                 await task
         assert recorder.outcome == "interrupted"
+        assert recorder.assistant_text == "Independent work done"
         assert recorder.claim_interrupted_persistence()
         if failure_boundary == "join_cancel":
             assert (await runtime.lookup("retained", owner=owner, depth=0)).status == "running"

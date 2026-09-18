@@ -748,3 +748,9 @@ Automatic result joins stay within the same quiet/ordinary delivery policy so ne
 
 The seven new regression cases were observed failing before correction and now pass in a focused run of 377 tests, with two optional skips.
 The quiet delivery contract retains the existing model-controlled final-report policy: `NO_REPLY` is suppressed, while findings or an unfinished-work report may still be delivered.
+
+A later final-document review found that ordinary team joins replaced prose already shown while waiting.
+The shared turn state now retains completed semantic text, while blocking responses retain their delivered segments and team streams seed fresh trackers from the prior document.
+Terminal SDK summaries keep the structured live document and its trace.
+Regression assertions inspect the final document and canonical recorder, including repeated joins, recovered prefixes, cancellation, and quiet control tokens; approved continuations retain their existing collector.
+Quiet continuations preserve substantive findings without concatenating `NO_REPLY` into a visible report.

@@ -42,6 +42,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
+    is_silent_schedule_no_report_response,
 )
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
@@ -340,6 +341,7 @@ class TurnRunState:
     standalone_replay_persisted: bool = False
     empty_response_retried: bool = False
     attempted_job_outcomes: set[tuple[str, int]] = field(default_factory=set)
+    prior_response_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -725,8 +727,12 @@ def _reset_turn_state_for_dynamic_continuation(
     turn_recorder: TurnRecorder | None,
     run_metadata: dict[str, Any] | None,
     completed_tools_for_turn: list[ToolTraceEntry],
+    prior_assistant_text: str = "",
 ) -> AITurnState:
-    turn_state = AITurnState(prior_completed_tools=completed_tools_for_turn)
+    turn_state = AITurnState(
+        prior_completed_tools=completed_tools_for_turn,
+        prior_assistant_text=prior_assistant_text,
+    )
     turn_state.sync_partial(
         turn_recorder,
         run_metadata=run_metadata,
@@ -784,7 +790,7 @@ def _persist_excluded_attempt_replay(
         StandaloneReplaySnapshot(
             session_id=resolution.session_id or ctx.session_id,
             run_id=resolution.run_id or str(uuid4()),
-            partial_text=resolution.partial_text,
+            partial_text=run.turn_state.assistant_text_for(resolution.partial_text),
             completed_tools=run.turn_state.completed_tools_for(resolution.completed_tools),
             interrupted_tools=list(resolution.interrupted_tools),
             run_metadata=run_metadata,
@@ -832,7 +838,7 @@ def _record_turn_excluded_fallback(
         StandaloneReplaySnapshot(
             session_id=ctx.session_id,
             run_id=(snapshot.attempt_run_id or ctx.run_id) or str(uuid4()),
-            partial_text=snapshot.assistant_text,
+            partial_text=run.turn_state.assistant_text_for(snapshot.assistant_text),
             completed_tools=run.turn_state.completed_tools_for(snapshot.completed_tools),
             interrupted_tools=list(snapshot.interrupted_tools),
             run_metadata=_interrupted_run_metadata(ctx, sinks, run),
@@ -885,9 +891,14 @@ def _advance_turn_continuation(
     next_prompt: str | None,
     active_model_name: str | None,
     apply_model_to_team_members: bool,
+    preserve_response: bool = False,
 ) -> DynamicContinuationRunState:
     """Close the spent attempt entity and prepare run state for one more continuation."""
     completed_tools_for_turn = run.turn_state.completed_tools_for(resolution.completed_tools)
+    prior_assistant_text = run.turn_state.prior_assistant_text
+    if preserve_response:
+        prior_assistant_text = run.turn_state.assistant_text_for(resolution.replayable_text)
+        run.prior_response_text = append_stream_text(run.prior_response_text, resolution.response_text, separate=True)
     release_attempt_entity(run.scope_context)
     advanced = continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
@@ -899,6 +910,7 @@ def _advance_turn_continuation(
         turn_recorder=sinks.turn_recorder,
         run_metadata=run.run_metadata,
         completed_tools_for_turn=completed_tools_for_turn,
+        prior_assistant_text=prior_assistant_text,
     )
     return advanced
 
@@ -1023,7 +1035,7 @@ async def run_blocking_response_turn(
         if adapter.unexpected_error_text is None:
             raise
         logger.exception("Response turn failed", entity=ctx.entity_label)
-        return adapter.unexpected_error_text(e)
+        return append_stream_text(run.prior_response_text, adapter.unexpected_error_text(e), separate=True)
     finally:
         adapter.close_runtime_dbs(run.scope_context)
 
@@ -1105,7 +1117,7 @@ async def _settle_blocking_attempt(
             )
         if resolution.original_status is RunStatus.cancelled:
             raise build_cancelled_error(resolution.reason)
-        return resolution.response_text
+        return append_stream_text(run.prior_response_text, resolution.response_text, separate=True)
     return await _settle_joined_blocking_attempt(
         ctx,
         adapter,
@@ -1140,6 +1152,7 @@ async def _settle_joined_blocking_attempt(
     )
     if settle.keep_going:
         return settle.continuation
+    response_text = append_stream_text(run.prior_response_text, settle.response_text, separate=True)
     run.turn_state.sync_partial(
         sinks.turn_recorder,
         run_metadata=run.run_metadata,
@@ -1152,14 +1165,14 @@ async def _settle_joined_blocking_attempt(
         async for joined in join_conversation_jobs(run.attempted_job_outcomes, agent_names=ctx.tool_job_agent_names):
             if isinstance(joined, str):
                 initial = ctx.initial_presentation
-                response_text = (
-                    append_stream_text(initial.response_text, settle.response_text, separate=True)
+                visible_text = (
+                    append_stream_text(initial.response_text, response_text, separate=True)
                     if initial is not None
-                    else settle.response_text
+                    else response_text
                 )
                 await report_background_wait(
                     StreamingPresentation(
-                        response_text=response_text + joined,
+                        response_text=visible_text + joined,
                         tool_trace=initial.tool_trace if initial is not None else (),
                     ),
                 )
@@ -1173,6 +1186,10 @@ async def _settle_joined_blocking_attempt(
                     next_prompt=joined.prompt,
                     active_model_name=continuation.active_model_name,
                     apply_model_to_team_members=continuation.apply_model_to_team_members,
+                    preserve_response=not (
+                        ctx.allow_no_report_response
+                        and is_silent_schedule_no_report_response(resolution.replayable_text)
+                    ),
                 )
     if joined_continuation is not None:
         return joined_continuation
@@ -1185,7 +1202,7 @@ async def _settle_joined_blocking_attempt(
     )
     if sinks.on_completed is not None:
         sinks.on_completed(resolution)
-    return settle.response_text
+    return response_text
 
 
 def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
@@ -1299,11 +1316,15 @@ def _settle_completed_attempt(
         if not resolution.has_visible_content:
             recorded_text = decision.limit_message
             response_text = decision.limit_message
-    elif ctx.allow_no_report_response and not resolution.replayable_text.strip():
+    elif ctx.allow_no_report_response and (
+        not resolution.replayable_text.strip()
+        or (run.turn_state.prior_assistant_text and is_silent_schedule_no_report_response(resolution.replayable_text))
+    ):
         # Tool presentation and team fallback chrome are not semantic prose.
         # The tool records remain part of the completed turn, but quiet
         # delivery has no final assistant body to publish.
         response_text = ""
+        recorded_text = ""
     return _CompletionSettle(
         keep_going=False,
         continuation=continuation,
@@ -1426,6 +1447,10 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                                     next_prompt=joined.prompt,
                                     active_model_name=continuation.active_model_name,
                                     apply_model_to_team_members=continuation.apply_model_to_team_members,
+                                    preserve_response=not (
+                                        ctx.allow_no_report_response
+                                        and is_silent_schedule_no_report_response(resolution.replayable_text)
+                                    ),
                                 )
                                 keep_going = True
                     if not keep_going:
