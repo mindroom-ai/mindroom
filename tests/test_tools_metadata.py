@@ -3,6 +3,7 @@
 import gc
 import json
 import sys
+import weakref
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -71,8 +72,8 @@ def _restore_builtin_tool_metadata_state() -> None:
 
 def _clear_module_origin_caches() -> None:
     """Clear module-origin caches between tests."""
-    metadata_module._resolved_module_file.cache_clear()
-    metadata_module._module_file_within_root.cache_clear()
+    metadata_module._MODULE_ORIGIN_CACHE.clear()
+    metadata_module._module_directory_within_root.cache_clear()
 
 
 def test_reconcile_dynamic_tool_state_replaces_only_owned_entries() -> None:
@@ -448,13 +449,15 @@ def test_module_origin_within_root_caches_containment_checks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plugin validation rescans all of sys.modules, so containment must resolve once."""
+    """Sibling modules share one directory check, reused across validation scans."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     module_path = plugin_root / "helper.py"
     module_path.write_text("VALUE = 1\n", encoding="utf-8")
     module = ModuleType("demo.helper")
     module.__file__ = str(module_path)
+    sibling_module = ModuleType("demo.sibling")
+    sibling_module.__file__ = str(plugin_root / "sibling.py")
     outside_module = ModuleType("outside.helper")
     outside_module.__file__ = str(tmp_path / "outside.py")
     containment_calls = 0
@@ -470,11 +473,65 @@ def test_module_origin_within_root_caches_containment_checks(
     try:
         for _ in range(5):
             assert metadata_module._module_origin_within_root(module, plugin_root)
+            assert metadata_module._module_origin_within_root(sibling_module, plugin_root)
             assert not metadata_module._module_origin_within_root(outside_module, plugin_root)
     finally:
         _clear_module_origin_caches()
 
     assert containment_calls == 2
+
+
+def test_module_origin_cache_survives_large_module_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm plugin scans must reuse paths even beyond the old 8,192-entry limit."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    other_root = tmp_path / "plugins" / "other"
+    modules = [ModuleType(f"demo.helper_{index}") for index in range(8_193)]
+    for index, module in enumerate(modules):
+        module.__file__ = str(plugin_root / f"helper_{index}.py")
+    resolve_calls = 0
+    original_resolve = Path.resolve
+
+    def counted_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return original_resolve(self, *args, **kwargs)
+
+    _clear_module_origin_caches()
+    monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
+    try:
+        for root, expected in ((plugin_root, True), (plugin_root, True), (other_root, False), (plugin_root, True)):
+            assert all(metadata_module._module_origin_within_root(module, root) is expected for module in modules)
+    finally:
+        _clear_module_origin_caches()
+
+    assert resolve_calls == len(modules)
+
+
+def test_module_origin_cache_tracks_file_changes(tmp_path: Path) -> None:
+    """Changing a live module's origin must invalidate its cached containment."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    module = ModuleType("demo.helper")
+    module.__file__ = str(plugin_root / "helper.py")
+
+    assert metadata_module._module_origin_within_root(module, plugin_root)
+    module.__file__ = str(tmp_path / "outside.py")
+    assert not metadata_module._module_origin_within_root(module, plugin_root)
+
+
+def test_module_origin_cache_does_not_retain_unloaded_modules(tmp_path: Path) -> None:
+    """Origin caching must not keep transient validation modules alive."""
+    module = ModuleType("demo.helper")
+    module.__file__ = str(tmp_path / "helper.py")
+    reference = weakref.ref(module)
+    assert metadata_module._module_origin_within_root(module, tmp_path)
+
+    del module
+    gc.collect(0)
+
+    assert reference() is None
 
 
 def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(

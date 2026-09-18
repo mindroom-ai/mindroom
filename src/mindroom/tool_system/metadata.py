@@ -826,20 +826,26 @@ class _ResolvedToolState:
     unresolved_plugin_tool_sources: frozenset[str] = frozenset()
 
 
-@functools.lru_cache(maxsize=8192)
-def _resolved_module_file(module_file: str) -> Path | None:
-    """Return the resolved on-disk path for one module file, cached across calls."""
-    try:
-        return Path(module_file).resolve()
-    except OSError:
-        return None
+@dataclass(frozen=True, slots=True)
+class _ModuleOrigin:
+    """One live module's resolved file and most recent plugin containment check."""
+
+    module_file: str
+    resolved_file: Path | None
+    root: Path
+    within_root: bool
+
+
+# Validation scans all loaded modules twice. A fixed-size LRU below that working
+# set evicts every path before the next scan reaches it. Weak keys retain one
+# entry per live module and release transient plugin modules after unloading.
+_MODULE_ORIGIN_CACHE: weakref.WeakKeyDictionary[ModuleType, _ModuleOrigin] = weakref.WeakKeyDictionary()
 
 
 @functools.lru_cache(maxsize=8192)
-def _module_file_within_root(module_file: str, root: str) -> bool:
-    """Return whether one module file lives under one plugin root, cached across calls."""
-    resolved = _resolved_module_file(module_file)
-    return resolved is not None and resolved.is_relative_to(root)
+def _module_directory_within_root(directory: Path, root: Path) -> bool:
+    """Share containment checks across modules in the same resolved directory."""
+    return directory.is_relative_to(root)
 
 
 def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
@@ -847,7 +853,19 @@ def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
     module_file = getattr(module, "__file__", None)
     if not isinstance(module_file, str):
         return False
-    return _module_file_within_root(module_file, str(root))
+    cached = _MODULE_ORIGIN_CACHE.get(module)
+    if cached is not None and cached.module_file == module_file:
+        if cached.root == root:
+            return cached.within_root
+        resolved = cached.resolved_file
+    else:
+        try:
+            resolved = Path(module_file).resolve()
+        except OSError:
+            resolved = None
+    within_root = resolved is not None and (resolved == root or _module_directory_within_root(resolved.parent, root))
+    _MODULE_ORIGIN_CACHE[module] = _ModuleOrigin(module_file, resolved, root, within_root)
+    return within_root
 
 
 def _execute_validation_plugin_module(

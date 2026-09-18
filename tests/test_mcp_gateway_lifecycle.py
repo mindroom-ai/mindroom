@@ -268,15 +268,26 @@ async def test_managed_mode_refuses_legacy_unbound_grant(
     assert await managed.load_refresh_token(client, tokens.refresh_token) is None
 
 
-# This capacity regression performs 17,280 real SQLite token rotations; allow CI disk contention.
+# Keep all 17,280 issuances: sampling rotations would miss cumulative quota growth.
 @pytest.mark.timeout(600)
 async def test_180_day_quarter_hour_refresh_fits_default_quota_and_retains_replay(
     runtime_paths: RuntimePaths,
     client: OAuthClientInformationFull,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One ordinary client can refresh every 15 minutes for 180 days under default quotas."""
     clock = _Clock()
     provider, _, account_id = await _managed(runtime_paths, clock)
+    connect = provider.store._connect
+
+    def connect_without_disk_sync(*, timeout: float = 10) -> sqlite3.Connection:
+        connection = connect(timeout=timeout)
+        # This checks quota accounting and replay across real transactions, not
+        # power-loss durability. Avoid fsync for each of the 17,280 issuances.
+        connection.execute("PRAGMA synchronous = OFF")
+        return connection
+
+    monkeypatch.setattr(provider.store, "_connect", connect_without_disk_sync)
     tokens = await provider.exchange_authorization_code(client, await _managed_code(provider, client, account_id))
     first = await provider.load_refresh_token(client, tokens.refresh_token)
     for quarter_hour in range(1, 180 * 96):
