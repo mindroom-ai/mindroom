@@ -2869,6 +2869,7 @@ async def continue_paused_team_run(  # noqa: PLR0915 - Ordered lifecycle and cle
 
         continued = await join_approval_jobs(
             continued,
+            agent_names=member_names,
             is_complete=lambda result: result.status == RunStatus.completed,
             continue_response=partial(
                 _retrieve_team_job_results,
@@ -3103,6 +3104,7 @@ async def team_response(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_name,
+        tool_job_agent_names=tuple(requested_agent_names),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,
@@ -3577,6 +3579,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
     ctx = replace(
         ctx,
         entity_label=team_label,
+        tool_job_agent_names=tuple(requested_agent_names),
         transient_enrichment_items=append_knowledge_availability_enrichment(
             ctx.transient_enrichment_items,
             unavailable_bases,

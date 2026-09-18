@@ -2838,14 +2838,25 @@ class ResponseRunner:
             on_no_response_handled=lambda: self.deps.approval_store.settle(event.event_id),
         )
         team = self.deps.runtime.config.teams.get(self.deps.agent_name)
+        member_names = team.agents if team is not None else []
         if team is None:
+            jobs = await runtime.conversation_jobs(
+                transport_agent_name=self.deps.agent_name,
+                room_id=event.room_id,
+                thread_id=event.thread_id,
+                requester_id=envelope.requester_id,
+            )
+            # Ad hoc teams have no configured roster. Reconstruct the actors
+            # that own outstanding work so each result keeps its exact owner.
+            member_names = sorted({job.owner.agent_name, *(pending.owner.agent_name for pending in jobs)})
+        if team is None and member_names == [self.deps.agent_name]:
             await self.generate_response(request)
         else:
             registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
             await self.generate_team_response_helper(
                 request,
-                team_agents=[registry.current_ids[name] for name in team.agents],
-                team_mode=team.mode,
+                team_agents=[registry.current_ids[name] for name in member_names],
+                team_mode=team.mode if team is not None else "coordinate",
             )
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
