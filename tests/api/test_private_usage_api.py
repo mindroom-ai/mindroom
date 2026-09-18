@@ -1,4 +1,4 @@
-"""Personal usage uses signed identity while organization export uses service auth."""
+"""Personal usage uses signed identity while organization routes use separate auth."""
 
 from __future__ import annotations
 

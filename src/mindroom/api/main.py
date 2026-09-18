@@ -756,7 +756,7 @@ app.include_router(schedules_router, dependencies=[Depends(verify_user)])
 app.include_router(knowledge_router, dependencies=[Depends(verify_user)])
 app.include_router(skills_router, dependencies=[Depends(verify_user)])
 app.include_router(tools_router, dependencies=[Depends(verify_user)])
-app.include_router(usage_router)  # Routes require signed personal or dedicated service authentication.
+app.include_router(usage_router)  # Routes require dashboard, signed personal, or dedicated service authentication.
 app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)

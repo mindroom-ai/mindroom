@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import require_personal_user, require_usage_service
+from mindroom.api.auth import require_personal_user, require_usage_service, verify_user
 from mindroom.api.usage_export import (
     RETRY_AFTER_SECONDS,
     UsageExportContext,
@@ -16,14 +16,25 @@ from mindroom.api.usage_export import (
 )
 from mindroom.usage_stats import collect_admin_usage, collect_private_usage
 
-__all__ = ["get_private_usage", "get_usage_export", "router"]
+__all__ = ["get_private_usage", "get_usage", "get_usage_export", "router"]
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
+
+
+@router.get("", dependencies=[Depends(verify_user)], response_model=None)
+def get_usage(request: Request, include_daily: bool = False) -> dict[str, object] | Response:
+    """Prepare retained usage under standard dashboard authentication."""
+    return _get_organization_usage(request, include_daily=include_daily)
 
 
 @router.get("/export", dependencies=[Depends(require_usage_service)], response_model=None)
 def get_usage_export(request: Request, include_daily: bool = False) -> dict[str, object] | Response:
     """Return retained usage to the authenticated usage-export service."""
+    return _get_organization_usage(request, include_daily=include_daily)
+
+
+def _get_organization_usage(request: Request, *, include_daily: bool) -> dict[str, object] | Response:
+    """Start or poll one application-scoped organization usage report."""
     headers = {"Cache-Control": "no-store"}
     unavailable = Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers=headers)
     snapshot = config_lifecycle.request_snapshot(request)

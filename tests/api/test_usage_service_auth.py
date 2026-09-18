@@ -440,24 +440,7 @@ def test_usage_export_rejects_invalid_service_assertions(
         assert set(response.json()) == {"detail"}
 
 
-def test_obsolete_organization_usage_route_is_absent(
-    temp_config_file: Path,
-    tmp_path: Path,
-    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
-) -> None:
-    """The service export leaf must be the only organization-wide HTTP route."""
-    env, private_key = usage_service_auth
-    client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
-
-    response = client.get(
-        "/api/usage",
-        headers={_ASSERTION_HEADER: _service_assertion(private_key)},
-    )
-
-    assert response.status_code == 404
-
-
-@pytest.mark.parametrize("path", ["/api/config/raw", "/api/usage/me/private-agents"])
+@pytest.mark.parametrize("path", ["/api/usage", "/api/config/raw", "/api/usage/me/private-agents"])
 def test_service_assertion_does_not_authorize_other_routes(
     temp_config_file: Path,
     tmp_path: Path,
@@ -471,6 +454,48 @@ def test_service_assertion_does_not_authorize_other_routes(
     response = client.get(path, headers={_ASSERTION_HEADER: _service_assertion(private_key)})
 
     assert response.status_code == 401
+
+
+def test_dashboard_and_service_routes_share_preparation_and_cache(
+    temp_config_file: Path,
+    tmp_path: Path,
+    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+) -> None:
+    """Both authenticated adapters must share work while guarding every poll."""
+    env, private_key = usage_service_auth
+    client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+    runner, workers = _install_manual_export_runner(client)
+    dashboard_email = "owner@example.org"
+    dashboard_headers = {
+        "Cf-Access-Authenticated-User-Email": dashboard_email,
+        _ASSERTION_HEADER: _trusted_upstream_jwt(
+            private_key,
+            email=dashboard_email,
+            audience="mindroom-dashboard",
+            issuer=_ISSUER,
+        ),
+    }
+    service_headers = {_ASSERTION_HEADER: _service_assertion(private_key)}
+
+    try:
+        dashboard_pending = client.get("/api/usage", headers=dashboard_headers)
+        service_pending = client.get("/api/usage/export", headers=service_headers)
+        assert dashboard_pending.status_code == 202
+        assert service_pending.status_code == 202
+        assert len(workers.targets) == 1
+        workers.run_next()
+
+        assert client.get("/api/usage").status_code == 401
+        assert client.get("/api/usage/export").status_code == 401
+        dashboard_ready = client.get("/api/usage", headers=dashboard_headers)
+        service_ready = client.get("/api/usage/export", headers=service_headers)
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
+
+    assert dashboard_ready.status_code == 200
+    assert service_ready.status_code == 200
+    assert dashboard_ready.json() == service_ready.json()
 
 
 def test_usage_export_rejects_unsupported_write_method(
