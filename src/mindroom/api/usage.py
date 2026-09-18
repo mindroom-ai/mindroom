@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
-from mindroom.api.auth import require_personal_user, require_usage_service, verify_user
+from mindroom.api.auth import require_personal_user, require_usage_service
 from mindroom.api.usage_export import (
     RETRY_AFTER_SECONDS,
     UsageExportContext,
@@ -16,24 +16,23 @@ from mindroom.api.usage_export import (
 )
 from mindroom.usage_stats import collect_admin_usage, collect_private_usage
 
-__all__ = ["get_private_usage", "get_usage", "get_usage_export", "router"]
+__all__ = ["get_private_usage", "get_usage_export", "router"]
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
-
-
-@router.get("", dependencies=[Depends(verify_user)])
-def get_usage(request: Request, response: Response, include_daily: bool = False) -> dict[str, object]:
-    """Return retained usage by user and model under dashboard administrator auth."""
-    return _get_admin_usage(request, response, include_daily=include_daily)
 
 
 @router.get("/export", dependencies=[Depends(require_usage_service)], response_model=None)
 def get_usage_export(request: Request, include_daily: bool = False) -> dict[str, object] | Response:
     """Return retained usage to the authenticated usage-export service."""
+    headers = {"Cache-Control": "no-store"}
+    unavailable = Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers=headers)
     snapshot = config_lifecycle.request_snapshot(request)
     if snapshot is None:
-        raise HTTPException(status_code=503, detail="Usage export configuration is not available")
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+        return unavailable
+    try:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return unavailable
     api_app = request.app
     context = UsageExportContext(
         runtime_paths=runtime_paths,
@@ -49,26 +48,12 @@ def get_usage_export(request: Request, include_daily: bool = False) -> dict[str,
         ).to_dict(),
         context_is_current=lambda: context_is_current(api_app, context),
     )
-    headers = {"Cache-Control": "no-store"}
     if poll.status is UsageExportStatus.PENDING:
         headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
         return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "pending"}, headers=headers)
     if poll.status is UsageExportStatus.FAILED or poll.report is None:
-        return Response(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            headers=headers,
-        )
+        return unavailable
     return JSONResponse(content=poll.report, headers=headers)
-
-
-def _get_admin_usage(request: Request, response: Response, *, include_daily: bool) -> dict[str, object]:
-    """Build one aggregate administrator usage report for an authenticated caller."""
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
-    # FastAPI runs synchronous handlers in its thread pool, keeping SQLite scans
-    # and report serialization off the runtime event loop.
-    report = collect_admin_usage(config=config, runtime_paths=runtime_paths, include_daily=include_daily)
-    response.headers["Cache-Control"] = "no-store"
-    return report.to_dict()
 
 
 @router.get("/me/private-agents")

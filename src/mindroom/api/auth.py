@@ -900,7 +900,7 @@ async def require_usage_service(request: Request) -> None:
         claims.get("type") != "app"
         or claims.get("sub") != ""
         or not isinstance(claims.get("common_name"), str)
-        or not secrets.compare_digest(claims["common_name"], client_id)
+        or claims["common_name"] != client_id
     ):
         raise HTTPException(status_code=401, detail="Invalid usage service JWT")
 

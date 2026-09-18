@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -42,7 +43,7 @@ def _service_assertion(
     private_key: rsa.RSAPrivateKey,
     *,
     omit_claims: frozenset[str] = frozenset(),
-    **claim_overrides: str | datetime,
+    **claim_overrides: object,
 ) -> str:
     now = datetime.now(UTC)
     claims: dict[str, object] = {
@@ -167,6 +168,8 @@ def _seed_usage_database(storage_root: Path) -> None:
                                     ],
                                 },
                             },
+                            "content": "sensitive-conversation-content",
+                            "messages": [{"content": "sensitive-prompt-content"}],
                         },
                     ],
                 ),
@@ -187,6 +190,9 @@ def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str
         "wrong-issuer": lambda: _service_assertion(private_key, iss="https://other-issuer.example"),
         "wrong-audience": lambda: _service_assertion(private_key, aud="another-service"),
         "wrong-client": lambda: _service_assertion(private_key, common_name="other-client.example.org"),
+        "non-ascii-client": lambda: _service_assertion(private_key, common_name="service-élève.example.org"),
+        "lone-surrogate-client": lambda: _service_assertion(private_key, common_name="\ud800"),
+        "non-string-client": lambda: _service_assertion(private_key, common_name=123),
         "wrong-type": lambda: _service_assertion(private_key, type="user"),
         "nonempty-subject": lambda: _service_assertion(private_key, sub="person@example.org"),
         "human-token": lambda: _trusted_upstream_jwt(
@@ -269,10 +275,30 @@ def test_usage_export_prepares_and_returns_real_daily_report(
     assert {key: payload["totals"][key] for key in expected_metrics} == expected_metrics
     assert payload["user_breakdown"][0]["user_id"] == "@alice:example.org"
     assert payload["user_breakdown"][0]["run_count"] == 1
+    assert payload["user_breakdown"][0]["model_breakdown"] == payload["model_breakdown"]
     assert [row["model"] for row in payload["model_breakdown"]] == ["test-model", "other-model"]
+    assert [
+        (
+            row["model"],
+            row["totals"]["input_tokens"],
+            row["totals"]["output_tokens"],
+            row["totals"]["cache_read_tokens"],
+            row["totals"]["cache_write_tokens"],
+        )
+        for row in payload["model_breakdown"]
+    ] == [
+        ("test-model", 10, 5, 7, 2),
+        ("other-model", 2, 3, 2, 1),
+    ]
     assert payload["daily_breakdown"][0]["date"] == "2023-11-14"
+    assert payload["daily_breakdown"][0]["run_count"] == 1
     assert {key: payload["daily_breakdown"][0]["totals"][key] for key in expected_metrics} == expected_metrics
     assert payload["daily_breakdown"][0]["model_breakdown"] == payload["model_breakdown"]
+    assert payload["user_breakdown"][0]["daily_breakdown"] == payload["daily_breakdown"]
+    assert "daily_coverage" in payload
+    assert "sensitive-conversation-content" not in ready.text
+    assert "sensitive-prompt-content" not in ready.text
+    assert str(storage_root) not in ready.text
 
 
 def test_usage_export_fails_closed_when_strict_jwt_configuration_is_partial(
@@ -291,6 +317,45 @@ def test_usage_export_fails_closed_when_strict_jwt_configuration_is_partial(
     )
 
     assert response.status_code == 503
+
+
+def test_usage_export_sanitizes_failed_committed_configuration(
+    temp_config_file: Path,
+    tmp_path: Path,
+    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+) -> None:
+    """Committed configuration diagnostics must not cross the service boundary."""
+    env, private_key = usage_service_auth
+    client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+    runner, workers = _install_manual_export_runner(client)
+    api_state = config_lifecycle.require_api_state(client.app)
+    sensitive_detail = "sensitive-config-diagnostic"
+    with api_state.config_lock:
+        snapshot = api_state.snapshot
+        api_state.snapshot = replace(
+            snapshot,
+            generation=snapshot.generation + 1,
+            config_load_result=config_lifecycle.ConfigLoadResult(
+                success=False,
+                error_status_code=422,
+                error_detail={"diagnostic": sensitive_detail},
+            ),
+        )
+
+    try:
+        response = client.get(
+            "/api/usage/export",
+            headers={_ASSERTION_HEADER: _service_assertion(private_key)},
+        )
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
+
+    assert response.status_code == 503
+    assert response.content == b""
+    assert response.headers["cache-control"] == "no-store"
+    assert sensitive_detail not in response.text
+    assert workers.targets == []
 
 
 @pytest.mark.parametrize(
@@ -343,6 +408,9 @@ def test_usage_export_fails_closed_when_auth_setting_is_missing(
         "wrong-issuer",
         "wrong-audience",
         "wrong-client",
+        "non-ascii-client",
+        "lone-surrogate-client",
+        "non-string-client",
         "wrong-type",
         "nonempty-subject",
         "human-token",
@@ -366,17 +434,37 @@ def test_usage_export_rejects_invalid_service_assertions(
     response = client.get("/api/usage/export", headers=headers, params=params)
 
     assert response.status_code == 401
-    assert set(response.json()) == {"detail"}
+    if case in {"non-ascii-client", "lone-surrogate-client", "non-string-client"}:
+        assert response.json() == {"detail": "Invalid usage service JWT"}
+    else:
+        assert set(response.json()) == {"detail"}
 
 
-@pytest.mark.parametrize("path", ["/api/usage", "/api/config/raw"])
-def test_service_assertion_does_not_authorize_administrator_routes(
+def test_obsolete_organization_usage_route_is_absent(
+    temp_config_file: Path,
+    tmp_path: Path,
+    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+) -> None:
+    """The service export leaf must be the only organization-wide HTTP route."""
+    env, private_key = usage_service_auth
+    client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+
+    response = client.get(
+        "/api/usage",
+        headers={_ASSERTION_HEADER: _service_assertion(private_key)},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/api/config/raw", "/api/usage/me/private-agents"])
+def test_service_assertion_does_not_authorize_other_routes(
     temp_config_file: Path,
     tmp_path: Path,
     usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
     path: str,
 ) -> None:
-    """A service assertion must never become a dashboard administrator identity."""
+    """A service assertion must not become an administrator or personal identity."""
     env, private_key = usage_service_auth
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
 
@@ -407,7 +495,7 @@ def test_usage_export_omits_daily_breakdown_by_default(
     tmp_path: Path,
     usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
 ) -> None:
-    """The export route must preserve the administrator report's include_daily behavior."""
+    """The export route must preserve the organization report's include_daily behavior."""
     env, private_key = usage_service_auth
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
     runner, workers = _install_manual_export_runner(client)

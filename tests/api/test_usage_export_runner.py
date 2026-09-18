@@ -7,6 +7,7 @@ from concurrent.futures import CancelledError, Future
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 from mindroom import constants
@@ -19,8 +20,11 @@ from mindroom.api.usage_export import (
 )
 
 if TYPE_CHECKING:
+    import asyncio
     from collections.abc import Callable
     from pathlib import Path
+
+    import pytest
 
 
 class ManualWorkers:
@@ -366,6 +370,33 @@ def test_app_cleanup_retires_runner_without_waiting(tmp_path: Path) -> None:
     config_state.usage_export_runner = runner
 
     usage_export.close_usage_export_runner(api_app)
+
+    assert runner.closed
+    assert config_state.usage_export_runner is None
+
+
+def test_api_lifespan_shutdown_retires_export_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The production API lifespan must close and detach its export runner."""
+    main.initialize_api_app(main.app, _runtime_paths(tmp_path))
+    config_state = config_lifecycle.app_state(main.app)
+    if config_state.usage_export_runner is not None:
+        config_state.usage_export_runner.close()
+    runner = UsageExportRunner(start_worker=ManualWorkers().start)
+    config_state.usage_export_runner = runner
+
+    async def idle_until_shutdown(stop_event: asyncio.Event, _app: FastAPI) -> None:
+        await stop_event.wait()
+
+    monkeypatch.setattr(main, "sync_env_to_credentials", lambda _runtime_paths: None)
+    monkeypatch.setattr(main, "_watch_config", idle_until_shutdown)
+    monkeypatch.setattr(main, "_worker_cleanup_loop", idle_until_shutdown)
+
+    with TestClient(main.app):
+        assert config_state.usage_export_runner is runner
+        assert not runner.closed
 
     assert runner.closed
     assert config_state.usage_export_runner is None
