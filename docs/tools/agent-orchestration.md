@@ -321,6 +321,7 @@ Streaming and non-streaming responses show waiting progress, and a human message
 Resuming an approved tool follows the same waiting behavior.
 Ready outcomes or approval boundaries cause one internal continuation using the native result-retrieval tool.
 A result that finishes while text is streaming waits for the response boundary; it does not start a competing response.
+Result continuations retain previously delivered prose and tool traces in the final response.
 Idle completion work uses an internal event-journal source and the existing serialized conversation runner, without sending a synthetic completion message to Matrix.
 Runtime updates retain requester authorization but are identified separately from human input.
 Silent scheduled work retains its quiet delivery policy and run receipts across later completions and restarts.

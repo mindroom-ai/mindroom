@@ -45,7 +45,7 @@ from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
-from mindroom.tool_system.events import BackgroundWaitChunk, ToolTraceEntry
+from mindroom.tool_system.events import BackgroundWaitChunk, StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     build_execution_identity_from_runtime_context,
@@ -271,6 +271,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
                 release.set()
                 text = await asyncio.wait_for(pending, 2)
                 assert "Final result received." in text
+                assert text.count("Independent work done.") == 1
                 assert await runtime.pending_outcomes() == []
             assert executions == 1
     finally:
@@ -282,11 +283,14 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("streaming", "recovered"), [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize("repeat_join", [False, True])
 async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C901, PLR0915 - One native job lifecycle across delivery modes.
     tmp_path: Path,
     streaming: bool,
     recovered: bool,
+    repeat_join: bool,
 ) -> None:
     """Both ordinary team entry points acknowledge only their saved native result receipt."""
     config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
@@ -296,14 +300,15 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
     owner = build_execution_identity_from_runtime_context(context)
     runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
-    release, waiting = asyncio.Event(), asyncio.Event()
+    releases = [asyncio.Event(), asyncio.Event()]
+    waiting = asyncio.Event()
     notices: list[StreamingPresentation] = []
     calls = 0
 
     async def slow_tool() -> str:
         nonlocal calls
         calls += 1
-        await release.wait()
+        await releases[calls - 1].wait()
         return "actual result"
 
     async def report_wait(presentation: StreamingPresentation) -> None:
@@ -361,8 +366,10 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
             runtime_model_name="default",
         )
 
+    recorder = TurnRecorder(user_message="Start")
+    final_trace: list[ToolTraceEntry] = []
+
     async def run() -> str:
-        recorder = TurnRecorder(user_message="Start")
         if not streaming:
             return await team_response(
                 agent_names=["leader"],
@@ -374,7 +381,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
                 user_id=owner.requester_id,
                 turn_recorder=recorder,
             )
-        chunks = []
+        rendered = ""
         async for chunk in team_response_stream(
             agent_ids=[identities["leader"]],
             message="Start",
@@ -386,9 +393,12 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
         ):
             if isinstance(chunk, BackgroundWaitChunk):
                 waiting.set()
+            elif isinstance(chunk, StructuredStreamChunk):
+                rendered = chunk.content
+                final_trace[:] = chunk.tool_trace or []
             else:
-                chunks.append(str(chunk))
-        return "".join(chunks)
+                rendered = str(chunk)
+        return rendered
 
     pending = None
     try:
@@ -407,7 +417,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
                 if pending.done():
                     pending.result()
                 assert waiting.is_set()
-                if recovered:
+                if recovered and not streaming:
                     assert notices[-1].response_text.startswith(prefix.response_text + "\n\n")
                     assert notices[-1].response_text.count(prefix.response_text) == 1
                     assert notices[-1].tool_trace == prefix.tool_trace
@@ -421,19 +431,53 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
                     ModelResponse(
                         tool_calls=[_call("job", "retrieve", action="wait", job_id=jobs[0].job_id, wait_timeout=0)],
                     ),
-                    ModelResponse(content="Final result received."),
+                    *(
+                        [
+                            ModelResponse(tool_calls=[_call("slow_tool", "second-call", wait_timeout=0)]),
+                            ModelResponse(content="Second independent stage done."),
+                        ]
+                        if repeat_join
+                        else [ModelResponse(content="Final result received.")]
+                    ),
                 ],
             )
-            release.set()
+            waiting.clear()
+            releases[0].set()
+            if repeat_join:
+                await asyncio.wait_for(waiting.wait(), 2)
+                jobs = await runtime.list_jobs(owner=owner, depth=0)
+                second = next(job for job in jobs if job.status == "running")
+                model.responses.extend(
+                    [
+                        ModelResponse(
+                            tool_calls=[_call("job", "retrieve-second", action="wait", job_id=second.job_id)],
+                        ),
+                        ModelResponse(content="Final result received."),
+                    ],
+                )
+                releases[1].set()
             answer = await asyncio.wait_for(pending, 2)
             assert "Final result received." in answer
+            assert answer.count("Independent work done.") == 1
+            assert recorder.assistant_text.count("Independent work done.") == 1
+            assert "Final result received." in recorder.assistant_text
+            expected_tools = ["slow_tool", "job"] * (2 if repeat_join else 1)
+            assert [entry.tool_name for entry in recorder.completed_tools] == expected_tools
+            if repeat_join:
+                assert answer.count("Second independent stage done.") == 1
+                assert recorder.assistant_text.count("Second independent stage done.") == 1
+            if streaming:
+                assert [entry.tool_name for entry in final_trace] == (
+                    (["original_tool"] if recovered else []) + expected_tools
+                )
             if recovered:
                 assert answer.startswith(prefix.response_text + "\n\n")
                 assert answer.count(prefix.response_text) == 1
-            assert calls == 1
+            assert calls == (2 if repeat_join else 1)
             assert await runtime.pending_outcomes() == []
     finally:
-        release.set()
+        for release in releases:
+            release.set()
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
         register_background_runtime(paths, None)

@@ -3276,6 +3276,15 @@ async def team_response(  # noqa: C901, PLR0915
                 toolkit_owners=toolkit_owners_for_agents(attempt_agents),
             )
             if paused_attempt is not None:
+                initial_presentation = ctx.initial_presentation
+                if run.attempted_job_outcomes:
+                    initial_presentation = StreamingPresentation(
+                        response_text=_prepend_team_response_prefix(run.prior_response_text, initial_presentation),
+                        tool_trace=(
+                            *(initial_presentation.tool_trace if initial_presentation is not None else ()),
+                            *run.turn_state.prior_completed_tools,
+                        ),
+                    )
                 return replace(
                     _attach_team_pause_presentation(
                         paused_attempt,
@@ -3283,7 +3292,7 @@ async def team_response(  # noqa: C901, PLR0915
                         config_names=attempt_members.requested_agent_names,
                         display_names=attempt_members.display_names,
                         show_tool_calls=show_tool_calls,
-                        initial_presentation=ctx.initial_presentation,
+                        initial_presentation=initial_presentation,
                     ),
                     runtime_model_name=prepared_execution.runtime_model_name,
                     team_member_model_names=tuple(sorted(holder.member_model_names.items())),
@@ -3591,12 +3600,18 @@ async def team_response_stream(  # noqa: C901, PLR0915
         team_members=team_members,
         member_model_names=team_members.model_names,
     )
+    previous_presentation = ctx.initial_presentation
+    attempt_prefix = ctx.initial_presentation
 
     async def _run_team_stream_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[_TeamStreamChunk | AttemptResolved, None]:
         """Stream one team attempt, ending with its ``AttemptResolved`` sentinel."""
+        nonlocal attempt_prefix
+        # Background joins continue the already-published document. A fresh
+        # tracker owns this attempt while the prior trace remains a frozen prefix.
+        attempt_prefix = previous_presentation if run.attempted_job_outcomes else ctx.initial_presentation
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
             holder.member_model_names = dict.fromkeys(
                 requested_agent_names,
@@ -3672,7 +3687,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
             attempt_config_names,
             attempt_display_names,
             show_tool_calls=show_tool_calls,
-            initial_presentation=ctx.initial_presentation,
+            initial_presentation=attempt_prefix,
         )
         attempt_member_ids = presentation.member_ids
         attempt_display_names_by_id = presentation.display_names_by_id
@@ -3889,6 +3904,26 @@ async def team_response_stream(  # noqa: C901, PLR0915
                         ),
                     )
                     return
+                replayable_text = response_text if event_has_visible else ""
+                if emitted_output:
+                    # The aggregate terminal output must not replace the live
+                    # document with a prose-only rendering that drops its trace.
+                    _append_team_output_text(
+                        presentation,
+                        event,
+                        top_level=True,
+                        skip_scopes={
+                            *(f"agent:{member}" for member, text in canonical_per_member.items() if text),
+                            *({"team"} if canonical_consensus else ()),
+                        },
+                    )
+                    _complete_terminal_team_tools(presentation, event)
+                    yield StructuredStreamChunk(
+                        content=presentation.render_body(),
+                        tool_trace=presentation.tool_trace.copy(),
+                        presentation_state=presentation.to_state(),
+                    )
+                    response_text = ""
                 # The driver emits response_text only after settling the
                 # attempt: a pre-settle yield would leak the fallback
                 # placeholder before an empty-run retry, or stale
@@ -3896,7 +3931,7 @@ async def team_response_stream(  # noqa: C901, PLR0915
                 yield AttemptResolved(
                     CompletedAttempt(
                         response_text=response_text,
-                        replayable_text=response_text if event_has_visible else "",
+                        replayable_text=replayable_text,
                         has_visible_content=event_has_visible,
                         is_empty=(
                             event.status == RunStatus.completed and not event_tool_executions and not event_has_visible
@@ -4179,7 +4214,15 @@ async def team_response_stream(  # noqa: C901, PLR0915
     # its cleanup does not wait for event-loop async-generator finalization.
     async with aclosing(response_stream) as closing_stream:
         async for chunk in closing_stream:
-            yield _prefix_team_stream_chunk(chunk, ctx.initial_presentation)
+            published = _prefix_team_stream_chunk(chunk, attempt_prefix)
+            if isinstance(published, StructuredStreamChunk):
+                previous_presentation = StreamingPresentation(
+                    response_text=published.content,
+                    tool_trace=tuple(deepcopy(published.tool_trace or ())),
+                )
+            elif isinstance(published, str):
+                previous_presentation = StreamingPresentation(response_text=published)
+            yield published
 
 
 __all__ = [
