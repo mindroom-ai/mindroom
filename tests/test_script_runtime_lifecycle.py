@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import socket
 import threading
 import time
@@ -45,7 +46,7 @@ from mindroom.script_runs.models import (
     ScriptToolGrant,
     script_worker_key_for_run,
 )
-from mindroom.script_runs.recovery import script_recovery_signature
+from mindroom.script_runs.recovery import script_recovery_signature, verified_script_recovery_signature
 from mindroom.script_runs.store import (
     ScriptCallNotFoundError,
     ScriptRunNotFoundError,
@@ -853,6 +854,7 @@ class _RecoveringBackend(_Backend):
     backend_name: str = "kubernetes"
     signature: str = "worker-authority-v1"
     legacy_signature: str = "legacy-worker-authority-v1"
+    pre_seccomp_signature: str | None = None
 
     def script_recovery_signature(self) -> str:
         return self.signature
@@ -862,6 +864,9 @@ class _RecoveringBackend(_Backend):
 
     def legacy_script_recovery_signature(self) -> str:
         return self.legacy_signature
+
+    def legacy_pre_seccomp_script_recovery_signature(self) -> str | None:
+        return self.pre_seccomp_signature
 
 
 @dataclass
@@ -1039,6 +1044,69 @@ async def test_startup_migrates_exact_legacy_recovery_contract(tmp_path: Path) -
         assert client.exited is False
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [None, "owner", "resources", "gateway"])
+async def test_startup_migrates_pre_seccomp_recovery_contract(tmp_path: Path, change: str | None) -> None:
+    """An unchanged pre-seccomp process survives; its owner, resources and gateway remain bound."""
+    runtime, run, backend, client = _recovery_scenario(tmp_path)
+    backend.pre_seccomp_signature = "pre-seccomp-worker-authority"
+    historical_payload = {
+        "protocol": 1,
+        "backend": "pre-seccomp-worker-authority",
+        "agent": "watcher",
+        "process_authority": {
+            "execution_scope": None,
+            "private": None,
+            "knowledge_paths": [],
+            "grantable_credentials": [],
+        },
+        "gateway": "http://primary.test/api/script-gateway",
+        "resources": {"profile": None, "requests": {}, "limits": {}},
+    }
+    if change == "owner":
+        historical_payload["agent"] = "other"
+    elif change == "resources":
+        historical_payload["resources"] = {"profile": None, "requests": {}, "limits": {"cpu": "2"}}
+    elif change == "gateway":
+        historical_payload["gateway"] = "http://other.test/api/script-gateway"
+    digest = hashlib.sha256(json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    runtime.store.replace_recovery_signature(
+        run.run_id,
+        expected_signature=run.recovery_signature,
+        recovery_signature=f"v2:{digest}",
+    )
+
+    try:
+        await runtime.start()
+        durable = runtime.store.get_run(run.run_id)
+        if change is None:
+            assert durable.state is ScriptRunState.RUNNING
+            assert durable.cancel_requested_at is None
+            assert durable.worker_id == run.worker_id
+            assert durable.recovery_signature == run.recovery_signature
+            assert client.exited is False
+            assert set(backend.actions) == {f"touch:{run.worker_key}"}
+        else:
+            assert durable.state is ScriptRunState.INTERRUPTED
+            assert client.exited is True
+    finally:
+        await runtime.shutdown()
+
+
+def test_recovery_requires_a_persisted_signature(tmp_path: Path) -> None:
+    """An unavailable historical digest cannot match a missing durable authority record."""
+    runtime, run, backend, _client = _recovery_scenario(tmp_path)
+    assert (
+        verified_script_recovery_signature(
+            run=replace(run, recovery_signature=None),
+            backend=backend,
+            config=_config(),
+            gateway_url=runtime.manager.gateway_url,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

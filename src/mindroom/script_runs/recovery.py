@@ -10,6 +10,7 @@ from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.legacy_recovery import (
     is_legacy_script_recovery_signature,
     legacy_script_recovery_signature,
+    pre_seccomp_backend_recovery_signature,
 )
 
 if TYPE_CHECKING:
@@ -54,6 +55,7 @@ def script_recovery_signature(
     agent_name: str,
     gateway_url: str,
     resource_profile: str | None = None,
+    legacy_pre_seccomp: bool = False,
 ) -> str | None:
     """Bind one recoverable launch to its worker authority, private scope and gateway."""
     if (
@@ -64,9 +66,14 @@ def script_recovery_signature(
         or (process_authority := script_process_authority(config, agent_name)) is None
     ):
         return None
+    backend_signature = (
+        pre_seccomp_backend_recovery_signature(backend) if legacy_pre_seccomp else backend.script_recovery_signature()
+    )
+    if backend_signature is None:
+        return None
     payload = {
         "protocol": SCRIPT_PROTOCOL_VERSION,
-        "backend": backend.script_recovery_signature(),
+        "backend": backend_signature,
         "agent": agent_name,
         "process_authority": process_authority,
         "gateway": gateway_url.rstrip("/"),
@@ -91,9 +98,18 @@ def verified_script_recovery_signature(
         gateway_url=gateway_url,
         resource_profile=run.resource_profile,
     )
-    if current_signature is None:
+    if current_signature is None or run.recovery_signature is None:
         return None
     if current_signature == run.recovery_signature:
+        return current_signature
+    if run.recovery_signature == script_recovery_signature(
+        backend=backend,
+        config=config,
+        agent_name=run.agent_name,
+        gateway_url=gateway_url,
+        resource_profile=run.resource_profile,
+        legacy_pre_seccomp=True,
+    ):
         return current_signature
     if not is_legacy_script_recovery_signature(run.recovery_signature):
         return None
