@@ -20,7 +20,7 @@ from mindroom.agents import apply_tool_approval_capability
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import sessions
 from mindroom.delegation.execution import drive_delegations
@@ -38,16 +38,22 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("execution", ["direct", "native", "team"])
+@pytest.mark.parametrize("model", [None, "alternate"])
 async def test_followup_reuses_child_history_after_parent_reconstruction(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     execution: str,
+    model: str | None,
 ) -> None:
     """A new parent/toolkit can continue the same child and obtain a separate audit turn."""
     native = execution != "direct"
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"], tools=["calculator"])},
         defaults=DefaultsConfig(tools=[], learning=False),
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "alternate": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+        },
         memory={"backend": "none"},
         tool_approval={
             "rules": [{"match": name, "action": "require_approval"} for name in ("add", "continue_subagent")],
@@ -72,7 +78,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
         toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity)
         if not native:
             if name == "run_subagent":
-                return await toolkit.run_subagent(task=str(args["task"]))
+                return await toolkit.run_subagent(task=str(args["task"]), model=model)
             return await toolkit.continue_subagent(subagent_id=str(args["subagent_id"]), message=str(args["message"]))
         apply_tool_approval_capability(
             toolkit,
@@ -140,6 +146,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
                         depth=0,
                     )
                     assert restored.status == "paused"
+                    assert restored.model_name == (model or "default")
                 response = await drive_delegations(
                     parent,
                     response,
@@ -159,7 +166,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             storage.close()
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-        first = await invoke("run_subagent", task="Remember this secret word: cobalt")
+        first = await invoke("run_subagent", task="Remember this secret word: cobalt", model=model)
         match = re.search(r"Subagent ID: ([a-f0-9]{32})", first)
         assert match, first
         subagent_id = match.group(1)
@@ -183,6 +190,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     assert len(records) == 2
     assert {record["subagent_id"] for record in records} == {subagent_id}
     assert {record["status"] for record in records} == {"completed"}
+    assert {record["model_name"] for record in records} == {model or "default"}
     assert sum(record["previous_delegation_id"] is not None for record in records) == 1
 
     foreign_identity = replace(identity, session_id="another-parent-session")
