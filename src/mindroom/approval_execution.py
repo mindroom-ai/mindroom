@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -36,7 +37,7 @@ from mindroom.delegation.execution import drive_delegation_stream, has_delegatio
 from mindroom.delegation.state import DelegationState
 from mindroom.error_handling import run_error_event_text
 from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import close_agent_runtime_state_dbs
+from mindroom.history.session_context import close_agent_runtime_state_dbs, close_execution_storage
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -48,6 +49,9 @@ from mindroom.response_turn import (
     apply_local_approval_decisions,
     paused_attempt_from_response,
 )
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeModelBinding,
@@ -140,10 +144,14 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
     if paused is not None:
         for tool in paused.tools:
             presentation.start_tool(tool)
+    completed_call_ids = {
+        entry.tool_call_id for entry in presentation.tool_tracker.completed_tools if entry.tool_call_id is not None
+    }
     for tool in response.tools or ():
         if tool.is_paused:
             presentation.start_tool(tool)
-        else:
+        elif tool.tool_call_id is None or tool.tool_call_id not in completed_call_ids:
+            # Repeated terminal completions must not match older public slots by name.
             presentation.complete_tool(tool)
 
 
@@ -345,6 +353,10 @@ class AgentApprovalExecution:
     knowledge_access: KnowledgeAccessSupport
     refresh_scheduler: Callable[[], KnowledgeRefreshScheduler | None]
 
+    @partial(
+        owned_tool_execution,
+        enabled=lambda self, *_args, **_kwargs: background_tool_jobs_enabled(self.config(), self.runtime_paths),
+    )
     async def continue_run(
         self,
         continuation: ApprovalContinuation,
@@ -374,6 +386,14 @@ class AgentApprovalExecution:
             config,
             self.runtime_paths,
             execution_identity,
+        )
+        set_consumption_storage(
+            lambda: create_session_storage(
+                continuation.entity_name,
+                config,
+                self.runtime_paths,
+                execution_identity=execution_identity,
+            ),
         )
         try:
             session = await asyncio.to_thread(
@@ -464,20 +484,23 @@ class AgentApprovalExecution:
                     )
         finally:
             try:
-                ai_runtime.register_queued_notice_storage(
-                    storage_factory=lambda: create_session_storage(
-                        continuation.entity_name,
-                        config,
-                        self.runtime_paths,
-                        execution_identity=execution_identity,
-                    ),
-                    session_id=continuation.session_id,
-                    session_type=SessionType.AGENT,
-                    entity_name=continuation.entity_name,
-                )
+                await finalize_consumption()
             finally:
                 try:
-                    close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+                    ai_runtime.register_queued_notice_storage(
+                        storage_factory=lambda: create_session_storage(
+                            continuation.entity_name,
+                            config,
+                            self.runtime_paths,
+                            execution_identity=execution_identity,
+                        ),
+                        session_id=continuation.session_id,
+                        session_type=SessionType.AGENT,
+                        entity_name=continuation.entity_name,
+                    )
                 finally:
-                    history_storage.close()
+                    try:
+                        close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
+                    finally:
+                        close_execution_storage(history_storage)
         return result

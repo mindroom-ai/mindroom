@@ -144,7 +144,9 @@ from .orchestration.runtime import (
 )
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
+from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
+from .tool_jobs.disabled import approval_is_parked
 
 if TYPE_CHECKING:
     import socket
@@ -397,6 +399,7 @@ class _MultiAgentOrchestrator:
     _memory_auto_flush_worker: MemoryAutoFlushWorker | None = field(default=None, init=False)
     _memory_auto_flush_task: asyncio.Task | None = field(default=None, init=False)
     _todo_poke_runtime: TodoPokeRuntimeCoordinator = field(init=False, repr=False)
+    _tool_job_runtime: ToolJobRuntimeCoordinator = field(init=False, repr=False)
     _thread_export_runner: WorkspaceThreadExportRunner = field(init=False, repr=False)
     config_reload: ConfigReloadLifecycle = field(init=False)
     _mcp_manager: MCPServerManager | None = field(default=None, init=False)
@@ -458,6 +461,12 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
         )
+        self._tool_job_runtime = ToolJobRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+            agent_reply_memberships=self.agent_reply_memberships,
+        )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
                 runtime_paths=self.runtime_paths,
@@ -498,6 +507,7 @@ class _MultiAgentOrchestrator:
                 self.config is not None and (name in self.config.agents or name in self.config.teams)
             ),
             entity_permanently_unavailable=lambda name: name in self._permanently_failed_entities,
+            approval_is_parked=lambda approval_id: approval_is_parked(self.runtime_paths, approval_id),
             recover_unavailable_final=self._recover_unavailable_final,
             cancel_delegations=lambda continuation, reason: cancel_approval_delegations(
                 continuation,
@@ -1020,6 +1030,8 @@ class _MultiAgentOrchestrator:
         self._configure_approval_store_transport()
         await self._sync_memory_auto_flush_worker()
         await self._todo_poke_runtime.sync()
+        await self._tool_job_runtime.initialize(self._shared_journal_store())
+        await self._tool_job_runtime.sync()
         self._thread_export_runner.start()
         if self.running:
             # Startup queues its own pass once the bots are up; a reload
@@ -1381,6 +1393,7 @@ class _MultiAgentOrchestrator:
         self.config = config
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
+        await self._tool_job_runtime.initialize(self._shared_journal_store())
         self._activate_hook_registry(hook_registry)
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
@@ -1652,7 +1665,7 @@ class _MultiAgentOrchestrator:
         for bot in self.agent_bots.values():
             bot.schedule_reply_authorized_call_reconciliation()
 
-    async def _start_runtime(self) -> None:
+    async def _start_runtime(self) -> None:  # noqa: PLR0915
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
         self._runtime_ready_event.clear()
@@ -1689,6 +1702,7 @@ class _MultiAgentOrchestrator:
         self._resolve_bot_room_aliases(started_bots, config)
         phase_started = log_startup_phase_started("bind_runtime_support")
         self._bind_started_runtime_support_services(started_bots)
+        await self._tool_job_runtime.sync()
         await self._script_runtime.start()
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
@@ -2466,6 +2480,7 @@ class _MultiAgentOrchestrator:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
             logger.exception("Background script runtime shutdown failed")
+        await _run_shutdown_step("tool_job_runtime", self._tool_job_runtime.stop())
         await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
         await _run_shutdown_step("config_reload", self.config_reload.cancel())
         owner = self._mcp_catalog_change_task_owner

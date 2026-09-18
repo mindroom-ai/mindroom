@@ -686,8 +686,15 @@ Pass a configured alias from `models:` as `model` to choose a different model fo
 An explicit model takes precedence over thread and room choices; omitted or `None` keeps normal model selection.
 Unknown model aliases are rejected before execution.
 The selected model is retained for follow-ups, approval continuations, and restarts without changing the parent or agent configuration.
-The caller waits for the child to execute the task, then receives its answer, stable subagent ID, and an audit reference as the tool result.
-Use `continue_subagent` with that ID for a follow-up in the same child session after its previous turn returns.
+Fast calls return the child's answer, stable subagent ID, and an audit reference as the tool result.
+Calls wait for the child by default.
+Enable the instance-wide root option `background_tool_jobs: true` and restart to use generic background execution; it is disabled by default.
+In that mode, managed Matrix calls wait until completion or human input, and the shared `wait_timeout` option accepts zero for immediate background execution or positive seconds to bound the wait.
+Human input then releases the wait while the child keeps working; it does not automatically pause the child.
+Use `job(action="list")` to rediscover jobs and `job(action="wait", job_id=...)` to retrieve a turn's result; see [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs).
+The accepted `action` values are `list`, `inspect`, `wait`, and `cancel`; every action except `list` requires `job_id`.
+The `wait` action accepts the same optional `wait_timeout` budget.
+Use `continue_subagent` with the reusable subagent ID for a follow-up in the same child session after its previous turn returns.
 The ID stays scoped to the original caller, requester, and conversation across parent turns and restarts.
 Follow-ups recheck current permissions, preserve nesting depth, and create separate audit records.
 The task must include relevant context, constraints, and expected output, because the child does not inherit the conversation.
@@ -727,7 +734,7 @@ agents:
 - Targets must reference existing agent names in the config
 - An agent may delegate to itself only when its own name appears in `delegate_to`
 - Recursive delegation is supported (agent A delegates to B, B delegates to C) up to a maximum depth of 3
-- Native Matrix delegation runs one child at a time per parent; direct tool calls can run children in parallel
+- Detached managed jobs may overlap; each accepted job owns its execution and exact result independently
 
 ## Naming Rules
 

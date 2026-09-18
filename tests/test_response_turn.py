@@ -8,15 +8,21 @@ import json
 import threading
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 
 import pytest
+from agno.db.base import BaseDb
 from agno.models.response import ToolExecution
+from agno.run.agent import RunOutput, RunPausedEvent
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
 from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.types import HistoryScope
 from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
@@ -42,8 +48,6 @@ from mindroom.tool_system.events import ToolTraceEntry
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
-
-    from mindroom.history.session_context import ScopeSessionContext
 
 
 @dataclass
@@ -198,8 +202,8 @@ class _AdapterLog:
 
 def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager[ScopeSessionContext]]:
     def _open() -> AbstractContextManager[ScopeSessionContext]:
-        log.scope = object()
-        return contextlib.nullcontext(cast("ScopeSessionContext", log.scope))
+        log.scope = ScopeSessionContext(HistoryScope(kind="agent", scope_id="helper"), MagicMock(spec=BaseDb), None)
+        return contextlib.nullcontext(log.scope)
 
     return _open
 
@@ -298,6 +302,178 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
     assert paused.tools == (tool,)
     assert paused.requirements == (requirement,)
     assert paused.requirements[0].member_agent_name == "researcher"
+
+
+@pytest.mark.parametrize(
+    ("response", "toolkit_owners", "expected"),
+    [
+        (
+            RunOutput(
+                status=RunStatus.paused,
+                session_id="session",
+                run_id="run",
+                tools=[
+                    ToolExecution(
+                        tool_call_id="call",
+                        tool_name="report",
+                        tool_args={"wait_timeout": None},
+                        requires_confirmation=True,
+                    ),
+                ],
+            ),
+            {("general", "report"): "reports"},
+            True,
+        ),
+        (
+            RunOutput(
+                status=RunStatus.paused,
+                session_id="session",
+                run_id="run",
+                tools=[
+                    ToolExecution(
+                        tool_call_id="call",
+                        tool_name="report",
+                        requires_confirmation=True,
+                    ),
+                ],
+                metadata={
+                    DELEGATION_STATE_KEY: {
+                        "hooks": {
+                            "hook": {
+                                "execution_identity": {},
+                                "arguments": {"wait_timeout": None},
+                                "started_at": 1.0,
+                            },
+                        },
+                    },
+                },
+            ),
+            {("general", "report"): "reports"},
+            True,
+        ),
+        (
+            RunOutput(
+                status=RunStatus.paused,
+                session_id="session",
+                run_id="run",
+                metadata={
+                    DELEGATION_STATE_KEY: {
+                        "pending_tools": [
+                            {
+                                "tool_call_id": "call",
+                                "tool_name": "report",
+                                "tool_args": {"wait_timeout": 0},
+                                "requires_confirmation": True,
+                            },
+                        ],
+                    },
+                },
+            ),
+            {("general", "report"): "reports"},
+            True,
+        ),
+        (
+            TeamRunOutput(
+                status=RunStatus.paused,
+                session_id="session",
+                run_id="run",
+                tools=[
+                    ToolExecution(
+                        tool_call_id="call",
+                        tool_name="report",
+                        requires_confirmation=True,
+                    ),
+                ],
+                member_responses=[
+                    RunOutput(
+                        tools=[
+                            ToolExecution(
+                                tool_call_id="member-call",
+                                tool_name="report",
+                                tool_args={"wait_timeout": 0},
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            {("general", "report"): "reports"},
+            True,
+        ),
+        (
+            RunOutput(
+                status=RunStatus.paused,
+                session_id="session",
+                run_id="run",
+                tools=[
+                    ToolExecution(
+                        tool_call_id="call",
+                        tool_name="report",
+                        requires_confirmation=True,
+                    ),
+                ],
+            ),
+            {("general", "report"): "reports"},
+            False,
+        ),
+    ],
+    ids=[
+        "null-wait",
+        "delegation-hook",
+        "delegation-pending-tool",
+        "team-member",
+        "ordinary",
+    ],
+)
+def test_paused_attempt_records_background_tool_job_ownership(
+    response: RunOutput | TeamRunOutput,
+    toolkit_owners: dict[tuple[str, str], str | None],
+    expected: bool,
+) -> None:
+    """Pause capture classifies exact feature ownership without restart inference."""
+    paused = response_turn_module.paused_attempt_from_response(
+        response,
+        fallback_session_id="fallback-session",
+        fallback_run_id="fallback-run",
+        toolkit_owners=toolkit_owners,
+    )
+
+    assert paused is not None
+    assert paused.requires_background_tool_jobs is expected
+
+
+def test_streamed_pause_classifies_completed_background_tool_before_ordinary_approval() -> None:
+    """The pause event carries the full run tool list, including earlier completed feature work."""
+    earlier = ToolExecution(
+        tool_call_id="earlier",
+        tool_name="report",
+        tool_args={"wait_timeout": None},
+        result="done",
+    )
+    pending = ToolExecution(
+        tool_call_id="pending",
+        tool_name="publish",
+        requires_confirmation=True,
+    )
+    event = RunPausedEvent(
+        session_id="session",
+        run_id="run",
+        tools=[earlier, pending],
+        requirements=[RunRequirement(tool_execution=pending)],
+    )
+
+    paused = response_turn_module.paused_attempt_from_event(
+        event,
+        fallback_session_id="fallback-session",
+        fallback_run_id="fallback-run",
+        toolkit_owners={
+            ("general", "report"): "reports",
+            ("general", "publish"): "reports",
+        },
+    )
+
+    assert paused is not None
+    assert paused.tools == (pending,)
+    assert paused.requires_background_tool_jobs is True
 
 
 def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
@@ -941,7 +1117,8 @@ def test_blocking_continuation_advances_and_resets_turn_state() -> None:
     assert log.released == 1
     assert log.finalized == 2
     # The continuation reset synced empty partial state carrying the prior tools.
-    assert recorder.synced_calls[-1]["completed_tools"] == [first_trace]
+    assert recorder.synced_calls[0]["completed_tools"] == [first_trace]
+    assert recorder.synced_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
     # The final recording carries the first attempt's tools plus the second's.
     assert recorder.completed_calls[-1]["completed_tools"] == [first_trace, _trace("sleep")]
 

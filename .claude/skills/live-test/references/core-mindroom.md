@@ -71,16 +71,18 @@ MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
 uv run --python 3.13 matty rooms
 ```
 
-## Isolated Path: Temporary Config
+## Isolated Path: Persistent Config
 
 Use this when the machine already has local MindRoom instances, existing Matrix users, occupied dashboard ports, or stale config.
+Keep the config, storage, logs, and other evidence together in a persistent run directory.
 
 ```bash
-tmp="$(mktemp -d /tmp/mindroom-live-test.XXXXXX)"
-uv run mindroom config init --provider openai --force --path "$tmp/config.yaml"
+run_root=".baspowers/sdd/live-test-$(date +%Y%m%dT%H%M%S)"
+mkdir -p "$run_root"
+uv run mindroom config init --provider openai --force --path "$run_root/config.yaml"
 ```
 
-`config init` has no `--minimal` flag; write the config YAML directly when you need a precise minimal shape (models, agents, teams, authorization, `mindroom_user`).
+`config init` has no `--minimal` flag; write the config YAML directly when you need a precise minimal shape (models, agents, teams, room membership, `mindroom_user`).
 If no local model server is running on 9292 and no provider key is available, a ~60-line FastAPI stub serving `/v1/models` and `/v1/chat/completions` (JSON + SSE stream) is enough for deterministic end-to-end turns; run it with `uvicorn` from the venv.
 
 Patch the generated config so it can run locally without private credentials and without restrictive room auth.
@@ -107,21 +109,33 @@ memory:
 mindroom_user:
   username: mindroom_user_<unique_suffix>
 
-matrix_room_access:
-  mode: multi_user
-  multi_user_join_rule: public
+administrators:
+  - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 
-authorization:
-  default_room_access: true
-  global_users: []
-  agent_reply_permissions: {}
+room_defaults:
+  join_policy: public
+  invite_users:
+    - __MINDROOM_OWNER_USER_ID_FROM_PAIRING__
 ```
+
+Replace the owner placeholder through pairing or with the concrete disposable Matrix user ID before relying on administrator or invitation behavior.
+
+For a real-model exploratory pass using an existing Codex login, replace the model entry with:
+
+```yaml
+models:
+  default:
+    provider: codex
+    id: gpt-6-astra
+```
+
+This route uses the existing login; do not add a Codex token to the run's `.env`.
 
 Then export an isolated runtime.
 
 ```bash
-export MINDROOM_CONFIG_PATH="$tmp/config.yaml"
-export MINDROOM_STORAGE_PATH="$tmp/mindroom_data"
+export MINDROOM_CONFIG_PATH="$run_root/config.yaml"
+export MINDROOM_STORAGE_PATH="$run_root/mindroom_data"
 export MINDROOM_NAMESPACE="live$(date +%H%M%S)"
 export MATRIX_HOMESERVER=http://localhost:8008
 export MATRIX_SSL_VERIFY=false
@@ -133,26 +147,26 @@ export UV_PYTHON=3.13
 Use lowercase letters and digits only.
 Do not use underscores or hyphens.
 
-In practice, it is often cleaner to write a temporary `"$tmp/.env"` and `source` it so the live run and later `curl` commands use the same values.
+In practice, it is often cleaner to write `"$run_root/.env"` and `source` it so the live run and later `curl` commands use the same values.
 
 Example:
 
 ```bash
-cat > "$tmp/.env" <<EOF
+cat > "$run_root/.env" <<EOF
 MATRIX_HOMESERVER=http://localhost:8008
 MATRIX_SSL_VERIFY=false
-MINDROOM_STORAGE_PATH=$tmp/mindroom_data
+MINDROOM_STORAGE_PATH=$run_root/mindroom_data
 MINDROOM_API_KEY=live-test-$(date +%H%M%S)
 OPENAI_API_KEY=sk-test
 OPENAI_BASE_URL=http://localhost:9292/v1
 EOF
 
 set -a
-source "$tmp/.env"
+source "$run_root/.env"
 set +a
 ```
 
-If `"$tmp/.env"` exists, inspect it for `MINDROOM_API_KEY`.
+If `"$run_root/.env"` exists, inspect it for `MINDROOM_API_KEY`.
 Use that key for `/api/*` requests so you are talking to the same isolated instance you started.
 
 Start the isolated backend on a non-default API port.
@@ -183,7 +197,7 @@ registration_response="$(curl -sS -X POST 'http://localhost:8008/_matrix/client/
   -H 'Content-Type: application/json' \
   -d "{\"auth\":{\"type\":\"m.login.dummy\"},\"username\":\"$username\",\"password\":\"$password\"}")"
 read -r user_id access_token < <(
-  REGISTRATION_RESPONSE="$registration_response" python -c \
+  REGISTRATION_RESPONSE="$registration_response" uv run python -c \
     'import json, os; response = json.loads(os.environ["REGISTRATION_RESPONSE"]); print(response["user_id"], response["access_token"])'
 )
 unset registration_response
@@ -200,7 +214,7 @@ Join by room ID:
 
 ```bash
 room_id='!example:localhost'
-encoded_room_id="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$room_id")"
+encoded_room_id="$(uv run python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$room_id")"
 curl -sS -X POST "http://localhost:8008/_matrix/client/v3/join/$encoded_room_id" \
   -H "Authorization: Bearer $access_token"
 ```
@@ -209,7 +223,7 @@ Join by alias only when you know the exact alias:
 
 ```bash
 room_alias='#lobby_<namespace>:localhost'
-encoded_alias="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$room_alias")"
+encoded_alias="$(uv run python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$room_alias")"
 curl -sS -X POST "http://localhost:8008/_matrix/client/v3/join/$encoded_alias" \
   -H "Authorization: Bearer $access_token"
 ```
@@ -295,12 +309,14 @@ Use this to prove a storage or persistence change against real history written b
 
 1. Check out the old version in its own worktree with its own environment, so both versions can run against the same storage root in turn.
 ```bash
-git worktree add --detach /tmp/mindroom-main origin/main
-(cd /tmp/mindroom-main && uv sync --all-extras)
+upgrade_root="$HOME/.codex/worktrees/mindroom-live-upgrade"
+mkdir -p "$upgrade_root"
+git worktree add --detach "$upgrade_root/old" origin/main
+(cd "$upgrade_root/old" && uv sync --all-extras)
 ```
 2. Start the old backend detached with an absolute interpreter path; a relative `.venv/bin/mindroom` from another directory fails silently and a plain `nohup ... &` dies with the shell that started it.
 ```bash
-setsid nohup /tmp/mindroom-main/.venv/bin/mindroom run --storage-path "$MINDROOM_STORAGE_PATH" --api-port 9877 --log-level INFO >> old.log 2>&1 < /dev/null & disown
+setsid nohup "$upgrade_root/old/.venv/bin/mindroom" run --storage-path "$MINDROOM_STORAGE_PATH" --api-port 9877 --log-level INFO >> old.log 2>&1 < /dev/null & disown
 ```
 3. Build history, stop it (`kill "$(lsof -ti :9877)"`), copy the session database aside for comparison, then start this branch's `.venv/bin/mindroom` on the same `MINDROOM_STORAGE_PATH`, namespace, and config.
 4. Verify with the database, not the chat: `sqlite3 <root>/agents/<agent>/sessions/<agent>.db` and inspect `<agent>_sessions` (`runs`, `summary`, `metadata`), `<agent>_sessions_runs`, and `PRAGMA journal_mode`.

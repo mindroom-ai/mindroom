@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -357,7 +358,7 @@ def _plugin_slug(name: str) -> str:
 
 
 def _plugin_package_name(plugin_name: str, plugin_root: Path) -> str:
-    digest = abs(hash(str(plugin_root)))
+    digest = hashlib.sha256(str(plugin_root.resolve()).encode()).hexdigest()
     return f"mindroom_plugin_{_plugin_slug(plugin_name)}_{digest}"
 
 

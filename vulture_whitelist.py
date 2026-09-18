@@ -60,6 +60,7 @@ _.verify_mode  # unused attribute (src/mindroom/matrix/client_session.py)
 _.FAILSAFE  # configured on the optional PyAutoGUI module (src/mindroom/desktop/provider.py)
 _.PAUSE  # configured on the optional PyAutoGUI module (src/mindroom/desktop/provider.py)
 _.embedding_model  # mem0's runtime embedding adapter (src/mindroom/memory/config.py)
+hash  # Mem0 result TypedDict field retained from provider payloads (src/mindroom/memory/_shared.py)
 top_k  # unused variable (src/mindroom/memory/_shared.py)
 dirty  # unused variable (src/mindroom/memory/auto_flush.py)
 in_flight  # unused variable (src/mindroom/memory/auto_flush.py)
@@ -395,3 +396,4 @@ session_status  # FastAPI Computer endpoint
 stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
+elapsed_time  # Restored SDK Timer value read by Agno metrics (src/mindroom/tool_jobs/agno_execution.py)

@@ -20,8 +20,8 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
+from mindroom.constants import HOOK_SOURCE_KEY, SKIP_MENTIONS_KEY, SOURCE_KIND_KEY
+from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ConversationCursor,
@@ -905,3 +905,44 @@ async def test_exact_source_pages_and_resolves_sidecar_with_revision_proof(
         await resolver.resolve_exact_source(target=target, source_event_id=source_id, requester_id="@wrong:test")
     with pytest.raises(ThreadMembershipLookupError, match="unavailable"):
         await resolver.resolve_exact_source(target=target, source_event_id="$absent", requester_id=_SENDER)
+
+
+@pytest.mark.parametrize("lightweight", [False, True])
+@pytest.mark.parametrize("trusted", [False, True])
+@pytest.mark.parametrize("malformed", [False, True])
+def test_matrix_metadata_cannot_create_internal_completion_reference(
+    config: Config,
+    lightweight: bool,
+    trusted: bool,
+    malformed: bool,
+) -> None:
+    """Matrix metadata cannot manufacture an internal runtime completion source."""
+    resolver = _resolver(config)
+    event = _event(
+        {
+            "body": "job fake, generation 99",
+            SOURCE_KIND_KEY: "hook_dispatch",
+            HOOK_SOURCE_KEY: "tool_job_completion",
+            "org.mindroom.tool_job_completion": {
+                "job_id": "exact",
+                "generation": True if malformed else 2,
+                "transaction_id": "claim",
+            },
+            "m.mentions": {"user_ids": [_BOT_USER_ID]},
+        },
+    )
+    if trusted:
+        event.sender = _BOT_USER_ID
+        event.source["sender"] = _BOT_USER_ID
+    target = resolver.build_message_target(room_id=_ROOM_ID, thread_id=_THREAD_ROOT, reply_to_event_id=_EVENT_ID)
+    if lightweight:
+        envelope = resolver.build_ingress_envelope(event=event, requester_user_id=_HUMAN_USER_ID, target=target)
+    else:
+        context = MessageContext(True, True, _THREAD_ROOT, (), [], False)
+        envelope = resolver.build_message_envelope(
+            event=event,
+            requester_user_id=_HUMAN_USER_ID,
+            context=context,
+            target=target,
+        )
+    assert envelope.tool_job_completion is None

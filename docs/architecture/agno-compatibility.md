@@ -49,6 +49,8 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| Application tools lack a public accepted-execution owner, framework waiting metadata, and per-call native wait projection. | Add ownership around approved FunctionCalls, provider-schema metadata hooks, and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
+| Agent and Team cleanup closes connectable resources when detached work still owns them. | Add shared resource leases with task-affine async teardown. | `tool_jobs/agno_compat_resources.py`; physical connections close after the final execution owner releases them. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
@@ -93,6 +95,8 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
+| `tool_jobs/agno_compat_execution.py` | Approved FunctionCall driver binding, provider-schema projection of shared wait metadata, and exact-call native requirement projection. | `tool_jobs/agno_execution.py`, `wait_timeout.py`, and `runtime.py` own admission, wait validation, execution, result claims, and cancellation. |
+| `tool_jobs/agno_compat_resources.py` | Agent/Team resource connection and teardown binding. | `tool_jobs/resources.py` retains shared leases and closes resources after their final execution owner releases them. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs and retained terminal metadata. | `openai_models.py` retains provider classes and canonical history/replay policy. |
 | `agno_compat_openai_responses.py` | Responses SDK stream ownership, completion, response-ID publication, native failure normalization, retry protection, and continuation adaptation. | `openai_models.py` retains request configuration and native/portable replay policy; `provider_stream_retry.py` owns retry limits and delays. |
 | `agno_compat_openai_responses_items.py` | Capture of provider output items lost by Agno parsing. | `openai_response_replay.py` retains canonical filtering, output ordering, and replay selection. |

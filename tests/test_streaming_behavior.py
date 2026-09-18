@@ -68,7 +68,7 @@ from mindroom.streaming import (
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import StructuredStreamChunk, format_tool_started_event
+from mindroom.tool_system.events import BackgroundWaitChunk, StructuredStreamChunk, format_tool_started_event
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.access_schema_support import with_current_room_member_access
@@ -4695,3 +4695,42 @@ async def test_a_failing_final_transform_still_delivers_the_streamed_answer(tmp_
 
     assert prepared is not None
     assert "the streamed answer" in prepared.content["body"]
+
+
+@pytest.mark.asyncio
+async def test_background_wait_flushes_visible_text_before_generator_blocks(tmp_path: Path) -> None:
+    """Turn-end joining cannot strand independent prose behind stream edit throttling."""
+    client = _make_matrix_client_mock()
+    delivered = asyncio.Event()
+    bodies = []
+
+    async def send(*_args: object, **kwargs: object) -> nio.RoomSendResponse:
+        content = kwargs["content"]
+        body = content.get("m.new_content", content)["body"]
+        bodies.append(body)
+        if "Waiting" in body:
+            delivered.set()
+        return nio.RoomSendResponse.from_dict({"event_id": "$progress"}, "!test:localhost")
+
+    client.room_send.side_effect = send
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        update_interval=3600,
+        min_update_interval=3600,
+        update_char_threshold=100000,
+        min_update_char_threshold=100000,
+    )
+    streaming.event_id = "$existing"
+    streaming.last_update = time.time()
+    streaming.stream_started_at = time.time()
+
+    async def chunks() -> AsyncIterator[object]:
+        yield "Independent answer."
+        yield BackgroundWaitChunk("\nWaiting for background work…")
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+
+    await _consume_streaming_chunks_for_test(client, chunks(), streaming)
+    assert any("Independent answer." in body and "Waiting" in body for body in bodies)

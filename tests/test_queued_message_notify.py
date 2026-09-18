@@ -16,6 +16,7 @@ from agno.agent import Agent as AgnoAgent
 from agno.db.base import BaseDb, SessionType
 from agno.media import Image
 from agno.models.message import Message
+from agno.models.openai import OpenAIChat
 from agno.models.response import ModelResponse
 from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
 from agno.run.base import RunStatus
@@ -3600,7 +3601,7 @@ def test_create_team_instance_installs_notice_hook_on_team_model(tmp_path: Path)
     """Team coordinator models should receive the same queued-message notice hook."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    model = _FakeModel()
+    model = OpenAIChat(id="test-model")
     agent = AgnoAgent(id="general", name="General", model="openai:test-model")
 
     with (

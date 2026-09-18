@@ -24,6 +24,7 @@ import pytest
 from agno.agent import Agent as AgnoAgent
 from agno.models.message import Message
 from agno.models.ollama import Ollama
+from agno.models.openai import OpenAIChat
 from agno.models.response import ModelResponse
 from agno.run.agent import RunContentEvent, RunOutput
 from agno.run.team import RunContentEvent as TeamContentEvent
@@ -4895,7 +4896,7 @@ class TestTeamCompletion:
 
         with (
             patch("mindroom.teams.create_agent", return_value=member),
-            patch("mindroom.model_loading.get_model_instance", return_value="openai:test-model"),
+            patch("mindroom.model_loading.get_model_instance", return_value=OpenAIChat(id="test-model")),
         ):
             from mindroom.api.openai_compat import _build_team  # noqa: PLC0415
 

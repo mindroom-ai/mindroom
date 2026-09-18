@@ -45,6 +45,7 @@ from mindroom.orchestration.runtime import (
 from mindroom.streaming_warmup import RenderedWarmupLine, WorkerWarmupState
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import (
+    BackgroundWaitChunk,
     StreamingToolTracker,
     StructuredStreamChunk,
     complete_pending_tool_block,
@@ -132,7 +133,13 @@ _TerminalStreamStatus = Literal["completed", "cancelled", "error"]
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
 
 StreamInputChunk = (
-    str | StructuredStreamChunk | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+    str
+    | BackgroundWaitChunk
+    | StructuredStreamChunk
+    | RunContentEvent
+    | RunCompletedEvent
+    | ToolCallStartedEvent
+    | ToolCallCompletedEvent
 )
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
@@ -1603,6 +1610,17 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
     tool_tracker = StreamingToolTracker()
 
     async for chunk in response_stream:
+        if isinstance(chunk, BackgroundWaitChunk):
+            await _apply_visible_text_chunk(
+                streaming,
+                delivery_queue,
+                chunk.content,
+                apply_chunk=streaming._append_incremental_text,
+                force_refresh=True,
+                boundary_refresh=True,
+                wait_for_capture=True,
+            )
+            continue
         if isinstance(chunk, str):
             text_chunk = chunk
         elif isinstance(chunk, StructuredStreamChunk):

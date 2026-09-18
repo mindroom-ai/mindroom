@@ -39,8 +39,8 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
-from mindroom.streaming import StreamingDeliveryError
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.streaming import StreamingDeliveryError, StreamingPresentation
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.access_schema_support import with_current_room_member_access
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -64,10 +64,13 @@ from tests.bot_helpers import (
     _stream_outcome,
 )
 from tests.identity_helpers import fixture_entity_matrix_id
+from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_get_event_response
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
+
+    from mindroom.delivery_gateway import EditTextRequest
 
 
 def _assert_interrupted_messages(
@@ -903,6 +906,81 @@ async def test_generate_team_response_helper_stream_delivery_failure_with_visibl
     assistant_text = cast("str", persisted_run.messages[1].content)
     assert "🔧 `run_shell_command` [1]" not in assistant_text
     assert assistant_text.count("run_shell_command") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_path: Path, recovered: bool) -> None:
+    """Stopping a fresh or recovered team keeps its latest Matrix prose and tool markers."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = bind_runtime_paths(_config_with_team(), runtime_paths)
+    config.background_tool_jobs = True
+    bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
+    coordinator = _build_response_runner(
+        bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=tmp_path,
+        requester_id="@alice:localhost",
+        team_history_storage=_SessionStorage(),
+        message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
+        orchestrator=_team_orchestrator(config, runtime_paths),
+        enable_streaming=False,
+    )
+    _install_inert_post_response_effects(coordinator)
+    edits: list[EditTextRequest] = []
+
+    async def capture_edit(request: EditTextRequest) -> bool:
+        edits.append(request)
+        return True
+
+    _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", capture_edit)
+    prior_trace = ToolTraceEntry(type="tool_call_completed", tool_name="run_shell_command", result_preview="/app")
+    prior_text = "The team checked the workspace.\n\n🔧 `run_shell_command` [1]"
+    latest_trace = [prior_trace, ToolTraceEntry(type="tool_call_started", tool_name="job")]
+    latest_text = f"{prior_text}\n\nThe team is waiting for results.\n\n🔧 `job` [2]"
+    original = _make_message_event(
+        event_id="$existing",
+        body=prior_text,
+        timestamp_ms=10,
+        sender=bot.matrix_id.full_id,
+        room_id="!test:localhost",
+        extra_content=build_tool_trace_content([prior_trace]),
+    )
+    latest = _make_message_event(
+        event_id="$latest-edit",
+        body="* latest team progress",
+        timestamp_ms=20,
+        sender=bot.matrix_id.full_id,
+        room_id="!test:localhost",
+        relates_to={"rel_type": "m.replace", "event_id": "$existing"},
+        new_content={"msgtype": "m.text", "body": latest_text, **(build_tool_trace_content(latest_trace) or {})},
+    )
+    bot.client.room_get_event.side_effect = None
+    bot.client.room_get_event.return_value = _room_get_event_response(original)
+    bot.client.room_get_event_relations = MagicMock(side_effect=lambda *_args, **_kwargs: _aiter(latest))
+    request = replace(
+        _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        existing_event_id="$existing",
+        existing_event_is_placeholder=False,
+        initial_presentation=StreamingPresentation(prior_text, tool_trace=(prior_trace,)) if recovered else None,
+    )
+
+    with patch(
+        "mindroom.response_runner.team_response",
+        new=AsyncMock(side_effect=asyncio.CancelledError("user_stop")),
+    ):
+        resolution = await coordinator.generate_team_response_helper(
+            request,
+            team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+            team_mode="coordinate",
+        )
+
+    assert resolution == "$existing"
+    assert len(edits) == 1
+    assert edits[0].event_id == "$existing"
+    assert edits[0].new_text == f"{latest_text}\n\n**[Response cancelled by user]**"
+    assert edits[0].tool_trace == latest_trace
 
 
 @pytest.mark.asyncio

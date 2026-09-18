@@ -46,6 +46,13 @@ class ToolTraceEntry:
     scope_key: str | None = field(default=None, compare=False)
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundWaitChunk:
+    """Append and flush progress before the response waits for background work."""
+
+    content: str
+
+
 @dataclass(slots=True)
 class StructuredStreamChunk:
     """Streaming chunk that carries fully-rendered content plus structured metadata."""

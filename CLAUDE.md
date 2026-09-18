@@ -226,6 +226,18 @@ Matrix sync callback
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations |
+| `tool_jobs/__init__.py` | Package boundary for opt-in managed background tool execution |
+| `tool_jobs/runtime.py` | Accepted execution ownership, durable outcomes, scoped discovery, and result claims |
+| `tool_jobs/settings.py` / `tool_jobs/disabled.py` | Startup-pinned feature setting and passive preservation of saved sources and approvals while off |
+| `tool_jobs/agno_compat_execution.py` / `tool_jobs/agno_compat_resources.py` | SDK schema/dispatch adapters and toolkit resource-lifetime bindings |
+| `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Approved SDK call execution, result capture, and exact durable consumption |
+| `tool_jobs/execution_scope.py` / `tool_jobs/resources.py` | Response execution envelopes and retained resource cleanup ownership |
+| `tool_jobs/authorization.py` / `tool_jobs/execution_authority.py` / `tool_jobs/provenance.py` | Current local grants, application-entry authority checks, and callable provenance |
+| `tool_jobs/control.py` / `tool_jobs/wait_timeout.py` | Human-follow-up wait signals, cancellation checkpoints, and reserved wait-metadata validation |
+| `tool_jobs/results.py` | Non-executable durable tool-value and rich-artifact serialization |
+| `tool_jobs/completion.py` / `tool_job_completion.py` | Internal completion admission and immutable job-generation references |
+| `custom_tools/job.py` | Reserved job discovery/control tool and native delegation-wait projection |
+| `orchestration/tool_job_runtime.py` | Managed job lifecycle and retrying internal completion wakeups |
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |

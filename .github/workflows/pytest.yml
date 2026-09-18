@@ -11,7 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.13"]
+        python-version: ["3.13", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
 
     steps:
       - uses: actions/checkout@v5
@@ -26,9 +28,15 @@ jobs:
         run: |
           uv sync --all-extras
 
-      - name: Run tests with pytest
+      - name: Run full suite on Python 3.13
+        if: matrix.python-version == '3.13'
         run: |
           uv run pytest -m "not requires_matrix"
+
+      - name: Check tool execution on Python 3.14
+        if: matrix.python-version == '3.14'
+        run: |
+          uv run pytest tests/test_tool_job_execution.py tests/test_tool_job_wait_timeout.py tests/test_tool_hooks.py -m "not requires_matrix"
 
       - name: Check for uncommitted changes
         run: |

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing, asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -105,11 +106,17 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
+from mindroom.streaming import StreamingPresentation
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
+from mindroom.tool_jobs.completion import report_background_wait
+from mindroom.tool_jobs.resources import defer_execution_cleanup
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import (
+    BackgroundWaitChunk,
     CollectedStreamPresentation,
     StreamingToolTracker,
+    StructuredStreamChunk,
     complete_pending_tool_block,
     format_tool_combined,
 )
@@ -153,7 +160,15 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = str | RunContentEvent | RunCompletedEvent | ToolCallStartedEvent | ToolCallCompletedEvent
+AIStreamChunk = (
+    str
+    | BackgroundWaitChunk
+    | StructuredStreamChunk
+    | RunContentEvent
+    | RunCompletedEvent
+    | ToolCallStartedEvent
+    | ToolCallCompletedEvent
+)
 
 
 def _append_additional_context(agent: Agent, context_chunk: str) -> None:
@@ -371,7 +386,12 @@ async def _finalize_agent_turn_model(
     if model is None and holder.agent is not None:
         model = holder.agent.model
     if model is not None:
-        await run_coroutine_until_complete(aclose_anthropic_async_client(model))
+
+        async def close() -> None:
+            await aclose_anthropic_async_client(model)
+
+        if not defer_execution_cleanup(close, resource=model):
+            await run_coroutine_until_complete(close())
 
 
 def _build_agent_turn_callbacks(
@@ -506,7 +526,7 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
-async def collect_streamed_response_content(
+async def collect_streamed_response_content(  # noqa: C901 - Explicit stream event variants.
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     presentation: CollectedStreamPresentation,
@@ -516,6 +536,16 @@ async def collect_streamed_response_content(
         async for chunk in response_stream:
             if isinstance(chunk, str):
                 presentation.append_text(chunk)
+            elif isinstance(chunk, StructuredStreamChunk):
+                presentation.append_text(chunk.content)
+                presentation.tool_trace.extend(deepcopy(chunk.tool_trace or ()))
+            elif isinstance(chunk, BackgroundWaitChunk):
+                await report_background_wait(
+                    StreamingPresentation(
+                        response_text=presentation.final_text() + chunk.content,
+                        tool_trace=tuple(deepcopy(presentation.tool_trace)) if presentation.show_tool_calls else (),
+                    ),
+                )
             elif isinstance(chunk, RunContentEvent):
                 presentation.append_text(chunk.content)
             elif isinstance(chunk, RunCompletedEvent):
@@ -596,12 +626,16 @@ def _attach_blocking_pause_presentation(
     response: RunOutput,
     *,
     show_tool_calls: bool,
+    initial_presentation: StreamingPresentation | None = None,
 ) -> PausedAttempt:
     """Render a blocking pause once, before it crosses the approval boundary."""
     presentation = CollectedStreamPresentation(
         show_tool_calls=show_tool_calls,
         track_hidden_tools=True,
+        response_text=initial_presentation.response_text if initial_presentation is not None else "",
+        tool_trace=list(deepcopy(initial_presentation.tool_trace)) if initial_presentation is not None else [],
     )
+    presentation.separate_next_text = bool(presentation.response_text)
     presentation.append_text(_extract_replayable_response_text(response))
     pending_by_id: dict[str, ToolExecution] = {}
     for tool in paused.tools:
@@ -1461,7 +1495,7 @@ async def ai_response(  # noqa: C901, PLR0915
     """
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
-    if collect_streamed_response:
+    if collect_streamed_response or ctx.initial_presentation is not None:
         return await _collect_response_body_with_trace(
             stream_agent_response(
                 ctx,
@@ -1658,6 +1692,10 @@ async def ai_response(  # noqa: C901, PLR0915
                         paused_attempt,
                         response,
                         show_tool_calls=show_tool_calls,
+                        initial_presentation=StreamingPresentation(
+                            response_text=run.prior_response_text,
+                            tool_trace=tuple(run.turn_state.prior_completed_tools),
+                        ),
                     ),
                     runtime_model_name=prepared_run.runtime_model_name,
                 )
@@ -1716,7 +1754,7 @@ async def ai_response(  # noqa: C901, PLR0915
     )
     try:
         return await run_blocking_response_turn(
-            ctx,
+            replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths)),
             adapter,
             TurnSinks(turn_recorder=turn_recorder, run_metadata_collector=run_metadata_collector),
             continuation=_initial_agent_continuation(
@@ -2343,7 +2381,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         persist_standalone_replay=callbacks.persist_standalone_replay,
     )
     response_stream = stream_response_turn(
-        ctx,
+        replace(ctx, background_tool_jobs=background_tool_jobs_enabled(config, runtime_paths)),
         adapter,
         TurnSinks(
             turn_recorder=turn_recorder,
@@ -2364,7 +2402,22 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     # its cleanup does not wait for event-loop async-generator finalization.
     try:
         async with aclosing(response_stream) as closing_stream:
+            if ctx.initial_presentation is not None:
+                initial = ctx.initial_presentation
+                yield StructuredStreamChunk(
+                    content=initial.response_text.rstrip() + "\n\n" if initial.response_text else "",
+                    tool_trace=list(deepcopy(initial.tool_trace)),
+                )
+            attempt_has_content = False
             async for chunk in closing_stream:
+                if isinstance(chunk, RunContentEvent) and chunk.content:
+                    attempt_has_content = True
+                elif isinstance(chunk, RunCompletedEvent):
+                    # Prior attempts or recovery text must not hide an answer
+                    # reported only in this attempt's terminal event.
+                    if not attempt_has_content and chunk.content:
+                        yield RunContentEvent(content=str(chunk.content))
+                    attempt_has_content = False
                 yield chunk
     finally:
         _reset_reusable_agent_context(reusable_agent, reusable_agent_base_context)
