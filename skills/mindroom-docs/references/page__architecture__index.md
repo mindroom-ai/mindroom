@@ -129,7 +129,8 @@ MindRoom's architecture consists of several key components working together.
 ## Storage upgrade boundaries
 
 Historical formats stay with their storage or lifecycle owners, while current callers consume canonical identities and paths.
-`legacy_private_storage_aliases.py` owns historical requester spellings and verified aliases; only startup migration and `private_storage_paths.py` can import it.
+`legacy_private_storage_aliases.py` owns historical requester spellings and verified aliases; only startup migration, `private_storage_paths.py`, and `usage_stats_storage.py` can import it.
+Usage discovery uses verified aliases only to classify coverage, skipping duplicate historical paths while scanning their canonical directories.
 Worker mount planning and sandbox path validation use `private_storage_paths.py`, while `private_instance_identity_store.py` validates current identities.
 
 `oauth/legacy_credentials.py` owns publication-field normalization and lossless historical requester bindings.
