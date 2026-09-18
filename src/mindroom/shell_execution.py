@@ -192,8 +192,9 @@ async def _run_command_after_reservation(  # noqa: C901
     output_destination: ShellOutputDestination | None,
 ) -> _RunResult:
     """Spawn one command after any caller-supplied handle is reserved."""
-    capture = ShellOutputCapture(output_destination, cwd) if output_destination is not None else None
+    capture = None
     try:
+        capture = ShellOutputCapture(output_destination, cwd) if output_destination is not None else None
         process = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
@@ -432,20 +433,26 @@ async def _read_stream(
     if stream is None:
         return
 
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    while True:
-        chunk = await stream.read(_STREAM_READ_CHUNK_BYTES)
-        if not chunk:
-            break
-        text = decoder.decode(chunk)
-        buf.append(text)
-        if capture is not None:
-            capture.append(text)
+    try:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while True:
+            chunk = await stream.read(_STREAM_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            text = decoder.decode(chunk)
+            buf.append(text)
+            if capture is not None:
+                capture.append(text)
 
-    final = decoder.decode(b"", final=True)
-    buf.append(final)
-    if capture is not None:
-        capture.append(final)
+        final = decoder.decode(b"", final=True)
+        buf.append(final)
+        if capture is not None:
+            capture.append(final)
+            capture.reached_eof = True
+    except Exception:
+        if capture is None:
+            raise
+        capture.error = "Failed to read complete shell output."
 
 
 async def _cancel_pending_tasks(*tasks: asyncio.Task[None]) -> None:

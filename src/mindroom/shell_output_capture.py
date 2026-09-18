@@ -48,6 +48,7 @@ class CapturedShellStream:
         self.max_bytes = destination.max_bytes
         self.byte_count = 0
         self.error: str | None = None
+        self.reached_eof = False
 
     def append(self, text: str) -> None:
         """Append decoded output until the cap or a storage error is reached."""
@@ -95,31 +96,39 @@ class ShellOutputCapture:
 
         selected = self.stdout if return_code == 0 else self.stderr
         error = selected.error
-        if self.incomplete or return_code is None or return_code < 0:
+        if (
+            self.incomplete
+            or not self.stdout.reached_eof
+            or not self.stderr.reached_eof
+            or return_code is None
+            or return_code < 0
+        ):
             error = "Shell command or output capture was interrupted; no complete output file was saved."
         if error is not None:
             return json.dumps({"mindroom_tool_output": {"status": "error", "error": error}})
-        request = prepare_tool_output_file(
-            ToolOutputFilePolicy(
-                workspace_root=Path(self.destination.workspace_root),
-                max_bytes=self.destination.max_bytes,
-            ),
-            tool_name="run_shell_command",
-            output_path=self.destination.path,
-        )
-        if isinstance(request, dict):
-            return json.dumps(request)
         try:
+            request = prepare_tool_output_file(
+                ToolOutputFilePolicy(
+                    workspace_root=Path(self.destination.workspace_root),
+                    max_bytes=self.destination.max_bytes,
+                ),
+                tool_name="run_shell_command",
+                output_path=self.destination.path,
+            )
+            if isinstance(request, dict):
+                return json.dumps(request)
             output = selected.read()
+            if return_code != 0:
+                output = f"Error: {output}"
+            if self.cwd is not None:
+                output = f"[cwd: {self.cwd}]\n{output}"
+            return json.dumps(finalize_tool_output_file(request, output))
         except OSError:
             return json.dumps(
-                {"mindroom_tool_output": {"status": "error", "error": "Failed to read captured shell output."}},
+                {
+                    "mindroom_tool_output": {"status": "error", "error": "Failed to publish complete shell output."},
+                },
             )
-        if return_code != 0:
-            output = f"Error: {output}"
-        if self.cwd is not None:
-            output = f"[cwd: {self.cwd}]\n{output}"
-        return json.dumps(finalize_tool_output_file(request, output))
 
     def close(self) -> None:
         """Release unlinked capture files on completion, cancellation, or eviction."""

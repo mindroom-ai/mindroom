@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import signal
 import tempfile
 import time
 from pathlib import Path
@@ -16,7 +17,7 @@ from agno.tools.function import FunctionCall
 
 from mindroom.api import sandbox_runner
 from mindroom.constants import resolve_runtime_paths
-from mindroom.shell_execution import run_command
+from mindroom.shell_execution import kill_all_records, run_command
 from mindroom.shell_output_capture import ShellOutputDestination
 from mindroom.shell_supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -368,3 +369,194 @@ def test_worker_subprocess_preserves_background_capture(tmp_path: Path) -> None:
     assert "saved_to_file" in status
     saved = (workspace / "worker.txt").read_bytes().split(b"\n", 1)[1]
     assert saved == b"0123456789012345678\n" * 125000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wait_seconds", [0, 30])
+@pytest.mark.parametrize("stderr", [False, True])
+async def test_reader_failure_never_publishes_partial_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wait_seconds: int,
+    stderr: bool,
+) -> None:
+    """A pipe-read failure after real bytes arrive must fail closed in either lifecycle."""
+    original_read = asyncio.StreamReader.read
+    failed_streams: set[asyncio.StreamReader] = set()
+
+    async def failing_read(stream: asyncio.StreamReader, n: int = -1) -> bytes:
+        if stream in failed_streams:
+            message = "pipe read failed"
+            raise OSError(message)
+        data = await original_read(stream, n)
+        if data:
+            failed_streams.add(stream)
+        return data
+
+    monkeypatch.setattr(asyncio.StreamReader, "read", failing_read)
+    destination = tmp_path / "partial.txt"
+    destination.write_text("keep existing")
+    registry = {}
+    result = await run_command(
+        registry,
+        namespace="reader-failure",
+        argv=["bash", "-c", "printf partial" + (" >&2" if stderr else "")],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=wait_seconds,
+        output_destination=ShellOutputDestination(str(tmp_path), "partial.txt", 10000),
+    )
+    if result.handle is not None:
+        record = registry[result.handle]
+        assert record._monitor_task is not None
+        await record._monitor_task
+        assert record.finished
+        message = record.output_receipt
+    else:
+        message = result.message
+    assert '"status": "error"' in str(message)
+    assert destination.read_text() == "keep existing"
+
+
+@pytest.mark.asyncio
+async def test_spool_creation_failure_returns_shell_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spool allocation failure must return through the shell protocol without executing the command."""
+
+    def fail_spool(**_kwargs: object) -> BinaryIO:
+        message = "Cannot create capture spool"
+        raise OSError(message)
+
+    monkeypatch.setattr("mindroom.shell_output_capture.tempfile.TemporaryFile", fail_spool)
+    result = await run_command(
+        {},
+        namespace="spool-create",
+        argv=["touch", "ran"],
+        env={},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=30,
+        output_destination=ShellOutputDestination(str(tmp_path), "output.txt", 10000),
+    )
+    assert result.message.startswith("Error:")
+    assert "Cannot create capture spool" in result.message
+    assert not (tmp_path / "ran").exists()
+
+
+@pytest.mark.asyncio
+async def test_spawn_error_preserves_generic_redirection(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+    """A command that cannot start still redirects its ordinary shell error result."""
+    result = await FunctionCall(
+        function=shell_toolkit.async_functions["run_shell_command"],
+        arguments={"args": [str(tmp_path / "missing-command")], "mindroom_output_path": "error.txt"},
+    ).aexecute()
+    assert "saved_to_file" in str(result.result)
+    assert "Error:" in (tmp_path / "error.txt").read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wait_seconds", [0, 30])
+async def test_publication_io_failure_settles_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wait_seconds: int,
+) -> None:
+    """A filesystem error during destination revalidation must settle with an error receipt."""
+    original_resolve = Path.resolve
+
+    def failing_resolve(path: Path, strict: bool = False) -> Path:
+        if path == tmp_path:
+            message = "destination became inaccessible"
+            raise PermissionError(message)
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", failing_resolve)
+    registry = {}
+    result = await run_command(
+        registry,
+        namespace="publication-failure",
+        argv=["bash", "-c", "printf complete"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=wait_seconds,
+        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
+    )
+    if result.handle is not None:
+        record = registry[result.handle]
+        assert record._monitor_task is not None
+        await record._monitor_task
+        assert record.finished
+        message = record.output_receipt
+    else:
+        message = result.message
+    assert '"status": "error"' in str(message)
+    assert not (tmp_path / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_inherited_pipe_cannot_publish_partial_capture(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+    """A descendant retaining a pipe beyond the existing grace period must not overwrite the destination."""
+    destination = tmp_path / "inherited.txt"
+    destination.write_text("keep existing")
+    try:
+        async with asyncio.timeout(10):
+            result = await FunctionCall(
+                function=shell_toolkit.async_functions["run_shell_command"],
+                arguments={
+                    "args": "sleep 30 & echo $! > child.pid; printf early",
+                    "mindroom_output_path": "inherited.txt",
+                },
+            ).aexecute()
+        assert '"status": "error"' in str(result.result)
+        assert "saved_to_file" not in str(result.result)
+        assert destination.read_text() == "keep existing"
+    finally:
+        pid_file = tmp_path / "child.pid"
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real pipe closure plus reader error must settle even when the producer exceeds pipe capacity."""
+    original_read = asyncio.StreamReader.read
+    failed_streams: set[asyncio.StreamReader] = set()
+
+    async def failing_read(stream: asyncio.StreamReader, n: int = -1) -> bytes:
+        data = await original_read(stream, n)
+        if data and stream not in failed_streams:
+            failed_streams.add(stream)
+            transport = stream._transport
+            assert transport is not None
+            transport.close()
+            message = "pipe read failed"
+            stream.set_exception(OSError(message))
+        return data
+
+    monkeypatch.setattr(asyncio.StreamReader, "read", failing_read)
+    registry = {}
+    result = await run_command(
+        registry,
+        namespace="blocked-producer",
+        argv=["bash", "-c", "awk 'BEGIN { for(i=0;i<125000;i++) print \"0123456789012345678\" }'"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=100,
+        timeout=0,
+        output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 3000000),
+    )
+    assert result.handle is not None
+    record = registry[result.handle]
+    assert record._monitor_task is not None
+    try:
+        await asyncio.wait_for(asyncio.shield(record._monitor_task), timeout=10)
+        assert record.finished
+        assert record.process.returncode is not None
+        assert '"status": "error"' in str(record.output_receipt)
+        assert not (tmp_path / "missing.txt").exists()
+    finally:
+        kill_all_records(registry)
+        with contextlib.suppress(asyncio.CancelledError):
+            await record._monitor_task

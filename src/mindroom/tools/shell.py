@@ -457,7 +457,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901
                     output_destination=output_destination,
                 )
                 message = result.message
-            if output_destination is not None:
+            # The existing shell protocol uses plain Error: replies before a
+            # run is accepted. Preserve generic redirection for those errors;
+            # accepted captures return a running handle or a JSON file receipt.
+            if output_destination is not None and not message.startswith("Error:"):
                 return ToolOutputFileHandled(message)
             if cwd is None:
                 return message
