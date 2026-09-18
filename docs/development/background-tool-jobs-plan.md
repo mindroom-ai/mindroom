@@ -734,3 +734,17 @@ Real-model testing exposed the other half of that path: member job controls had 
 They now bind the actual member while retaining the original requester, transport, and conversation.
 The regression test uses normal agent construction and actual SDK result consumption, and was observed failing before that binding correction.
 A fresh Matrix run passed six checks: a human follow-up ended the original team wait, its single-agent reply finished while the other member's command was still running, and a later team continuation consumed and delivered the exact result without repeating the command.
+
+A further boundary review found that replaying a generator's original chunks discarded the state-conflict notice added during result consumption.
+Replay now retains that appended notice; SDK-dispatch regressions cover plain and rich streams, newer parent state, events, and media.
+The same review checked cleanup failures against the baseline SDK: Agno already logs and suppresses toolkit disconnect errors.
+The documentation now distinguishes that existing best-effort policy from cleanup exceptions reported to the job runtime, which become failed outcomes.
+This preserves the existing teardown contract instead of adding a separate toolkit cleanup policy.
+
+Review also exposed a delivery-policy gap: replacing a silent schedule's origin with a generic completion origin enabled visible progress after recovery.
+The design keeps completion intent runtime-owned while preserving source delivery policy independently.
+Accepted generic and delegated jobs retain their source kind in the existing durable adapter metadata; no new store or recovery process is introduced.
+Automatic result joins stay within the same quiet/ordinary delivery policy so newer ordinary turns cannot publish quiet schedule results, and quiet continuations cannot suppress ordinary results.
+
+The seven new regression cases were observed failing before correction and now pass in a focused run of 377 tests, with two optional skips.
+The quiet delivery contract retains the existing model-controlled final-report policy: `NO_REPLY` is suppressed, while findings or an unfinished-work report may still be delivered.

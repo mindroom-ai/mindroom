@@ -728,6 +728,58 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("rich", [False, True])
+async def test_streamed_state_conflict_notice_reaches_sdk_tool_message(tmp_path: Path, *, rich: bool) -> None:
+    """Replayed generator output retains consumption warnings and newer parent state."""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def generated(run_context: RunContext) -> AsyncIterator[str | ToolResult | RunContentEvent]:
+        started.set()
+        await release.wait()
+        run_context.session_state.update({"changed": 1, "conflict": "tool"})
+        yield RunContentEvent(content="progress")
+        yield ToolResult(content="Result.", images=[Image(content=b"image")]) if rich else "Result."
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    state = {"changed": 0, "conflict": "old"}
+    function = Function.from_callable(generated)
+    function._agent = Agent(id="leader")
+    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state=state)
+    call = FunctionCall(function=function, call_id="stream-state", arguments={})
+    messages = []
+
+    @owned_tool_execution
+    async def dispatch() -> list[object]:
+        with tool_runtime_context(context):
+            return [event async for event in model.arun_function_calls([call], messages)]
+
+    pending = asyncio.create_task(dispatch())
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        state["conflict"] = "newer"
+        release.set()
+        events = await pending
+        assert state["changed"] == 1
+        assert state["conflict"] == "newer"
+        assert len(messages) == 1
+        assert "Result." in messages[0].content
+        assert messages[0].content.count("Session state conflicts: conflict") == 1
+        assert sum(isinstance(event, RunContentEvent) and event.content == "progress" for event in events) == 1
+        if rich:
+            assert messages[0].images[0].content == b"image"
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+        await runtime.shutdown()
+        register_background_runtime(paths, None)
+
+
+@pytest.mark.asyncio
 async def test_sdk_cache_and_post_hook_never_receive_job_handles(tmp_path: Path) -> None:
     """The copied actual call alone fills raw-result cache and post hooks."""
     calls, observed = [], []

@@ -18,6 +18,7 @@ from mindroom.background_tasks import (
     run_coroutine_until_complete,
     wait_for_future_until_complete,
 )
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
@@ -773,8 +774,9 @@ class ToolJobRuntime:
         room_id: str,
         thread_id: str | None,
         requester_id: str,
+        source_kind: str | None = None,
     ) -> list[BackgroundJob]:
-        """Discover outstanding work for one authorized requester and conversation."""
+        """Discover outstanding work for one requester, conversation, and delivery policy."""
         async with self._lock:
             if self._closed:
                 return []
@@ -785,6 +787,8 @@ class ToolJobRuntime:
                 and entry.job.owner.room_id == room_id
                 and entry.job.owner.resolved_thread_id == thread_id
                 and entry.job.owner.requester_id == requester_id
+                and (entry.job.adapter.get("source_kind") == SILENT_SCHEDULE_SOURCE_KIND)
+                == (source_kind == SILENT_SCHEDULE_SOURCE_KIND)
                 and self._unconsumed(entry)
             ]
 
