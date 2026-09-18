@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import os
 import re
 import sys
@@ -74,6 +76,9 @@ class _RecoveringWorkerBackend:
 
     def script_recovery_signature(self) -> str:
         return "stable-worker-authority"
+
+    def legacy_pre_seccomp_script_recovery_signature(self) -> str:
+        return "pre-seccomp-worker-authority"
 
     def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
         return {"profile": resource_profile, "requests": {}, "limits": {}}
@@ -253,8 +258,10 @@ async def _wait_for_pid_exit(process_id: int) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pre_seccomp", [False, True])
 async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  # noqa: PLR0915
     tmp_path: Path,
+    pre_seccomp: bool,
 ) -> None:
     """A compatible primary restart preserves one exact process until its original deadline."""
     runtime_paths = _runtime_paths(tmp_path)
@@ -365,6 +372,29 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert after_detach.state is ScriptRunState.RUNNING
         assert after_detach.cancel_requested_at is None
         assert store.get_call(_RUN_ID, "accepted-before-restart").state is ScriptCallState.INDETERMINATE
+
+        if pre_seccomp:
+            historical_payload = {
+                "protocol": 1,
+                "backend": "pre-seccomp-worker-authority",
+                "agent": "watcher",
+                "process_authority": {
+                    "execution_scope": None,
+                    "private": None,
+                    "knowledge_paths": [],
+                    "grantable_credentials": [],
+                },
+                "gateway": _GATEWAY_URL,
+                "resources": {"profile": None, "requests": {}, "limits": {}},
+            }
+            digest = hashlib.sha256(
+                json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode(),
+            ).hexdigest()
+            store.replace_recovery_signature(
+                _RUN_ID,
+                expected_signature=recovery_signature,
+                recovery_signature=f"v2:{digest}",
+            )
 
         backend.configured_image = "worker-image-v2"
         reopened_store = ScriptRunStore(runtime_paths)

@@ -498,6 +498,67 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     assert backend.script_recovery_signature() == initial
 
 
+@pytest.mark.parametrize("seccomp_enabled", [False, True])
+def test_pre_seccomp_recovery_preserves_exact_backend_authority(tmp_path: Path, seccomp_enabled: bool) -> None:
+    """Only an unset seccomp policy can match the historical backend serialization."""
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        process_env={},
+    )
+    backend, _apps, _core = _backend(
+        runtime_paths=runtime_paths,
+        config_snapshot={},
+        seccomp_profile={"type": "Localhost", "localhostProfile": "worker.json"} if seccomp_enabled else None,
+    )
+    historical_payload = {
+        "config": {
+            "namespace": "chat",
+            "worker_port": 8766,
+            "service_account_name": "mindroom-worker",
+            "storage_pvc_name": "mindroom-storage",
+            "storage_mount_path": "/app/worker",
+            "storage_subpath_prefix": "workers",
+            "config_map_name": "mindroom-config",
+            "config_key": "config.yaml",
+            "config_path": "/app/config.yaml",
+            "idle_timeout_seconds": 60.0,
+            "ready_timeout_seconds": 5.0,
+            "name_prefix": "mindroom-worker",
+            "node_name": None,
+            "colocate_with_control_plane_node": False,
+            "extra_env": {},
+            "extra_labels": {"mindroom.ai/tenant": "test"},
+            "extra_annotations": {},
+            "owner_deployment_name": None,
+            "enable_service_links": False,
+            "auth_secret_name": None,
+            "reconcile_pod_templates": True,
+            "agent_vault": None,
+            "extra_containers": [],
+            "extra_volumes": [],
+        },
+        "owner": None,
+        "auth_token": _TEST_AUTH_TOKEN,
+        "encryption_key": None,
+        "storage_root": str(tmp_path / "storage"),
+        "grantable_credentials": [],
+    }
+    expected = hashlib.sha256(
+        json.dumps(historical_payload, sort_keys=True, separators=(",", ":")).encode(),
+    ).hexdigest()
+    historical = backend.legacy_pre_seccomp_script_recovery_signature()
+    if seccomp_enabled:
+        assert historical is None
+    else:
+        assert historical == expected
+        assert historical != backend.script_recovery_signature()
+        backend.config = replace(backend.config, extra_env={"SCRIPT_ACCESS": "changed"})
+        assert backend.legacy_pre_seccomp_script_recovery_signature() != historical
+
+
 def test_script_recovery_contract_survives_unrelated_tool_catalog_upgrade() -> None:
     """A new tool or UI label cannot revoke an unchanged script process authority."""
     original, _apps, _core = _backend(config_snapshot={})
