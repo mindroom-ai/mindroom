@@ -6125,6 +6125,7 @@ visibility = [
     "mindroom.delegation.sessions",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
+    "mindroom.orchestration.tool_job_runtime",
 ]
 
 [[modules]]
@@ -6771,6 +6772,7 @@ visibility = [
 [[modules]]
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
+    "mindroom.delegation.storage",
     "mindroom.tool_jobs.provenance",
     "mindroom.tool_jobs.runtime",
     "mindroom.authorization",

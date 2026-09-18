@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 # Upstream issue: No matching public reserved-parameter extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK supports per-call framework metadata outside application kwargs.
-# Coverage: tests/test_tool_job_wait_timeout.py.
+# Coverage: tests/test_tool_job_wait_timeout.py and tests/test_tool_job_control_calls.py.
 def _wrap_tool_schemas(
     original: Callable[..., list[dict[str, Any]]],
     *,
@@ -40,7 +40,7 @@ def _wrap_tool_schemas(
             return original(tools)
         projected: list[Function | dict[str, Any]] = []
         for tool in tools or []:
-            if not isinstance(tool, Function) or is_framework_function(tool):
+            if not isinstance(tool, Function) or is_framework_function(tool) or tool.stop_after_tool_call:
                 projected.append(tool)
                 continue
             if (job_owns_execution() or depth > 0) and not is_job_function(tool):
@@ -71,7 +71,7 @@ def _wrap_tool_schemas(
 # Upstream issue: No matching public accepted-operation extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK exposes public approved-call execution ownership.
-# Coverage: tests/test_tool_job_execution.py.
+# Coverage: tests/test_tool_job_execution.py and tests/test_tool_job_control_calls.py.
 def install_tool_job_execution(
     model: Model,
     fallback_config: FallbackConfig | None = None,

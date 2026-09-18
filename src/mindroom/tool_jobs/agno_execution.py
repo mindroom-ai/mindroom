@@ -274,7 +274,7 @@ def _failed_call(call: FunctionCall, error: ValueError) -> _CallResult:
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
-    async def execute(call: FunctionCall) -> _CallResult:
+    async def execute(call: FunctionCall) -> _CallResult:  # noqa: C901 - Keep admission and cleanup together.
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()
@@ -287,6 +287,11 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             )
         except ValueError as error:
             return _failed_call(call, error)
+        if call.function.stop_after_tool_call and wait_timeout is not None:
+            return _failed_call(
+                call,
+                ValueError("wait_timeout is not supported for tools that stop the current model step"),
+            )
         owner = get_tool_execution_identity() or build_execution_identity_from_runtime_context(context)
         actor = call.function._agent or call.function._team
         if actor is not None and actor.id:
@@ -294,7 +299,12 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         await job_checkpoint()
         with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
             check_current_execution_authority()
-            if job_owns_execution() or is_job_function(call.function) or call.function.external_execution:
+            if (
+                job_owns_execution()
+                or is_job_function(call.function)
+                or call.function.external_execution
+                or call.function.stop_after_tool_call
+            ):
                 return await _execute_inline(original, call)
         run_context = call.function._run_context
         if run_context is None or not run_context.run_id or not call.call_id:
