@@ -190,14 +190,14 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
 
 @pytest.mark.asyncio
 async def test_real_parent_tool_call_records_direct_provenance_without_schema_fields(tmp_path: Path) -> None:
-    """A real Agno parent call must bind its run and call IDs without exposing model parameters."""
+    """A real Agno parent call must bind its run and call IDs without exposing them in the tool schema."""
     tools, config, runtime_paths = _tools(tmp_path)
     config = with_responder_access(config, "child", users=[_identity().requester_id])
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     function = tools.async_functions["run_subagent"]
     schema = cached_processed_schema(function, strict=False)
     assert schema is not None
-    assert set(schema.parameters["properties"]) == {"agent_name", "task"}
+    assert set(schema.parameters["properties"]) == {"agent_name", "task", "model"}
 
     async def complete_child(ctx: object, **kwargs: object) -> str:
         callback = cast("Callable[[str], None]", kwargs["run_id_callback"])

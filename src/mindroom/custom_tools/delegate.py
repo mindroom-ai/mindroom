@@ -141,13 +141,16 @@ class DelegateTools(Toolkit):
             "the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\n"
             "Selecting your own name starts a fresh copy of yourself, if listed. "
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
+            "Set model to a configured model name to override the child's model for this session. "
+            f"Available models: {', '.join(sorted(self._config.models))}. "
+            "Omit model or pass null to use the child's normal thread, room, or configured model. "
             "The caller waits; this does not create a Matrix thread. "
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session.\n"
             "In Matrix, approval-required child tools pause for the user's approval before continuing. "
             "Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent."
         )
 
-    async def run_subagent(self, task: str, agent_name: str | None = None) -> str:
+    async def run_subagent(self, task: str, agent_name: str | None = None, model: str | None = None) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
         The runtime-generated tool description lists caller-specific allowed
@@ -156,12 +159,13 @@ class DelegateTools(Toolkit):
         Args:
             task: Self-contained task with relevant context, constraints, and expected output.
             agent_name: Allowed subagent name; omitted or null selects yourself, if allowed.
+            model: Configured model name from models; omitted or null uses normal model selection.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
 
         """
-        return await self._run_child(self._agent_name if agent_name is None else agent_name, task)
+        return await self._run_child(self._agent_name if agent_name is None else agent_name, task, model=model)
 
     def _caller_identity(self) -> ToolExecutionIdentity:
         """Resolve one concrete caller identity for execution, ownership, and audit."""
@@ -221,6 +225,7 @@ class DelegateTools(Toolkit):
         agent_name: str,
         task: str,
         *,
+        model: str | None = None,
         continuation: DelegationChild | None = None,
     ) -> str:
         """Run one direct child using the shared preparation and settlement owner."""
@@ -233,6 +238,7 @@ class DelegateTools(Toolkit):
             execution_identity=self._execution_identity,
             depth=self._delegation_depth,
             allowed_targets=self._delegate_to,
+            model=model,
         )
         if isinstance(config, str):
             return config
@@ -247,6 +253,7 @@ class DelegateTools(Toolkit):
             config=config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
+            model=model,
             previous=continuation,
             parent_tool_call_id=(parent.tool_call_id or "") if parent is not None else "",
         )

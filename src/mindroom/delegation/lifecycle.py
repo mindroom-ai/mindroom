@@ -246,6 +246,7 @@ def authorize_delegation(  # noqa: PLR0911
     execution_identity: ToolExecutionIdentity | None,
     depth: int,
     allowed_targets: Sequence[str] | None = None,
+    model: str | None = None,
 ) -> Config | str:
     """Recheck the current caller allowlist and requester authority."""
     if allowed_targets is None:
@@ -299,6 +300,9 @@ def authorize_delegation(  # noqa: PLR0911
 
     if depth >= MAX_DELEGATION_DEPTH:
         return "Cannot delegate: the maximum delegation depth was reached."
+    if model is not None and (not isinstance(model, str) or model not in active_config.models):
+        available_models = ", ".join(sorted(active_config.models))
+        return f"Cannot delegate: Unknown model '{model}'. Available models: {available_models}."
     return active_config
 
 
@@ -311,6 +315,7 @@ def prepare_child_turn(
     config: Config,
     runtime_paths: RuntimePaths,
     depth: int,
+    model: str | None = None,
     previous: DelegationChild | None = None,
     parent_tool_call_id: str = "",
     parent_requirement_id: str = "",
@@ -332,6 +337,7 @@ def prepare_child_turn(
         if previous is not None
         else config.resolve_runtime_model(
             entity_name=agent_name,
+            active_model_name=model,
             room_id=identity.room_id,
             thread_id=identity.resolved_thread_id,
             runtime_paths=runtime_paths,

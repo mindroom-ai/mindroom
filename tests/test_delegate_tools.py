@@ -193,6 +193,10 @@ class TestDelegateTools:
             {"type": "string"},
             {"type": "null"},
         ]
+        assert function.parameters["properties"]["model"]["anyOf"] == [
+            {"type": "string"},
+            {"type": "null"},
+        ]
 
     def test_continue_subagent_schema(self, tools: DelegateTools) -> None:
         """Continuation has two required string arguments, without a conditional target."""
@@ -833,17 +837,23 @@ class TestDelegateKnowledge:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("thread_model_name", "expected_model_name"),
-        [(None, "large"), ("default", "default")],
+        ("thread_model_name", "model", "expected_model_name"),
+        [
+            (None, None, "large"),
+            ("default", None, "default"),
+            (None, "default", "default"),
+            ("default", "large", "large"),
+        ],
     )
     async def test_delegation_rebinds_resolved_model_for_child_agent(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         thread_model_name: str | None,
+        model: str | None,
         expected_model_name: str,
     ) -> None:
-        """Delegated child and its tools must share thread-over-room model precedence."""
+        """The child and its tools share explicit-over-thread-over-room model precedence."""
         config = Config(
             agents={
                 "leader": AgentConfig(
@@ -926,7 +936,7 @@ class TestDelegateKnowledge:
             tool_runtime_context(runtime_context),
             patch("mindroom.ai.ai_response", new=AsyncMock(side_effect=fake_ai_response)),
         ):
-            result = await tools.run_subagent(agent_name="worker", task="do work")
+            result = await tools.run_subagent(agent_name="worker", task="do work", model=model)
 
         _assert_direct_result_with_receipt(result, "done")
 
