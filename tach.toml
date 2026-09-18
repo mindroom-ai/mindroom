@@ -3083,8 +3083,12 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.thread_export.storage"
+path = "mindroom.atomic_file"
 depends_on = []
+
+[[modules]]
+path = "mindroom.thread_export.storage"
+depends_on = ["mindroom.atomic_file"]
 visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
@@ -3894,6 +3898,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.tool_system.output_files"
 depends_on = [
+    "mindroom.atomic_file",
     "mindroom.tool_system.agno_compat_function_schema",
     "mindroom.constants",
     "mindroom.logging_config",

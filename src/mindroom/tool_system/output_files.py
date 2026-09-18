@@ -5,9 +5,9 @@ from __future__ import annotations
 import inspect
 import json
 import os
-import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal, cast, get_type_hints
 from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 
+from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
@@ -370,29 +371,21 @@ def _existing_parent_component_error(path: Path) -> str | None:
     return None
 
 
-def _ensure_parent_directory(workspace_root: Path, relative_parent: Path) -> str | None:
-    """Create parent directories one component at a time without accepting symlinks."""
-    resolved_root = workspace_root.resolve()
-    current = workspace_root.expanduser()
-    for part in relative_parent.parts:
-        current = current / part
-        if component_error := _existing_parent_component_error(current):
-            return component_error
-        try:
-            current.mkdir()
-        except FileExistsError:
-            if component_error := _existing_parent_component_error(current):
-                return component_error
-        except OSError:
-            return "Failed to prepare redirected tool output path."
-
-        try:
-            resolved_current = current.resolve()
-        except OSError:
-            return "Failed to prepare redirected tool output path."
-        if not resolved_current.is_relative_to(resolved_root):
-            return "mindroom_output_path parent escaped the workspace before write."
-    return None
+@contextmanager
+def _output_parent_directory(workspace_root: Path, relative_parent: Path) -> Iterator[int]:
+    """Create and open parents relative to pinned directories, rejecting symlinks."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    directory_fd = os.open(workspace_root.expanduser().resolve(), flags)
+    try:
+        for part in relative_parent.parts:
+            with suppress(FileExistsError):
+                os.mkdir(part, dir_fd=directory_fd)
+            child_fd = os.open(part, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        yield directory_fd
+    finally:
+        os.close(directory_fd)
 
 
 def _normalize_json_value(value: object) -> object:
@@ -466,44 +459,16 @@ def _auto_output_relative_path(tool_name: str, output_format: Literal["text", "j
 
 
 def _write_atomic(
-    path: Path,
     payload: bytes,
     workspace_root: Path,
     relative_path: Path,
     *,
     file_mode: int | None = None,
 ) -> str | None:
-    parent_error = _ensure_parent_directory(workspace_root, relative_path.parent)
-    if parent_error is not None:
-        return parent_error
-
-    resolved_root = workspace_root.resolve()
     try:
-        resolved_parent = path.parent.resolve()
-    except OSError:
-        return "Failed to prepare redirected tool output path."
-    if not resolved_parent.is_relative_to(resolved_root):
-        return "mindroom_output_path parent escaped the workspace before write."
-
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            dir=path.parent,
-            delete=False,
-        ) as temp_file:
-            temp_file.write(payload)
-            temp_file.flush()
-            os.fsync(temp_file.fileno())
-            temp_path = Path(temp_file.name)
-        if file_mode is not None:
-            temp_path.chmod(file_mode)
-        os.replace(temp_path, path)  # noqa: PTH105
+        with _output_parent_directory(workspace_root, relative_path.parent) as directory_fd:
+            atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=file_mode)
     except OSError as exc:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
         logger.warning("tool_output_redirect_write_failed", error_type=type(exc).__name__)
         return "Failed to write redirected tool output."
     return None
@@ -527,7 +492,6 @@ def write_bytes_to_output_path(
         return f"Redirected tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte limit."
 
     write_error = _write_atomic(
-        validated_path.absolute_path,
         payload,
         policy.workspace_root,
         validated_path.relative_path,
@@ -566,7 +530,6 @@ def _redirect_result_to_file(
         )
 
     write_error = _write_atomic(
-        validated_path.absolute_path,
         serialized.payload,
         policy.workspace_root,
         validated_path.relative_path,
@@ -627,7 +590,6 @@ def _write_auto_saved_result(
         return _error_receipt(validated_path)
 
     write_error = _write_atomic(
-        validated_path.absolute_path,
         serialized.payload,
         policy.workspace_root,
         validated_path.relative_path,
