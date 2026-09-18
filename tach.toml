@@ -1504,6 +1504,7 @@ depends_on = [
 path = "mindroom.api.usage_export"
 depends_on = [
     "mindroom.api.config_lifecycle",
+    "mindroom.logging_config",
 ]
 
 [[modules]]

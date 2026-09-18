@@ -350,6 +350,45 @@ def _trusted_upstream_required_jwt_setting(value: str | None, env_name: str) -> 
     return value
 
 
+async def _verified_trusted_upstream_jwt_claims(
+    request: Request,
+    jwt_client: PyJWKClient,
+    *,
+    header: str,
+    audience: str,
+    issuer: str,
+    required_claims: tuple[str, ...],
+    invalid_detail: str,
+    algorithms: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Verify one configured upstream JWT and return its claims."""
+    token = _get_configured_header(request, header)
+    if token is None:
+        raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
+    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
+        raise HTTPException(status_code=401, detail=invalid_detail)
+
+    try:
+        signing_key = await asyncio.to_thread(jwt_client.get_signing_key_from_jwt, token)
+        accepted_algorithms = algorithms
+        if accepted_algorithms is None:
+            algorithm = signing_key.algorithm_name
+            if algorithm is None:
+                raise jwt.InvalidTokenError
+            accepted_algorithms = (algorithm,)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=accepted_algorithms,
+            audience=audience,
+            issuer=issuer,
+            options={"require": list(required_claims)},
+        )
+    except PyJWTError as exc:
+        raise HTTPException(status_code=401, detail=invalid_detail) from exc
+    return claims
+
+
 async def _verified_trusted_upstream_jwt_identity(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
@@ -382,32 +421,20 @@ async def _verified_trusted_upstream_jwt_identity(
             detail="Trusted upstream strict JWT auth is enabled but JWKS validation is not configured",
         )
 
-    token = _get_configured_header(request, header)
-    if token is None:
-        raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
-    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT")
-
-    try:
-        signing_key = await asyncio.to_thread(jwt_client.get_signing_key_from_jwt, token)
-        algorithm = signing_key.algorithm_name
-        if algorithm is None:
-            raise jwt.InvalidTokenError
-        required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
-        if jwt_settings.user_id_claim is not None:
-            required_claims.append(jwt_settings.user_id_claim)
-        if jwt_settings.matrix_user_id_claim is not None:
-            required_claims.append(jwt_settings.matrix_user_id_claim)
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=[algorithm],
-            audience=audience,
-            issuer=issuer,
-            options={"require": required_claims},
-        )
-    except PyJWTError as exc:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream JWT") from exc
+    required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
+    if jwt_settings.user_id_claim is not None:
+        required_claims.append(jwt_settings.user_id_claim)
+    if jwt_settings.matrix_user_id_claim is not None:
+        required_claims.append(jwt_settings.matrix_user_id_claim)
+    claims = await _verified_trusted_upstream_jwt_claims(
+        request,
+        jwt_client,
+        header=header,
+        audience=audience,
+        issuer=issuer,
+        required_claims=tuple(required_claims),
+        invalid_detail="Invalid trusted upstream JWT",
+    )
 
     email = _trusted_upstream_jwt_string_claim(claims, jwt_settings.email_claim)
     user_id = (
@@ -858,24 +885,16 @@ async def require_usage_service(request: Request) -> None:
     ):
         raise HTTPException(status_code=503, detail="Usage export service authentication is not configured")
 
-    token = _get_configured_header(request, jwt_settings.header)
-    if token is None:
-        raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {jwt_settings.header}")
-    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
-        raise HTTPException(status_code=401, detail="Invalid usage service JWT")
-
-    try:
-        signing_key = await asyncio.to_thread(auth_state.trusted_upstream_jwt_client.get_signing_key_from_jwt, token)
-        claims = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=audience,
-            issuer=jwt_settings.issuer,
-            options={"require": ["exp", "iat", "iss", "aud", "type", "common_name", "sub"]},
-        )
-    except PyJWTError as exc:
-        raise HTTPException(status_code=401, detail="Invalid usage service JWT") from exc
+    claims = await _verified_trusted_upstream_jwt_claims(
+        request,
+        auth_state.trusted_upstream_jwt_client,
+        header=jwt_settings.header,
+        audience=audience,
+        issuer=jwt_settings.issuer,
+        algorithms=("RS256",),
+        required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
+        invalid_detail="Invalid usage service JWT",
+    )
 
     if (
         claims.get("type") != "app"

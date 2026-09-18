@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
 from mindroom.api import config_lifecycle
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,7 +22,9 @@ if TYPE_CHECKING:
 
 _SUCCESS_TTL_SECONDS = 60
 _FAILURE_TTL_SECONDS = 5
+_DIAGNOSTIC_FRAME_LIMIT = 8
 RETRY_AFTER_SECONDS = 5
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,7 @@ class _ActiveExport:
     context: UsageExportContext
     future: Future[dict[str, object]]
     context_is_current: Callable[[], bool]
+    failure_event: str = "usage_export_preparation_failed"
 
 
 @dataclass(frozen=True)
@@ -126,8 +131,10 @@ class UsageExportRunner:
 
         try:
             self._start_worker(lambda: self._run(active, build_report))
-        except BaseException as exc:
+        except Exception as exc:
+            active.failure_event = "usage_export_worker_start_failed"
             future.set_exception(exc)
+            return _UsageExportPoll(UsageExportStatus.FAILED)
         return _UsageExportPoll(UsageExportStatus.PENDING)
 
     def close(self) -> None:
@@ -156,19 +163,29 @@ class UsageExportRunner:
         try:
             active.future.set_result(build_report())
         except BaseException as exc:
+            # A detached worker must always settle its Future; otherwise a
+            # process-control exception would leave the single scan slot stuck.
             active.future.set_exception(exc)
 
     def _finish(self, active: _ActiveExport, future: Future[dict[str, object]]) -> None:
         try:
             report = future.result()
-        except BaseException:
+        except BaseException as exc:
+            if future.cancelled():
+                return
+            # The worker boundary deliberately permits any BaseException to
+            # reach this Future so the in-flight slot can always be released.
+            _log_sanitized_failure(active.failure_event, exc)
             report = None
         with self._lock:
             if self._active is not active or self._closed:
                 return
         try:
             context_is_current = active.context_is_current()
-        except BaseException:
+        except BaseException as exc:
+            # Validation runs in the detached completion callback, which must
+            # still retire the active slot after a process-control exception.
+            _log_sanitized_failure("usage_export_context_validation_failed", exc)
             context_is_current = False
         with self._lock:
             if self._active is not active:
@@ -181,6 +198,29 @@ class UsageExportRunner:
                 completed_at=self._clock(),
                 report=report,
             )
+
+
+def _log_sanitized_failure(event: str, error: BaseException) -> None:
+    """Log bounded traceback metadata without exception text, locals, or source."""
+    frames: deque[dict[str, object]] = deque(maxlen=_DIAGNOSTIC_FRAME_LIMIT)
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        module = frame.f_globals.get("__name__")
+        frames.append(
+            {
+                "module": module if isinstance(module, str) else "<unknown>",
+                "function": frame.f_code.co_name,
+                "line": traceback.tb_lineno,
+            },
+        )
+        traceback = traceback.tb_next
+    error_class = type(error)
+    logger.error(
+        event,
+        error_type=f"{error_class.__module__}.{error_class.__qualname__}",
+        stack=tuple(frames),
+    )
 
 
 def usage_export_runner(api_app: FastAPI) -> UsageExportRunner:

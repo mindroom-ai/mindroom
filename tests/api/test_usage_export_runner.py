@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import threading
-from concurrent.futures import Future
+from concurrent.futures import CancelledError, Future
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main, usage_export
@@ -139,6 +140,106 @@ def test_failure_is_sanitized_and_suppresses_retry_storm(tmp_path: Path) -> None
     assert len(workers.targets) == 1
 
 
+def test_worker_start_failure_is_immediate_and_temporarily_cached(tmp_path: Path) -> None:
+    """A worker-start error must fail immediately and suppress retries for five seconds."""
+    clock = ManualClock()
+    start_calls = 0
+    sensitive_value = "sensitive-start-detail"
+
+    def fail_start(_target: Callable[[], None]) -> None:
+        nonlocal start_calls
+        start_calls += 1
+        raise RuntimeError(sensitive_value)
+
+    runner = UsageExportRunner(start_worker=fail_start, clock=clock)
+    context = _context(tmp_path)
+
+    with capture_logs() as logs:
+        first = runner.poll(context, dict, context_is_current=lambda: True)
+        cached = runner.poll(context, dict, context_is_current=lambda: True)
+        clock.now = 5
+        retried = runner.poll(context, dict, context_is_current=lambda: True)
+
+    assert first.status is UsageExportStatus.FAILED
+    assert cached.status is UsageExportStatus.FAILED
+    assert retried.status is UsageExportStatus.FAILED
+    assert start_calls == 2
+    assert [event["event"] for event in logs] == [
+        "usage_export_worker_start_failed",
+        "usage_export_worker_start_failed",
+    ]
+    assert all(event["error_type"] == "builtins.RuntimeError" for event in logs)
+    assert sensitive_value not in str(logs)
+
+
+def test_worker_failure_logs_only_sanitized_diagnostics(tmp_path: Path) -> None:
+    """Preparation diagnostics must exclude exception text, locals, and report content."""
+    workers = ManualWorkers()
+    runner = UsageExportRunner(start_worker=workers.start)
+    context = _context(tmp_path)
+    sensitive_value = "sensitive-report-detail"
+
+    def fail_report() -> dict[str, object]:
+        report = {"private": sensitive_value}
+        message = f"{sensitive_value}: {report}"
+        raise RuntimeError(message)
+
+    with capture_logs() as logs:
+        assert runner.poll(context, fail_report, context_is_current=lambda: True).status is UsageExportStatus.PENDING
+        workers.run_next()
+        failed = runner.poll(context, dict, context_is_current=lambda: True)
+
+    assert failed.status is UsageExportStatus.FAILED
+    assert len(logs) == 1
+    assert logs[0]["event"] == "usage_export_preparation_failed"
+    assert logs[0]["error_type"] == "builtins.RuntimeError"
+    assert logs[0]["stack"]
+    assert sensitive_value not in str(logs)
+
+
+def test_context_validation_failure_logs_sanitized_diagnostics(tmp_path: Path) -> None:
+    """Snapshot-validation errors must discard results and leave safe diagnostics."""
+    workers = ManualWorkers()
+    runner = UsageExportRunner(start_worker=workers.start)
+    context = _context(tmp_path)
+    sensitive_value = "sensitive-context-detail"
+
+    def fail_context_validation() -> bool:
+        raise ValueError(sensitive_value)
+
+    with capture_logs() as logs:
+        assert (
+            runner.poll(context, dict, context_is_current=fail_context_validation).status is UsageExportStatus.PENDING
+        )
+        workers.run_next()
+
+    assert len(logs) == 1
+    assert logs[0]["event"] == "usage_export_context_validation_failed"
+    assert logs[0]["error_type"] == "builtins.ValueError"
+    assert sensitive_value not in str(logs)
+
+
+def test_builder_cancelled_error_settles_as_failed_preparation(tmp_path: Path) -> None:
+    """A builder-raised cancellation must release the slot and cache a failure."""
+    workers = ManualWorkers()
+    runner = UsageExportRunner(start_worker=workers.start)
+    context = _context(tmp_path)
+    sensitive_value = "sensitive-cancel-detail"
+
+    def fail_report() -> dict[str, object]:
+        raise CancelledError(sensitive_value)
+
+    with capture_logs() as logs:
+        assert runner.poll(context, fail_report, context_is_current=lambda: True).status is UsageExportStatus.PENDING
+        workers.run_next()
+        failed = runner.poll(context, dict, context_is_current=lambda: True)
+
+    assert failed.status is UsageExportStatus.FAILED
+    assert logs[0]["event"] == "usage_export_preparation_failed"
+    assert logs[0]["error_type"] == "concurrent.futures._base.CancelledError"
+    assert sensitive_value not in str(logs)
+
+
 def test_success_expiry_starts_exactly_one_refresh(tmp_path: Path) -> None:
     """A successful result must refresh once after its 60-second TTL."""
     workers = ManualWorkers()
@@ -244,12 +345,14 @@ def test_close_cancels_queued_work_without_running_or_waiting(tmp_path: Path) ->
         context_checks += 1
         return True
 
-    assert runner.poll(context, build, context_is_current=context_is_current).status is UsageExportStatus.PENDING
-    runner.close()
-    workers.run_next()
+    with capture_logs() as logs:
+        assert runner.poll(context, build, context_is_current=context_is_current).status is UsageExportStatus.PENDING
+        runner.close()
+        workers.run_next()
 
     assert build_calls == 0
     assert context_checks == 0
+    assert logs == []
     assert runner.poll(context, build, context_is_current=lambda: True).status is UsageExportStatus.FAILED
 
 

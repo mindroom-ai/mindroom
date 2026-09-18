@@ -114,6 +114,7 @@ MindRoom's architecture consists of several key components working together.
 | `avatar_generation.py` | Generates and manages avatar assets for agents, rooms, and spaces |
 | `topic_generator.py` | AI-generated room topics |
 | `background_tasks.py` | Non-blocking async task management with GC protection |
+| `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a two-variant bounded cache, committed-generation validation, and non-blocking shutdown cleanup |
 | `desktop/session.py` | Owns the desktop device's durable NIO session and storage binding |
 | `desktop/transport.py` | Polls owned to-device work and acknowledges only after durable command admission |
 | `desktop/command_journal.py` | Persists command admission, execution outcomes, and pending responses |

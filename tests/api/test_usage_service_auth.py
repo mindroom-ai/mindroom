@@ -10,6 +10,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
@@ -438,17 +439,18 @@ def test_usage_export_failure_is_content_free_and_temporarily_cached(
     runner, workers = _install_manual_export_runner(client)
     headers = {_ASSERTION_HEADER: _service_assertion(private_key)}
 
-    private_error = "private retained report row"
+    private_error = "sensitive-retained-report-detail"
 
     def fail_report(**_kwargs: object) -> object:
         raise RuntimeError(private_error)
 
     monkeypatch.setattr("mindroom.api.usage.collect_admin_usage", fail_report)
     try:
-        assert client.get("/api/usage/export", headers=headers).status_code == 202
-        workers.run_next()
-        first_failure = client.get("/api/usage/export", headers=headers)
-        repeated_failure = client.get("/api/usage/export", headers=headers)
+        with capture_logs() as logs:
+            assert client.get("/api/usage/export", headers=headers).status_code == 202
+            workers.run_next()
+            first_failure = client.get("/api/usage/export", headers=headers)
+            repeated_failure = client.get("/api/usage/export", headers=headers)
     finally:
         runner.close()
         config_lifecycle.app_state(client.app).usage_export_runner = None
@@ -456,9 +458,49 @@ def test_usage_export_failure_is_content_free_and_temporarily_cached(
     assert first_failure.status_code == 503
     assert first_failure.content == b""
     assert first_failure.headers["cache-control"] == "no-store"
-    assert "private retained report row" not in first_failure.text
+    assert private_error not in first_failure.text
+    assert private_error not in str(logs)
     assert repeated_failure.status_code == 503
     assert workers.targets == []
+
+
+def test_usage_export_worker_start_failure_returns_immediate_cached_503(
+    temp_config_file: Path,
+    tmp_path: Path,
+    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+) -> None:
+    """A worker-start failure must return 503 immediately and honor retry backoff."""
+    env, private_key = usage_service_auth
+    client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+    headers = {_ASSERTION_HEADER: _service_assertion(private_key)}
+    now = 0.0
+    start_calls = 0
+    sensitive_value = "sensitive-worker-start-detail"
+
+    def fail_start(_target: Callable[[], None]) -> None:
+        nonlocal start_calls
+        start_calls += 1
+        raise RuntimeError(sensitive_value)
+
+    runner = UsageExportRunner(start_worker=fail_start, clock=lambda: now)
+    config_lifecycle.app_state(client.app).usage_export_runner = runner
+    try:
+        with capture_logs() as logs:
+            first = client.get("/api/usage/export", headers=headers)
+            cached = client.get("/api/usage/export", headers=headers)
+            now = 5
+            retried = client.get("/api/usage/export", headers=headers)
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
+
+    assert first.status_code == 503
+    assert first.content == b""
+    assert first.headers["cache-control"] == "no-store"
+    assert cached.status_code == 503
+    assert retried.status_code == 503
+    assert start_calls == 2
+    assert sensitive_value not in first.text + str(logs)
 
 
 def test_usage_export_authentication_precedes_start_and_cache_access(
