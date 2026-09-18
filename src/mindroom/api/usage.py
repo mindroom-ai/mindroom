@@ -2,10 +2,18 @@
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_personal_user, require_usage_service, verify_user
+from mindroom.api.usage_export import (
+    RETRY_AFTER_SECONDS,
+    UsageExportContext,
+    UsageExportStatus,
+    context_is_current,
+    usage_export_runner,
+)
 from mindroom.usage_stats import collect_admin_usage, collect_private_usage
 
 __all__ = ["get_private_usage", "get_usage", "get_usage_export", "router"]
@@ -19,10 +27,38 @@ def get_usage(request: Request, response: Response, include_daily: bool = False)
     return _get_admin_usage(request, response, include_daily=include_daily)
 
 
-@router.get("/export", dependencies=[Depends(require_usage_service)])
-def get_usage_export(request: Request, response: Response, include_daily: bool = False) -> dict[str, object]:
+@router.get("/export", dependencies=[Depends(require_usage_service)], response_model=None)
+def get_usage_export(request: Request, include_daily: bool = False) -> dict[str, object] | Response:
     """Return retained usage to the authenticated usage-export service."""
-    return _get_admin_usage(request, response, include_daily=include_daily)
+    snapshot = config_lifecycle.request_snapshot(request)
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail="Usage export configuration is not available")
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    api_app = request.app
+    context = UsageExportContext(
+        runtime_paths=runtime_paths,
+        generation=snapshot.generation,
+        include_daily=include_daily,
+    )
+    poll = usage_export_runner(api_app).poll(
+        context,
+        lambda: collect_admin_usage(
+            config=config,
+            runtime_paths=runtime_paths,
+            include_daily=include_daily,
+        ).to_dict(),
+        context_is_current=lambda: context_is_current(api_app, context),
+    )
+    headers = {"Cache-Control": "no-store"}
+    if poll.status is UsageExportStatus.PENDING:
+        headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={"status": "pending"}, headers=headers)
+    if poll.status is UsageExportStatus.FAILED or poll.report is None:
+        return Response(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers=headers,
+        )
+    return JSONResponse(content=poll.report, headers=headers)
 
 
 def _get_admin_usage(request: Request, response: Response, *, include_daily: bool) -> dict[str, object]:

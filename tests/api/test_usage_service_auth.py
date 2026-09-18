@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,12 +13,28 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
+from mindroom.api.usage_export import UsageExportRunner
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
 
 _ISSUER = "https://issuer.example"
 _SERVICE_AUDIENCE = "mindroom-usage-export"
 _SERVICE_CLIENT_ID = "usage-export-client.example.org"
 _ASSERTION_HEADER = "Cf-Access-Jwt-Assertion"
+
+
+class ManualExportWorkers:
+    """Capture export jobs so handler tests complete them deterministically."""
+
+    def __init__(self) -> None:
+        self.targets: list[Callable[[], None]] = []
+
+    def start(self, target: Callable[[], None]) -> None:
+        """Capture one worker target without starting it."""
+        self.targets.append(target)
+
+    def run_next(self) -> None:
+        """Run the oldest captured target synchronously."""
+        self.targets.pop(0)()
 
 
 def _service_assertion(
@@ -79,6 +96,16 @@ def _initialize_usage_runtime(
     main.initialize_api_app(main.app, runtime_paths)
     config_lifecycle.load_config_into_app(runtime_paths, main.app)
     return TestClient(main.app), runtime_paths.storage_root
+
+
+def _install_manual_export_runner(client: TestClient) -> tuple[UsageExportRunner, ManualExportWorkers]:
+    workers = ManualExportWorkers()
+    runner = UsageExportRunner(start_worker=workers.start)
+    state = config_lifecycle.app_state(client.app)
+    if state.usage_export_runner is not None:
+        state.usage_export_runner.close()
+    state.usage_export_runner = runner
+    return runner, workers
 
 
 def _seed_usage_database(storage_root: Path) -> None:
@@ -193,25 +220,44 @@ def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str
     return builders[case]()
 
 
-def test_usage_export_accepts_service_assertion_and_returns_daily_report(
+def test_usage_export_prepares_and_returns_real_daily_report(
     temp_config_file: Path,
     tmp_path: Path,
     usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
 ) -> None:
-    """The export route must verify a service assertion before reading real retained usage."""
+    """Authenticated polling must return a prepared report from real retained storage."""
     env, private_key = usage_service_auth
     client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
     _seed_usage_database(storage_root)
+    runner, workers = _install_manual_export_runner(client)
+    headers = {_ASSERTION_HEADER: _service_assertion(private_key)}
 
-    response = client.get(
-        "/api/usage/export",
-        params={"include_daily": "true"},
-        headers={_ASSERTION_HEADER: _service_assertion(private_key)},
-    )
+    try:
+        response = client.get(
+            "/api/usage/export",
+            params={"include_daily": "true"},
+            headers=headers,
+        )
 
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    payload = response.json()
+        assert response.status_code == 202
+        assert response.json() == {"status": "pending"}
+        assert response.headers["retry-after"] == "5"
+        assert response.headers["cache-control"] == "no-store"
+        assert len(workers.targets) == 1
+
+        repeated = client.get("/api/usage/export", params={"include_daily": "true"}, headers=headers)
+        assert repeated.status_code == 202
+        assert len(workers.targets) == 1
+
+        workers.run_next()
+        ready = client.get("/api/usage/export", params={"include_daily": "true"}, headers=headers)
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
+
+    assert ready.status_code == 200
+    assert ready.headers["cache-control"] == "no-store"
+    payload = ready.json()
     expected_metrics = {
         "input_tokens": 12,
         "output_tokens": 8,
@@ -363,12 +409,78 @@ def test_usage_export_omits_daily_breakdown_by_default(
     """The export route must preserve the administrator report's include_daily behavior."""
     env, private_key = usage_service_auth
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+    runner, workers = _install_manual_export_runner(client)
+    headers = {_ASSERTION_HEADER: _service_assertion(private_key)}
 
-    response = client.get(
-        "/api/usage/export",
-        headers={_ASSERTION_HEADER: _service_assertion(private_key)},
-    )
+    try:
+        pending = client.get("/api/usage/export", headers=headers)
+        assert pending.status_code == 202
+        workers.run_next()
+        response = client.get("/api/usage/export", headers=headers)
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
 
     assert response.status_code == 200
     assert "daily_breakdown" not in response.json()
     assert "daily_coverage" not in response.json()
+
+
+def test_usage_export_failure_is_content_free_and_temporarily_cached(
+    temp_config_file: Path,
+    tmp_path: Path,
+    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scan exception must become a stable content-free service failure."""
+    env, private_key = usage_service_auth
+    client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+    runner, workers = _install_manual_export_runner(client)
+    headers = {_ASSERTION_HEADER: _service_assertion(private_key)}
+
+    private_error = "private retained report row"
+
+    def fail_report(**_kwargs: object) -> object:
+        raise RuntimeError(private_error)
+
+    monkeypatch.setattr("mindroom.api.usage.collect_admin_usage", fail_report)
+    try:
+        assert client.get("/api/usage/export", headers=headers).status_code == 202
+        workers.run_next()
+        first_failure = client.get("/api/usage/export", headers=headers)
+        repeated_failure = client.get("/api/usage/export", headers=headers)
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
+
+    assert first_failure.status_code == 503
+    assert first_failure.content == b""
+    assert first_failure.headers["cache-control"] == "no-store"
+    assert "private retained report row" not in first_failure.text
+    assert repeated_failure.status_code == 503
+    assert workers.targets == []
+
+
+def test_usage_export_authentication_precedes_start_and_cache_access(
+    temp_config_file: Path,
+    tmp_path: Path,
+    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+) -> None:
+    """Unauthenticated requests must neither start work nor read a completed report."""
+    env, private_key = usage_service_auth
+    client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+    runner, workers = _install_manual_export_runner(client)
+    headers = {_ASSERTION_HEADER: _service_assertion(private_key)}
+
+    try:
+        assert client.get("/api/usage/export").status_code == 401
+        assert workers.targets == []
+        assert client.get("/api/usage/export", headers=headers).status_code == 202
+        workers.run_next()
+        assert client.get("/api/usage/export").status_code == 401
+        ready = client.get("/api/usage/export", headers=headers)
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
+
+    assert ready.status_code == 200

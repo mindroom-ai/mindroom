@@ -82,7 +82,7 @@ When no Matrix user ID claim or email-to-Matrix template is configured, strict m
 ## Usage Export Service
 
 Strict JWT deployments can expose `GET /api/usage/export` to a service client without granting that client a browser or administrator identity.
-The route returns the same aggregate report as `GET /api/usage` and accepts the same `include_daily` query parameter.
+The route prepares the same aggregate report as `GET /api/usage` and accepts the same `include_daily` query parameter.
 It never accepts an assertion from a query parameter, and methods other than `GET` are unsupported.
 
 Configure trusted-upstream strict JWT mode as above, then add a dedicated service audience and exact client ID:
@@ -106,6 +106,14 @@ The issuer, JWKS URL, and assertion header come from the trusted-upstream settin
 The export route returns `503` until trusted-upstream auth, strict JWT mode, every shared strict-JWT setting, and both service settings are configured.
 Missing or invalid assertions return `401`.
 A valid service assertion authorizes only `/api/usage/export`; it does not authorize `/api/usage`, configuration APIs, or any other administrator route.
+
+Every request, including polls and cache hits, must include the service assertion.
+When a report needs preparation, the route promptly returns `202` with `{"status":"pending"}`, `Retry-After: 5`, and `Cache-Control: no-store`.
+Poll the same URL with the same `include_daily` value after the requested delay.
+Once preparation finishes, an authenticated poll returns `200`, `Cache-Control: no-store`, and the existing aggregate report schema.
+The two `include_daily` variants are prepared and cached separately, successful results expire 60 seconds after completion, and only one retained-data scan runs at a time.
+Configuration or runtime changes discard earlier results.
+A failed scan returns a content-free `503` with `Cache-Control: no-store`; the failure remains cached for five seconds before another request can start a retry.
 
 ## Connections Portal
 
