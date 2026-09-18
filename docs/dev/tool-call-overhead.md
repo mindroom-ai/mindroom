@@ -58,8 +58,7 @@ Agno 3.0.9 inspects each hook ten times per call when selecting injected argumen
 MindRoom retains the signature on each owned sync bridge to avoid repeatedly rebuilding it.
 New bridges created after a reload get their own signature; plugin hooks and tool entrypoints are not cached by this change.
 
-Using the same `--agno` harness against `83a7f7f4c` and the signature change, three alternating before/after rounds
-(5,000 calls per case after 100 warmups) measured these medians of round medians:
+Using the same `--agno` harness against `83a7f7f4c` and the signature change, three alternating before/after rounds (5,000 calls per case after 100 warmups) measured these medians of round medians:
 
 | Agno dispatch case | Before | After |
 | --- | ---: | ---: |

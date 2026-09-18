@@ -999,7 +999,13 @@ def build_tool_hook_bridge(
             ),
         )
 
-    # Agno repeatedly inspects hooks while injecting arguments on every call.
+    # AGNO_COMPAT: Hook argument injection repeatedly reconstructs fixed signatures.
+    # Reason: Agno 3.0.9 inspects each hook ten times per call to select injected arguments.
+    # Upstream issue: Tracking gap; no repeated-inspection issue identified in upstream search.
+    # Upstream PR: None identified for preparing hook signatures once.
+    # Remove when: Agno prepares stable hook signatures without repeated annotation reads
+    #   during tool calls, preserving argument injection and fresh bridge ownership on reload.
+    # Coverage: tests/test_tool_hooks.py::test_agno_tool_calls_reuse_bridge_signature
     # This owned wrapper has a fixed signature for its lifetime.
     sync_bridge.__dict__["__signature__"] = inspect.signature(sync_bridge)
     _SYNC_BRIDGES[bridge] = sync_bridge
