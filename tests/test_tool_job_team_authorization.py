@@ -16,7 +16,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.delegation.background import delegation_child, start_delegation
-from mindroom.delegation.lifecycle import child_run_context, start_child_turn
+from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY, authority_snapshot, bind_toolkit_authority
@@ -24,7 +24,13 @@ from mindroom.tool_jobs.completion import completion_event, join_conversation_jo
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import (
+    BackgroundOutcome,
+    JobAccessError,
+    JobSpec,
+    ToolJobRuntime,
+    register_background_runtime,
+)
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity, tool_execution_identity
@@ -240,6 +246,47 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_o
             assert not isinstance(joined[0], str)
             assert 'job_id="member"' in joined[0].prompt
         assert await runtime.outcome("member", 0) is not None
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_agent", ["lead", "worker"])
+async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path: Path, changed_agent: str) -> None:
+    """Native retrieval and generic discovery enforce the same frozen caller/child storage scope."""
+    config = _config(tmp_path)
+    coordinator = _delivery_coordinator(tmp_path, config)
+    paths, owner = coordinator.runtime_paths, _job().owner
+    child = prepare_child_turn("lead", "worker", "Work", owner=owner, config=config, runtime_paths=paths, depth=0)
+    context = replace(
+        _delegate_runtime_context(config, paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+    )
+
+    async def operation() -> BackgroundOutcome:
+        child.status = "completed"
+        child.result = "saved answer"
+        return BackgroundOutcome("completed", child.result)
+
+    runtime = coordinator.runtime
+    register_background_runtime(paths, runtime)
+    try:
+        job = await start_delegation(runtime, child, owner=owner, operation=operation)
+        waited = await runtime.wait(job.job_id, owner=owner, depth=0)
+        await runtime.release_wait(job.job_id, waited.token)
+        assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
+        assert len(await runtime.pending_outcomes()) == 1
+        config.agents[changed_agent].worker_scope = "user"
+        assert await runtime.list_jobs(owner=owner, depth=0) == []
+        assert await runtime.pending_outcomes() == []
+        assert await runtime.outcome(job.job_id, job.generation) is None
+        with tool_runtime_context(context):
+            assert [item async for item in join_conversation_jobs(set())] == []
+        for control in (runtime.lookup, runtime.wait, runtime.cancel):
+            with pytest.raises(JobAccessError):
+                await control(job.job_id, owner=owner, depth=0)
     finally:
         register_background_runtime(paths, None)
         await runtime.shutdown()

@@ -762,3 +762,13 @@ Agent and team regressions cancel both successive closes in immediate and detach
 Blocking agent approval pauses also retain the completed background-join presentation through the existing pause builder, including hidden tool identities and visible marker numbering.
 The agent stream adapter applies terminal-only content fallback to every attempt, so a normal background continuation retains its answer even when the provider emits no text delta.
 Regression coverage exercises actual SDK approval pauses and both collected and Matrix streaming delivery.
+
+The next review checkpoint identified two policy boundaries that should reuse existing rules.
+Calls marked `stop_after_tool_call` control the next model step and must return their actual result before that decision; they remain inline and omit the shared waiting option.
+Returning a job handle instead would lose model-switch timing or dynamic-tool continuation semantics, so extending detached result handling for those controls would add unnecessary state.
+Application authorization still runs before inline control execution, and unsupported numeric waits fail before side effects.
+Registered agent and team model-switch regressions cover both timing choices, human follow-ups, immediate waits, and finite waits; dynamic loader schemas use the same stop-after flag.
+
+Native job access now applies the same frozen storage-binding comparison as native retrieval.
+Tests change either the caller or child worker scope and require discovery, controls, automatic joining, and completion lookup to withdraw access.
+The job runtime does not gain another storage policy or migration layer.

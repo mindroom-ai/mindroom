@@ -13,6 +13,7 @@ from mindroom.custom_tools.job import is_job_function
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.lifecycle import active_delegation_edges
 from mindroom.delegation.recovery import interrupt_child
+from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
@@ -121,8 +122,13 @@ class ToolJobRuntimeCoordinator:
             return False
         entities = {owner.agent_name, owner.transport_agent_name or owner.agent_name}
         if job.kind == "delegation":
-            child_name = delegation_child(job).child_agent_name
-            if child_name not in caller.delegate_to:
+            child = delegation_child(job)
+            child_name = child.child_agent_name
+            if (
+                child_name not in caller.delegate_to
+                or child_name not in config.agents
+                or child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings)
+            ):
                 return False
             entities.add(child_name)
         elif not locally_allowed(
