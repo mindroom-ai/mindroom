@@ -9,10 +9,8 @@ import {
   CardHeader,
   CardTitle,
 } from "../ui/card";
-import { Badge } from "../ui/badge";
 import { Checkbox } from "../ui/checkbox";
 import { Alert, AlertDescription } from "../ui/alert";
-import { ScrollArea } from "../ui/scroll-area";
 import { cn } from "../../lib/utils";
 
 interface RoomInfo {
@@ -183,29 +181,29 @@ export function UnconfiguredRooms() {
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="min-w-0 space-y-4">
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-2xl font-semibold tracking-tight">
             External Rooms
           </h2>
-          <p className="text-sm text-muted-foreground mt-1">
-            Manage rooms that agents and teams have joined but are not in the
-            configuration
-          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={loadAgentRooms}
+            className="shrink-0"
+            disabled={loading}
+          >
+            <RefreshCw
+              className={cn("h-4 w-4 mr-2", loading && "animate-spin")}
+            />
+            Refresh
+          </Button>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={loadAgentRooms}
-          disabled={loading}
-        >
-          <RefreshCw
-            className={cn("h-4 w-4 mr-2", loading && "animate-spin")}
-          />
-          Refresh
-        </Button>
+        <p className="text-sm text-muted-foreground">
+          Manage rooms that agents and teams have joined but are not in the
+          configuration
+        </p>
       </div>
 
       {/* Error Alert */}
@@ -216,35 +214,27 @@ export function UnconfiguredRooms() {
         </Alert>
       )}
 
-      {/* Summary Card */}
       {totalUnconfiguredRooms > 0 && (
-        <Card>
-          <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle className="text-base">Summary</CardTitle>
-                <CardDescription>
-                  {totalUnconfiguredRooms} external room
-                  {totalUnconfiguredRooms !== 1 ? "s" : ""} found across{" "}
-                  {entitiesWithExternalRooms.length} entit
-                  {entitiesWithExternalRooms.length === 1 ? "y" : "ies"}
-                </CardDescription>
-              </div>
-              {selectedRooms.size > 0 && (
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={leaveSelectedRooms}
-                  disabled={leavingRooms}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Leave {selectedRooms.size} Room
-                  {selectedRooms.size !== 1 ? "s" : ""}
-                </Button>
-              )}
-            </div>
-          </CardHeader>
-        </Card>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            {totalUnconfiguredRooms} external room
+            {totalUnconfiguredRooms !== 1 ? "s" : ""} found across{" "}
+            {entitiesWithExternalRooms.length} entit
+            {entitiesWithExternalRooms.length === 1 ? "y" : "ies"}
+          </p>
+          {selectedRooms.size > 0 && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={leaveSelectedRooms}
+              disabled={leavingRooms}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Leave {selectedRooms.size} Room
+              {selectedRooms.size !== 1 ? "s" : ""}
+            </Button>
+          )}
+        </div>
       )}
 
       {/* No unconfigured rooms message */}
@@ -260,137 +250,125 @@ export function UnconfiguredRooms() {
       )}
 
       {/* Entity Room Lists */}
-      <ScrollArea className="h-[600px] pr-4">
-        <div className="space-y-4">
-          {entitiesWithExternalRooms.map((entity) => (
-            <Card key={entity.agent_id}>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <CardTitle className="text-lg">
-                      {entity.display_name}
-                    </CardTitle>
-                    <CardDescription>
-                      {entity.unconfigured_rooms.length} external room
-                      {entity.unconfigured_rooms.length !== 1 ? "s" : ""}
-                    </CardDescription>
-                  </div>
-                  <div className="flex gap-2">
-                    {entity.unconfigured_rooms.length > 1 && (
-                      <>
-                        {areAllSelectedForAgent(
-                          entity.agent_id,
-                          entity.unconfigured_rooms,
-                        ) ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() =>
-                              deselectAllForAgent(
-                                entity.agent_id,
-                                entity.unconfigured_rooms,
-                              )
-                            }
-                          >
-                            Deselect All
-                          </Button>
-                        ) : (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() =>
-                              selectAllForAgent(
-                                entity.agent_id,
-                                entity.unconfigured_rooms,
-                              )
-                            }
-                          >
-                            Select All
-                          </Button>
-                        )}
-                      </>
-                    )}
-                  </div>
+      <div className="space-y-4">
+        {entitiesWithExternalRooms.map((entity) => (
+          <Card key={entity.agent_id} className="min-w-0">
+            <CardHeader>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1 basis-40">
+                  <CardTitle className="break-words text-lg">
+                    {entity.display_name}
+                  </CardTitle>
+                  <CardDescription>
+                    {entity.unconfigured_rooms.length} external room
+                    {entity.unconfigured_rooms.length !== 1 ? "s" : ""}
+                  </CardDescription>
                 </div>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {entity.unconfigured_rooms.map((roomId, index) => {
-                    const key = `${entity.agent_id}:${roomId}`;
-                    const isSelected = selectedRooms.has(key);
-                    const roomDetails =
-                      entity.unconfigured_room_details?.[index];
+                <div className="flex shrink-0 gap-2">
+                  {entity.unconfigured_rooms.length > 1 && (
+                    <>
+                      {areAllSelectedForAgent(
+                        entity.agent_id,
+                        entity.unconfigured_rooms,
+                      ) ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            deselectAllForAgent(
+                              entity.agent_id,
+                              entity.unconfigured_rooms,
+                            )
+                          }
+                        >
+                          Deselect All
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            selectAllForAgent(
+                              entity.agent_id,
+                              entity.unconfigured_rooms,
+                            )
+                          }
+                        >
+                          Select All
+                        </Button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2">
+                {entity.unconfigured_rooms.map((roomId, index) => {
+                  const key = `${entity.agent_id}:${roomId}`;
+                  const isSelected = selectedRooms.has(key);
+                  const roomDetails = entity.unconfigured_room_details?.[index];
 
-                    return (
-                      <div
-                        key={roomId}
-                        className={cn(
-                          "flex items-center space-x-3 p-3 rounded-lg border transition-colors cursor-pointer",
-                          isSelected
-                            ? "bg-muted/50 border-primary/20"
-                            : "hover:bg-muted/30",
-                        )}
-                        onClick={() =>
+                  return (
+                    <div
+                      key={roomId}
+                      className={cn(
+                        "flex min-w-0 items-center gap-3 rounded-lg px-2 py-3 transition-colors cursor-pointer",
+                        isSelected ? "bg-primary/10" : "hover:bg-muted/30",
+                      )}
+                      onClick={() =>
+                        toggleRoomSelection(entity.agent_id, roomId)
+                      }
+                    >
+                      <Checkbox
+                        checked={isSelected}
+                        aria-label={`Select ${roomDetails?.name || roomId} for ${entity.display_name}`}
+                        onCheckedChange={() =>
                           toggleRoomSelection(entity.agent_id, roomId)
                         }
-                      >
-                        <Checkbox
-                          checked={isSelected}
-                          onCheckedChange={() =>
-                            toggleRoomSelection(entity.agent_id, roomId)
-                          }
-                          disabled={leavingRooms}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                        <div className="flex-1 min-w-0 select-none">
-                          {/* Show room name if available */}
-                          {roomDetails?.name && (
-                            <div className="font-medium text-sm mb-1">
-                              {roomDetails.name}
-                            </div>
-                          )}
-                          <div className="flex items-center gap-2">
-                            <code className="text-xs font-mono truncate text-muted-foreground">
-                              {roomId}
-                            </code>
-                            {roomId.startsWith("!") && roomId.includes(":") && (
-                              <Badge
-                                variant="outline"
-                                className="text-xs pointer-events-none"
-                              >
-                                {roomId.split(":")[1]}
-                              </Badge>
-                            )}
+                        disabled={leavingRooms}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div className="flex-1 min-w-0 select-none">
+                        {/* Show room name if available */}
+                        {roomDetails?.name && (
+                          <div className="break-words font-medium text-sm mb-1">
+                            {roomDetails.name}
                           </div>
-                          {/* Show if it's a DM room */}
-                          {roomId.includes("dm") && (
-                            <p className="text-xs text-muted-foreground mt-1">
-                              Direct Message Room
-                            </p>
-                          )}
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            // Open room in Element/Matrix client
-                            const matrixUrl = `https://matrix.to/#/${roomId}`;
-                            window.open(matrixUrl, "_blank");
-                          }}
-                          title="Open in Matrix client"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                        </Button>
+                        )}
+                        <code className="block break-all text-xs font-mono text-muted-foreground">
+                          {roomId}
+                        </code>
+                        {/* Show if it's a DM room */}
+                        {roomId.includes("dm") && (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Direct Message Room
+                          </p>
+                        )}
                       </div>
-                    );
-                  })}
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </ScrollArea>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-11 w-11 shrink-0"
+                        aria-label={`Open ${roomDetails?.name || roomId} in Matrix client`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Open room in Element/Matrix client
+                          const matrixUrl = `https://matrix.to/#/${roomId}`;
+                          window.open(matrixUrl, "_blank");
+                        }}
+                        title="Open in Matrix client"
+                      >
+                        <ExternalLink className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
     </div>
   );
 }

@@ -568,11 +568,9 @@ function AppContent() {
               <RoutePanel
                 active={currentTab === "unconfigured-rooms"}
                 label="External rooms"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+                className="min-h-0 flex-1 overflow-y-auto p-3 md:p-5"
               >
-                <div className="h-full overflow-hidden">
-                  <UnconfiguredRooms />
-                </div>
+                <UnconfiguredRooms />
               </RoutePanel>
 
               <RoutePanel

@@ -41,7 +41,9 @@ const report = {
   cumulative_model_coverage: coverage,
   user_breakdown: [],
   user_coverage: coverage,
-  daily_breakdown: [{ date: "2026-09-19", run_count: 42, totals }],
+  daily_breakdown: [
+    { date: "2026-09-19", run_count: 42, totals, model_breakdown: [] },
+  ],
   daily_coverage: coverage,
 };
 const schedule = {
