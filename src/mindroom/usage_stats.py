@@ -137,6 +137,9 @@ class UsageBreakdownRow:
     totals: TokenTotals
     session_count: int
     cumulative_model_breakdown: tuple[UsageCumulativeModelBreakdownRow, ...]
+    retained_run_totals: TokenTotals
+    run_count: int
+    user_breakdown: tuple[UsageUserBreakdownRow, ...]
 
     def to_dict(self) -> dict[str, object]:
         """Return the public breakdown row."""
@@ -146,6 +149,9 @@ class UsageBreakdownRow:
             "totals": self.totals.to_dict(),
             "session_count": self.session_count,
             "cumulative_model_breakdown": [row.to_dict() for row in self.cumulative_model_breakdown],
+            "retained_run_totals": self.retained_run_totals.to_dict(),
+            "run_count": self.run_count,
+            "user_breakdown": [row.to_dict() for row in self.user_breakdown],
         }
 
 
@@ -445,6 +451,7 @@ class _DailyUsageAccumulator:
 
 @dataclass(slots=True)
 class _ModelUsageAccumulator:
+    total: _Aggregate = dataclass_field(default_factory=_Aggregate)
     buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
     user_buckets: dict[str | None, dict[tuple[str, str], _Aggregate]] = dataclass_field(default_factory=dict)
     user_totals: dict[str | None, _Aggregate] = dataclass_field(default_factory=dict)
@@ -498,6 +505,7 @@ class _ModelUsageAccumulator:
         source_path: str,
     ) -> None:
         """Accumulate an already validated, deduplicated run for any report view."""
+        self.total.add(totals)
         _add_model_totals(self.buckets, models)
         if scope == "admin":
             self.user_totals.setdefault(run.requester_id, _Aggregate()).add(totals)
@@ -572,11 +580,6 @@ class _PrivateUsageAccumulator:
             self.buckets.items(),
             key=lambda item: (item[0][0] or "", item[0][1]),
         ):
-            retained = TokenTotals()
-            run_count = 0
-            for aggregate in models.user_totals.values():
-                retained = retained.plus(aggregate.totals)
-                run_count += aggregate.count
             rows.append(
                 UsagePrivateAgentBreakdownRow(
                     agent_name,
@@ -584,8 +587,8 @@ class _PrivateUsageAccumulator:
                     usage.total,
                     len(usage.sessions),
                     _cumulative_model_breakdown(usage.cumulative_model_buckets),
-                    retained,
-                    run_count,
+                    models.total.totals,
+                    models.total.count,
                     _model_breakdown(models.buckets),
                     models.daily_usage.rows() if models.daily_usage is not None else None,
                 ),
@@ -678,6 +681,7 @@ def _collect_usage(
     usage = _UsageAccumulator()
     daily_usage = _DailyUsageAccumulator() if include_daily else None
     model_usage = _ModelUsageAccumulator(daily_usage=daily_usage)
+    entity_models: dict[str, _ModelUsageAccumulator] = {}
     private_usage = _PrivateUsageAccumulator(include_daily)
     scanned_sources: set[str] = set()
     for discovered in sources:
@@ -721,25 +725,13 @@ def _collect_usage(
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
             )
+            if scope == "admin":
+                _add_entity_runs(entity_models, row, entries, include_daily=include_daily)
             if scope == "admin" or _self_source_allowed(source, expected_agent):
                 private_usage.add_row(row, entries, scope=scope, requester_id=expected_requester)
             if source.scope == "private_agent" and source.path_label in model_usage.unavailable_sources:
                 private_usage.unavailable_sources.add(source.path_label)
 
-    breakdown = tuple(
-        UsageBreakdownRow(
-            key=entity_id,
-            totals=aggregate.totals,
-            session_count=aggregate.count,
-            cumulative_model_breakdown=_cumulative_model_breakdown(
-                usage.entity_cumulative_model_buckets.get(entity_id, {}),
-            ),
-        )
-        for entity_id, aggregate in sorted(
-            usage.buckets.items(),
-            key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )
-    )
     model_breakdown = _model_breakdown(model_usage.buckets)
     model_coverage = UsageCoverage(
         scanned_sources=len(scanned_sources),
@@ -750,7 +742,7 @@ def _collect_usage(
         scope=scope,
         totals=usage.total,
         session_count=len(usage.sessions),
-        breakdown=breakdown,
+        breakdown=_entity_breakdown(usage, entity_models),
         coverage=UsageCoverage(
             scanned_sources=len(scanned_sources),
             unavailable_sources=len(usage.unavailable_sources),
@@ -763,11 +755,7 @@ def _collect_usage(
             unavailable_sources=len(usage.cumulative_model_unavailable_sources),
             note=_CUMULATIVE_MODEL_COVERAGE_NOTE,
         ),
-        user_breakdown=_user_breakdown(
-            model_usage.user_buckets,
-            model_usage.user_totals,
-            model_usage.user_daily_usage if include_daily else None,
-        ),
+        user_breakdown=_user_breakdown(model_usage),
         daily_breakdown=daily_usage.rows() if daily_usage is not None else (),
         daily_coverage=UsageCoverage(
             scanned_sources=len(scanned_sources),
@@ -782,21 +770,58 @@ def _collect_usage(
     )
 
 
-def _user_breakdown(
-    buckets: Mapping[str | None, dict[tuple[str, str], _Aggregate]],
-    user_totals: Mapping[str | None, _Aggregate],
-    user_daily_usage: Mapping[str | None, _DailyUsageAccumulator] | None,
-) -> tuple[UsageUserBreakdownRow, ...]:
+def _add_entity_runs(
+    entities: dict[str, _ModelUsageAccumulator],
+    row: UsageSessionRow,
+    entries: list[_ModelUsageEntry],
+    *,
+    include_daily: bool,
+) -> None:
+    if not entries or (entity_id := _admin_entity_id(row)) is None:
+        return
+    if entity_id not in entities:
+        entities[entity_id] = _ModelUsageAccumulator(
+            daily_usage=_DailyUsageAccumulator() if include_daily else None,
+        )
+    for run, totals, models in entries:
+        entities[entity_id].add_run(run, totals, models, scope="admin", source_path=row.source.path_label)
+
+
+def _entity_breakdown(
+    usage: _UsageAccumulator,
+    entity_models: Mapping[str, _ModelUsageAccumulator],
+) -> tuple[UsageBreakdownRow, ...]:
+    rows = []
+    for entity_id in usage.buckets.keys() | entity_models.keys():
+        aggregate = usage.buckets.get(entity_id, _Aggregate())
+        models = entity_models.get(entity_id, _ModelUsageAccumulator())
+        rows.append(
+            UsageBreakdownRow(
+                key=entity_id,
+                totals=aggregate.totals,
+                session_count=aggregate.count,
+                cumulative_model_breakdown=_cumulative_model_breakdown(
+                    usage.entity_cumulative_model_buckets.get(entity_id, {}),
+                ),
+                retained_run_totals=models.total.totals,
+                run_count=models.total.count,
+                user_breakdown=_user_breakdown(models),
+            ),
+        )
+    return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.key)))
+
+
+def _user_breakdown(usage: _ModelUsageAccumulator) -> tuple[UsageUserBreakdownRow, ...]:
     rows: list[UsageUserBreakdownRow] = []
-    for user_id, models in buckets.items():
-        aggregate = user_totals[user_id]
+    for user_id, models in usage.user_buckets.items():
+        aggregate = usage.user_totals[user_id]
         rows.append(
             UsageUserBreakdownRow(
                 user_id,
                 aggregate.totals,
                 aggregate.count,
                 _model_breakdown(models),
-                user_daily_usage[user_id].rows() if user_daily_usage is not None else None,
+                usage.user_daily_usage[user_id].rows() if usage.daily_usage is not None else None,
             ),
         )
     return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.user_id or "")))

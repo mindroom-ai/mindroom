@@ -460,6 +460,66 @@ def test_admin_groups_canonical_users_and_models_without_counting_duplicate_runs
         assert all("daily_breakdown" not in user for user in users)
 
 
+@pytest.mark.parametrize("include_daily", [False, True])
+def test_entity_requesters_group_the_same_retained_runs_as_the_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    include_daily: bool,
+) -> None:
+    shared = _source()
+    private = _source(scope="private_agent", requester_isolated=True)
+    other = _source(agent_name="other")
+    created_at = datetime(2026, 9, 15, tzinfo=UTC).timestamp()
+    alice = _run(run_id="alice", total_tokens=10, created_at=created_at)
+    _wire(
+        monkeypatch,
+        (shared, private, other),
+        {
+            shared.path_label: (
+                _row(
+                    shared,
+                    alice,
+                    alice,
+                    _run(requester_id="@telegram-alice:example.test", run_id="alias", total_tokens=20),
+                    _run(requester_id="@bob:example.test", run_id="bob", total_tokens=15),
+                    _run(requester_id=None, run_id="unknown", total_tokens=5),
+                    session_metrics=_metrics(150),
+                ),
+            ),
+            private.path_label: (
+                _row(private, _run(requester_id="@bob:example.test", total_tokens=11), session_metrics=_metrics(40)),
+            ),
+            other.path_label: (_row(other, _run(total_tokens=7), session_metrics=_metrics(100)),),
+        },
+    )
+
+    payload = collect_admin_usage(
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        include_daily=include_daily,
+    ).to_dict()
+    code, other_entity = payload["breakdown"]
+    assert (code["key"], code["totals"]["total_tokens"], code["session_count"]) == ("code", 190, 2)
+    assert (code["retained_run_totals"]["total_tokens"], code["run_count"]) == (61, 5)
+    users = code["user_breakdown"]
+    assert [(user["user_id"], user["totals"]["total_tokens"], user["run_count"]) for user in users] == [
+        ("@alice:example.test", 30, 2),
+        ("@bob:example.test", 26, 2),
+        (None, 5, 1),
+    ]
+    assert users[0]["model_breakdown"][0]["totals"]["total_tokens"] == 30
+    assert (other_entity["key"], other_entity["run_count"]) == ("other", 1)
+    assert other_entity["user_breakdown"][0]["totals"]["total_tokens"] == 7
+    assert payload["totals"]["total_tokens"] == 290
+    if include_daily:
+        assert [
+            (day["date"], day["run_count"], day["totals"]["total_tokens"]) for day in users[0]["daily_breakdown"]
+        ] == [("2026-09-15", 1, 10)]
+        assert users[1]["daily_breakdown"] == []
+    else:
+        assert all("daily_breakdown" not in user for user in users)
+
+
 def test_daily_usage_groups_utc_dates_and_deduplicates_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = _source()
     team = _source(scope="team", agent_name=None)
@@ -751,6 +811,10 @@ def test_daily_and_combined_models_use_agno_details(tmp_path: Path, admin: bool)
     ]
     assert report["daily_coverage"]["unavailable_sources"] == 0
     if admin:
+        entity = report["breakdown"][0]
+        assert entity["run_count"] == 3
+        assert {key: entity["retained_run_totals"][key] for key in totals} == totals
+        assert entity["user_breakdown"] == report["user_breakdown"]
         assert report["user_breakdown"][0]["run_count"] == 3
         assert report["user_breakdown"][0]["totals"]["total_tokens"] == 52
         assert report["user_breakdown"][0]["model_breakdown"] == report["model_breakdown"]
@@ -922,6 +986,7 @@ def test_self_report_does_not_expose_user_breakdown(tmp_path: Path, monkeypatch:
     ).to_dict()
     assert "user_breakdown" not in payload
     assert "user_coverage" not in payload
+    assert payload["breakdown"] == []
 
 
 def test_self_usage_is_requester_scoped_and_small(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1106,6 +1171,11 @@ def test_admin_usage_uses_member_inclusive_session_metrics(
 
     assert report.totals.total_tokens == 40
     assert report.session_count == 2
+    assert {(row.key, row.run_count, row.retained_run_totals.total_tokens) for row in report.breakdown} == {
+        ("code", 1, 7),
+        ("engineering", 1, 5),
+    }
+    assert all(row.user_breakdown[0].user_id == "@alice:example.test" for row in report.breakdown)
     assert {(row.key, row.totals.total_tokens) for row in report.breakdown} == {
         ("code", 10),
         ("engineering", 30),
@@ -1277,6 +1347,10 @@ def test_invalid_model_run_does_not_discard_authoritative_admin_totals(
     assert report.model_breakdown == ()
     assert report.model_coverage.unavailable_sources == 1
 
+    entity = report.to_dict()["breakdown"][0]
+    assert entity["run_count"] == 0
+    assert entity["user_breakdown"] == []
+
 
 def test_unavailable_model_payload_does_not_discard_authoritative_admin_totals(
     tmp_path: Path,
@@ -1330,6 +1404,12 @@ def test_unavailable_session_payload_does_not_discard_model_attribution(
     assert report.coverage.unavailable_sources == 1
     assert report.model_breakdown[0].totals.total_tokens == 12
     assert report.model_coverage.unavailable_sources == 0
+    entity = report.to_dict()["breakdown"][0]
+    assert entity["totals"]["total_tokens"] == 0
+    assert entity["session_count"] == 0
+    assert entity["retained_run_totals"]["total_tokens"] == 12
+    assert entity["run_count"] == 1
+    assert entity["user_breakdown"][0]["user_id"] == "@alice:example.test"
 
 
 def test_admin_usage_reads_every_retained_session(
