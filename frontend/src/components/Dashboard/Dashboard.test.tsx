@@ -274,9 +274,6 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: /Research Analyst/ }),
       ).toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: /Builder Team/ }),
-      ).toBeInTheDocument();
-      expect(
         screen.queryByRole("button", { name: /Lobby/ }),
       ).not.toBeInTheDocument();
     }
@@ -317,6 +314,120 @@ describe("Dashboard", () => {
     }
 
     fireEvent.click(screen.getByRole("button", { name: /Lobby/ }));
+    expect(
+      within(screen.getByRole("complementary")).getByText(
+        "fast · openai/gpt-fast",
+      ),
+    ).toBeVisible();
+  });
+
+  it("uses default model metadata for a team whose model was omitted", () => {
+    seedDashboard({
+      config: {
+        ...config,
+        models: {
+          ...config.models,
+          default: {
+            provider: "ollama",
+            id: "qwen-reasoner",
+            display_name: "Local Reasoner",
+          },
+        },
+      },
+      teams: [{ ...teams[0], model: undefined }],
+    });
+    renderDashboard();
+
+    for (const term of [
+      "default",
+      "ollama",
+      "qwen-reasoner",
+      "LOCAL REASONER",
+    ]) {
+      fireEvent.change(screen.getByRole("searchbox"), {
+        target: { value: term },
+      });
+      expect(
+        screen.getByRole("button", { name: /Builder Team/ }),
+      ).toBeInTheDocument();
+    }
+
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: /Builder Team/ }));
+    expect(
+      within(screen.getByRole("complementary")).getByText(
+        "default · ollama/qwen-reasoner",
+      ),
+    ).toBeVisible();
+  });
+
+  it("shows an explicit null team model without indexing default metadata", () => {
+    seedDashboard({
+      config: {
+        ...config,
+        models: {
+          ...config.models,
+          default: {
+            provider: "ollama",
+            id: "qwen-reasoner",
+            display_name: "Local Reasoner",
+          },
+        },
+      },
+      teams: [{ ...teams[0], model: null }],
+    });
+    renderDashboard();
+
+    for (const term of [
+      "default",
+      "ollama",
+      "qwen-reasoner",
+      "LOCAL REASONER",
+    ]) {
+      fireEvent.change(screen.getByRole("searchbox"), {
+        target: { value: term },
+      });
+      expect(
+        screen.queryByRole("button", { name: /Builder Team/ }),
+      ).not.toBeInTheDocument();
+    }
+
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
+    const teamRow = screen.getByRole("button", { name: /Builder Team/ });
+    expect(within(teamRow).getByText(/No model set/i)).toBeVisible();
+    fireEvent.click(teamRow);
+    expect(
+      within(screen.getByRole("complementary")).getByText("No model set"),
+    ).toBeVisible();
+  });
+
+  it("searches explicit team model alias, provider, ID, and display name", () => {
+    seedDashboard({
+      config: {
+        ...config,
+        models: {
+          ...config.models,
+          fast: {
+            provider: "openai",
+            id: "gpt-fast",
+            display_name: "Fast model",
+          },
+        },
+      },
+      teams: [{ ...teams[0], model: "fast" }],
+    });
+    renderDashboard();
+
+    for (const term of ["fast", "openai", "gpt-fast", "FAST MODEL"]) {
+      fireEvent.change(screen.getByRole("searchbox"), {
+        target: { value: term },
+      });
+      expect(
+        screen.getByRole("button", { name: /Builder Team/ }),
+      ).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: /Builder Team/ }));
     expect(
       within(screen.getByRole("complementary")).getByText(
         "fast · openai/gpt-fast",

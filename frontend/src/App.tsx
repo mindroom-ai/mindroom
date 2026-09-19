@@ -40,10 +40,6 @@ import {
 
 const queryClient = new QueryClient();
 
-export function resolveCurrentTab(pathname: string): string {
-  return getNavigationValue(pathname);
-}
-
 function RoutePanel({
   active,
   label,
@@ -110,7 +106,7 @@ function AppContent() {
   const location = useLocation();
 
   // Get the current tab from URL or default to 'dashboard'
-  const currentTab = resolveCurrentTab(location.pathname);
+  const currentTab = getNavigationValue(location.pathname);
   const currentNavItem =
     NAV_ITEMS.find((item) => item.value === currentTab) || NAV_ITEMS[0];
   const validationIssues = getConfigValidationIssues(diagnostics);

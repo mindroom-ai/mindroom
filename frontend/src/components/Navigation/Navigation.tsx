@@ -16,7 +16,7 @@ import {
   type LucideIcon,
   Users,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import {
@@ -165,6 +165,10 @@ export function Navigation({ mode = "all", className }: NavigationProps) {
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const currentValue = getNavigationValue(location.pathname);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [location.pathname]);
 
   return (
     <>

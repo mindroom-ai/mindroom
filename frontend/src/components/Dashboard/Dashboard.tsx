@@ -239,7 +239,9 @@ function TeamDetails({
     <dl>
       <DetailRow label="Role">{team.role || "No role set"}</DetailRow>
       <DetailRow label="Mode">{team.mode}</DetailRow>
-      <DetailRow label="Model">{modelLabel(team.model)}</DetailRow>
+      <DetailRow label="Model">
+        {team.model === null ? "No model set" : modelLabel(team.model)}
+      </DetailRow>
       <DetailRow label="Members">
         {team.agents.length > 0
           ? displayNames(team.agents, agents).join(", ")
@@ -338,7 +340,8 @@ export function Dashboard() {
     const teamItems = teams.map<DirectoryItem>((team) => {
       const agentNames = displayNames(team.agents, agents);
       const roomNames = displayNames(team.rooms, rooms);
-      const model = resolveModelMetadata(team.model, config);
+      const model =
+        team.model === null ? null : resolveModelMetadata(team.model, config);
       return {
         kind: "team",
         id: team.id,
@@ -346,7 +349,7 @@ export function Dashboard() {
         description: team.role || "No role set",
         metadata: [
           team.mode,
-          `model ${model.alias}`,
+          model ? `model ${model.alias}` : "No model set",
           team.agents.length > 0
             ? `members ${agentNames.join(", ")}`
             : "no members",
@@ -357,12 +360,13 @@ export function Dashboard() {
           team.display_name,
           team.role,
           team.mode,
-          model.searchText,
+          model?.searchText,
           ...team.agents,
           ...agentNames,
           ...team.rooms,
           ...roomNames,
         ]
+          .filter(Boolean)
           .join(" ")
           .toLocaleLowerCase(),
       };
