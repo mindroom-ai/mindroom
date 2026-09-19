@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, useLocation } from "react-router-dom";
 import { useConfigStore } from "@/store/configStore";
@@ -109,6 +109,7 @@ function AppContent() {
   const currentTab = getNavigationValue(location.pathname);
   const currentNavItem =
     NAV_ITEMS.find((item) => item.value === currentTab) || NAV_ITEMS[0];
+  const previousSelectedRoomIdRef = useRef(selectedRoomId);
   const validationIssues = getConfigValidationIssues(diagnostics);
   const globalDiagnostics = getGlobalConfigDiagnostics(diagnostics);
   const blockingDiagnostic =
@@ -146,6 +147,36 @@ function AppContent() {
     // Load configuration on mount
     loadConfig();
   }, [loadConfig]);
+
+  useLayoutEffect(() => {
+    const previousSelectedRoomId = previousSelectedRoomIdRef.current;
+    previousSelectedRoomIdRef.current = selectedRoomId;
+
+    if (
+      currentTab === "rooms" &&
+      window.innerWidth < 1024 &&
+      previousSelectedRoomId === null &&
+      selectedRoomId !== null
+    ) {
+      const workspace = document.querySelector<HTMLElement>(".rooms-workspace");
+      const roomsLayout =
+        workspace?.querySelector<HTMLElement>(".rooms-layout");
+      if (workspace && roomsLayout) {
+        const workspaceTop = workspace.getBoundingClientRect().top;
+        const layoutTop = roomsLayout.getBoundingClientRect().top;
+        const paddingTop = Number.parseFloat(
+          window.getComputedStyle(workspace).paddingTop,
+        );
+        workspace.scrollTo(
+          0,
+          Math.max(
+            0,
+            workspace.scrollTop + layoutTop - workspaceTop - paddingTop,
+          ),
+        );
+      }
+    }
+  }, [currentTab, selectedRoomId]);
 
   const getPlatformUrl = () => {
     const configured = (import.meta as any).env?.VITE_PLATFORM_URL as
@@ -495,24 +526,30 @@ function AppContent() {
               <RoutePanel
                 active={currentTab === "rooms"}
                 label="Rooms"
-                className="min-h-0 flex-1 overflow-hidden p-3 md:p-5"
+                className="rooms-workspace min-h-0 flex-1 overflow-y-auto p-3 md:p-5 lg:overflow-hidden"
               >
-                <div className="flex h-full flex-col gap-3 sm:gap-4">
+                <div className="rooms-stack flex min-h-full flex-col gap-3 sm:gap-4 lg:h-full lg:min-h-0">
                   <RoomAdmins />
-                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 flex-1 min-h-0">
+                  <div className="rooms-layout grid grid-cols-1 gap-3 sm:gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-12">
                     <div
-                      className={`col-span-1 lg:col-span-4 h-full overflow-hidden ${
+                      className={`col-span-1 overflow-visible lg:col-span-4 lg:h-full lg:overflow-hidden ${
                         selectedRoomId ? "hidden lg:block" : "block"
                       }`}
                     >
                       <RoomList />
                     </div>
                     <div
-                      className={`col-span-1 lg:col-span-8 h-full overflow-hidden ${
+                      className={`col-span-1 overflow-visible lg:col-span-8 lg:h-full lg:overflow-hidden ${
                         selectedRoomId ? "block" : "hidden lg:block"
                       }`}
                     >
-                      <RoomEditor />
+                      <RoomEditor
+                        key={
+                          selectedRoomId === null
+                            ? "no-room"
+                            : `room:${selectedRoomId}`
+                        }
+                      />
                     </div>
                   </div>
                 </div>
