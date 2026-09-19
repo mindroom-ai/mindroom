@@ -841,3 +841,14 @@ This introduces no new store or database migration.
 The third gap allowed a delegated child's generic tool to detach when excluded delegation supplied no outer job.
 Nested tools now keep the native child owner even after a human follow-up.
 Regression coverage executes agent/team approvals, streaming and blocking, changes exclusions in both directions, verifies later calls and new runs, checks disabled restart parking, and interrupts a real slow child tool.
+
+The next independent review found three additional gaps outside the exclusion parser.
+Direct toolkit construction now captures authored options just like registry construction, so configured Dynamic Workflow tools pass unchanged grants and lose access after those options change.
+Terminal-only text fallback now belongs to the response attempt, preventing a nested tool completion from causing the parent's streamed prose to repeat, including when background jobs are disabled.
+
+Synchronous completion ownership now belongs to each SDK call inside an accepted job, including embedded agents that construct their own models.
+This moves the existing tracker and dispatch drain to the shared SDK boundary instead of sharing one tracker across an entire async workflow.
+Async calls receive independent leaf trackers; sync calls retain their complete worker dispatch, including hook cleanup on a worker-local event loop.
+The adapter is gated by accepted execution ownership, so foreground execution keeps the SDK's normal behavior.
+Real workflow regressions execute multiple calculator calls sequentially and in parallel.
+Cancellation regressions verify that all started nested threads finish before job settlement and resource cleanup, with both sync and async hooks.

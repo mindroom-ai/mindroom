@@ -62,8 +62,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-type _CallResult = tuple[bool | AgentRunException, Timer, FunctionCall, FunctionExecutionResult]
-type _Execute = Callable[[FunctionCall], Coroutine[object, object, _CallResult]]
+type ToolCallResult = tuple[bool | AgentRunException, Timer, FunctionCall, FunctionExecutionResult]
+type _Execute = Callable[[FunctionCall], Coroutine[object, object, ToolCallResult]]
 _EVENT_TYPES = {**RUN_EVENT_TYPE_REGISTRY, **TEAM_RUN_EVENT_TYPE_REGISTRY, **WORKFLOW_RUN_EVENT_TYPE_REGISTRY}
 
 
@@ -198,6 +198,31 @@ def _restore_control(payload: dict[str, Any]) -> AgentRunException:
     return AgentRunException(values.pop("message"), **values)
 
 
+async def execute_owned_tool_call(original: _Execute, call: FunctionCall) -> ToolCallResult:
+    """Drain one SDK dispatch without sharing its synchronous leaf with nested calls."""
+    if not job_owns_execution():
+        return await original(call)
+    tracker = SyncToolCompletionTracker()
+    asynchronous = (
+        inspect.iscoroutinefunction(call.function.entrypoint)
+        or inspect.isasyncgenfunction(call.function.entrypoint)
+        or inspect.iscoroutine(call.function.entrypoint)
+        or any(inspect.iscoroutinefunction(hook) for hook in call.function.tool_hooks or [])
+    )
+    try:
+        with track_sync_tool_completion(tracker if asynchronous else None):
+            invocation = original(call)
+            if asynchronous:
+                return await invocation
+            # A synchronous hook bridge can create a worker-local loop. Retain
+            # its whole dispatch instead of a leaf task bound to another loop.
+            return await run_coroutine_until_complete(invocation)
+    finally:
+        started = tracker.started_task()
+        if started is not None:
+            await run_coroutine_until_complete(_drain_sync(started))
+
+
 async def _run_operation(
     original: _Execute,
     owned_call: FunctionCall,
@@ -205,28 +230,14 @@ async def _run_operation(
     baseline: dict[str, Any],
     reference: ExecutionResourceReference,
 ) -> BackgroundOutcome:
-    tracker = SyncToolCompletionTracker()
-    asynchronous = (
-        inspect.iscoroutinefunction(owned_call.function.entrypoint)
-        or inspect.isasyncgenfunction(owned_call.function.entrypoint)
-        or any(inspect.iscoroutinefunction(hook) for hook in owned_call.function.tool_hooks or [])
-    )
     try:
         with (
             tool_execution_identity(owner),
-            track_sync_tool_completion(tracker if asynchronous else None),
             authorized_tool_call(owner, owned_call.function, arguments=owned_call.arguments),
         ):
             await job_checkpoint()
             check_current_execution_authority()
-            invocation = original(owned_call)
-            if asynchronous:
-                success, timer, _, result = await invocation
-            else:
-                # Own the SDK's complete offloaded dispatch. A sync hook bridge
-                # may create a worker-local loop whose leaf tasks cannot be
-                # retained by the tracker on this loop.
-                success, timer, _, result = await run_coroutine_until_complete(invocation)
+            success, timer, _, result = await original(owned_call)
             value, events, replay = await _drain_result(result.result)
             isolated = owned_call.function._run_context
             delta = session_state_delta(baseline, isolated.session_state or {}) if isolated is not None else {}
@@ -245,9 +256,6 @@ async def _run_operation(
                 result_payload=payload,
             )
     finally:
-        started = tracker.started_task()
-        if started is not None:
-            await run_coroutine_until_complete(_drain_sync(started))
         await reference.release()
 
 
@@ -257,7 +265,7 @@ async def _consume_result(
     token: str,
     call: FunctionCall,
     timer: Timer,
-) -> _CallResult:
+) -> ToolCallResult:
     payload = job.result_payload or {}
     timer.elapsed_time = payload.get("elapsed", timer.elapsed)
     try:
@@ -291,7 +299,7 @@ async def _consume_result(
     return success, timer, call, result
 
 
-async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolWaitMode) -> _CallResult:
+async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolWaitMode) -> ToolCallResult:
     inline_call = (
         call
         if is_job_function(call.function) or mode == "native"
@@ -302,7 +310,7 @@ async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolW
     return success, timer, call, result
 
 
-def _failed_call(call: FunctionCall, error: ValueError) -> _CallResult:
+def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
     """Expose invalid framework arguments through Agno's ordinary tool failure contract."""
     with Timer() as timer:
         call.error = str(error)
@@ -312,7 +320,7 @@ def _failed_call(call: FunctionCall, error: ValueError) -> _CallResult:
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
-    async def execute(call: FunctionCall) -> _CallResult:  # noqa: C901 - Keep admission and cleanup together.
+    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901 - Keep admission and cleanup together.
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()

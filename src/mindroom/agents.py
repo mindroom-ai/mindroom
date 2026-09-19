@@ -43,7 +43,7 @@ from mindroom.tool_system.catalog import (
     ensure_tool_registry_loaded,
     get_tool_by_name,
 )
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
@@ -615,6 +615,7 @@ def _wrap_direct_agent_toolkit_for_output_files(
     toolkit: Toolkit,
     *,
     tool_name: str,
+    tool_config_overrides: dict[str, object] | None,
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
     tool_output_auto_save_threshold_bytes: int,
@@ -625,7 +626,10 @@ def _wrap_direct_agent_toolkit_for_output_files(
         runtime_paths,
         tool_output_auto_save_threshold_bytes,
     )
-    return bind_toolkit_construction(wrap_toolkit_for_output_files(toolkit, policy), ToolConstruction(tool_name, None))
+    return bind_toolkit_construction(
+        wrap_toolkit_for_output_files(toolkit, policy),
+        ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
+    )
 
 
 @timed("system_prompt_assembly.agent_create.model_instance")
@@ -702,6 +706,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 execution_identity=execution_identity,
             ),
             tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -737,6 +742,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 refresh_scheduler=refresh_scheduler,
             ),
             tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -748,6 +754,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         return _wrap_direct_agent_toolkit_for_output_files(
             SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
             tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -764,6 +771,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 execution_identity=execution_identity,
             ),
             tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -775,6 +783,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         return _wrap_direct_agent_toolkit_for_output_files(
             DynamicWorkflowTools(),
             tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -786,6 +795,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
         return _wrap_direct_agent_toolkit_for_output_files(
             ReportPublishingTools(),
             tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
@@ -829,6 +839,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
                 hidden_tool_names=hidden_tool_names,
             ),
             tool_name=tool_name,
+            tool_config_overrides=tool_config_overrides,
             agent_runtime=agent_runtime,
             runtime_paths=runtime_paths,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,

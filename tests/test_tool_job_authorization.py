@@ -11,6 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 import mindroom.tool_jobs.authorization as authorization_module
+from mindroom.agents import build_agent_toolkit
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, ToolConfigEntry
@@ -38,6 +39,44 @@ if TYPE_CHECKING:
 
 
 _OWNER = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
+
+
+def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> None:
+    """Direct toolkit construction admits its current options and rejects changed ones."""
+    entry = ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]})
+    config = Config(agents={"lead": AgentConfig(display_name="Lead", tools=[entry])})
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    toolkit = build_agent_toolkit(
+        entry.name,
+        agent_name="lead",
+        config=config,
+        runtime_paths=paths,
+        worker_tools=[],
+        runtime_overrides=None,
+        tool_config_overrides=config.resolve_entity("lead").authored_tool_configs[0].tool_config_overrides,
+        execution_identity=_OWNER,
+        session_id=_OWNER.session_id,
+    )
+    assert toolkit is not None
+    bind_toolkit_authority(toolkit, authored_name=entry.name)
+    function = toolkit.get_async_functions()["list_workflows"]
+    function._agent = Agent(metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, "lead")})
+    authority = function_authority(function)
+
+    def allowed() -> bool:
+        return locally_allowed(
+            config,
+            _OWNER,
+            tool_name=function.name,
+            toolkit_name=function.owning_toolkit,
+            origin={},
+            depth=0,
+            authority=authority,
+        )
+
+    assert allowed()
+    entry.overrides.clear()
+    assert not allowed()
 
 
 def _calculator_authority(config: Config) -> dict[str, object]:

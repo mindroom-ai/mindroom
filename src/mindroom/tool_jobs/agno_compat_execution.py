@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import partial, wraps
 from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from agno.agent import _tools as agent_tools
+from agno.models.base import Model
 from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.team import TeamRunOutput
@@ -17,6 +19,7 @@ from mindroom.custom_tools.job import is_job_function, project_native_job_wait
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
 from mindroom.tool_jobs.agno_execution import (
     call_wait_mode,
+    execute_owned_tool_call,
     is_background_job_excluded,
     is_framework_function,
     wrap_tool_execution,
@@ -30,13 +33,14 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
-    from agno.models.base import Model
     from agno.models.fallback import FallbackConfig
     from agno.tools.function import FunctionCall
 
+    from mindroom.tool_jobs.agno_execution import ToolCallResult
 
-_METADATA_BOUND = False
-_METADATA_LOCK = Lock()
+
+_SDK_BINDINGS_INSTALLED = False
+_SDK_BINDINGS_LOCK = Lock()
 
 
 def _wrap_wait_metadata[**P, R](original: Callable[P, R]) -> Callable[P, R]:
@@ -66,13 +70,31 @@ def _wrap_wait_metadata[**P, R](original: Callable[P, R]) -> Callable[P, R]:
 # Upstream PR: None identified.
 # Remove when: SDK preserves owner-controlled per-call metadata through approval continuation.
 # Coverage: tests/test_tool_job_approval_modes.py, tests/test_tool_job_restart_integration.py.
-def _install_wait_metadata_bindings() -> None:
-    global _METADATA_BOUND
-    with _METADATA_LOCK:
-        if not _METADATA_BOUND:
+def _install_sdk_bindings() -> None:
+    global _SDK_BINDINGS_INSTALLED
+    with _SDK_BINDINGS_LOCK:
+        if not _SDK_BINDINGS_INSTALLED:
             vars(agent_tools)["determine_tools_for_model"] = _wrap_wait_metadata(agent_tools.determine_tools_for_model)
             vars(team_tools)["_determine_tools_for_model"] = _wrap_wait_metadata(team_tools._determine_tools_for_model)
-            _METADATA_BOUND = True
+            _install_owned_dispatch_binding()
+            _SDK_BINDINGS_INSTALLED = True
+
+
+# AGNO_COMPAT: Own every nested SDK dispatch inside accepted background execution.
+# Reason: Embedded agents may bypass MindRoom's model construction; SDK sync dispatch
+# offloads a complete hook chain whose thread outlives cancellation of its waiter.
+# Upstream issue: No matching public accepted-call completion owner identified.
+# Upstream PR: None identified.
+# Remove when: SDK dispatch retains synchronous work until its resource owner can close.
+# Coverage: tests/test_tool_job_workflows.py, tests/test_tool_job_execution.py.
+def _install_owned_dispatch_binding() -> None:
+    original = Model.arun_function_call
+
+    @wraps(original)
+    async def execute(model: Model, function_call: FunctionCall) -> ToolCallResult:
+        return await execute_owned_tool_call(partial(original, model), function_call)
+
+    type.__setattr__(Model, "arun_function_call", execute)
 
 
 # AGNO_COMPAT: Project framework parameters before provider-specific schema conversion.
@@ -136,7 +158,7 @@ def install_tool_job_execution(
     depth: int = 0,
 ) -> None:
     """Bind the approved-call owner to primary and concrete fallback models."""
-    _install_wait_metadata_bindings()
+    _install_sdk_bindings()
     install_execution_resource_bindings()
     models = [model]
     if fallback_config is not None:

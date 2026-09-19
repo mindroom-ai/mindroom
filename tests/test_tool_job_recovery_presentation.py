@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -34,8 +35,43 @@ from tests.test_stale_stream_cleanup import _aiter, _make_message_event, _room_g
 from tests.test_subagent_runtime import _job
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+async def test_nested_completion_does_not_repeat_parent_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool's completion event cannot reset the owning attempt's text fallback."""
+
+    async def tool_stream() -> AsyncIterator[RunContentEvent | RunCompletedEvent]:
+        yield RunContentEvent(content="Nested text.", run_id="nested-run")
+        yield RunCompletedEvent(content="Nested text.", run_id="nested-run")
+
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(content="Starting. ", tool_calls=[_call("tool_stream", "call")]),
+            ModelResponse(content=""),
+        ],
+    )
+    agent = Agent(id="general", model=model, tools=[tool_stream], telemetry=False)
+    config = _config()
+    config.memory.backend = "none"
+    assert not config.background_tool_jobs.enabled
+    monkeypatch.setattr("mindroom.ai._prepare_agent_and_prompt", AsyncMock(return_value=_prepared_prompt_result(agent)))
+
+    body = await ai_response(
+        make_turn_context("general", session_id="session1"),
+        prompt="Run the tool.",
+        runtime_paths=_runtime_paths(tmp_path),
+        config=config,
+        collect_streamed_response=True,
+        show_tool_calls=False,
+    )
+
+    assert body == "Starting. Nested text."
 
 
 @pytest.mark.asyncio

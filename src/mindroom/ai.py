@@ -2063,7 +2063,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             entity_name=agent_name,
         )
 
-    async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0915
+    async def _run_streaming_attempt(  # noqa: C901, PLR0911, PLR0912, PLR0915
         run: TurnRunState,
         continuation_state: DynamicContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
@@ -2307,6 +2307,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             return
 
+        # Only the owning attempt can supply terminal-only text. Nested tool
+        # completions must not reset this attempt's record of streamed content.
+        if not state.assistant_text and state.canonical_final_body_candidate:
+            yield RunContentEvent(content=state.canonical_final_body_candidate)
+
         metadata_content: dict[str, Any] | None = None
         final_status = RunStatus.error if _stream_completed_without_visible_output(state) else RunStatus.completed
         if run_metadata_collector is not None:
@@ -2402,16 +2407,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     content=initial.response_text.rstrip() + "\n\n" if initial.response_text else "",
                     tool_trace=list(deepcopy(initial.tool_trace)),
                 )
-            attempt_has_content = False
             async for chunk in closing_stream:
-                if isinstance(chunk, RunContentEvent) and chunk.content:
-                    attempt_has_content = True
-                elif isinstance(chunk, RunCompletedEvent):
-                    # Prior attempts or recovery text must not hide an answer
-                    # reported only in this attempt's terminal event.
-                    if not attempt_has_content and chunk.content:
-                        yield RunContentEvent(content=str(chunk.content))
-                    attempt_has_content = False
                 yield chunk
     finally:
         _reset_reusable_agent_context(reusable_agent, reusable_agent_base_context)
