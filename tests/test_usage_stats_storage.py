@@ -7,7 +7,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import RunMetrics
+from agno.metrics import ModelMetrics, RunMetrics
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -343,11 +343,41 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, le
         session,
         TeamRunOutput(
             team_id="engineering",
-            metrics=RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10),
+            metrics=RunMetrics(
+                input_tokens=7,
+                output_tokens=3,
+                total_tokens=10,
+                details={
+                    "model": [
+                        ModelMetrics(
+                            id="model-a",
+                            provider="provider-a",
+                            input_tokens=7,
+                            output_tokens=3,
+                            total_tokens=10,
+                        ),
+                    ],
+                },
+            ),
             member_responses=[
                 RunOutput(
                     agent_id="code",
-                    metrics=RunMetrics(input_tokens=14, output_tokens=6, total_tokens=20),
+                    metrics=RunMetrics(
+                        input_tokens=14,
+                        output_tokens=6,
+                        total_tokens=20,
+                        details={
+                            "model": [
+                                ModelMetrics(
+                                    id="model-b",
+                                    provider="provider-b",
+                                    input_tokens=14,
+                                    output_tokens=6,
+                                    total_tokens=20,
+                                ),
+                            ],
+                        },
+                    ),
                 ),
             ],
         ),
@@ -374,6 +404,10 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, le
     row = result[0]
     assert isinstance(row, UsageSessionRow)
     assert row.session_metrics == {"input_tokens": 21, "output_tokens": 9, "total_tokens": 30}
+    assert [(entry.model_provider, entry.model, dict(entry.metrics)) for entry in row.session_model_metrics or ()] == [
+        ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
+        ("provider-b", "model-b", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
+    ]
     assert row.runs == ()
     assert row.runs_available is True
     assert row.session_metrics_available is True
