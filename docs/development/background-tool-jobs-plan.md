@@ -822,10 +822,22 @@ Explicit lists replace the default `[shell]`, including an empty list.
 Native delegation applies the same policy before accepting fresh subagent and follow-up turns.
 Saved approval continuations retain their accepted execution owner in either direction when exclusions change.
 The already-recovered job index distinguishes accepted background work from foreground continuations; authorized lookup still controls access.
-No additional persisted field or migration is required.
+Native delegation reuses its existing persisted owners without a migration.
 
 Integration coverage exercises real plugin loading and SDK dispatch for agents and teams, native argument preservation, startup pinning, config-command restart notices, excluded delegation, stale wait rejection, and approval recovery after exclusions change.
 Verification passed: 212 focused tests; the full Python 3.13 suite passed 22,784 tests with 25 optional/environment skips, including 27 process/storage cases run separately.
 A real-model Matrix run passed 14 independent checks across native shell completion/cancellation, exact output capture, a human follow-up, both excluded plugin functions, native timeout argument preservation, and ordinary generic jobs alongside them.
 Repository hooks, type checks, Tach, and module privacy checks passed.
 Independent review status is tracked on the PR.
+
+Independent review identified three approval/lifetime gaps in the first configurable version.
+Excluded plugins could have a native argument named `wait_timeout` mistaken for managed ownership, and a config change could reinterpret a saved generic approval's arguments.
+The dispatch adapter now captures each call's wait mode in the existing SDK run metadata before approval, keyed by exact run and call identity.
+Continuation restores that metadata through the existing saved-run path; later calls use the current policy.
+The SDK tool-preparation adapter binds the exact stored run's wait metadata into its active context, including team members, and publishes later call captures back into the saved run.
+Pause ownership comes from the captured mode instead of argument-name inference.
+This introduces no new store or database migration.
+
+The third gap allowed a delegated child's generic tool to detach when excluded delegation supplied no outer job.
+Nested tools now keep the native child owner even after a human follow-up.
+Regression coverage executes agent/team approvals, streaming and blocking, changes exclusions in both directions, verifies later calls and new runs, checks disabled restart parking, and interrupts a real slow child tool.

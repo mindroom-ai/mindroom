@@ -52,6 +52,7 @@ from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPrese
 from mindroom.tool_jobs.completion import join_conversation_jobs, report_background_wait
 from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.wait_timeout import run_uses_managed_waits
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import BackgroundWaitChunk, append_stream_text
 
@@ -535,10 +536,6 @@ def _paused_attempt(
     requires_background_tool_jobs: bool = False,
 ) -> PausedAttempt | None:
     """Build one restartable pause from Agno's common pause fields."""
-    requires_background_tool_jobs = requires_background_tool_jobs or _tools_use_background_tool_jobs(
-        tools,
-        requirements,
-    )
     if any(_has_unsupported_approval_requirement(requirement) for requirement in requirements):
         msg = "Paused run contains an unsupported non-confirmation requirement"
         raise RuntimeError(msg)
@@ -595,26 +592,9 @@ def _paused_attempt(
     )
 
 
-def _tools_use_background_tool_jobs(
-    tools: Sequence[ToolExecution],
-    requirements: Sequence[RunRequirement],
-) -> bool:
-    """Recognize feature wait metadata across the complete paused run."""
-    executions = [
-        *tools,
-        *(requirement.tool_execution for requirement in requirements if requirement.tool_execution),
-    ]
-    return any("wait_timeout" in (tool.tool_args or {}) for tool in executions)
-
-
 def _run_uses_background_tool_jobs(response: RunOutput | TeamRunOutput) -> bool:
     """Classify exact feature ownership while the paused SDK run is available."""
-    if _tools_use_background_tool_jobs(response.tools or (), response.requirements or ()):
-        return True
-    delegation = DelegationState.from_metadata(response.metadata)
-    if any("wait_timeout" in hook.arguments for hook in delegation.hooks.values()):
-        return True
-    if any("wait_timeout" in (tool.get("tool_args") or {}) for tool in delegation.pending_tools):
+    if run_uses_managed_waits(response.metadata, response.run_id):
         return True
     return isinstance(response, TeamRunOutput) and any(
         _run_uses_background_tool_jobs(member) for member in response.member_responses

@@ -427,6 +427,7 @@ depends_on = [
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.completion",
+    "mindroom.tool_jobs.wait_timeout",
     "mindroom.tool_system.events",
 ]
 visibility = [
@@ -6980,6 +6981,7 @@ visibility = [
 path = "mindroom.tool_jobs.wait_timeout"
 depends_on = []
 visibility = [
+    "mindroom.response_turn",
     "mindroom.tool_jobs.agno_compat_execution",
     "mindroom.tool_jobs.agno_execution",
     "mindroom.delegation.execution",

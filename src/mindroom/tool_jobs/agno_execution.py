@@ -39,7 +39,13 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
-from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
+from mindroom.tool_jobs.wait_timeout import (
+    ToolWaitMode,
+    application_arguments,
+    read_wait_timeout,
+    record_tool_wait_mode,
+    saved_tool_wait_mode,
+)
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
@@ -81,6 +87,23 @@ def is_framework_function(function: Function) -> bool:
         and origin["qualname"] is not None
         and ("get_delegate_task" in origin["qualname"] or "get_forward_task" in origin["qualname"])
     )
+
+
+def call_wait_mode(call: FunctionCall, *, depth: int) -> ToolWaitMode:
+    """Freeze a call's argument/owner policy before the SDK can pause for approval."""
+    run = call.function._run_context
+    if run is not None and call.call_id and (saved := saved_tool_wait_mode(run.metadata, run.run_id, call.call_id)):
+        return saved
+    mode: ToolWaitMode = "managed"
+    if is_background_job_excluded(call.function) or is_framework_function(call.function):
+        mode = "native"
+    elif not is_job_function(call.function) and (
+        job_owns_execution() or depth > 0 or call.function.stop_after_tool_call
+    ):
+        mode = "inline"
+    if run is not None and run.metadata is not None and call.call_id:
+        record_tool_wait_mode(run.metadata, run.run_id, call.call_id, mode)
+    return mode
 
 
 def _copy_call(call: FunctionCall) -> FunctionCall:
@@ -268,10 +291,10 @@ async def _consume_result(
     return success, timer, call, result
 
 
-async def _execute_inline(original: _Execute, call: FunctionCall) -> _CallResult:
+async def _execute_inline(original: _Execute, call: FunctionCall, *, mode: ToolWaitMode) -> _CallResult:
     inline_call = (
         call
-        if is_job_function(call.function) or is_background_job_excluded(call.function)
+        if is_job_function(call.function) or mode == "native"
         else call.model_copy(update={"arguments": application_arguments(call.arguments)})
     )
     success, timer, _, result = await original(inline_call)
@@ -286,7 +309,7 @@ def _failed_call(call: FunctionCall, error: ValueError) -> _CallResult:
         return False, timer, call, FunctionExecutionResult(status="failure", error=call.error)
 
 
-def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901 - Keep admission and cleanup together.
+def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
     async def execute(call: FunctionCall) -> _CallResult:  # noqa: C901 - Keep admission and cleanup together.
@@ -295,10 +318,11 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         resources = current_execution_resources()
         if runtime is None or context is None or resources is None or is_framework_function(call.function):
             return await original(call)
+        mode = call_wait_mode(call, depth=depth)
         try:
             wait_timeout = (
                 None
-                if is_background_job_excluded(call.function)
+                if mode == "native"
                 else read_wait_timeout(
                     call.arguments,
                     owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
@@ -319,13 +343,12 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
             check_current_execution_authority()
             if (
-                is_background_job_excluded(call.function)
-                or job_owns_execution()
+                mode != "managed"
                 or is_job_function(call.function)
                 or call.function.external_execution
                 or call.function.stop_after_tool_call
             ):
-                return await _execute_inline(original, call)
+                return await _execute_inline(original, call, mode=mode)
         run_context = call.function._run_context
         if run_context is None or not run_context.run_id or not call.call_id:
             msg = "Managed tool execution requires an exact run and tool-call identity"

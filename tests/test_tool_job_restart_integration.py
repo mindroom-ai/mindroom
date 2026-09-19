@@ -14,6 +14,7 @@ from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ModelResponse
 from agno.run.base import RunStatus
+from agno.tools import Toolkit
 from agno.tools.function import Function
 
 from mindroom import response_runner
@@ -40,11 +41,13 @@ from mindroom.response_turn import (
     run_blocking_response_turn,
 )
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.events import format_tool_started_event
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -286,14 +289,17 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_timeout", [False, True])
 async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa: PLR0915 - Real SDK pause and disabled startup.
     tmp_path: Path,
+    native_timeout: bool,
 ) -> None:
     """Disabled startup trusts the real writer marker after session storage moves."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     config = bot.config
     config.background_tool_jobs.enabled = True
+    config.background_tool_jobs.exclude_toolkits = ["test_toolkit"] if native_timeout else []
     paths = bot.runtime_paths
     owner = ToolExecutionIdentity(
         channel="matrix",
@@ -315,13 +321,16 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
     register_background_runtime(paths, runtime)
     side_effects: list[str] = []
 
-    async def write_report() -> str:
-        side_effects.append("executed")
+    async def write_report(wait_timeout: int | None = None) -> str:
+        side_effects.append(f"executed:{wait_timeout}")
         return "approved report"
 
     function = Function.from_callable(write_report)
     function.requires_confirmation = True
     function.owning_toolkit = "test_toolkit"
+    toolkit = Toolkit(name="test_toolkit", tools=[function])
+    bind_toolkit_construction(toolkit, ToolConstruction("test_toolkit", None))
+    bind_toolkit_authority(toolkit, authored_name="test_toolkit")
     paused_model = DelegationModel(
         id="test",
         responses=[
@@ -333,7 +342,8 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
     actor = Agent(
         id="general",
         model=paused_model,
-        tools=[function, JobTools(paths, owner)],
+        tools=[toolkit, JobTools(paths, owner)],
+        metadata={},
         db=storage,
         telemetry=False,
     )
@@ -413,7 +423,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
 
         saved = await store.approval_continuation_for_source("$approval-source")
         assert saved is not None
-        assert saved.requires_background_tool_jobs is True
+        assert saved.requires_background_tool_jobs is (not native_timeout)
 
         storage.close()
         config.agents["general"].private = AgentPrivateConfig(per="user")
@@ -430,8 +440,8 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         source_event_id = "$approval-source"
         event = await store.load_event(source_event_id)
         assert event is not None
-        assert approval_is_parked(paths, saved.approval_id)
-        assert event_is_parked(config, paths, "general", event)
+        assert approval_is_parked(paths, saved.approval_id) is (not native_timeout)
+        assert event_is_parked(config, paths, "general", event) is (not native_timeout)
         assert await store.is_pending(source_event_id)
         assert side_effects == []
     finally:

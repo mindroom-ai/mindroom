@@ -327,7 +327,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
                 ],
             ),
             {("general", "report"): "reports"},
-            True,
+            False,
         ),
         (
             RunOutput(
@@ -354,7 +354,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
                 },
             ),
             {("general", "report"): "reports"},
-            True,
+            False,
         ),
         (
             RunOutput(
@@ -375,7 +375,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
                 },
             ),
             {("general", "report"): "reports"},
-            True,
+            False,
         ),
         (
             TeamRunOutput(
@@ -402,7 +402,7 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
                 ],
             ),
             {("general", "report"): "reports"},
-            True,
+            False,
         ),
         (
             RunOutput(
@@ -422,10 +422,10 @@ def test_paused_attempt_from_team_requirement_keeps_invoking_member_identity() -
         ),
     ],
     ids=[
-        "null-wait",
-        "delegation-hook",
-        "delegation-pending-tool",
-        "team-member",
+        "uncaptured-null-wait",
+        "native-delegation-hook",
+        "native-delegation-pending-tool",
+        "native-team-member",
         "ordinary",
     ],
 )
@@ -443,11 +443,13 @@ def test_paused_attempt_records_background_tool_job_ownership(
     )
 
     assert paused is not None
+    # Argument names alone do not establish managed ownership. Real SDK capture,
+    # including managed team members, is exercised by test_tool_job_approval_modes.
     assert paused.requires_background_tool_jobs is expected
 
 
-def test_streamed_pause_classifies_completed_background_tool_before_ordinary_approval() -> None:
-    """The pause event carries the full run tool list, including earlier completed feature work."""
+def test_streamed_pause_does_not_infer_ownership_from_native_argument_names() -> None:
+    """The retained SDK run supplies ownership; its earlier event lacks that evidence."""
     earlier = ToolExecution(
         tool_call_id="earlier",
         tool_name="report",
@@ -478,7 +480,7 @@ def test_streamed_pause_classifies_completed_background_tool_before_ordinary_app
 
     assert paused is not None
     assert paused.tools == (pending,)
-    assert paused.requires_background_tool_jobs is True
+    assert paused.requires_background_tool_jobs is False
 
 
 def test_paused_attempt_rejects_confirmation_entries_without_call_ids() -> None:
