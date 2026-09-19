@@ -901,11 +901,11 @@ async def test_persisted_snapshot_is_canonical_without_mutating_the_live_session
 
 @pytest.mark.parametrize("surface", ["agent", "team", "workflow"])
 @pytest.mark.asyncio
-async def test_session_row_save_does_not_copy_run_history(
+async def test_session_row_save_does_not_copy_run_history_or_runtime_state(
     tmp_path: Path,
     surface: Literal["agent", "team", "workflow"],
 ) -> None:
-    """Saving a row must not traverse history that is persisted by separate run saves."""
+    """Saving a row must skip history and runtime-only caches such as accounted usage."""
 
     class UncopyableHistory:
         def __deepcopy__(self, _memo: dict[int, object]) -> None:
@@ -926,6 +926,7 @@ async def test_session_row_save_does_not_copy_run_history(
         assert session.runs is not None
         session.runs[0].content = history
     live_runs = session.runs
+    session.__dict__["_runtime_state"] = history
 
     try:
         await owner.asave_session(session)  # type: ignore[arg-type]
@@ -939,6 +940,7 @@ async def test_session_row_save_does_not_copy_run_history(
     assert session.runs is live_runs
     assert session.runs is not None
     assert session.runs[0].content is history
+    assert session.__dict__["_runtime_state"] is history
 
 
 def _session_with_row_metadata(

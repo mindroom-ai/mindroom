@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
 
-from mindroom import agno_compat_session_persistence, agno_compat_sqlite
+from mindroom import agno_compat_session_metrics, agno_compat_session_persistence, agno_compat_sqlite
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.legacy_usage_storage import migrate_usage_database
@@ -148,6 +148,7 @@ def _create_sqlite_state_storage(
             db_file=db_file,
             session_table=session_table,
         )
+        agno_compat_session_metrics.register_database(database)
         return database
 
 
@@ -298,6 +299,8 @@ class _ConversationSqliteDb(SqliteDb):
             user_id=None,
             deserialize=deserialize,
         )
+        if isinstance(session, (AgentSession, TeamSession)):
+            agno_compat_session_metrics.seed_accounted_usage(session)
         self._report_cache_counts()
         return session
 

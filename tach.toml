@@ -537,6 +537,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_storage"
 depends_on = [
+    "mindroom.agno_compat_session_metrics",
     "mindroom.agno_compat_sqlite",
     "mindroom.agno_compat_session_persistence",
     "mindroom.constants",
@@ -623,6 +624,11 @@ visibility = [
 path = "mindroom.agno_compat_session_persistence"
 depends_on = ["mindroom.background_tasks"]
 visibility = ["mindroom.agent_storage", "mindroom.ai"]
+
+[[modules]]
+path = "mindroom.agno_compat_session_metrics"
+depends_on = []
+visibility = ["mindroom.agent_storage"]
 
 [[modules]]
 path = "mindroom.agent_run_context"

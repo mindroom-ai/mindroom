@@ -142,6 +142,9 @@ def test_real_agno_continuation_replaces_the_accumulated_snapshot(usage_db: Sqli
     paused = actor.run("Run the tool", session_id="session", user_id="@alice:example.test")
     assert paused.status == RunStatus.paused
     assert _rows(usage_db)[0][1]["metrics"]["total_tokens"] == 10
+    saved = usage_db.get_session("session", session_type=SessionType.AGENT)
+    assert isinstance(saved, AgentSession)
+    assert saved.session_data["session_metrics"]["total_tokens"] == 10
     assert paused.requirements
     paused.requirements[0].confirm()
 
@@ -153,6 +156,10 @@ def test_real_agno_continuation_replaces_the_accumulated_snapshot(usage_db: Sqli
     assert len(rows) == 1
     assert rows[0][1]["metrics"]["total_tokens"] == 20
     assert rows[0][1]["metrics"]["cache_read_tokens"] == 4
+    saved = usage_db.get_session("session", session_type=SessionType.AGENT)
+    assert isinstance(saved, AgentSession)
+    assert saved.session_data["session_metrics"]["total_tokens"] == 20
+    assert saved.session_data["session_metrics"]["cache_read_tokens"] == 4
 
 
 def test_concurrent_saves_keep_run_and_usage_snapshots_consistent(usage_db: SqliteDb) -> None:

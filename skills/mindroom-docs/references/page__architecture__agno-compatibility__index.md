@@ -23,6 +23,7 @@ Paths are relative to `src/mindroom/`.
 
 | Agno weakness | Upstream issue / PR | Local workaround and remaining scope |
 | --- | --- | --- |
+| Session totals repeat cumulative run usage on checkpoints/resumes, or omit totals for bare sessions. | [PR #10353](https://github.com/agno-agi/agno/pull/10353), open. | `agno_compat_session_metrics.py`; remove after the pinned release includes the fix and approval, checkpoint, reload, and retained-history tests pass without the repair. |
 | Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `agno_compat_provider_errors.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
 | Deleted runs survive in legacy blobs or deletion spans separate transactions. | [Issue #9934](https://github.com/agno-agi/agno/issues/9934), [PR #9939](https://github.com/agno-agi/agno/pull/9939), both open. | `agno_compat_sqlite.py`; preserve owner descendant deletion when the atomic upstream fix ships. |
 | New runs can sort before surviving runs after deletion. | [Issue #9936](https://github.com/agno-agi/agno/issues/9936), [PR #9938](https://github.com/agno-agi/agno/pull/9938), both open. | `agno_compat_sqlite.py`; verify insertion after existing indexes with the local override disabled. |
@@ -87,6 +88,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | --- | --- | --- |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
+| `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
