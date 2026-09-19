@@ -1,3 +1,4 @@
+import { EntityAvatar } from "@/components/shared/EntityAvatar";
 import { useConfigStore } from "@/store/configStore";
 import type { Agent } from "@/types/config";
 import { Bot, MapPin } from "lucide-react";
@@ -46,6 +47,9 @@ export function AgentList() {
 
     return (
       <ItemCard
+        leading={
+          <EntityAvatar kind="agent" id={agent.id} name={agent.display_name} />
+        }
         id={agent.id}
         title={agent.display_name}
         description={agent.role}
