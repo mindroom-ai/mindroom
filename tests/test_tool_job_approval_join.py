@@ -142,20 +142,56 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
             @owned_tool_execution
             async def resume_agent() -> str:
                 set_consumption_storage(lambda: SqliteDb(db_file=db_file))
-                response, presentation = await _continue_persisted_agent(
-                    actor,
-                    continuation,
-                    paused,
-                    paused.requirements,
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=owner,
-                    refresh_scheduler=None,
-                    decisions={},
-                    denial_reasons={},
+                assert isinstance(actor, Agent)
+                scope = ScopeSessionContext(
+                    HistoryScope(kind="agent", scope_id="leader"),
+                    storage,
+                    storage.get_session(context.session_id, session_type=SessionType.AGENT),
+                    session_id=context.session_id,
+                    storage_factory=lambda: SqliteDb(db_file=db_file),
                 )
-                assert response.status is RunStatus.completed
-                return presentation.final_text()
+
+                async def prepare(ctx: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
+                    prompt = str(kwargs["prompt"])
+                    prepared = _PreparedAgentRun(
+                        agent=actor,
+                        messages=(Message(role="user", content=prompt),),
+                        unseen_event_ids=[],
+                        prepared_history=PreparedHistoryState(),
+                        runtime_model_name="default",
+                    )
+                    return _AgentRunContext(
+                        turn=ctx,
+                        session_id=context.session_id,
+                        prompt=prompt,
+                        model_prompt=None,
+                        prepared_run=prepared,
+                        run_input=prepared.run_input,
+                        metadata=ctx.matrix_run_metadata,
+                    )
+
+                with (
+                    patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
+                    patch("mindroom.ai._prepare_agent_run_context", new=prepare),
+                ):
+                    response = await _continue_persisted_agent(
+                        actor,
+                        continuation,
+                        paused,
+                        paused.requirements,
+                        config=config,
+                        runtime_paths=paths,
+                        execution_identity=owner,
+                        refresh_scheduler=None,
+                        decisions={},
+                        denial_reasons={},
+                        knowledge=None,
+                        tool_trace_collector=[],
+                        run_id_callback=None,
+                        tool_dispatch=LiveToolDispatchContext.from_runtime_context(context),
+                    )
+                assert isinstance(response, CompletedApprovalRun)
+                return response.response_text
 
             async def resume_team() -> str:
                 session = storage.get_session(context.session_id, session_type=SessionType.TEAM)
