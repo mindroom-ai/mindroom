@@ -68,10 +68,10 @@ async def test_checkpoints_count_only_new_metrics_despite_shared_run_objects(
     tmp_path: Path,
     asynchronous: bool,
 ) -> None:
-    """Repeating a save or mutating a shallow checkpoint must not repeat incurred usage."""
+    """Bare sessions and repeated shallow checkpoints must retain each usage contribution once."""
     storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
     actor = Agent(id="code", db=storage, checkpoint="tool-batch", telemetry=False)
-    session = AgentSession(session_id="session", agent_id="code", session_data={})
+    session = AgentSession(session_id="session", agent_id="code")
     run = RunOutput(run_id="run", agent_id="code", metrics=_metrics(1))
     # Session summaries can upsert a run before accounting it.
     session.upsert_run(run)
@@ -147,7 +147,7 @@ def test_team_resaves_count_member_and_nested_team_deltas_once(tmp_path: Path, r
     """Team history can store flat member rows as well as nested response objects."""
     storage = create_state_storage("squad", tmp_path, subdir="sessions", session_table="squad_sessions")
     actor = Team(id="squad", members=[], db=storage, telemetry=False, store_member_responses=True)
-    session = TeamSession(session_id="session", team_id="squad", session_data={})
+    session = TeamSession(session_id="session", team_id="squad")
     child = RunOutput(run_id="child", agent_id="child", metrics=_metrics(4))
     nested = TeamRunOutput(run_id="nested", team_id="nested", metrics=_metrics(3), member_responses=[child])
     member = RunOutput(run_id="member", agent_id="member", parent_run_id="leader", metrics=_metrics(2))
@@ -298,6 +298,7 @@ async def test_approval_usage_reconciles_with_export_after_each_resume(
 async def test_team_approval_counts_leader_and_member_usage_once(tmp_path: Path, mode: str, reopen: bool) -> None:
     """Default team storage must account resumed members, including after process reconstruction."""
     storage = create_state_storage("squad", tmp_path, subdir="sessions", session_table="squad_sessions")
+    storage.upsert_session(TeamSession(session_id="session", team_id="squad"))
     leader_model = _ApprovalModel(
         id="leader-model",
         provider="test-provider",

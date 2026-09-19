@@ -38,9 +38,7 @@ def usage_db(tmp_path: Path) -> Iterator[SqliteDb]:
     """Use the production storage owner with a real session row."""
     storage = create_state_storage("code", tmp_path, subdir="sessions", session_table="code_sessions")
     assert isinstance(storage, SqliteDb)
-    storage.upsert_session(
-        AgentSession(session_id="session", agent_id="code", user_id="@alice:example.test", session_data={}),
-    )
+    storage.upsert_session(AgentSession(session_id="session", agent_id="code", user_id="@alice:example.test"))
     try:
         yield storage
     finally:

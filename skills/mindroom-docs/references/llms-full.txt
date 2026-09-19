@@ -19389,7 +19389,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
-| Session totals add a run's full cumulative metrics again on pause/resume and checkpoints. | Make Agent and Team accumulation idempotent for repeated saves of one run, including member contributions. | `agno_compat_session_metrics.py`; real approval/resume, checkpoint, reload and export reconciliation tests. |
+| Session totals add a run's full cumulative metrics again on pause/resume and checkpoints, or are omitted for sessions without a `session_data` mapping. | Initialize missing session totals and make Agent and Team accumulation idempotent for repeated saves of one run, including member contributions. | `agno_compat_session_metrics.py`; real approval/resume, checkpoint, reload and export reconciliation tests. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |

@@ -31,10 +31,12 @@ if TYPE_CHECKING:
 # AGNO_COMPAT: Saving a resumed run adds already-counted metrics again.
 # Reason: Agent and Team add the full cumulative run metrics at every pause,
 # checkpoint and completion; the previous run has already been replaced in session.runs.
+# They also omit totals when a pre-created session has no session_data mapping.
 # Upstream issue: No matching session-accumulation issue identified.
 # Upstream PR: None identified for idempotent session accumulation.
 # Remove when: Agno counts each run's usage once across pause/resume, checkpoints
-# and team-member saves, while preserving totals for history removed by the owner.
+# and team-member saves, initializes totals for bare sessions, and preserves
+# totals for history removed by the owner.
 # Coverage: tests/test_agno_compat_session_metrics.py; tests/test_usage_storage.py.
 _SUPPORTED_VERSION = "3.0.9"
 _ORIGINAL_AGENT_UPDATE = agent_storage.update_session_metrics
@@ -115,7 +117,7 @@ def _update_team_metrics(team: Team, session: TeamSession, run_response: TeamRun
 
 def _accumulate_new_usage(session: _Session, totals: SessionMetrics, runs: Iterable[_Run]) -> None:
     if session.session_data is None:
-        return
+        session.session_data = {}
     accounted = session.__dict__.setdefault(_SNAPSHOT_ATTRIBUTE, _AccountedUsage())
     assert isinstance(accounted, _AccountedUsage)
     updates: dict[str, RunMetrics] = {}
