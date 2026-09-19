@@ -77,7 +77,6 @@ const NAV_ITEMS: NavItem[] = [
     icon: LayoutDashboard,
     group: "Workspace",
   },
-  { value: "usage", label: "Usage", icon: BarChart3, group: "Workspace" },
   { value: "agents", label: "Agents", icon: Bot, group: "Workspace" },
   { value: "teams", label: "Teams", icon: Users, group: "Workspace" },
   { value: "rooms", label: "Rooms", icon: Home, group: "Workspace" },
@@ -94,6 +93,7 @@ const NAV_ITEMS: NavItem[] = [
     group: "Workspace",
   },
   { value: "models", label: "Models", icon: Settings2, group: "Configuration" },
+  { value: "usage", label: "Usage", icon: BarChart3, group: "Configuration" },
   { value: "memory", label: "Memory", icon: Brain, group: "Configuration" },
   {
     value: "knowledge",
