@@ -5,6 +5,31 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.9.198</title>
+            <pubDate>Sat, 19 Sep 2026 18:01:40 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1515</sparkle:version>
+            <sparkle:shortVersionString>2026.9.198</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.198
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Combine warm paper styling with subtle dashboard glass (#2144)](https://github.com/mindroom-ai/mindroom/commit/6f274254f) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.198/MindRoom.zip" length="119708900" type="application/octet-stream" sparkle:edSignature="Vrlriy0mFEVCpHFPXgxknb8anaqPDOgnDxf+8U0+XsrqZ2G029hlqM4Lkr0XFmNP8+z+PjkyCf8mzXKr9JYVDA=="/>
+        </item>
+        <item>
             <title>2026.9.152</title>
             <pubDate>Tue, 15 Sep 2026 15:29:01 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
