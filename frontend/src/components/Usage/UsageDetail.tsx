@@ -24,6 +24,7 @@ export function UsageDetail({
   onMetricChange,
   onClose,
   trigger,
+  fallbackFocus,
 }: {
   detail: UsageDetailData | undefined;
   generatedAt: string;
@@ -31,6 +32,7 @@ export function UsageDetail({
   onMetricChange: (metric: keyof TokenTotals) => void;
   onClose: () => void;
   trigger: RefObject<HTMLButtonElement | null>;
+  fallbackFocus: RefObject<HTMLInputElement | null>;
 }) {
   return (
     <Dialog
@@ -43,7 +45,12 @@ export function UsageDetail({
         className="max-h-[90vh] w-[calc(100%-2rem)] max-w-3xl grid-cols-1 overflow-y-auto p-4 sm:p-6"
         onCloseAutoFocus={(event) => {
           event.preventDefault();
-          trigger.current?.focus();
+          // A completed refresh can remove the selected row while this is open.
+          onClose();
+          const target = trigger.current?.isConnected
+            ? trigger.current
+            : fallbackFocus.current;
+          target?.focus();
         }}
       >
         {detail && (

@@ -35,6 +35,7 @@ function UsageReportView({ report }: { report: UsageReport }) {
   const [search, setSearch] = useState("");
   const [selection, setSelection] = useState<UsageSelection | null>(null);
   const detailTrigger = useRef<HTMLButtonElement | null>(null);
+  const breakdownSearch = useRef<HTMLInputElement | null>(null);
   const select =
     (value: UsageSelection): UsageTableRow["onSelect"] =>
     (event) => {
@@ -178,6 +179,7 @@ function UsageReportView({ report }: { report: UsageReport }) {
               </TabsTrigger>
             </TabsList>
             <Input
+              ref={breakdownSearch}
               aria-label="Search breakdown"
               placeholder="Search breakdown"
               className="w-full sm:w-56"
@@ -234,6 +236,7 @@ function UsageReportView({ report }: { report: UsageReport }) {
         onMetricChange={setMetric}
         onClose={() => setSelection(null)}
         trigger={detailTrigger}
+        fallbackFocus={breakdownSearch}
       />
     </>
   );

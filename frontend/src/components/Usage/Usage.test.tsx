@@ -411,6 +411,37 @@ describe("Usage", () => {
     expect(screen.getByText("No matching usage.")).toBeInTheDocument();
   });
 
+  it("returns focus to search when an in-flight refresh removes the open row", async () => {
+    let finishRefresh!: (response: Response) => void;
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(respond())
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishRefresh = resolve;
+        }),
+      )
+      .mockResolvedValue(respond());
+    renderUsage();
+    await screen.findByRole("button", { name: "research" });
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await userEvent.click(screen.getByRole("button", { name: "research" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    await act(async () => finishRefresh(respond({ ...report, breakdown: [] })));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Search breakdown" }),
+      ).toHaveFocus(),
+    );
+
+    // Reappearing usage must not reopen a detail panel the user already left.
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByRole("button", { name: "research" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("polls preparation then renders the ready report", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(fetch)
