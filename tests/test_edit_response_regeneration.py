@@ -916,6 +916,45 @@ def test_remove_run_by_event_id_removes_team_runs() -> None:
     assert session.runs[0].metadata["matrix_event_id"] == "$other:example.com"
 
 
+def test_remove_run_by_event_id_drops_idless_child_without_dropping_idless_survivor() -> None:
+    """Shared missing run IDs must not conflate a removed descendant with an unrelated survivor."""
+    child = RunOutput(parent_run_id="parent")
+    survivor = RunOutput()
+    session = TeamSession(
+        session_id="session-1",
+        team_id="test_team",
+        runs=[
+            TeamRunOutput(run_id="parent", metadata={"matrix_event_id": "$source:example.com"}),
+            child,
+            survivor,
+        ],
+    )
+    storage = _FakeTeamStorage(session)
+    assert remove_run_by_event_id(storage, "session-1", "$source:example.com", session_type=SessionType.TEAM)
+    assert session.runs == [survivor]
+    assert session.runs[0] is survivor
+
+
+def test_remove_run_by_event_id_preserves_session_when_deletion_fails() -> None:
+    """Failed storage deletion must leave the caller's complete run list intact."""
+    session = TeamSession(
+        session_id="session-1",
+        team_id="test_team",
+        runs=[
+            TeamRunOutput(run_id="parent", metadata={"matrix_event_id": "$source:example.com"}),
+            RunOutput(run_id="child", parent_run_id="parent"),
+        ],
+    )
+    storage = _FakeTeamStorage(session)
+    original_runs = session.runs
+    with (
+        patch.object(storage, "delete_runs", side_effect=RuntimeError("storage unavailable")),
+        pytest.raises(RuntimeError, match="storage unavailable"),
+    ):
+        remove_run_by_event_id(storage, "session-1", "$source:example.com", session_type=SessionType.TEAM)
+    assert session.runs is original_runs
+
+
 def test_remove_run_by_event_id_matches_coalesced_source_event_ids() -> None:
     """Coalesced runs should be removable through any batch member event ID."""
     session = TeamSession(

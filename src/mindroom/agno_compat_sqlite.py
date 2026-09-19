@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, cast
 from agno.db.sqlite import SqliteDb
 from sqlalchemy import event
 
+from mindroom import usage_archive
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -44,7 +46,8 @@ def remove_default_pragmas(engine: Engine) -> None:
 # Upstream issue: https://github.com/agno-agi/agno/issues/9936
 # Upstream PR: https://github.com/agno-agi/agno/pull/9938
 # Remove when: The pinned adapter appends new runs after existing indexes even when
-# given a shortened session-list position; keep owner prompt sanitization.
+# given a shortened session-list position; keep owner prompt sanitization and
+# the archive-aware index floor and resurrected-ID position.
 # Coverage: tests/test_agent_storage_runs.py::test_runs_appended_after_deleting_leading_runs_sort_after_the_survivors.
 def upsert_run_at_end(
     db: SqliteDb,
@@ -53,8 +56,10 @@ def upsert_run_at_end(
     session_id: str,
     user_id: str | None,
 ) -> None:
-    """Use Agno's atomic MAX+1 insertion while preserving existing row indexes."""
-    SqliteDb.upsert_run(db, run=run, session_id=session_id, user_id=user_id, run_index=None)
+    """Append atomically after live and archived indexes, retaining resurrected IDs' order."""
+    run_id = cast("dict[str, Any]", run).get("run_id") if isinstance(run, dict) else run.run_id
+    index = usage_archive.next_run_index(db, run_id, session_id)
+    SqliteDb.upsert_run(db, run=run, session_id=session_id, user_id=user_id, run_index=cast("Any", index))
 
 
 # AGNO_COMPAT: Run deletion and legacy-blob cleanup are not atomic.

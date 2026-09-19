@@ -48,7 +48,7 @@ type _ModelUsageEntry = tuple[UsageRunNode, TokenTotals, Mapping[tuple[str, str]
 _COVERAGE_NOTE = (
     "Shared self totals use requester-attributed retained agent runs. "
     "Private self and admin totals use Agno session aggregates, including team members. "
-    "Deleted sessions are unavailable."
+    "Retained runs include content-free usage archived during compaction. Deleted sessions are unavailable."
 )
 _MODEL_COVERAGE_NOTE = (
     "Model breakdown uses retained top-level runs with usable token metrics. "
@@ -74,7 +74,7 @@ _PRIVATE_COVERAGE_NOTE = (
     "Private-agent totals use session aggregates, attributed to a validated private-instance owner "
     "or the session's recorded requester. Retained-run totals, models, and days use recorded run requesters "
     "with the private owner as fallback. A null user_id means attribution is unavailable. "
-    "Compacted or deleted run detail cannot be reconstructed."
+    "Retained detail includes usage archived during compaction; older missing or deleted detail cannot be reconstructed."
 )
 
 

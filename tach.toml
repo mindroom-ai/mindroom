@@ -537,6 +537,7 @@ visibility = [
 [[modules]]
 path = "mindroom.agent_storage"
 depends_on = [
+    "mindroom.usage_archive",
     "mindroom.agno_compat_sqlite",
     "mindroom.agno_compat_session_persistence",
     "mindroom.constants",
@@ -564,6 +565,7 @@ visibility = [
 path = "mindroom.legacy_session_storage"
 depends_on = []
 visibility = [
+    "mindroom.usage_archive",
     "mindroom.agent_storage",
     "mindroom.usage_stats_storage",
 ]
@@ -4642,6 +4644,8 @@ expose = [
     "get_agent_runtime_state_dbs",
     "get_agent_session",
     "get_team_session",
+    "archive_compacted_usage",
+    "runs_for_deletion",
     "replace_runs",
     "run_session_storage_operation",
     "runs_without",
@@ -6339,7 +6343,7 @@ expose = [
 
 [[modules]]
 path = "mindroom.agno_compat_sqlite"
-depends_on = []
+depends_on = ["mindroom.usage_archive"]
 visibility = ["mindroom.agent_storage"]
 
 [[interfaces]]
@@ -6473,3 +6477,13 @@ visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_pro
 [[interfaces]]
 from = ["mindroom.browser_profile"]
 expose = ["clear_stale_singleton_locks"]
+
+[[modules]]
+path = "mindroom.usage_archive"
+depends_on = ["mindroom.constants", "mindroom.usage_tokens", "mindroom.legacy_session_storage"]
+visibility = ["mindroom.agent_storage", "mindroom.agno_compat_sqlite"]
+
+[[modules]]
+path = "mindroom.usage_tokens"
+depends_on = []
+visibility = ["mindroom.usage_archive", "mindroom.usage_stats_storage"]

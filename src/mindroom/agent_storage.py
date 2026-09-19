@@ -19,7 +19,7 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
 
-from mindroom import agno_compat_session_persistence, agno_compat_sqlite
+from mindroom import agno_compat_session_persistence, agno_compat_sqlite, usage_archive
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.logging_config import get_logger
@@ -47,6 +47,7 @@ _CACHE_DIAGNOSTICS: weakref.WeakKeyDictionary[_ConversationSqliteDb, tuple[int, 
 
 
 __all__ = [
+    "archive_compacted_usage",
     "configure_state_engine_pragmas",
     "create_session_storage",
     "create_state_engine",
@@ -56,6 +57,7 @@ __all__ = [
     "get_team_session",
     "replace_runs",
     "run_session_storage_operation",
+    "runs_for_deletion",
     "runs_without",
     "save_runs",
 ]
@@ -313,26 +315,44 @@ class _ConversationSqliteDb(SqliteDb):
             user_id=user_id,
         )
 
-    def delete_runs(self, run_ids: list[str]) -> None:
+    def delete_runs(self, run_ids: list[str], *, preserve_usage: bool = False) -> None:
         """Delete a run subtree and its legacy representations atomically."""
         if not run_ids:
             return
         wanted = {run_id for run_id in run_ids if run_id}
+        archive = None if preserve_usage else usage_archive.archive_table(self)
         with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table, sessions_table):
+            # One frontier spans live and archived identities, including a
+            # subtree split between both stores after a stale write.
+            frontier = list(wanted)
+            while frontier:
+                children = usage_archive.child_run_ids(sess, archive, frontier)
+                if runs_table is not None:
+                    children.extend(
+                        sess.execute(
+                            select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
+                        ).scalars(),
+                    )
+                frontier = [child for child in children if child not in wanted]
+                wanted.update(frontier)
             if runs_table is not None:
-                # Team member runs are rows whose parent_run_id is the team run; a
-                # deleted run takes its whole subtree along, as agno's own
-                # session-level delete cascades do.
-                frontier = list(wanted)
-                while frontier:
-                    children = sess.execute(
-                        select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
-                    ).scalars()
-                    frontier = [child for child in children if child not in wanted]
-                    wanted.update(frontier)
                 sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
+            usage_archive.erase_runs(sess, archive, wanted)
             if sessions_table is not None:
                 scrub_legacy_run_blobs(sess, sessions_table, wanted)
+
+
+def archive_compacted_usage(storage: BaseDb, session: AgentSession | TeamSession, run_ids: Iterable[str]) -> None:
+    """Preserve content-free usage before compaction mutates durable history."""
+    if isinstance(storage, _ConversationSqliteDb):
+        usage_archive.archive_runs(storage, session, run_ids)
+
+
+def runs_for_deletion(storage: BaseDb, session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
+    """Include archived identities when matching explicit event erasure."""
+    if isinstance(storage, _ConversationSqliteDb):
+        return usage_archive.runs_for_deletion(storage, session)
+    return list(session.runs or [])
 
 
 def runs_without(
@@ -396,6 +416,8 @@ def replace_runs(
     storage: BaseDb,
     session: AgentSession | TeamSession,
     runs: Iterable[RunOutput | TeamRunOutput],
+    *,
+    preserve_usage: bool = False,
 ) -> list[str]:
     """Make ``runs`` the session's run list and delete the rows of the runs it dropped.
 
@@ -411,7 +433,10 @@ def replace_runs(
         if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id and run.run_id not in kept_ids
     ]
     if removed:
-        storage.delete_runs(removed)
+        if preserve_usage and isinstance(storage, _ConversationSqliteDb):
+            storage.delete_runs(removed, preserve_usage=True)
+        else:
+            storage.delete_runs(removed)
     session.runs = kept
     return removed
 
