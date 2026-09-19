@@ -308,6 +308,9 @@ export function UnconfiguredRooms() {
                   const key = `${entity.agent_id}:${roomId}`;
                   const isSelected = selectedRooms.has(key);
                   const roomDetails = entity.unconfigured_room_details?.[index];
+                  const roomLabel = roomDetails?.name
+                    ? `${roomDetails.name} (${roomId})`
+                    : roomId;
 
                   return (
                     <div
@@ -322,7 +325,7 @@ export function UnconfiguredRooms() {
                     >
                       <Checkbox
                         checked={isSelected}
-                        aria-label={`Select ${roomDetails?.name || roomId} for ${entity.display_name}`}
+                        aria-label={`Select ${roomLabel} for ${entity.display_name}`}
                         onCheckedChange={() =>
                           toggleRoomSelection(entity.agent_id, roomId)
                         }
@@ -350,7 +353,7 @@ export function UnconfiguredRooms() {
                         variant="ghost"
                         size="icon"
                         className="h-11 w-11 shrink-0"
-                        aria-label={`Open ${roomDetails?.name || roomId} in Matrix client`}
+                        aria-label={`Open ${roomLabel} in Matrix client`}
                         onClick={(e) => {
                           e.stopPropagation();
                           // Open room in Element/Matrix client
