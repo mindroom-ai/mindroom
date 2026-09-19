@@ -4,6 +4,7 @@ import {
   Bot,
   Brain,
   CalendarClock,
+  Check,
   DoorOpen,
   Home,
   KeyRound,
@@ -151,6 +152,12 @@ function NavigationLinks({
                     )}
                   />
                   <span>{item.label}</span>
+                  {active && (
+                    <Check
+                      aria-hidden="true"
+                      className="ml-auto h-3.5 w-3.5 shrink-0"
+                    />
+                  )}
                 </Link>
               );
             })}
