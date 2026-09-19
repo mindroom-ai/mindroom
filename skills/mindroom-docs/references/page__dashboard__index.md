@@ -282,7 +282,7 @@ Every report-state response uses `Cache-Control: no-store`.
 Completed HTTP reports include `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp set when the scan finishes.
 Cached polls return the original timestamp for that completed scan.
 
-The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
+The completed organization-wide HTTP JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
 Counters include input, output, total, cache read/write, reasoning, and audio tokens.
 Models include their provider.

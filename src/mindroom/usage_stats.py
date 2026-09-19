@@ -861,20 +861,26 @@ def _session_model_totals(
     """Accept session model detail only when every token counter reconciles."""
     if not row.session_model_metrics:
         return None
-    return _detailed_model_totals(row.session_model_metrics, totals)
+    return _detailed_model_totals(row.session_model_metrics, totals, require_usable_entries=True)
 
 
 def _detailed_model_totals(
     model_metrics: tuple[UsageModelMetrics, ...],
     totals: TokenTotals,
+    *,
+    require_usable_entries: bool = False,
 ) -> dict[tuple[str, str], TokenTotals] | None:
     models: dict[tuple[str, str], TokenTotals] = {}
     combined = TokenTotals()
     try:
         for entry in model_metrics:
             model_totals = _metrics_totals(entry.metrics)
+            if model_totals is None and require_usable_entries:
+                return None
             if model_totals is None:
                 continue
+            if require_usable_entries and (entry.model_provider is None or entry.model is None):
+                return None
             key = (entry.model_provider or "unknown", entry.model or "unknown")
             models[key] = models.get(key, TokenTotals()).plus(model_totals)
             combined = combined.plus(model_totals)

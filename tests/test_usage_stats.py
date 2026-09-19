@@ -292,8 +292,22 @@ def test_admin_exports_reconciled_cumulative_models_separately_from_retained_run
         None,
         (_model_metrics("provider-a", "model-a", total_tokens=-1),),
         (_model_metrics("provider-a", "model-a", total_tokens=5),),
+        (_model_metrics(None, "model-a", input_tokens=97, output_tokens=3, total_tokens=100),),
+        (_model_metrics("provider-a", None, input_tokens=97, output_tokens=3, total_tokens=100),),
+        (
+            _model_metrics("provider-a", "model-a", input_tokens=97, output_tokens=3, total_tokens=100),
+            _model_metrics("provider-b", "model-b"),
+        ),
     ],
-    ids=["absent", "malformed", "negative", "unreconciled"],
+    ids=[
+        "absent",
+        "malformed",
+        "negative",
+        "unreconciled",
+        "missing-provider",
+        "missing-model",
+        "empty-entry",
+    ],
 )
 def test_admin_keeps_cumulative_totals_under_unknown_when_model_detail_is_unusable(
     tmp_path: Path,
