@@ -51,30 +51,14 @@ function isUsageRow(
   );
 }
 
-function isRequesterRow(value: unknown): boolean {
+function isModelRow(
+  value: unknown,
+  count: "session_count" | "run_count",
+): boolean {
   return (
-    isUsageRow(value, "run_count") &&
-    (value.user_id === null || typeof value.user_id === "string")
-  );
-}
-
-function isModelRow(value: unknown): boolean {
-  return (
-    isUsageRow(value, "session_count") &&
+    isUsageRow(value, count) &&
     typeof value.provider === "string" &&
     typeof value.model === "string"
-  );
-}
-
-function isEntityRow(value: unknown): boolean {
-  return (
-    isUsageRow(value, "session_count") &&
-    value.dimension === "entity" &&
-    typeof value.key === "string" &&
-    isCount(value.run_count) &&
-    isTokenTotals(value.retained_run_totals) &&
-    Array.isArray(value.user_breakdown) &&
-    value.user_breakdown.every(isRequesterRow)
   );
 }
 
@@ -88,7 +72,39 @@ function isDay(value: unknown): value is string {
 }
 
 function isDailyRow(value: unknown): boolean {
-  return isUsageRow(value, "run_count") && isDay(value.date);
+  return (
+    isUsageRow(value, "run_count") &&
+    isDay(value.date) &&
+    Array.isArray(value.model_breakdown) &&
+    value.model_breakdown.every((row) => isModelRow(row, "run_count"))
+  );
+}
+
+function isRequesterRow(value: unknown): boolean {
+  return (
+    isUsageRow(value, "run_count") &&
+    (value.user_id === null || typeof value.user_id === "string") &&
+    Array.isArray(value.model_breakdown) &&
+    value.model_breakdown.every((row) => isModelRow(row, "run_count")) &&
+    Array.isArray(value.daily_breakdown) &&
+    value.daily_breakdown.every(isDailyRow)
+  );
+}
+
+function isEntityRow(value: unknown): boolean {
+  return (
+    isUsageRow(value, "session_count") &&
+    value.dimension === "entity" &&
+    typeof value.key === "string" &&
+    isCount(value.run_count) &&
+    Array.isArray(value.cumulative_model_breakdown) &&
+    value.cumulative_model_breakdown.every((row) =>
+      isModelRow(row, "session_count"),
+    ) &&
+    isTokenTotals(value.retained_run_totals) &&
+    Array.isArray(value.user_breakdown) &&
+    value.user_breakdown.every(isRequesterRow)
+  );
 }
 
 function isUsageReport(value: unknown): value is UsageReport {
@@ -106,7 +122,9 @@ function isUsageReport(value: unknown): value is UsageReport {
     value.breakdown.every(isEntityRow) &&
     isCoverage(value.coverage) &&
     Array.isArray(value.cumulative_model_breakdown) &&
-    value.cumulative_model_breakdown.every(isModelRow) &&
+    value.cumulative_model_breakdown.every((row) =>
+      isModelRow(row, "session_count"),
+    ) &&
     isCoverage(value.cumulative_model_coverage) &&
     Array.isArray(value.user_breakdown) &&
     value.user_breakdown.every(isRequesterRow) &&

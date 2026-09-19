@@ -85,6 +85,124 @@ const report = {
   private_agent_coverage: coverage,
 };
 
+// One run can use both providers. Alice also has 50 undated tokens.
+const modelUsage = (provider: string, total: number, count: number) => ({
+  provider,
+  model: "sample-model",
+  totals: totals(total),
+  run_count: count,
+});
+const day = (
+  date: string,
+  total: number,
+  count: number,
+  models: ReturnType<typeof modelUsage>[],
+) => ({
+  date,
+  totals: totals(total),
+  run_count: count,
+  model_breakdown: models,
+});
+const aliceResearch = {
+  ...requester,
+  totals: totals(150),
+  run_count: 2,
+  model_breakdown: [
+    modelUsage("example", 110, 2),
+    modelUsage("alternate", 40, 1),
+  ],
+  daily_breakdown: [
+    day("2026-09-19", 100, 1, [
+      modelUsage("example", 60, 1),
+      modelUsage("alternate", 40, 1),
+    ]),
+  ],
+};
+const unknownResearch = {
+  ...requester,
+  user_id: null,
+  model_breakdown: [modelUsage("example", 100, 1)],
+  daily_breakdown: [day("2026-09-19", 100, 1, [modelUsage("example", 100, 1)])],
+};
+const aliceWriting = {
+  ...requester,
+  totals: totals(200),
+  model_breakdown: [modelUsage("example", 200, 1)],
+  daily_breakdown: [day("2026-09-18", 200, 1, [modelUsage("example", 200, 1)])],
+};
+const samWriting = {
+  ...requester,
+  user_id: "@sam:example.test",
+  totals: totals(300),
+  model_breakdown: [modelUsage("alternate", 300, 1)],
+  daily_breakdown: [
+    day("2026-09-19", 300, 1, [modelUsage("alternate", 300, 1)]),
+  ],
+};
+const cumulativeModel = (provider: string, total: number, count: number) => ({
+  provider,
+  model: "sample-model",
+  totals: totals(total),
+  session_count: count,
+});
+const drilldownReport = {
+  ...report,
+  totals: totals(1700),
+  session_count: 6,
+  breakdown: [
+    {
+      ...report.breakdown[0],
+      retained_run_totals: totals(250),
+      run_count: 3,
+      cumulative_model_breakdown: [
+        cumulativeModel("example", 800, 3),
+        cumulativeModel("alternate", 200, 1),
+      ],
+      user_breakdown: [aliceResearch, unknownResearch],
+    },
+    {
+      ...report.breakdown[0],
+      key: "writing",
+      totals: totals(700),
+      retained_run_totals: totals(500),
+      run_count: 2,
+      cumulative_model_breakdown: [
+        cumulativeModel("example", 300, 2),
+        cumulativeModel("alternate", 400, 2),
+      ],
+      user_breakdown: [aliceWriting, samWriting],
+    },
+  ],
+  cumulative_model_breakdown: [
+    cumulativeModel("example", 1100, 5),
+    cumulativeModel("alternate", 600, 3),
+  ],
+  user_breakdown: [
+    {
+      ...requester,
+      totals: totals(350),
+      run_count: 3,
+      model_breakdown: [
+        modelUsage("example", 310, 3),
+        modelUsage("alternate", 40, 1),
+      ],
+      daily_breakdown: [
+        ...aliceWriting.daily_breakdown,
+        ...aliceResearch.daily_breakdown,
+      ],
+    },
+    unknownResearch,
+    samWriting,
+  ],
+  daily_breakdown: [
+    ...aliceWriting.daily_breakdown,
+    day("2026-09-19", 500, 3, [
+      modelUsage("example", 160, 2),
+      modelUsage("alternate", 340, 2),
+    ]),
+  ],
+};
+
 function respond(payload: unknown = report, status = 200, headers = {}) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -130,9 +248,140 @@ describe("Usage", () => {
     expect(
       within(dialog).getByText(/200 tokens across 2 recorded runs/),
     ).toBeInTheDocument();
-    expect(within(dialog).queryByText("1,000")).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("region", { name: "All-time recorded usage" }),
+    ).toHaveTextContent("1,000");
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(agent).toHaveFocus());
+  });
+
+  it("shows an agent's cumulative models and combines requester days without inventing undated activity", async () => {
+    vi.mocked(fetch).mockResolvedValue(respond(drilldownReport));
+    renderUsage();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "research" }),
+    );
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByRole("table", { name: "Requesters" })).toHaveTextContent(
+      "150",
+    );
+    expect(
+      dialog.getByText(/250 tokens across 3 recorded runs/),
+    ).toBeInTheDocument();
+
+    await userEvent.click(dialog.getByRole("tab", { name: "Models" }));
+    const models = within(dialog.getByRole("table", { name: "Models" }));
+    expect(models.getByText("800")).toBeInTheDocument();
+    expect(models.getByText("200")).toBeInTheDocument();
+    expect(models.getByText("Stored sessions")).toBeInTheDocument();
+
+    await userEvent.click(dialog.getByRole("tab", { name: "Daily activity" }));
+    await userEvent.click(dialog.getByText("View daily data"));
+    const daily = within(dialog.getByRole("table", { name: "Daily data" }));
+    expect(
+      daily.getByRole("row", { name: "2026-09-19 2 200" }),
+    ).toBeInTheDocument();
+    expect(daily.queryByText("250")).not.toBeInTheDocument();
+    fireEvent.change(dialog.getByLabelText("Token metric"), {
+      target: { value: "cache_write_tokens" },
+    });
+    expect(
+      daily.getByRole("row", { name: "2026-09-19 2 20" }),
+    ).toBeInTheDocument();
+  });
+
+  it("drills into a requester across agents, models, and dated runs", async () => {
+    vi.mocked(fetch).mockResolvedValue(respond(drilldownReport));
+    renderUsage();
+    await screen.findByRole("button", { name: "research" });
+    await userEvent.click(screen.getByRole("tab", { name: "Requesters" }));
+    const person = screen.getByRole("button", { name: "@alice:example.test" });
+    person.focus();
+    await userEvent.keyboard("{Enter}");
+    const dialog = within(screen.getByRole("dialog"));
+    expect(
+      dialog.getByRole("region", { name: "Recorded runs only" }),
+    ).toHaveTextContent("350");
+    const agents = within(
+      dialog.getByRole("table", { name: "Agents & teams" }),
+    );
+    expect(
+      agents.getByRole("row", { name: "research 2 150" }),
+    ).toBeInTheDocument();
+    expect(
+      agents.getByRole("row", { name: "writing 1 200" }),
+    ).toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("tab", { name: "Models" }));
+    const models = within(dialog.getByRole("table", { name: "Models" }));
+    expect(
+      models.getByRole("row", { name: "sample-model example 3 310" }),
+    ).toBeInTheDocument();
+    expect(
+      models.getByRole("row", { name: "sample-model alternate 1 40" }),
+    ).toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("tab", { name: "Daily activity" }));
+    await userEvent.click(dialog.getByText("View daily data"));
+    const daily = within(dialog.getByRole("table", { name: "Daily data" }));
+    expect(
+      daily.getByRole("row", { name: "2026-09-18 1 200" }),
+    ).toBeInTheDocument();
+    expect(
+      daily.getByRole("row", { name: "2026-09-19 1 100" }),
+    ).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(person).toHaveFocus());
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Unknown requester" }),
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByRole("table", {
+        name: "Agents & teams",
+      }),
+    ).toHaveTextContent("research");
+    expect(
+      within(screen.getByRole("dialog")).queryByText("writing"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps model providers distinct and uses model-specific daily run counts", async () => {
+    vi.mocked(fetch).mockResolvedValue(respond(drilldownReport));
+    renderUsage();
+    await screen.findByRole("button", { name: "research" });
+    await userEvent.click(screen.getByRole("tab", { name: "Models" }));
+    const modelButton = screen.getByRole("button", {
+      name: "sample-model (example)",
+    });
+    await userEvent.click(modelButton);
+    const dialog = within(screen.getByRole("dialog"));
+    expect(
+      dialog.getByRole("region", { name: "All-time recorded usage" }),
+    ).toHaveTextContent("1,100");
+    const agents = within(
+      dialog.getByRole("table", { name: "Agents & teams" }),
+    );
+    expect(
+      agents.getByRole("row", { name: "research 3 800" }),
+    ).toBeInTheDocument();
+    expect(
+      agents.getByRole("row", { name: "writing 2 300" }),
+    ).toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("tab", { name: "Requesters" }));
+    const users = within(dialog.getByRole("table", { name: "Requesters" }));
+    expect(
+      users.getByRole("row", { name: "@alice:example.test 3 310" }),
+    ).toBeInTheDocument();
+    expect(
+      users.getByRole("row", { name: "Unknown requester 1 100" }),
+    ).toBeInTheDocument();
+    expect(users.queryByText("@sam:example.test")).not.toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("tab", { name: "Daily activity" }));
+    await userEvent.click(dialog.getByText("View daily data"));
+    expect(
+      dialog.getByRole("row", { name: "2026-09-19 2 160" }),
+    ).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(modelButton).toHaveFocus());
   });
 
   it("filters only daily activity by UTC date and keeps model totals cumulative", async () => {
