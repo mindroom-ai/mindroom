@@ -313,6 +313,7 @@ Each run save records its content-free usage in the same database transaction; l
 Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.
 Explicit whole-session erasure removes its usage too.
 Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
+The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
 Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
 Breakdowns can still differ from session totals because history lost before migration and nested team-member usage may lack detailed attribution.
 Deleted sessions are unavailable.
