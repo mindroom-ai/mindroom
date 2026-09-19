@@ -3,106 +3,64 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
-@layer utilities {
-  .glass {
-    @apply backdrop-blur-xl bg-white/70 border border-white/20;
-  }
-  .glass-subtle {
-    @apply backdrop-blur-md bg-white/50 border border-white/10;
-  }
-  .glass-card {
-    @apply backdrop-blur-xl bg-white/60 border border-white/20 shadow-xl;
-  }
-  .dark .glass {
-    @apply bg-stone-900/70 border-white/10;
-  }
-  .dark .glass-subtle {
-    @apply bg-stone-900/50 border-white/5;
-  }
-  .dark .glass-card {
-    @apply bg-stone-900/60 border-white/10;
-  }
-  .gradient-mesh {
-    background-image:
-      radial-gradient(
-        at 27% 37%,
-        hsla(35, 90%, 48%, 0.25) 0px,
-        transparent 50%
-      ),
-      radial-gradient(at 97% 21%, hsla(30, 50%, 60%, 0.2) 0px, transparent 50%),
-      radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.15) 0px, transparent 50%);
-  }
-  .gradient-mesh-dark {
-    background-image:
-      radial-gradient(
-        at 27% 37%,
-        hsla(35, 90%, 48%, 0.15) 0px,
-        transparent 50%
-      ),
-      radial-gradient(
-        at 97% 21%,
-        hsla(30, 50%, 60%, 0.12) 0px,
-        transparent 50%
-      ),
-      radial-gradient(at 52% 99%, hsla(35, 90%, 48%, 0.1) 0px, transparent 50%);
-  }
-}
-
 @layer base {
   :root {
-    /* Light mode - warm, minimal palette */
-    --background: 30 20% 98%; /* Very light warm gray */
-    --foreground: 25 25% 15%; /* Dark warm gray */
-    --card: 30 20% 100%; /* Pure white with hint of warmth */
-    --card-foreground: 25 25% 15%;
-    --popover: 30 20% 100%;
-    --popover-foreground: 25 25% 15%;
-    --primary: 35 90% 48%; /* Warm amber/orange */
-    --primary-foreground: 30 20% 98%;
-    --secondary: 30 15% 92%; /* Light warm gray */
-    --secondary-foreground: 25 25% 15%;
-    --muted: 30 10% 88%; /* Muted warm gray */
-    --muted-foreground: 25 15% 40%;
-    --accent: 35 90% 48%; /* Same as primary for consistency */
-    --accent-foreground: 30 20% 98%;
-    --destructive: 0 72% 51%; /* Warm red */
-    --destructive-foreground: 30 20% 98%;
-    --border: 30 15% 90%; /* Subtle warm gray border */
-    --input: 30 15% 90%;
-    --ring: 35 90% 48%;
+    --background: 36 24% 96%;
+    --foreground: 28 18% 15%;
+    --card: 36 30% 98%;
+    --card-foreground: 28 18% 15%;
+    --popover: 36 30% 99%;
+    --popover-foreground: 28 18% 15%;
+    --primary: 34 82% 30%;
+    --primary-foreground: 36 30% 98%;
+    --secondary: 34 15% 91%;
+    --secondary-foreground: 28 18% 19%;
+    --muted: 32 13% 90%;
+    --muted-foreground: 28 9% 43%;
+    --accent: 34 44% 90%;
+    --accent-foreground: 29 35% 23%;
+    --destructive: 2 65% 48%;
+    --destructive-foreground: 36 30% 98%;
+    --border: 30 13% 84%;
+    --input: 30 13% 80%;
+    --ring: 34 82% 30%;
     --radius: 0.5rem;
   }
 
   .dark {
-    /* Dark mode - warm, minimal palette */
-    --background: 25 15% 10%; /* Very dark warm gray */
-    --foreground: 30 15% 88%; /* Light warm gray */
-    --card: 25 12% 14%; /* Slightly lighter warm gray */
-    --card-foreground: 30 15% 88%;
-    --popover: 25 12% 14%;
-    --popover-foreground: 30 15% 88%;
-    --primary: 35 90% 48%; /* Same warm amber/orange */
-    --primary-foreground: 25 15% 10%;
-    --secondary: 25 10% 20%; /* Dark warm gray */
-    --secondary-foreground: 30 15% 88%;
-    --muted: 25 8% 25%; /* Muted dark warm gray */
-    --muted-foreground: 30 10% 65%;
-    --accent: 35 90% 48%; /* Same as primary for consistency */
-    --accent-foreground: 25 15% 10%;
-    --destructive: 0 62% 45%; /* Warm red for dark mode */
-    --destructive-foreground: 30 15% 88%;
-    --border: 25 10% 22%; /* Subtle dark warm gray border */
-    --input: 25 10% 22%;
-    --ring: 35 90% 48%;
+    --background: 27 13% 9%;
+    --foreground: 34 17% 88%;
+    --card: 27 12% 13%;
+    --card-foreground: 34 17% 88%;
+    --popover: 27 12% 12%;
+    --popover-foreground: 34 17% 88%;
+    --primary: 36 77% 56%;
+    --primary-foreground: 27 15% 10%;
+    --secondary: 27 9% 18%;
+    --secondary-foreground: 34 17% 88%;
+    --muted: 27 8% 20%;
+    --muted-foreground: 32 9% 63%;
+    --accent: 31 20% 20%;
+    --accent-foreground: 36 70% 72%;
+    --destructive: 2 58% 48%;
+    --destructive-foreground: 34 17% 92%;
+    --border: 27 8% 23%;
+    --input: 27 8% 27%;
+    --ring: 36 77% 56%;
   }
-}
 
-@layer base {
   * {
     @apply border-border;
   }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
   body {
-    @apply bg-background text-foreground font-sans antialiased;
+    @apply bg-background font-sans text-foreground antialiased;
     font-feature-settings:
       "kern" 1,
       "liga" 1,
@@ -112,29 +70,22 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* Typography improvements */
   h1,
   h2,
   h3,
   h4,
   h5,
   h6 {
-    @apply tracking-tight font-semibold;
+    @apply font-semibold tracking-tight;
   }
 
   p {
     @apply leading-relaxed;
   }
 
-  /* Smoother animations */
-  * {
-    @apply transition-colors duration-200;
-  }
-
-  /* Custom scrollbar styling */
   ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
   }
 
   ::-webkit-scrollbar-track {
@@ -142,59 +93,147 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    @apply bg-gray-300/50 rounded-full;
     border: 2px solid transparent;
+    border-radius: 999px;
+    background: hsl(var(--muted-foreground) / 0.28);
     background-clip: padding-box;
   }
 
-  ::-webkit-scrollbar-thumb:hover {
-    @apply bg-gray-400/70;
-  }
-
-  .dark ::-webkit-scrollbar-thumb {
-    @apply bg-stone-700/50;
-  }
-
-  .dark ::-webkit-scrollbar-thumb:hover {
-    @apply bg-stone-600/70;
-  }
-
-  /* Firefox scrollbar styling */
   * {
+    scrollbar-color: hsl(var(--muted-foreground) / 0.28) transparent;
     scrollbar-width: thin;
-    scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+  }
+}
+
+@layer components {
+  .app-shell {
+    background-color: hsl(var(--background));
+    background-image: radial-gradient(
+      circle at 4% 0%,
+      hsl(var(--primary) / 0.055),
+      transparent 28rem
+    );
   }
 
-  .dark * {
-    scrollbar-color: rgba(68, 64, 60, 0.5) transparent;
+  .shell-toolbar {
+    background: hsl(var(--background) / 0.88);
+    -webkit-backdrop-filter: blur(8px) saturate(112%);
+    backdrop-filter: blur(8px) saturate(112%);
   }
 
-  /* Mobile optimizations */
-  @media (max-width: 768px) {
-    /* Improve scrolling performance on mobile */
-    * {
-      -webkit-overflow-scrolling: touch;
-    }
+  .workspace-surface {
+    background: hsl(var(--background) / 0.74);
+  }
 
-    /* Prevent text selection on interactive elements */
-    button,
-    .cursor-pointer {
-      -webkit-user-select: none;
-      user-select: none;
-      -webkit-tap-highlight-color: transparent;
-    }
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    border: 1px solid hsl(var(--border) / 0.82);
+    background: hsl(var(--card) / 0.76);
+    -webkit-backdrop-filter: blur(8px) saturate(112%);
+    backdrop-filter: blur(8px) saturate(112%);
+    box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.42);
+  }
 
-    /* Ensure inputs zoom properly on iOS */
-    input,
-    textarea,
-    select {
-      font-size: 16px;
-    }
+  .dark .glass-panel,
+  .dark .glass-control,
+  .dark .glass-overlay,
+  .dark .glass-input {
+    background: hsl(var(--card) / 0.7);
+    box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.055);
+  }
 
-    /* Hide scrollbars on mobile for cleaner look */
-    ::-webkit-scrollbar {
-      width: 0px;
-      height: 0px;
-    }
+  .glass-control {
+    border-radius: 0.5rem;
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease;
+  }
+
+  .glass-input {
+    border-radius: 0.5rem;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    transition:
+      background-color 150ms ease,
+      border-color 150ms ease,
+      color 150ms ease;
+  }
+
+  .glass-control:hover {
+    background: hsl(var(--card) / 0.96);
+  }
+
+  .glass-overlay {
+    box-shadow:
+      0 18px 46px hsl(25 18% 8% / 0.18),
+      inset 0 1px 0 hsl(0 0% 100% / 0.42);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px))) {
+  .shell-toolbar,
+  .workspace-surface,
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    background: hsl(var(--card));
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .shell-toolbar,
+  .workspace-surface,
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    background: hsl(var(--card));
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .shell-toolbar,
+  .workspace-surface,
+  .glass-panel,
+  .glass-control,
+  .glass-overlay,
+  .glass-input {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none;
+  }
+}
+
+@media (max-width: 767px) {
+  button,
+  .cursor-pointer {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 16px;
   }
 }

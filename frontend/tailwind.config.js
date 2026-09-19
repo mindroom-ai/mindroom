@@ -6,7 +6,6 @@ export default {
     extend: {
       fontFamily: {
         sans: [
-          "Rubik",
           "system-ui",
           "-apple-system",
           "BlinkMacSystemFont",
@@ -15,7 +14,6 @@ export default {
           "sans-serif",
         ],
         display: [
-          "Rubik",
           "system-ui",
           "-apple-system",
           "BlinkMacSystemFont",
