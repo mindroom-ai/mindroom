@@ -22,6 +22,12 @@ export default {
           "sans-serif",
         ],
       },
+      borderRadius: {
+        md: "var(--radius)",
+        lg: "calc(var(--radius) + 4px)",
+        xl: "calc(var(--radius) + 8px)",
+        "2xl": "calc(var(--radius) + 14px)",
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

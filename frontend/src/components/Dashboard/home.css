@@ -3,13 +3,13 @@
   width: 100%;
   max-width: 1160px;
   margin: 0 auto;
-  padding: 32px 32px 40px;
+  padding: 24px 34px 34px;
   color: hsl(var(--foreground));
 }
 .home-page {
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: 30px;
 }
 .home-heading {
   display: flex;
@@ -18,8 +18,9 @@
   gap: 20px;
 }
 .home-heading h2 {
-  font-size: 30px;
-  font-weight: 600;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 37px;
+  font-weight: 400;
   line-height: 1.2;
   letter-spacing: -0.045em;
   outline: none;
@@ -33,26 +34,13 @@
   gap: 9px;
   font-weight: 400;
   color: hsl(var(--muted-foreground));
-  border-radius: 9px;
+  border-radius: var(--radius);
 }
 .home-day-surface {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  padding: 28px;
-  border: 1px solid hsl(var(--border) / 0.65);
-  border-radius: 20px;
-  background: hsl(var(--card) / 0.72);
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
-  box-shadow:
-    inset 1px 1px 0 hsl(0 0% 100% / 0.7),
-    0 8px 32px hsl(240 8% 12% / 0.035);
-}
-.dark .home-day-surface {
-  background: hsl(var(--card) / 0.68);
-  box-shadow:
-    inset 1px 1px 0 hsl(0 0% 100% / 0.07),
-    0 8px 32px hsl(0 0% 0% / 0.08);
+  padding: 20px 0 25px;
+  border-bottom: 1px solid hsl(var(--border) / 0.6);
 }
 .home-today {
   min-width: 0;
@@ -63,7 +51,7 @@
   flex-direction: column;
   min-width: 0;
   border-left: 1px solid hsl(var(--border) / 0.8);
-  padding-left: 28px;
+  padding-left: 34px;
 }
 .home-section-heading {
   display: flex;
@@ -72,8 +60,9 @@
   gap: 12px;
 }
 .home-page h3 {
-  font-size: 15px;
-  font-weight: 600;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 19px;
+  font-weight: 400;
   letter-spacing: -0.015em;
 }
 .home-runtime {
@@ -102,8 +91,9 @@
 }
 .home-run-count strong,
 .home-count-placeholder {
-  font-size: 64px;
-  font-weight: 500;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 62px;
+  font-weight: 400;
   line-height: 1.2;
   letter-spacing: -0.055em;
   font-variant-numeric: tabular-nums;
@@ -134,8 +124,8 @@
   display: block;
   width: 100%;
   max-width: 40px;
-  border-radius: 4px 4px 1px 1px;
-  background: hsl(var(--primary) / 0.24);
+  border-radius: 6px;
+  background: hsl(var(--primary) / 0.2);
 }
 .home-bar.is-current {
   background: hsl(var(--primary));
@@ -278,11 +268,25 @@
   align-items: center;
   gap: 16px;
   min-width: 0;
-  min-height: 108px;
-  padding: 16px 0;
-  border-bottom: 1px solid hsl(var(--border) / 0.6);
+  min-height: 100px;
+  padding: 14px 10px;
+  margin: 0 -10px;
+  border-radius: 12px;
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    hsl(var(--border) / 0.6) 8%,
+    hsl(var(--border) / 0.6) 92%,
+    transparent
+  );
+  background-size: 100% 1px;
+  background-position: bottom;
+  background-repeat: no-repeat;
   text-align: left;
   cursor: pointer;
+}
+.home-room:hover {
+  background-color: hsl(var(--primary) / 0.05);
 }
 .home-room-body {
   display: flex;
@@ -294,9 +298,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 17px;
+  font-size: 15px;
   line-height: 1.35;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: -0.025em;
 }
 .home-room-description {
@@ -381,7 +385,7 @@
 @media (max-width: 639px) {
   .home-page,
   .home-directory {
-    padding: 24px 20px 32px;
+    padding: 22px 18px;
   }
   .home-page {
     gap: 28px;
@@ -398,8 +402,7 @@
     font-size: 12px;
   }
   .home-day-surface {
-    padding: 22px;
-    border-radius: 18px;
+    padding: 12px 0 22px;
   }
   .home-run-count {
     gap: 10px;
@@ -417,28 +420,9 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-@supports not ((backdrop-filter: blur(1px))) {
-  .home-day-surface,
-  .dark .home-day-surface {
-    background: hsl(var(--card));
-  }
-}
-@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  .home-day-surface,
-  .dark .home-day-surface {
-    background: hsl(var(--card));
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-  }
-}
 @media (forced-colors: active) {
-  .home-day-surface,
-  .dark .home-day-surface {
-    background: Canvas;
-    border: 1px solid CanvasText;
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    box-shadow: none;
+  .home-day-surface {
+    border-color: CanvasText;
   }
   .home-bar {
     background: CanvasText;

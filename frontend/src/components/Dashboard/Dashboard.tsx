@@ -320,7 +320,7 @@ function Home({
                   kind="room"
                   id={room.id}
                   name={room.display_name}
-                  className="h-[52px] w-[52px] rounded-2xl text-lg"
+                  className="h-[52px] w-[52px] rounded-lg text-lg"
                 />
                 <span className="home-room-body">
                   <span className="home-room-name" title={room.display_name}>

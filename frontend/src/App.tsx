@@ -362,7 +362,7 @@ function AppContent() {
       >
         Skip to content
       </a>
-      <header className="shell-toolbar relative z-20 flex h-13 shrink-0 items-center justify-between gap-3 border-b px-3 md:px-5">
+      <header className="shell-toolbar relative z-20 flex h-15 shrink-0 items-center justify-between gap-3 px-3.5 md:h-16 md:px-6">
         <div className="flex min-w-0 items-center gap-2.5">
           <Navigation mode="mobile" />
           <h1 className="flex min-w-0 items-center gap-2.5">

@@ -5,7 +5,7 @@
 export const sharedStyles = {
   // Panel layouts
   panel: {
-    container: "glass-panel h-full flex flex-col overflow-hidden rounded-lg",
+    container: "glass-panel h-full flex flex-col overflow-hidden rounded-xl",
     header: "px-3 pt-3 pb-2 sm:px-4 sm:pt-4 flex-shrink-0",
     content: "px-2 pb-2 sm:px-3 sm:pb-3 flex-1 overflow-y-auto min-h-0",
   },
@@ -23,7 +23,7 @@ export const sharedStyles = {
   search: {
     container: "relative mt-2",
     input: "pl-8 h-10 sm:h-9",
-    icon: "absolute left-2 top-3 sm:top-2.5 h-4 w-4 text-gray-400",
+    icon: "absolute left-2 top-3 sm:top-2.5 h-4 w-4 text-muted-foreground",
     inputFullWidth: "w-full",
   },
 
@@ -33,18 +33,16 @@ export const sharedStyles = {
       "w-full text-left px-3 py-3 sm:py-2 rounded-md transition-colors duration-150 min-h-[44px] sm:min-h-0",
     containerHover: "hover:bg-foreground/[0.045]",
     containerCard:
-      "cursor-pointer rounded-sm outline-none transition-colors hover:bg-foreground/[0.045] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-    selected:
-      "bg-primary/[0.09] text-foreground shadow-[inset_2px_0_0_hsl(var(--primary))] hover:bg-primary/[0.12]",
-    selectedCard:
-      "bg-primary/[0.07] shadow-[inset_2px_0_0_hsl(var(--primary))]",
+      "cursor-pointer rounded-lg outline-none transition-colors hover:bg-foreground/[0.045] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+    selected: "bg-primary/[0.10] text-foreground hover:bg-primary/[0.14]",
+    selectedCard: "bg-primary/[0.10]",
     iconContainer: "flex items-center gap-2 transition-colors duration-150",
     icon: "h-4 w-4 transition-colors duration-150",
     iconSelected: "text-primary dark:text-primary",
-    iconDefault: "text-gray-500 dark:text-gray-400",
+    iconDefault: "text-muted-foreground",
     content: "flex-1 min-w-0",
     title: "font-medium text-sm",
-    subtitle: "text-xs text-gray-500 dark:text-gray-400 truncate",
+    subtitle: "text-xs text-muted-foreground truncate",
     cardContent: "p-3",
     cardTitle: "font-medium text-sm",
     cardDescription: "text-xs text-muted-foreground mt-1",
@@ -71,7 +69,7 @@ export const sharedStyles = {
   // Lists and containers
   list: {
     container: "space-y-1",
-    containerWithSpacing: "divide-y divide-border/70",
+    containerWithSpacing: "space-y-1",
   },
 
   // Badges

@@ -1,4 +1,5 @@
 import React, { ReactNode } from "react";
+import { Check } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { sharedStyles, getSelectionStyles } from "./styles";
@@ -106,7 +107,20 @@ export function ItemCard({
         <div className="flex items-start justify-between gap-3">
           {leading}
           <div className="min-w-0 flex-1">
-            <h3 className={sharedStyles.item.cardTitle}>{title}</h3>
+            <h3
+              className={cn(
+                sharedStyles.item.cardTitle,
+                "flex items-start gap-2",
+              )}
+            >
+              <span className="min-w-0 flex-1">{title}</span>
+              {isSelected && (
+                <Check
+                  aria-hidden="true"
+                  className="mt-0.5 h-4 w-4 shrink-0 text-primary"
+                />
+              )}
+            </h3>
             {description && (
               <p className={sharedStyles.item.cardDescription}>{description}</p>
             )}

@@ -5,48 +5,52 @@
 
 @layer base {
   :root {
-    --background: 0 0% 94.901961%;
-    --foreground: 247.5 11.764706% 13.333333%;
-    --card: 0 0% 100%;
-    --card-foreground: 247.5 11.764706% 13.333333%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 247.5 11.764706% 13.333333%;
-    --primary: 253.488372 56.331878% 55.098039%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 240 7.317073% 91.960784%;
-    --secondary-foreground: 247.5 11.764706% 13.333333%;
-    --muted: 240 9.090909% 91.372549%;
-    --muted-foreground: 250 5.405405% 43.529412%;
-    --accent: 243.529412 100% 96.666667%;
-    --accent-foreground: 253.488372 56.331878% 55.098039%;
+    --background: 42 25% 93%;
+    --foreground: 39 16% 20%;
+    --card: 44 38% 98%;
+    --card-foreground: 39 16% 20%;
+    --popover: 44 38% 98%;
+    --popover-foreground: 39 16% 20%;
+    --primary: 154 23% 33%;
+    --primary-foreground: 48 30% 98%;
+    --secondary: 40 22% 90%;
+    --secondary-foreground: 39 16% 20%;
+    --muted: 40 18% 89%;
+    --muted-foreground: 36 8% 39%;
+    --accent: 143 17% 88%;
+    --accent-foreground: 154 23% 30%;
     --destructive: 2 65% 48%;
     --destructive-foreground: 36 30% 98%;
-    --border: 248.571429 11.111111% 87.647059%;
-    --input: 250 13.636364% 82.745098%;
-    --ring: 253.488372 56.331878% 55.098039%;
-    --radius: 0.5rem;
+    --border: 37 17% 82%;
+    --input: 37 17% 75%;
+    --ring: 154 23% 33%;
+    --radius: 0.625rem;
+    --glass-highlight: 0 0% 100% / 0.55;
+    --glass-shadow: 35 25% 20% / 0.06;
   }
 
   .dark {
-    --background: 0 0% 10.196078%;
-    --foreground: 240 8.571429% 93.137255%;
-    --card: 240 3.370787% 17.45098%;
-    --card-foreground: 240 8.571429% 93.137255%;
-    --popover: 240 3.370787% 17.45098%;
-    --popover-foreground: 240 8.571429% 93.137255%;
-    --primary: 246.976744 100% 83.137255%;
-    --primary-foreground: 252.857143 34.146341% 16.078431%;
-    --secondary: 240 3.773585% 20.784314%;
-    --secondary-foreground: 240 8.571429% 93.137255%;
-    --muted: 240 3.703704% 21.176471%;
-    --muted-foreground: 246 5.747126% 65.882353%;
-    --accent: 246.976744 30.496454% 27.647059%;
-    --accent-foreground: 246.976744 100% 83.137255%;
+    --background: 40 10% 12%;
+    --foreground: 42 23% 90%;
+    --card: 40 9% 17%;
+    --card-foreground: 42 23% 90%;
+    --popover: 40 9% 17%;
+    --popover-foreground: 42 23% 90%;
+    --primary: 145 25% 70%;
+    --primary-foreground: 145 20% 16%;
+    --secondary: 40 10% 23%;
+    --secondary-foreground: 42 23% 90%;
+    --muted: 40 9% 23%;
+    --muted-foreground: 39 11% 64%;
+    --accent: 145 12% 26%;
+    --accent-foreground: 145 25% 70%;
     --destructive: 2 58% 48%;
     --destructive-foreground: 34 17% 92%;
-    --border: 240 2.985075% 26.27451%;
-    --input: 247.5 4.705882% 33.333333%;
-    --ring: 246.976744 100% 83.137255%;
+    --border: 39 9% 28%;
+    --input: 39 9% 35%;
+    --ring: 145 25% 70%;
+    --glass-highlight: 42 30% 90% / 0.07;
+    --glass-shadow: 30 20% 3% / 0.18;
   }
 
   * {
@@ -107,40 +111,61 @@
 
 @layer components {
   .app-shell {
-    background-color: hsl(var(--background));
+    background:
+      radial-gradient(
+        ellipse at 0% 10%,
+        hsl(var(--primary) / 0.08),
+        transparent 45%
+      ),
+      radial-gradient(
+        ellipse at 100% 100%,
+        hsl(38 65% 65% / 0.08),
+        transparent 45%
+      ),
+      hsl(var(--background));
   }
 
   .shell-toolbar {
-    background: hsl(var(--card) / 0.7);
-    -webkit-backdrop-filter: blur(8px) saturate(112%);
-    backdrop-filter: blur(8px) saturate(112%);
+    background: transparent;
   }
 
   .workspace-surface {
-    background: hsl(var(--background) / 0.74);
+    background: hsl(var(--card) / 0.62);
+  }
+
+  main.workspace-surface {
+    margin: 0 16px 16px 8px;
+    border: 1px solid hsl(var(--border) / 0.45);
+    border-radius: 24px;
   }
 
   .glass-panel,
   .glass-control,
   .glass-overlay,
   .glass-input {
-    border: 1px solid hsl(var(--border) / 0.82);
-    background: hsl(var(--card) / 0.76);
-    -webkit-backdrop-filter: blur(8px) saturate(112%);
-    backdrop-filter: blur(8px) saturate(112%);
-    box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.42);
+    border: 1px solid hsl(var(--border) / 0.65);
+    background: hsl(var(--card) / 0.92);
   }
 
-  .dark .glass-panel,
-  .dark .glass-control,
-  .dark .glass-overlay,
-  .dark .glass-input {
-    background: hsl(var(--card) / 0.7);
-    box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.055);
+  /* Keep working surfaces clear; reserve glass for navigation and overlays. */
+  .shell-navigation,
+  .glass-control,
+  .glass-overlay {
+    background: hsl(var(--card) / 0.6);
+    -webkit-backdrop-filter: blur(20px) saturate(110%);
+    backdrop-filter: blur(20px) saturate(110%);
+    box-shadow: inset 0 1px 0 hsl(var(--glass-highlight));
   }
 
-  .glass-control {
-    border-radius: 0.5rem;
+  .shell-navigation {
+    box-shadow:
+      inset 0 1px 0 hsl(var(--glass-highlight)),
+      0 8px 32px hsl(var(--glass-shadow));
+  }
+
+  .glass-control,
+  .glass-input {
+    border-radius: var(--radius);
     transition:
       background-color 150ms ease,
       border-color 150ms ease,
@@ -148,23 +173,19 @@
   }
 
   .glass-input {
-    border-radius: 0.5rem;
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    transition:
-      background-color 150ms ease,
-      border-color 150ms ease,
-      color 150ms ease;
+    background: hsl(var(--background) / 0.5);
+    border-color: hsl(var(--input) / 0.8);
   }
 
   .glass-control:hover {
-    background: hsl(var(--card) / 0.96);
+    background: hsl(var(--card) / 0.9);
   }
 
   .glass-overlay {
+    background: hsl(var(--popover) / 0.9);
     box-shadow:
-      0 18px 46px hsl(240 8% 8% / 0.18),
-      inset 0 1px 0 hsl(0 0% 100% / 0.42);
+      0 18px 46px hsl(var(--glass-shadow)),
+      inset 0 1px 0 hsl(var(--glass-highlight));
   }
 }
 
@@ -204,6 +225,18 @@
 }
 
 @media (forced-colors: active) {
+  nav [aria-current="page"],
+  .workspace-surface [aria-pressed="true"] {
+    outline: 1px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  nav a:focus-visible,
+  .workspace-surface [role="button"]:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
   .shell-toolbar,
   .workspace-surface,
   .glass-panel,
@@ -219,6 +252,11 @@
 }
 
 @media (max-width: 767px) {
+  main.workspace-surface {
+    margin: 0 8px 8px;
+    border-radius: 20px;
+  }
+
   button,
   .cursor-pointer {
     -webkit-tap-highlight-color: transparent;

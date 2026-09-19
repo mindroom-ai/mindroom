@@ -4,6 +4,7 @@ import {
   Bot,
   Brain,
   CalendarClock,
+  Check,
   DoorOpen,
   Home,
   KeyRound,
@@ -123,7 +124,7 @@ function NavigationLinks({
     <div className={cn("space-y-4", mobile && "space-y-3")}>
       {NAV_GROUPS.map((group) => (
         <div key={group}>
-          <p className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/80">
+          <p className="px-3 pb-2.5 pt-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
             {group}
           </p>
           <div className="space-y-0.5">
@@ -137,10 +138,10 @@ function NavigationLinks({
                   onClick={onNavigate}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "group flex items-center gap-2.5 rounded-md px-2.5 text-sm font-medium text-muted-foreground outline-none transition-colors hover:bg-foreground/[0.045] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-                    mobile ? "min-h-11" : "min-h-8",
+                    "group flex items-center gap-2.5 rounded-md px-3 text-[13px] font-medium text-muted-foreground outline-none transition-colors hover:bg-foreground/[0.045] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                    mobile ? "min-h-11" : "min-h-[38px]",
                     active &&
-                      "bg-primary/[0.09] text-foreground shadow-[inset_2px_0_0_hsl(var(--primary))] hover:bg-primary/[0.12]",
+                      "bg-primary/[0.12] text-primary hover:bg-primary/[0.16]",
                   )}
                 >
                   <ItemIcon
@@ -151,6 +152,12 @@ function NavigationLinks({
                     )}
                   />
                   <span>{item.label}</span>
+                  {active && (
+                    <Check
+                      aria-hidden="true"
+                      className="ml-auto h-3.5 w-3.5 shrink-0"
+                    />
+                  )}
                 </Link>
               );
             })}
@@ -207,7 +214,7 @@ export function Navigation({ mode = "all", className }: NavigationProps) {
       {mode !== "mobile" && (
         <aside
           className={cn(
-            "glass-panel m-2 mr-0 hidden w-[196px] shrink-0 overflow-y-auto rounded-xl p-2.5 md:block",
+            "glass-panel shell-navigation mb-4 ml-4 hidden w-52 shrink-0 overflow-y-auto rounded-xl px-3 py-4 md:block",
             className,
           )}
         >
