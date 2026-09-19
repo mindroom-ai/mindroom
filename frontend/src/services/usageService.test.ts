@@ -176,6 +176,54 @@ describe("fetchUsage", () => {
     );
   });
 
+  it.each([
+    ["entity totals", { breakdown: [{}] }],
+    [
+      "entity requester rows",
+      { breakdown: [{ ...report.breakdown[0], user_breakdown: [{}] }] },
+    ],
+    [
+      "model totals",
+      {
+        cumulative_model_breakdown: [
+          { provider: "example", model: "sample", session_count: 1 },
+        ],
+      },
+    ],
+    [
+      "requester ID",
+      {
+        user_breakdown: [
+          { ...report.breakdown[0].user_breakdown[0], user_id: {} },
+        ],
+      },
+    ],
+    [
+      "daily date",
+      { daily_breakdown: [{ date: "invalid", totals, run_count: 1 }] },
+    ],
+    ["report timestamp", { generated_at: "invalid" }],
+    ["unsafe total", { totals: { ...totals, input_tokens: 9007199254740992 } }],
+    [
+      "unsafe nested total",
+      {
+        user_breakdown: [
+          {
+            ...report.breakdown[0].user_breakdown[0],
+            totals: { ...totals, cache_read_tokens: 9007199254740992 },
+          },
+        ],
+      },
+    ],
+  ])("rejects malformed %s before rendering", async (_name, fields) => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ ...report, ...fields })),
+    );
+    await expect(fetchUsage()).rejects.toThrow(
+      "Could not read usage data from the server. Try again.",
+    );
+  });
+
   it("preserves request cancellation", async () => {
     const cancellation = new DOMException(
       "The operation was aborted.",

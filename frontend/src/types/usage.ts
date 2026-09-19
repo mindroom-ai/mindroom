@@ -16,13 +16,6 @@ export interface UsageCoverage {
   note: string;
 }
 
-export interface UsageModelRow {
-  provider: string;
-  model: string;
-  totals: TokenTotals;
-  run_count: number;
-}
-
 export interface UsageCumulativeModelRow {
   provider: string;
   model: string;
@@ -34,15 +27,12 @@ export interface UsageDailyRow {
   date: string;
   totals: TokenTotals;
   run_count: number;
-  model_breakdown: UsageModelRow[];
 }
 
 export interface UsageUserRow {
   user_id: string | null;
   totals: TokenTotals;
   run_count: number;
-  model_breakdown: UsageModelRow[];
-  daily_breakdown: UsageDailyRow[];
 }
 
 export interface UsageEntityRow {
@@ -50,7 +40,6 @@ export interface UsageEntityRow {
   key: string;
   totals: TokenTotals;
   session_count: number;
-  cumulative_model_breakdown: UsageCumulativeModelRow[];
   retained_run_totals: TokenTotals;
   run_count: number;
   user_breakdown: UsageUserRow[];
@@ -64,8 +53,6 @@ export interface UsageReport {
   session_count: number;
   breakdown: UsageEntityRow[];
   coverage: UsageCoverage;
-  model_breakdown: UsageModelRow[];
-  model_coverage: UsageCoverage;
   cumulative_model_breakdown: UsageCumulativeModelRow[];
   cumulative_model_coverage: UsageCoverage;
   user_breakdown: UsageUserRow[];

@@ -617,7 +617,8 @@ Daily and requester detail can be lower than cumulative totals when older attrib
 Cache tokens may already be included in input counts, depending on the provider.
 This page shows recorded usage, not estimated spend or billing totals.
 
-The page waits automatically while a report is prepared. Use **Refresh** to request the latest available report; completed reports may be cached by the server for up to one minute.
+The page waits automatically while a report is prepared.
+Use **Refresh** to request the latest available report; completed reports may be cached by the server for up to one minute.
 
 ### Agents
 

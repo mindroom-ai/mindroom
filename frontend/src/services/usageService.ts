@@ -23,25 +23,72 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 function isTokenTotals(value: unknown): value is TokenTotals {
   return (
-    isRecord(value) &&
-    TOKEN_FIELDS.every(
-      (field) =>
-        typeof value[field] === "number" &&
-        Number.isFinite(value[field]) &&
-        value[field] >= 0,
-    )
+    isRecord(value) && TOKEN_FIELDS.every((field) => isCount(value[field]))
   );
 }
 
 function isCoverage(value: unknown): boolean {
   return (
     isRecord(value) &&
-    typeof value.scanned_sources === "number" &&
-    typeof value.unavailable_sources === "number" &&
+    isCount(value.scanned_sources) &&
+    isCount(value.unavailable_sources) &&
     typeof value.note === "string"
   );
+}
+
+function isUsageRow(
+  value: unknown,
+  count: "session_count" | "run_count",
+): value is Record<string, unknown> {
+  return (
+    isRecord(value) && isTokenTotals(value.totals) && isCount(value[count])
+  );
+}
+
+function isRequesterRow(value: unknown): boolean {
+  return (
+    isUsageRow(value, "run_count") &&
+    (value.user_id === null || typeof value.user_id === "string")
+  );
+}
+
+function isModelRow(value: unknown): boolean {
+  return (
+    isUsageRow(value, "session_count") &&
+    typeof value.provider === "string" &&
+    typeof value.model === "string"
+  );
+}
+
+function isEntityRow(value: unknown): boolean {
+  return (
+    isUsageRow(value, "session_count") &&
+    value.dimension === "entity" &&
+    typeof value.key === "string" &&
+    isCount(value.run_count) &&
+    isTokenTotals(value.retained_run_totals) &&
+    Array.isArray(value.user_breakdown) &&
+    value.user_breakdown.every(isRequesterRow)
+  );
+}
+
+function isDay(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString().slice(0, 10) === value
+  );
+}
+
+function isDailyRow(value: unknown): boolean {
+  return isUsageRow(value, "run_count") && isDay(value.date);
 }
 
 function isUsageReport(value: unknown): value is UsageReport {
@@ -51,17 +98,21 @@ function isUsageReport(value: unknown): value is UsageReport {
     value.schema_version === 1 &&
     value.scope === "admin" &&
     typeof value.generated_at === "string" &&
-    typeof value.session_count === "number" &&
+    isDay(value.generated_at.slice(0, 10)) &&
+    Number.isFinite(Date.parse(value.generated_at)) &&
+    isCount(value.session_count) &&
     isTokenTotals(value.totals) &&
     Array.isArray(value.breakdown) &&
+    value.breakdown.every(isEntityRow) &&
     isCoverage(value.coverage) &&
-    Array.isArray(value.model_breakdown) &&
-    isCoverage(value.model_coverage) &&
     Array.isArray(value.cumulative_model_breakdown) &&
+    value.cumulative_model_breakdown.every(isModelRow) &&
     isCoverage(value.cumulative_model_coverage) &&
     Array.isArray(value.user_breakdown) &&
+    value.user_breakdown.every(isRequesterRow) &&
     isCoverage(value.user_coverage) &&
     Array.isArray(value.daily_breakdown) &&
+    value.daily_breakdown.every(isDailyRow) &&
     isCoverage(value.daily_coverage)
   );
 }
