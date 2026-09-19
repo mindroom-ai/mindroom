@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import math
+import sys
 from typing import Any
 
 
@@ -11,7 +11,7 @@ def read_wait_timeout(arguments: dict[str, Any] | None, *, owned_execution: bool
     value = (arguments or {}).get("wait_timeout")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= sys.float_info.max:
         msg = "wait_timeout must be null or a finite nonnegative number of seconds"
         raise ValueError(msg)
     if owned_execution:

@@ -803,3 +803,7 @@ Regression tests exercise actual process completion and termination, schema proj
 The existing shell-output fix from PR #2130 remains responsible for complete output-file capture; no second output truncation policy or retired-job tombstone store is added here.
 A real-model Matrix run passed ten independent checks across native completion, cancellation, and a human follow-up, alongside a generic file job.
 The redirected output retained all 262,144 payload bytes and its exact sentinels and working-directory header; shell controls created no generic job records.
+
+Independent review found that an integer wait budget beyond floating-point range raised an unhandled overflow and aborted the response.
+The shared validator now checks the representable nonnegative range before conversion, retaining the existing recoverable tool-error contract.
+Real SDK batch regressions cover streaming and blocking correction after rejection, with no invalid side effect and successful sibling execution.

@@ -122,7 +122,18 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("budget", [-1, True, "1", float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "budget",
+    [
+        -1,
+        True,
+        "1",
+        float("nan"),
+        float("inf"),
+        pytest.param(10**400, id="overflow"),
+        pytest.param(-(10**400), id="negative-overflow"),
+    ],
+)
 async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budget: object) -> None:
     """Reject malformed framework metadata before accepting any execution."""
     invoked = []
@@ -316,11 +327,19 @@ async def test_owned_nested_application_cannot_create_detached_job(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    ("nested", "invalid_budget"),
+    [
+        pytest.param(False, "bad", id="invalid-type"),
+        pytest.param(False, 10**400, id="overflow"),
+        pytest.param(True, 0, id="nested"),
+    ],
+)
 async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
     tmp_path: Path,
     streaming: bool,
     nested: bool,
+    invalid_budget: object,
 ) -> None:
     """Real SDK batches report one tool failure and keep siblings and correction turns alive."""
     invoked: list[str] = []
@@ -333,7 +352,6 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
-    invalid_budget = 0 if nested else "bad"
     model = DelegationModel(
         id="test",
         responses=[
