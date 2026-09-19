@@ -22,6 +22,7 @@ describe("resolveCurrentTab", () => {
     expect(resolveCurrentTab("/dashboard/")).toBe("dashboard");
     expect(resolveCurrentTab("///agents//")).toBe("agents");
     expect(resolveCurrentTab("/teams/details")).toBe("teams");
+    expect(resolveCurrentTab("/usage")).toBe("usage");
   });
 });
 
