@@ -173,6 +173,10 @@ Token totals separately report input, output, cache-read, cache-write, reasoning
 The admin response groups session aggregates by configured agent or team ID.
 Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
+Each entity also includes `retained_run_totals`, `run_count`, and `user_breakdown`, grouping retained top-level usage by canonical requester and model.
+With `include_daily=True`, these requester rows include daily detail too; the report's model, user, and daily coverage applies to them.
+Shared and private instances of the same entity are combined; `private_agent_breakdown` separately identifies the private contribution.
+Run counts describe retained runs with usable metrics, not message counts, and requester totals sum to `retained_run_totals` rather than cumulative session `totals`.
 Both responses group stored top-level usage snapshots by provider and model in `model_breakdown`.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
 Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.

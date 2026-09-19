@@ -310,6 +310,12 @@ def test_combined_private_ownership_differs_from_recorded_requester(
 
     users = {row["user_id"]: row["totals"]["total_tokens"] for row in report["user_breakdown"]}
     assert users == {BOB: 50, shared_only_user: 40}
+    entity = report["breakdown"][0]
+    assert (entity["key"], entity["run_count"], entity["retained_run_totals"]["total_tokens"]) == ("code", 3, 90)
+    assert {row["user_id"]: row["totals"]["total_tokens"] for row in entity["user_breakdown"]} == {
+        BOB: 50,
+        shared_only_user: 40,
+    }
     private = {row["user_id"]: row for row in report["private_agent_breakdown"]}
     assert private[ALICE]["totals"]["total_tokens"] == 100
     assert private[ALICE]["cumulative_model_breakdown"][0]["provider"] == "cumulative-provider"

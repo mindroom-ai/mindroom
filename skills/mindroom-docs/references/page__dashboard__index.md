@@ -290,6 +290,13 @@ Stored per-model details split runs that use several models; older runs fall bac
 Malformed or inconsistent model details retain the run's tokens under `unknown` and mark model coverage as incomplete.
 Requester aliases are combined; `user_id: null` holds unattributed usage.
 
+Each entity in `breakdown` also has `retained_run_totals`, `run_count`, and a `user_breakdown` with the same requester/model structure.
+These fields show which requesters used each agent or team, using the same deduplicated top-level runs as the report.
+Entity rows combine shared and private instances; `private_agent_breakdown` identifies the private contribution separately.
+Run counts measure retained runs with usable token metrics, not messages or conversations, and can undercount historical activity.
+Requester totals sum to the entity's `retained_run_totals`, which can differ from its cumulative `totals`.
+The report-level `model_coverage` and `user_coverage` also apply to entity retained detail.
+
 `cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
 The same rows appear within each entity in `breakdown`.
 Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
@@ -300,11 +307,12 @@ Session aggregates do not provide dates or requester attribution for these model
 Use `GET /api/usage?include_daily=true` or `GET /api/usage/export?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
+This also applies to requesters inside each entity's `user_breakdown`.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
 Daily rows are sorted oldest first and use retained run creation timestamps.
 Missing or invalid timestamps exclude the run from daily rows and mark daily coverage as incomplete.
 Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
-The report-level `daily_coverage` applies to both the overall and per-user daily breakdowns.
+The report-level `daily_coverage` applies to overall, per-user, and per-entity requester daily breakdowns.
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
