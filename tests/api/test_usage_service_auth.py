@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
+from mindroom.legacy_usage_storage import migrate_usage_database
 from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
 
 _ISSUER = "https://issuer.example"
@@ -122,7 +123,7 @@ def _seed_usage_database(storage_root: Path) -> None:
     }
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "CREATE TABLE test_agent_sessions (session_id TEXT, session_type TEXT, agent_id TEXT, "
+            "CREATE TABLE test_agent_sessions (session_id TEXT PRIMARY KEY, session_type TEXT, agent_id TEXT, "
             "team_id TEXT, user_id TEXT, session_data TEXT, runs TEXT)",
         )
         connection.execute(
@@ -175,6 +176,8 @@ def _seed_usage_database(storage_root: Path) -> None:
                 ),
             ),
         )
+
+    migrate_usage_database(database, "test_agent_sessions")
 
 
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:

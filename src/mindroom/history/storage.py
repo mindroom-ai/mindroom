@@ -19,8 +19,9 @@ It enforces the durable-state half of the compaction invariants
 
 2. Chunk progress survives interruption.
    ``record_compaction_chunk`` persists one chunk's partial summary, tombstones,
-   after preserving usage facts. Run removals follow the session upsert, so a
-   crash between chunks neither loses usage nor resurrects removed history on restart.
+   and run removals in a single session upsert against the freshest stored row,
+   so a crash between chunks neither loses the partial summary nor resurrects
+   removed runs on restart.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import archive_compacted_usage, replace_runs, runs_without, save_runs
+from mindroom.agent_storage import replace_runs, runs_without, save_runs
 from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -406,7 +407,7 @@ def prune_reintroduced_runs(
     if not state.compacted_run_ids:
         return False
     runs = session.runs or []
-    return bool(replace_runs(storage, session, remove_runs_by_id(runs, state.compacted_run_ids), preserve_usage=True))
+    return bool(replace_runs(storage, session, remove_runs_by_id(runs, state.compacted_run_ids)))
 
 
 def _latest_persisted_session(
@@ -461,14 +462,12 @@ def record_compaction_chunk(
 ) -> None:
     """Durably persist one compaction chunk before the next chunk is attempted (invariant 2).
 
-    Archive content-free usage first, then upsert the partial summary and
-    tombstones against the freshest stored row, then remove transcript rows.
-    A failed archive write aborts before durable history changes; interrupted
-    removal is retried by startup pruning without deleting archived usage.
+    One upsert against the freshest stored row carries the partial summary, the
+    merged scope metadata, the compacted-run tombstones, and the run removals,
+    so an interruption between chunks can neither lose progress nor resurrect
+    already-compacted runs.
     """
     chunk_run_ids = [run_id for run_id in compacted_run_ids if run_id]
-    target_session = _latest_persisted_session(storage, persisted_session)
-    archive_compacted_usage(storage, target_session, chunk_run_ids)
     working_state = read_scope_state(working_session, scope)
     write_scope_state(
         working_session,
@@ -476,6 +475,7 @@ def record_compaction_chunk(
         replace(working_state, compacted_run_ids=compacted_run_ids_with(working_state, chunk_run_ids)),
     )
 
+    target_session = _latest_persisted_session(storage, persisted_session)
     preexisting_tombstones = read_scope_state(target_session, scope).compacted_run_ids
     target_session.summary = working_session.summary
     target_session.metadata = _metadata_with_merged_seen_event_ids(
@@ -502,12 +502,7 @@ def record_compaction_chunk(
     # The summary and tombstones land before the run rows go: if the deletes never
     # happen, the next run prunes the tombstoned runs again instead of replaying them.
     storage.upsert_session(target_session)
-    replace_runs(
-        storage,
-        target_session,
-        remove_runs_by_id(target_session.runs or [], chunk_run_ids),
-        preserve_usage=True,
-    )
+    replace_runs(storage, target_session, remove_runs_by_id(target_session.runs or [], chunk_run_ids))
     if sync_remaining_runs:
         save_runs(
             storage,

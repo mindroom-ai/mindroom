@@ -48,33 +48,33 @@ type _ModelUsageEntry = tuple[UsageRunNode, TokenTotals, Mapping[tuple[str, str]
 _COVERAGE_NOTE = (
     "Shared self totals use requester-attributed retained agent runs. "
     "Private self and admin totals use Agno session aggregates, including team members. "
-    "Retained runs include content-free usage archived during compaction. Deleted sessions are unavailable."
+    "Usage snapshots survive compaction and regeneration. Deleted sessions are unavailable."
 )
 _MODEL_COVERAGE_NOTE = (
     "Model breakdown uses retained top-level runs with usable token metrics. "
     "Stored per-model details take precedence over a run's primary model. "
     "Runs with unusable model details are grouped as unknown. "
-    "It does not necessarily sum to report totals, which may include compacted history "
+    "It does not necessarily sum to report totals, which may include history lost before usage migration "
     "and nested team-member usage."
 )
 _USER_COVERAGE_NOTE = (
     "User breakdown uses requester-attributed retained top-level runs, grouped by canonical user identity. "
     "A null user_id means requester identity is unavailable. "
-    "It does not necessarily sum to report totals, which may include compacted history "
+    "It does not necessarily sum to report totals, which may include history lost before usage migration "
     "and nested team-member usage. Deleted sessions are unavailable."
 )
 _DAILY_COVERAGE_NOTE = (
     "Daily breakdown uses retained top-level runs with usable token metrics and creation timestamps, "
     "grouped by UTC date. Runs without usable timestamps are excluded. "
     "Runs with unusable model details retain their totals under the unknown model. "
-    "It does not necessarily sum to report totals, which may include compacted history "
+    "It does not necessarily sum to report totals, which may include history lost before usage migration "
     "and nested team-member usage. Deleted sessions are unavailable."
 )
 _PRIVATE_COVERAGE_NOTE = (
     "Private-agent totals use session aggregates, attributed to a validated private-instance owner "
     "or the session's recorded requester. Retained-run totals, models, and days use recorded run requesters "
     "with the private owner as fallback. A null user_id means attribution is unavailable. "
-    "Retained detail includes usage archived during compaction; older missing or deleted detail cannot be reconstructed."
+    "Usage survives run cleanup; detail lost before migration cannot be reconstructed."
 )
 
 
@@ -318,7 +318,8 @@ class _UsageAccumulator:
         uses_runs = scope == "self" and not row.source.requester_isolated
         if (uses_runs and not row.runs_available) or (not uses_runs and not row.session_metrics_available):
             self.unavailable_sources.add(row.source.path_label)
-            return
+            if not uses_runs:
+                return
         try:
             if scope == "self":
                 row_totals = _self_row_totals(
@@ -400,7 +401,6 @@ class _ModelUsageAccumulator:
     ) -> list[_ModelUsageEntry]:
         if not row.runs_available:
             self.unavailable_sources.add(row.source.path_label)
-            return []
         try:
             entries = _model_entries_for_row(
                 row,

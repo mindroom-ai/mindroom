@@ -19,12 +19,14 @@ from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
 
-from mindroom import agno_compat_session_persistence, agno_compat_sqlite, usage_archive
+from mindroom import agno_compat_session_persistence, agno_compat_sqlite
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
+from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage_preflight import session_storage_preflight
+from mindroom.usage_storage import usage_table_sql
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -47,7 +49,6 @@ _CACHE_DIAGNOSTICS: weakref.WeakKeyDictionary[_ConversationSqliteDb, tuple[int, 
 
 
 __all__ = [
-    "archive_compacted_usage",
     "configure_state_engine_pragmas",
     "create_session_storage",
     "create_state_engine",
@@ -57,7 +58,6 @@ __all__ = [
     "get_team_session",
     "replace_runs",
     "run_session_storage_operation",
-    "runs_for_deletion",
     "runs_without",
     "save_runs",
 ]
@@ -131,6 +131,8 @@ def _create_sqlite_state_storage(
     with preflight:
         db_dir = state_root / subdir
         db_dir.mkdir(parents=True, exist_ok=True)
+        if subdir == "sessions":
+            migrate_usage_database(db_dir / f"{storage_name}.db", session_table)
         db_file = str(db_dir / f"{storage_name}.db")
         # Both: the engine is what the database is reached through, and the path
         # is what it reports itself as. Handing over an engine alone leaves
@@ -299,6 +301,18 @@ class _ConversationSqliteDb(SqliteDb):
         self._report_cache_counts()
         return session
 
+    def upsert_session(
+        self,
+        session: Session,
+        deserialize: bool | None = True,
+    ) -> Session | dict[str, Any] | None:
+        """Initialize empty usage after Agno lazily creates a new session store."""
+        stored = super().upsert_session(session, deserialize=deserialize)
+        if stored is not None:
+            with self.db_engine.begin() as connection:
+                connection.exec_driver_sql(usage_table_sql(self.session_table_name))
+        return stored
+
     def upsert_run(
         self,
         run: _PersistedRun,
@@ -315,44 +329,26 @@ class _ConversationSqliteDb(SqliteDb):
             user_id=user_id,
         )
 
-    def delete_runs(self, run_ids: list[str], *, preserve_usage: bool = False) -> None:
+    def delete_runs(self, run_ids: list[str]) -> None:
         """Delete a run subtree and its legacy representations atomically."""
         if not run_ids:
             return
         wanted = {run_id for run_id in run_ids if run_id}
-        archive = None if preserve_usage else usage_archive.archive_table(self)
         with agno_compat_sqlite.run_deletion_transaction(self) as (sess, runs_table, sessions_table):
-            # One frontier spans live and archived identities, including a
-            # subtree split between both stores after a stale write.
-            frontier = list(wanted)
-            while frontier:
-                children = usage_archive.child_run_ids(sess, archive, frontier)
-                if runs_table is not None:
-                    children.extend(
-                        sess.execute(
-                            select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
-                        ).scalars(),
-                    )
-                frontier = [child for child in children if child not in wanted]
-                wanted.update(frontier)
             if runs_table is not None:
+                # Team member runs are rows whose parent_run_id is the team run; a
+                # deleted run takes its whole subtree along, as agno's own
+                # session-level delete cascades do.
+                frontier = list(wanted)
+                while frontier:
+                    children = sess.execute(
+                        select(runs_table.c.run_id).where(runs_table.c.parent_run_id.in_(frontier)),
+                    ).scalars()
+                    frontier = [child for child in children if child not in wanted]
+                    wanted.update(frontier)
                 sess.execute(runs_table.delete().where(runs_table.c.run_id.in_(wanted)))
-            usage_archive.erase_runs(sess, archive, wanted)
             if sessions_table is not None:
                 scrub_legacy_run_blobs(sess, sessions_table, wanted)
-
-
-def archive_compacted_usage(storage: BaseDb, session: AgentSession | TeamSession, run_ids: Iterable[str]) -> None:
-    """Preserve content-free usage before compaction mutates durable history."""
-    if isinstance(storage, _ConversationSqliteDb):
-        usage_archive.archive_runs(storage, session, run_ids)
-
-
-def runs_for_deletion(storage: BaseDb, session: AgentSession | TeamSession) -> list[RunOutput | TeamRunOutput]:
-    """Include archived identities when matching explicit event erasure."""
-    if isinstance(storage, _ConversationSqliteDb):
-        return usage_archive.runs_for_deletion(storage, session)
-    return list(session.runs or [])
 
 
 def runs_without(
@@ -416,8 +412,6 @@ def replace_runs(
     storage: BaseDb,
     session: AgentSession | TeamSession,
     runs: Iterable[RunOutput | TeamRunOutput],
-    *,
-    preserve_usage: bool = False,
 ) -> list[str]:
     """Make ``runs`` the session's run list and delete the rows of the runs it dropped.
 
@@ -433,10 +427,7 @@ def replace_runs(
         if isinstance(run, (RunOutput, TeamRunOutput)) and run.run_id and run.run_id not in kept_ids
     ]
     if removed:
-        if preserve_usage and isinstance(storage, _ConversationSqliteDb):
-            storage.delete_runs(removed, preserve_usage=True)
-        else:
-            storage.delete_runs(removed)
+        storage.delete_runs(removed)
     session.runs = kept
     return removed
 

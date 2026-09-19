@@ -303,8 +303,13 @@ The report-level `daily_coverage` applies to both the overall and per-user daily
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
-User and model breakdowns cover retained top-level runs.
-They can differ from session totals, which may include compacted history and nested team-member usage.
+User and model breakdowns cover stored top-level usage snapshots.
+Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
+Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.
+Explicit whole-session erasure removes its usage too.
+Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
+Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
+Breakdowns can still differ from session totals because history lost before migration and nested team-member usage may lack detailed attribution.
 Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
 `scanned_sources` counts discovered database candidates, including absent configured databases.
@@ -318,7 +323,7 @@ Rows separate stored session `totals` and `session_count` from `retained_run_tot
 They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
 Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
-Compacted history can contribute to session totals without recoverable model or daily detail.
+History compacted before usage migration can contribute to session totals without recoverable model or daily detail.
 
 For an ownership-based view, combine private-agent session usage attributed to owners with retained usage outside private-agent instances attributed to requesters.
 Group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
@@ -326,7 +331,7 @@ For each token counter and user, calculate `user_breakdown.totals - private_agen
 Calculate over the union of users in both breakdowns; users with no private-agent row retain their full `user_breakdown.totals`.
 Use values from the same response and retain `user_id: null` as unattributed usage.
 For example, 60 retained tokens containing 20 private-agent tokens, plus a private-agent session total of 50, gives 90 tokens: `60 - 20 + 50`.
-This includes private history whose detailed runs were compacted without counting its retained runs twice.
+This includes private history whose detail was lost before usage migration without counting its stored usage twice.
 It also replaces recorded-requester attribution for private runs with session ownership: if Bob requested 20 retained tokens from Alice's private instance with 100 session tokens, this view assigns those 100 tokens to Alice and none to Bob.
 Keep `user_breakdown` unchanged when reporting who made the retained requests; the combined view answers a different ownership question.
 Usage outside private-agent instances still relies on retained requester-attributed runs; a shared conversation's recorded requester is not the owner of every run.

@@ -1106,12 +1106,11 @@ def remove_run_by_event_id(
             session_id,
         )
     )
-    if session is None:
+    if session is None or not session.runs:
         return False
-    deletion_runs = agent_storage.runs_for_deletion(storage, session)
     removed_runs: list[RunOutput | TeamRunOutput] = []
     matched_run = False
-    for run in deletion_runs:
+    for run in session.runs:
         if not isinstance(run, (RunOutput, TeamRunOutput)):
             continue
         if matched_run and remove_following_runs:
@@ -1156,14 +1155,8 @@ def remove_run_by_event_id(
     if not removed_runs:
         return False
     # Team member runs hang off the team run through parent_run_id and go with it.
-    removed_ids = {run.run_id for run in removed_runs if run.run_id}
-    kept_objects = {id(run) for run in agent_storage.runs_without(deletion_runs, removed_ids)}
-    removed_ids.update(run.run_id for run in deletion_runs if run.run_id and id(run) not in kept_objects)
-    if removed_ids:
-        storage.delete_runs(sorted(removed_ids))
-    session.runs = [
-        run for run in session.runs or [] if id(run) in kept_objects and not any(run is gone for gone in removed_runs)
-    ]
+    kept = agent_storage.runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
+    agent_storage.replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
     return True
 
 

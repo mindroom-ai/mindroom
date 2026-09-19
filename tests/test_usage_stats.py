@@ -21,6 +21,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
@@ -116,7 +117,6 @@ def _row(
     entity_id: str | None = None,
     session_metrics: Mapping[str, object] | None = None,
     row_key: str = "session-1",
-    payload_bytes: int = 0,
     runs_available: bool = True,
     session_metrics_available: bool = True,
 ) -> UsageSessionRow:
@@ -128,7 +128,6 @@ def _row(
         row_key=row_key,
         runs=tuple(runs),
         session_metrics=MappingProxyType(dict(session_metrics or {})),
-        payload_bytes=payload_bytes,
         runs_available=runs_available,
         session_metrics_available=session_metrics_available,
     )
@@ -544,6 +543,7 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
         with sqlite3.connect(database) as connection:
             runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
             connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
+    migrate_usage_database(database, "code_sessions")
 
     report = collect_self_usage(
         agent_name="code",
@@ -566,6 +566,42 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
     assert day["model_breakdown"][0]["provider"] == "unknown"
     assert day["model_breakdown"][0]["model"] == "unknown"
     assert day["model_breakdown"][0]["totals"]["total_tokens"] == 12
+
+
+def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) -> None:
+    """A damaged historical metric must flag incomplete coverage without hiding usable neighbors."""
+    paths = _paths(tmp_path)
+    database = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ?",
+            (
+                json.dumps(
+                    [
+                        {"run_id": "valid", "user_id": "@alice:example.test", "metrics": {"total_tokens": 5}},
+                        {
+                            "run_id": "broken",
+                            "user_id": "@alice:example.test",
+                            "metrics": {"total_tokens": {"private": "content"}},
+                        },
+                    ],
+                ),
+            ),
+        )
+    migrate_usage_database(database, "code_sessions")
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=paths,
+        execution_identity=_identity(),
+    ).to_dict()
+
+    assert report["totals"]["total_tokens"] == 5
+    assert sum(model["totals"]["total_tokens"] for model in report["model_breakdown"]) == 5
+    assert report["coverage"]["unavailable_sources"] == 1
+    assert report["model_coverage"]["unavailable_sources"] == 1
 
 
 @pytest.mark.parametrize(

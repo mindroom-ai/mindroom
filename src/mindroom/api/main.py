@@ -54,6 +54,7 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.legacy_private_storage import migrate_private_storage
+from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
@@ -507,6 +508,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
     await migrate_private_storage(runtime_paths)
+    await migrate_usage_storage(runtime_paths)
     await asyncio.to_thread(constants.ensure_writable_config_path, create_minimal=True, runtime_paths=runtime_paths)
     app_state = config_lifecycle.app_state(_app)
     preload_snapshot = _app_context(_app)

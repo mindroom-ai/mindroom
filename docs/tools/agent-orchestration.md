@@ -173,14 +173,14 @@ Token totals separately report input, output, cache-read, cache-write, reasoning
 The admin response groups session aggregates by configured agent or team ID.
 Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
-Both responses group retained top-level runs by provider and model in `model_breakdown`.
+Both responses group stored top-level usage snapshots by provider and model in `model_breakdown`.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
 Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.
 Malformed model details or details that do not account for the run's token totals put the run's tokens under `unknown` and mark model and daily coverage as partially unavailable.
 Model rows include token totals and run counts and are sorted by total tokens.
 Each model counts a run once, while daily and user run counts count that run once across all its models.
 Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
-Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
+Model coverage is reported separately because history lost before usage migration and nested team-member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
 
@@ -192,7 +192,7 @@ Personal reports omit user identifiers and contain only the requester's own priv
 
 Each private row contains session `totals` and `session_count`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
 With `include_daily=True`, it also contains `daily_breakdown` using the same UTC dates and model/token counters as the other daily views.
-Session totals can include compacted history that no longer has retained model or daily detail; the two totals are intentionally separate.
+Session totals can include history compacted before usage migration that no longer has model or daily detail; the two totals are intentionally separate.
 
 For admin reports, session ownership comes from a validated private-instance identity record, falling back to the session's recorded requester.
 Retained runs keep their recorded requester, with the validated owner as fallback when requester metadata is missing.
@@ -200,8 +200,11 @@ Known aliases are combined; missing ownership remains `user_id: null`.
 `private_agent_coverage` describes unavailable attribution or metrics.
 All views share the same storage reader, run deduplication, token normalization, and daily grouping.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
-Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
-Agno 2.x session run blobs, including double-encoded JSON, and Agno 3 run tables are supported, including partly migrated databases.
+Usage snapshots survive compaction, edits, and regeneration; explicit whole-session erasure removes them.
+A one-time startup import in `legacy_usage_storage.py` reads available Agno 2.x session blobs and Agno 3 run rows, including partly migrated databases.
+The importer retains unknown timestamps and attribution and reports malformed records as coverage gaps.
+Reports and tools read the current usage table without migrating or scanning conversation payloads.
+History lost before migration cannot be recovered by this report.
 Missing counters are reported as zero, so zero does not prove that an older provider recorded that token category.
 These counters support cost estimates, but do not guarantee exact billing: provider-specific charging rules and calls outside retained session storage are not captured.
 
