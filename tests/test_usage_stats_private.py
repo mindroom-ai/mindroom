@@ -24,7 +24,7 @@ from mindroom.private_instance_identity_store import ensure_private_instance_ide
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, private_instance_scope_root_path
 from tests.conftest import seed_session
-from tests.test_usage_stats import _config, _metrics, _paths, _row, _run, _source, _wire
+from tests.test_usage_stats import _config, _metrics, _model_metrics, _paths, _row, _run, _source, _wire
 from tests.test_usage_stats_tool import _context
 
 if TYPE_CHECKING:
@@ -288,7 +288,12 @@ def test_combined_private_ownership_differs_from_recorded_requester(
     private_source = replace(_source(scope="private_agent", requester_isolated=True), owner_id=ALICE)
     shared_source = _source()
     shared_only_user = "@carol:example.test"
-    private_row = _row(private_source, _run(requester_id=BOB, total_tokens=20), session_metrics=_metrics(100))
+    private_row = _row(
+        private_source,
+        _run(requester_id=BOB, total_tokens=20),
+        session_metrics=_metrics(100),
+        session_model_metrics=(_model_metrics("cumulative-provider", "cumulative-model", **dict(_metrics(100))),),
+    )
     shared_row = _row(
         shared_source,
         _run(requester_id=BOB, total_tokens=30),
@@ -307,8 +312,12 @@ def test_combined_private_ownership_differs_from_recorded_requester(
     assert users == {BOB: 50, shared_only_user: 40}
     private = {row["user_id"]: row for row in report["private_agent_breakdown"]}
     assert private[ALICE]["totals"]["total_tokens"] == 100
+    assert private[ALICE]["cumulative_model_breakdown"][0]["provider"] == "cumulative-provider"
+    assert private[ALICE]["cumulative_model_breakdown"][0]["totals"]["total_tokens"] == 100
+    assert private[ALICE]["cumulative_model_breakdown"][0]["session_count"] == 1
     assert private[ALICE]["retained_run_totals"]["total_tokens"] == 0
     assert private[BOB]["totals"]["total_tokens"] == 0
+    assert private[BOB]["cumulative_model_breakdown"] == []
     assert private[BOB]["retained_run_totals"]["total_tokens"] == 20
     private_retained = {user: row["retained_run_totals"]["total_tokens"] for user, row in private.items()}
     private_sessions = {user: row["totals"]["total_tokens"] for user, row in private.items()}
@@ -317,6 +326,40 @@ def test_combined_private_ownership_differs_from_recorded_requester(
         for user in users.keys() | private.keys()
     }
     assert combined == {ALICE: 100, BOB: 30, shared_only_user: 40}
+
+
+def test_private_self_exports_only_owned_cumulative_models(tmp_path: Path) -> None:
+    """All-private self reports expose no shared or other-owner cumulative totals."""
+    data = private_usage_data(tmp_path)
+    report = usage_stats.collect_private_usage(
+        requester_id=ALICE,
+        config=data.config,
+        runtime_paths=data.paths,
+    ).to_dict()
+
+    assert report["cumulative_model_breakdown"][0]["provider"] == "unknown"
+    assert report["cumulative_model_breakdown"][0]["totals"]["total_tokens"] == 150
+    assert report["cumulative_model_breakdown"][0]["session_count"] == 2
+    assert report["cumulative_model_coverage"]["unavailable_sources"] == 2
+
+    shared = usage_stats.collect_self_usage(
+        agent_name="shared",
+        requester_id=ALICE,
+        config=data.config,
+        runtime_paths=data.paths,
+        execution_identity=build_tool_execution_identity(
+            channel="matrix",
+            agent_name="shared",
+            runtime_paths=data.paths,
+            requester_id=ALICE,
+            room_id=None,
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id=None,
+        ),
+    ).to_dict()
+    assert "cumulative_model_breakdown" not in shared
+    assert "cumulative_model_coverage" not in shared
 
 
 def test_private_rows_report_unreadable_run_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.usage_stats_storage import (
     TOKEN_FIELDS,
+    UsageModelMetrics,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -32,6 +33,7 @@ __all__ = [
     "TokenTotals",
     "UsageBreakdownRow",
     "UsageCoverage",
+    "UsageCumulativeModelBreakdownRow",
     "UsageDailyBreakdownRow",
     "UsageModelBreakdownRow",
     "UsagePrivateAgentBreakdownRow",
@@ -56,6 +58,12 @@ _MODEL_COVERAGE_NOTE = (
     "Runs with unusable model details are grouped as unknown. "
     "It does not necessarily sum to report totals, which may include compacted history "
     "and nested team-member usage."
+)
+_CUMULATIVE_MODEL_COVERAGE_NOTE = (
+    "Cumulative model breakdown uses per-model details stored in retained session aggregates. "
+    "Missing, unusable, or unreconciled attribution is grouped as unknown. "
+    "Compacted history still present in retained sessions is included; deleted sessions and dates or requester "
+    "attribution absent from session aggregates are unavailable."
 )
 _USER_COVERAGE_NOTE = (
     "User breakdown uses requester-attributed retained top-level runs, grouped by canonical user identity. "
@@ -128,6 +136,7 @@ class UsageBreakdownRow:
     key: str
     totals: TokenTotals
     session_count: int
+    cumulative_model_breakdown: tuple[UsageCumulativeModelBreakdownRow, ...]
 
     def to_dict(self) -> dict[str, object]:
         """Return the public breakdown row."""
@@ -136,6 +145,7 @@ class UsageBreakdownRow:
             "key": self.key,
             "totals": self.totals.to_dict(),
             "session_count": self.session_count,
+            "cumulative_model_breakdown": [row.to_dict() for row in self.cumulative_model_breakdown],
         }
 
 
@@ -172,6 +182,25 @@ class UsageModelBreakdownRow:
             "model": self.model,
             "totals": self.totals.to_dict(),
             "run_count": self.run_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UsageCumulativeModelBreakdownRow:
+    """Session-aggregate usage for one provider and model."""
+
+    model_provider: str
+    model: str
+    totals: TokenTotals
+    session_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the public cumulative model breakdown row."""
+        return {
+            "provider": self.model_provider,
+            "model": self.model,
+            "totals": self.totals.to_dict(),
+            "session_count": self.session_count,
         }
 
 
@@ -225,6 +254,7 @@ class UsagePrivateAgentBreakdownRow:
     user_id: str | None
     totals: TokenTotals
     session_count: int
+    cumulative_model_breakdown: tuple[UsageCumulativeModelBreakdownRow, ...]
     retained_run_totals: TokenTotals
     run_count: int
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
@@ -236,6 +266,7 @@ class UsagePrivateAgentBreakdownRow:
             "agent_name": self.agent_name,
             "totals": self.totals.to_dict(),
             "session_count": self.session_count,
+            "cumulative_model_breakdown": [row.to_dict() for row in self.cumulative_model_breakdown],
             "retained_run_totals": self.retained_run_totals.to_dict(),
             "run_count": self.run_count,
             "model_breakdown": [row.to_dict() for row in self.model_breakdown],
@@ -258,6 +289,8 @@ class UsageReport:
     coverage: UsageCoverage
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
     model_coverage: UsageCoverage
+    cumulative_model_breakdown: tuple[UsageCumulativeModelBreakdownRow, ...]
+    cumulative_model_coverage: UsageCoverage
     user_breakdown: tuple[UsageUserBreakdownRow, ...] = ()
     daily_breakdown: tuple[UsageDailyBreakdownRow, ...] = ()
     daily_coverage: UsageCoverage | None = None
@@ -278,6 +311,9 @@ class UsageReport:
         if self.scope == "admin":
             payload["user_breakdown"] = [row.to_dict() for row in self.user_breakdown]
             payload["user_coverage"] = replace(self.model_coverage, note=_USER_COVERAGE_NOTE).to_dict()
+        if self.scope == "admin" or self.private_agent_coverage is not None:
+            payload["cumulative_model_breakdown"] = [row.to_dict() for row in self.cumulative_model_breakdown]
+            payload["cumulative_model_coverage"] = self.cumulative_model_coverage.to_dict()
         if self.daily_coverage is not None:
             payload["daily_breakdown"] = [row.to_dict() for row in self.daily_breakdown]
             payload["daily_coverage"] = self.daily_coverage.to_dict()
@@ -304,8 +340,13 @@ class _UsageAccumulator:
     total: TokenTotals = TokenTotals()
     sessions: set[tuple[str, str]] = dataclass_field(default_factory=set)
     buckets: dict[str, _Aggregate] = dataclass_field(default_factory=dict)
+    cumulative_model_buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
+    entity_cumulative_model_buckets: dict[str, dict[tuple[str, str], _Aggregate]] = dataclass_field(
+        default_factory=dict,
+    )
     seen_runs: set[tuple[str, str, str]] = dataclass_field(default_factory=set)
     unavailable_sources: set[str] = dataclass_field(default_factory=set)
+    cumulative_model_unavailable_sources: set[str] = dataclass_field(default_factory=set)
 
     def add_row(
         self,
@@ -318,6 +359,8 @@ class _UsageAccumulator:
         uses_runs = scope == "self" and not row.source.requester_isolated
         if (uses_runs and not row.runs_available) or (not uses_runs and not row.session_metrics_available):
             self.unavailable_sources.add(row.source.path_label)
+            if not uses_runs:
+                self.cumulative_model_unavailable_sources.add(row.source.path_label)
             return
         try:
             if scope == "self":
@@ -333,13 +376,33 @@ class _UsageAccumulator:
                 row_totals = _metrics_totals(row.session_metrics) if entity_id is not None else None
         except ValueError:
             self.unavailable_sources.add(row.source.path_label)
+            if not uses_runs:
+                self.cumulative_model_unavailable_sources.add(row.source.path_label)
             return
         if row_totals is None:
             return
         self.total = self.total.plus(row_totals)
         self.sessions.add((row.source.path_label, row.row_key))
+        models: Mapping[tuple[str, str], TokenTotals] = {}
+        if not uses_runs:
+            models = self._add_cumulative_models(row, row_totals)
         if entity_id is not None:
             self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals)
+            _add_model_totals(self.entity_cumulative_model_buckets.setdefault(entity_id, {}), models)
+
+    def _add_cumulative_models(
+        self,
+        row: UsageSessionRow,
+        row_totals: TokenTotals,
+    ) -> Mapping[tuple[str, str], TokenTotals]:
+        models = _session_model_totals(row, row_totals)
+        if models is None:
+            models = {("unknown", "unknown"): row_totals}
+            self.cumulative_model_unavailable_sources.add(row.source.path_label)
+        elif any("unknown" in key for key in models):
+            self.cumulative_model_unavailable_sources.add(row.source.path_label)
+        _add_model_totals(self.cumulative_model_buckets, models)
+        return models
 
 
 @dataclass(slots=True)
@@ -521,6 +584,7 @@ class _PrivateUsageAccumulator:
                     user_id,
                     usage.total,
                     len(usage.sessions),
+                    _cumulative_model_breakdown(usage.cumulative_model_buckets),
                     retained,
                     run_count,
                     _model_breakdown(models.buckets),
@@ -620,6 +684,7 @@ def _collect_usage(
     for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
             usage.unavailable_sources.add(discovered.path_label)
+            usage.cumulative_model_unavailable_sources.add(discovered.path_label)
             model_usage.unavailable_sources.add(discovered.path_label)
             private_usage.mark_unavailable(discovered)
             continue
@@ -631,6 +696,7 @@ def _collect_usage(
         for item in iter_usage_storage_rows(source, mode=mode):
             if isinstance(item, UsageStorageDiagnostic):
                 usage.unavailable_sources.add(item.path_label)
+                usage.cumulative_model_unavailable_sources.add(item.path_label)
                 model_usage.unavailable_sources.add(item.path_label)
                 private_usage.mark_unavailable(source)
                 continue
@@ -662,7 +728,14 @@ def _collect_usage(
                 private_usage.unavailable_sources.add(source.path_label)
 
     breakdown = tuple(
-        UsageBreakdownRow(key=entity_id, totals=aggregate.totals, session_count=aggregate.count)
+        UsageBreakdownRow(
+            key=entity_id,
+            totals=aggregate.totals,
+            session_count=aggregate.count,
+            cumulative_model_breakdown=_cumulative_model_breakdown(
+                usage.entity_cumulative_model_buckets.get(entity_id, {}),
+            ),
+        )
         for entity_id, aggregate in sorted(
             usage.buckets.items(),
             key=lambda item: (-item[1].totals.total_tokens, item[0]),
@@ -685,6 +758,12 @@ def _collect_usage(
         ),
         model_breakdown=model_breakdown,
         model_coverage=model_coverage,
+        cumulative_model_breakdown=_cumulative_model_breakdown(usage.cumulative_model_buckets),
+        cumulative_model_coverage=UsageCoverage(
+            scanned_sources=len(scanned_sources),
+            unavailable_sources=len(usage.cumulative_model_unavailable_sources),
+            note=_CUMULATIVE_MODEL_COVERAGE_NOTE,
+        ),
         user_breakdown=_user_breakdown(
             model_usage.user_buckets,
             model_usage.user_totals,
@@ -741,6 +820,23 @@ def _model_breakdown(
     )
 
 
+def _cumulative_model_breakdown(
+    buckets: Mapping[tuple[str, str], _Aggregate],
+) -> tuple[UsageCumulativeModelBreakdownRow, ...]:
+    return tuple(
+        UsageCumulativeModelBreakdownRow(
+            model_provider=key[0],
+            model=key[1],
+            totals=aggregate.totals,
+            session_count=aggregate.count,
+        )
+        for key, aggregate in sorted(
+            buckets.items(),
+            key=lambda item: (-item[1].totals.total_tokens, item[0]),
+        )
+    )
+
+
 def _add_model_totals(
     buckets: dict[tuple[str, str], _Aggregate],
     models: Mapping[tuple[str, str], TokenTotals],
@@ -755,10 +851,27 @@ def _run_model_totals(run: UsageRunNode, totals: TokenTotals) -> dict[tuple[str,
         return None
     if not run.model_metrics:
         return {(run.model_provider or "unknown", run.model or "unknown"): totals}
+    return _detailed_model_totals(run.model_metrics, totals)
+
+
+def _session_model_totals(
+    row: UsageSessionRow,
+    totals: TokenTotals,
+) -> dict[tuple[str, str], TokenTotals] | None:
+    """Accept session model detail only when every token counter reconciles."""
+    if not row.session_model_metrics:
+        return None
+    return _detailed_model_totals(row.session_model_metrics, totals)
+
+
+def _detailed_model_totals(
+    model_metrics: tuple[UsageModelMetrics, ...],
+    totals: TokenTotals,
+) -> dict[tuple[str, str], TokenTotals] | None:
     models: dict[tuple[str, str], TokenTotals] = {}
     combined = TokenTotals()
     try:
-        for entry in run.model_metrics:
+        for entry in model_metrics:
             model_totals = _metrics_totals(entry.metrics)
             if model_totals is None:
                 continue

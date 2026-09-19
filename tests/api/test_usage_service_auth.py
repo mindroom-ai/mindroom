@@ -256,8 +256,11 @@ def test_usage_export_prepares_and_returns_real_daily_report(
         assert repeated.status_code == 202
         assert len(workers.targets) == 1
 
+        before_scan = datetime.now(UTC)
         workers.run_next()
+        after_scan = datetime.now(UTC)
         ready = client.get("/api/usage/export", params={"include_daily": "true"}, headers=headers)
+        cached = client.get("/api/usage/export", params={"include_daily": "true"}, headers=headers)
     finally:
         runner.close()
         config_lifecycle.app_state(client.app).usage_export_runner = None
@@ -265,6 +268,11 @@ def test_usage_export_prepares_and_returns_real_daily_report(
     assert ready.status_code == 200
     assert ready.headers["cache-control"] == "no-store"
     payload = ready.json()
+    assert payload["schema_version"] == 1
+    generated_at = datetime.fromisoformat(payload["generated_at"])
+    assert generated_at.utcoffset() == timedelta(0)
+    assert before_scan <= generated_at <= after_scan
+    assert cached.json() == payload
     expected_metrics = {
         "input_tokens": 12,
         "output_tokens": 8,

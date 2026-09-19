@@ -183,6 +183,15 @@ Coverage reports scanned sources, unavailable or partially unreadable sources, a
 Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
+The HTTP usage routes add `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp when a scan finishes; cached responses retain that scan timestamp.
+
+Admin and all-private self reports also include `cumulative_model_breakdown` and `cumulative_model_coverage`.
+Cumulative model rows use per-model details stored with session aggregates, so they include compacted usage still present in retained sessions.
+Each row contains provider, model, all token counters, and `session_count`; a session using several models counts once in each model row.
+Duplicate entries for the same provider and model within one session are combined before that count is added.
+The details must reconcile every token counter to the session total; absent, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark cumulative model coverage incomplete.
+Session aggregates do not retain dates or requester attribution for these counters, and deleted sessions remain unavailable.
+Shared-agent self reports omit the cumulative fields because their totals are requester-filtered retained runs rather than whole session aggregates.
 
 ### Private-Agent Accounting
 
@@ -190,7 +199,7 @@ The tool does not change Agno persistence settings.
 Personal reports omit user identifiers and contain only the requester's own private agents.
 `get_my_private_usage()` combines those agents in the overall totals; `get_all_usage()` includes private rows alongside the instance-wide report.
 
-Each private row contains session `totals` and `session_count`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
+Each private row contains session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
 With `include_daily=True`, it also contains `daily_breakdown` using the same UTC dates and model/token counters as the other daily views.
 Session totals can include compacted history that no longer has retained model or daily detail; the two totals are intentionally separate.
 

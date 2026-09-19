@@ -87,7 +87,7 @@ class UsageStorageSource:
 
 @dataclass(frozen=True, slots=True)
 class UsageModelMetrics:
-    """Token counters attributed to one model within a retained run."""
+    """Content-free token counters attributed to one stored model."""
 
     model_provider: str | None
     model: str | None
@@ -119,6 +119,8 @@ class UsageSessionRow:
     row_key: str
     runs: tuple[UsageRunNode, ...]
     session_metrics: Mapping[str, _MetricValue] = field(default_factory=lambda: MappingProxyType({}))
+    # Empty means no detailed attribution was stored; None means it was unusable.
+    session_model_metrics: tuple[UsageModelMetrics, ...] | None = ()
     requester_id: str | None = None
     payload_bytes: int = 0
     runs_available: bool = True
@@ -592,9 +594,10 @@ def _extract_row(
     if mode == "runs":
         runs = _extract_runs(persisted_runs.payloads, legacy_runs_payload, row_requester=row_requester)
         session_metrics = MappingProxyType({})
+        session_model_metrics: tuple[UsageModelMetrics, ...] | None = ()
     elif mode == "session_metrics":
         runs = ()
-        session_metrics = _decode_session_metrics(row["session_payload"])
+        session_metrics, session_model_metrics = _decode_session_usage(row["session_payload"])
     else:
         try:
             runs = _extract_runs(persisted_runs.payloads, legacy_runs_payload, row_requester=row_requester)
@@ -602,9 +605,10 @@ def _extract_row(
             runs = ()
             runs_available = False
         try:
-            session_metrics = _decode_session_metrics(row["session_payload"])
+            session_metrics, session_model_metrics = _decode_session_usage(row["session_payload"])
         except (RecursionError, TypeError, ValueError, json.JSONDecodeError):
             session_metrics = MappingProxyType({})
+            session_model_metrics = None
             session_metrics_available = False
     return UsageSessionRow(
         source=source,
@@ -613,6 +617,7 @@ def _extract_row(
         row_key=_bounded_string(row_key),
         runs=runs,
         session_metrics=session_metrics,
+        session_model_metrics=session_model_metrics,
         requester_id=row_requester,
         payload_bytes=payload_bytes,
         runs_available=runs_available,
@@ -647,18 +652,21 @@ def _extract_runs(
     return tuple(runs)
 
 
-def _decode_session_metrics(raw_value: object) -> Mapping[str, _MetricValue]:
+def _decode_session_usage(
+    raw_value: object,
+) -> tuple[Mapping[str, _MetricValue], tuple[UsageModelMetrics, ...] | None]:
     decoded = decode_persisted_session_json(raw_value)
     if decoded is None:
-        return MappingProxyType({})
+        return MappingProxyType({}), ()
     if not isinstance(decoded, dict):
         raise TypeError
     raw_metrics = cast("dict[str, object]", decoded).get("session_metrics")
     if raw_metrics is None:
-        return MappingProxyType({})
+        return MappingProxyType({}), ()
     if not isinstance(raw_metrics, dict):
         raise TypeError
-    return _select_metrics(cast("dict[str, object]", raw_metrics))
+    session_metrics = cast("dict[str, object]", raw_metrics)
+    return _select_metrics(session_metrics), _extract_model_metrics(session_metrics.get("details"))
 
 
 def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode | None:

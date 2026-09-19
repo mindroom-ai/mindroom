@@ -283,14 +283,23 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 The two routes share report preparation and caching while authenticating every request through their own policy.
 When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
 Every report-state response uses `Cache-Control: no-store`.
+Completed HTTP reports include `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp set when the scan finishes.
+Cached polls return the original timestamp for that completed scan.
 
-The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, and `user_breakdown`.
+The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
 Counters include input, output, total, cache read/write, reasoning, and audio tokens.
 Models include their provider.
 Stored per-model details split runs that use several models; older runs fall back to their recorded model.
 Malformed or inconsistent model details retain the run's tokens under `unknown` and mark model coverage as incomplete.
 Requester aliases are combined; `user_id: null` holds unattributed usage.
+
+`cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
+The same rows appear within each entity in `breakdown`.
+Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
+All token counters must reconcile to the session aggregate.
+Missing, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark `cumulative_model_coverage` incomplete.
+Session aggregates do not provide dates or requester attribution for these model counters, and deleted sessions remain unavailable.
 
 Use `GET /api/usage?include_daily=true` or `GET /api/usage/export?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
@@ -314,7 +323,7 @@ This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
 The organization-wide response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
-Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
+Rows separate stored session `totals`, `session_count`, and `cumulative_model_breakdown` from `retained_run_totals`, `run_count`, and `model_breakdown`.
 They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
 Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
