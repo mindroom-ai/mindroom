@@ -785,3 +785,21 @@ The existing immutable construction snapshot retains their canonical value; chan
 This closes constructor-controlled grants such as file and shell enable flags without enumerating tool-specific options or rebuilding remote clients during authorization.
 Include/exclude filters retain their existing per-function checks.
 Real SDK integration tests mutate eager and deferred file/shell settings while an outer job is active, verify that the side effect never occurs after revocation, and exercise discovery and result access before and after restoring the original settings.
+
+### Tools with their own background execution
+
+The shell's native timeout can finish a tool invocation while its process is still running.
+Wrapping that invocation in a generic job produced a completed job containing a second background handle, so generic cancellation no longer owned the process.
+This was reproduced with a real process through both agent and team SDK dispatch.
+
+A single exclusion list of registered toolkit/function pairs now controls schema projection and execution admission, using existing construction identity so presets retain the same behavior.
+Shell run, check, and kill functions keep their existing arguments, process owner, and shell handles without a generic job or added `wait_timeout`.
+The normal application authorization boundary still applies, including current constructor grants inside a retained outer job.
+Human follow-ups do not detach excluded calls through the generic runtime; the shell's native timeout bounds their wait.
+Shell handles are outside generic discovery and automatic completion delivery.
+Other functions, including an unrelated function with the same name, retain managed execution.
+
+Regression tests exercise actual process completion and termination, schema projection, rejection of a stale generic waiting argument before any side effect, and a human follow-up while a native shell wait is active.
+The existing shell-output fix from PR #2130 remains responsible for complete output-file capture; no second output truncation policy or retired-job tombstone store is added here.
+A real-model Matrix run passed ten independent checks across native completion, cancellation, and a human follow-up, alongside a generic file job.
+The redirected output retained all 262,144 payload bytes and its exact sentinels and working-directory header; shell controls created no generic job records.

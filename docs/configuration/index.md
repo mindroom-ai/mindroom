@@ -35,6 +35,7 @@ Restart MindRoom after changing this option.
 Hot reload saves the requested value and reports that a restart is required; other configuration changes can still take effect.
 When enabled, managed Matrix tools gain a shared `wait_timeout` argument and one `job` tool for listing, inspecting, waiting for, or cancelling accepted work.
 Ordinary calls still wait by default, and a human follow-up can release the wait while work continues.
+Shell tools retain their native `timeout` and shell handle controls; they do not gain `wait_timeout` or create generic jobs.
 See [Background jobs](../tools/agent-orchestration.md#background-jobs) for the complete waiting and result behavior.
 
 With the option off, tools and delegation use their ordinary execution paths without these generic job controls.

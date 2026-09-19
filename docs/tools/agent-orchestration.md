@@ -298,6 +298,13 @@ This waiting budget is separate from a tool's own execution or network timeout.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
 
+Tools that already own background execution are excluded from generic jobs.
+The shared exclusion list in `tool_jobs/agno_execution.py` uses registered toolkit and function names and applies to both schemas and execution, including tools loaded through presets.
+It currently excludes shell's `run_shell_command`, `check_shell_command`, and `kill_shell_command`.
+Use the shell's native `timeout` to release its wait, then poll or stop its `shell:...` handle with the shell controls.
+These calls retain their native arguments and current permission checks; human input does not release their wait through the generic job runtime.
+Shell handles do not appear in `job(action="list")` or trigger generic completion delivery, and they cannot be controlled with `job`.
+
 | `wait_timeout` | Behavior |
 | --- | --- |
 | Omitted or `null` | Wait until completion or a human follow-up. |
@@ -339,7 +346,7 @@ Remote service availability alone does not revoke access to a saved result.
 Native child approvals retain the existing persisted parent-child continuation and approval cards.
 After delegation detaches, `job(action="wait", job_id=...)` presents a pending approval through that same continuation.
 Human messages do not grant approval, and current execution authority is rechecked before a retained callable runs.
-Nested tools remain part of their accepted outer job rather than starting independent jobs.
+Nested managed tools remain part of their accepted outer job rather than starting independent jobs.
 Their schemas omit the shared waiting option, and supplying a non-null nested waiting budget is rejected.
 Provider-hosted internal tools cannot be individually detached by the application-tool boundary.
 Unmanaged API execution keeps its existing synchronous lifetime and approval restrictions.

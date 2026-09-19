@@ -18,6 +18,7 @@ from agno.run.base import BaseRunOutputEvent
 from agno.run.team import TEAM_RUN_EVENT_TYPE_REGISTRY
 from agno.run.team import RunContentEvent as TeamRunContentEvent
 from agno.run.workflow import WORKFLOW_RUN_EVENT_TYPE_REGISTRY
+from agno.tools import Toolkit
 from agno.tools.function import FunctionCall, FunctionExecutionResult, ToolResult
 from agno.utils.timer import Timer
 from pydantic import BaseModel
@@ -38,6 +39,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
+from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
@@ -56,6 +58,23 @@ if TYPE_CHECKING:
 type _CallResult = tuple[bool | AgentRunException, Timer, FunctionCall, FunctionExecutionResult]
 type _Execute = Callable[[FunctionCall], Coroutine[object, object, _CallResult]]
 _EVENT_TYPES = {**RUN_EVENT_TYPE_REGISTRY, **TEAM_RUN_EVENT_TYPE_REGISTRY, **WORKFLOW_RUN_EVENT_TYPE_REGISTRY}
+
+# Registered toolkit names and function names. These tools already own their
+# background work; keep their native arguments, results, and control handles.
+_BACKGROUND_JOB_EXCLUSIONS = frozenset(
+    {
+        ("shell", "run_shell_command"),
+        ("shell", "check_shell_command"),
+        ("shell", "kill_shell_command"),
+    },
+)
+
+
+def is_background_job_excluded(function: Function) -> bool:
+    """Share exact tool exclusions between schema projection and execution."""
+    toolkit = function.source_toolkit
+    construction = get_toolkit_construction(toolkit) if isinstance(toolkit, Toolkit) else None
+    return construction is not None and (construction.name, function.name) in _BACKGROUND_JOB_EXCLUSIONS
 
 
 def is_framework_function(function: Function) -> bool:
@@ -256,7 +275,7 @@ async def _consume_result(
 async def _execute_inline(original: _Execute, call: FunctionCall) -> _CallResult:
     inline_call = (
         call
-        if is_job_function(call.function)
+        if is_job_function(call.function) or is_background_job_excluded(call.function)
         else call.model_copy(update={"arguments": application_arguments(call.arguments)})
     )
     success, timer, _, result = await original(inline_call)
@@ -281,9 +300,13 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         if runtime is None or context is None or resources is None or is_framework_function(call.function):
             return await original(call)
         try:
-            wait_timeout = read_wait_timeout(
-                call.arguments,
-                owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
+            wait_timeout = (
+                None
+                if is_background_job_excluded(call.function)
+                else read_wait_timeout(
+                    call.arguments,
+                    owned_execution=(job_owns_execution() or depth > 0) and not is_job_function(call.function),
+                )
             )
         except ValueError as error:
             return _failed_call(call, error)
@@ -300,7 +323,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         with authorized_tool_call(owner, call.function, arguments=call.arguments), consuming_function_call(call):
             check_current_execution_authority()
             if (
-                job_owns_execution()
+                is_background_job_excluded(call.function)
+                or job_owns_execution()
                 or is_job_function(call.function)
                 or call.function.external_execution
                 or call.function.stop_after_tool_call

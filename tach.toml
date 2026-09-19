@@ -6802,6 +6802,7 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_jobs.agno_execution"
 depends_on = [
+    "mindroom.tool_system.construction",
     "mindroom.tool_jobs.provenance",
     "mindroom.mcp.toolkit",
     "mindroom.tool_jobs.consumption",
@@ -6968,7 +6969,12 @@ visibility = ["mindroom.tool_jobs.agno_execution", "mindroom.orchestration.tool_
 [[modules]]
 path = "mindroom.tool_system.construction"
 depends_on = []
-visibility = ["mindroom.agents", "mindroom.tool_jobs.authorization", "mindroom.tool_system.metadata"]
+visibility = [
+    "mindroom.agents",
+    "mindroom.tool_jobs.authorization",
+    "mindroom.tool_jobs.agno_execution",
+    "mindroom.tool_system.metadata",
+]
 
 [[modules]]
 path = "mindroom.tool_jobs.wait_timeout"

@@ -528,7 +528,8 @@ Your workspace contains the corresponding receipt at .mindroom/delegation_receip
 
 
 DELEGATE_BACKGROUND_JOB_INSTRUCTIONS = """Managed foreground Matrix calls accept wait_timeout: omitted or null waits until completion or human input, zero returns a Job ID immediately, and a positive number bounds waiting without cancelling work.
-Tools already executing within an outer job stay with that job; nested application calls do not accept a separate wait budget.
+Only use wait_timeout when the tool schema exposes it. Shell tools manage their own background processes: use run_shell_command's timeout and check_shell_command/kill_shell_command with its shell handle, not job.
+Managed tools already executing within an outer job stay with that job; nested managed calls do not accept a separate wait budget.
 A human follow-up releases the wait while the child continues working.
 Use job(action="list") to rediscover work, job(action="inspect", job_id=...) for status, job(action="wait", job_id=...) to retrieve results, job(action="cancel", job_id=...) to stop it.
 Waiting neither restarts the child nor grants tool approval.

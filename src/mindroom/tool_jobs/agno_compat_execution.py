@@ -9,7 +9,7 @@ from agno.tools.function import Function
 
 from mindroom.custom_tools.job import is_job_function, project_native_job_wait
 from mindroom.tool_jobs.agno_compat_resources import install_execution_resource_bindings
-from mindroom.tool_jobs.agno_execution import is_framework_function, wrap_tool_execution
+from mindroom.tool_jobs.agno_execution import is_background_job_excluded, is_framework_function, wrap_tool_execution
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 # Upstream issue: No matching public reserved-parameter extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK supports per-call framework metadata outside application kwargs.
-# Coverage: tests/test_tool_job_wait_timeout.py and tests/test_tool_job_control_calls.py.
+# Coverage: tests/test_tool_job_wait_timeout.py, tests/test_tool_job_control_calls.py, tests/test_tool_job_exclusions.py.
 def _wrap_tool_schemas(
     original: Callable[..., list[dict[str, Any]]],
     *,
@@ -40,7 +40,12 @@ def _wrap_tool_schemas(
             return original(tools)
         projected: list[Function | dict[str, Any]] = []
         for tool in tools or []:
-            if not isinstance(tool, Function) or is_framework_function(tool) or tool.stop_after_tool_call:
+            if (
+                not isinstance(tool, Function)
+                or is_framework_function(tool)
+                or tool.stop_after_tool_call
+                or is_background_job_excluded(tool)
+            ):
                 projected.append(tool)
                 continue
             if (job_owns_execution() or depth > 0) and not is_job_function(tool):
