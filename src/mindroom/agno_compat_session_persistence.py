@@ -8,8 +8,8 @@ import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager, nullcontext
-from copy import copy, deepcopy
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from functools import partial
 from importlib.metadata import version
 from pathlib import Path
@@ -238,9 +238,8 @@ async def _offload_sync_save[Owner, Payload](
         context = contextvars.copy_context()
         if isinstance(payload, (AgentSession, TeamSession, WorkflowSession)):
             # Agno 3 persists runs separately; snapshot only the session row.
-            # Clear history on a shallow copy so the live session stays intact.
-            payload = copy(payload)
-            payload.runs = None
+            # Keep declared row fields only, excluding history and runtime caches.
+            payload = replace(payload, runs=None)
         snapshot = deepcopy(payload)
         operation = partial(context.run, save, owner, snapshot, *save_args)
     except BaseException:

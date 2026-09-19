@@ -49,6 +49,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| Session totals add a run's full cumulative metrics again on pause/resume and checkpoints. | Make Agent and Team accumulation idempotent for repeated saves of one run, including member contributions. | `agno_compat_session_metrics.py`; real approval/resume, checkpoint, reload and export reconciliation tests. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
@@ -87,6 +88,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | --- | --- | --- |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
+| `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
