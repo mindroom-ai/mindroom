@@ -7,7 +7,7 @@ import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import RunMetrics
+from agno.metrics import ModelMetrics, RunMetrics
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
@@ -20,7 +20,7 @@ from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.legacy_session_storage import merge_legacy_run_payloads
+from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage_stats_storage import (
     UsageSessionRow,
@@ -50,6 +50,8 @@ _SESSION_COLUMNS = """
 
 
 def _source(path: Path, *, table: str = "code_sessions") -> UsageStorageSource:
+    # Existing-history fixtures pass through the same one-time import as startup.
+    migrate_usage_database(path, table)
     return UsageStorageSource(
         path=path,
         path_label=path.name,
@@ -210,7 +212,6 @@ def test_reader_extracts_only_top_level_usage_fields(tmp_path: Path) -> None:
     assert row.runs[0].created_at == 1_723_837_600
     assert row.runs_available is True
     assert row.session_metrics_available is False
-    assert row.payload_bytes > 0
     assert not hasattr(row.runs[0], "member_responses")
     assert "secret" not in repr(row)
     assert "999" not in repr(row)
@@ -342,11 +343,41 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, le
         session,
         TeamRunOutput(
             team_id="engineering",
-            metrics=RunMetrics(input_tokens=7, output_tokens=3, total_tokens=10),
+            metrics=RunMetrics(
+                input_tokens=7,
+                output_tokens=3,
+                total_tokens=10,
+                details={
+                    "model": [
+                        ModelMetrics(
+                            id="model-a",
+                            provider="provider-a",
+                            input_tokens=7,
+                            output_tokens=3,
+                            total_tokens=10,
+                        ),
+                    ],
+                },
+            ),
             member_responses=[
                 RunOutput(
                     agent_id="code",
-                    metrics=RunMetrics(input_tokens=14, output_tokens=6, total_tokens=20),
+                    metrics=RunMetrics(
+                        input_tokens=14,
+                        output_tokens=6,
+                        total_tokens=20,
+                        details={
+                            "model": [
+                                ModelMetrics(
+                                    id="model-b",
+                                    provider="provider-b",
+                                    input_tokens=14,
+                                    output_tokens=6,
+                                    total_tokens=20,
+                                ),
+                            ],
+                        },
+                    ),
                 ),
             ],
         ),
@@ -367,14 +398,18 @@ def test_reader_extracts_team_session_metrics_written_by_agno(tmp_path: Path, le
         with sqlite3.connect(source.path) as connection:
             (session_data,) = connection.execute("SELECT session_data FROM engineering_sessions").fetchone()
             connection.execute("UPDATE engineering_sessions SET session_data = ?", (json.dumps(session_data),))
-    result = list(iter_usage_storage_rows(source, mode="session_metrics"))
+    result = list(iter_usage_storage_rows(source, mode="both"))
 
     assert len(result) == 1
     row = result[0]
     assert isinstance(row, UsageSessionRow)
     assert row.session_metrics == {"input_tokens": 21, "output_tokens": 9, "total_tokens": 30}
+    assert [(entry.model_provider, entry.model, dict(entry.metrics)) for entry in row.session_model_metrics or ()] == [
+        ("provider-a", "model-a", {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}),
+        ("provider-b", "model-b", {"input_tokens": 14, "output_tokens": 6, "total_tokens": 20}),
+    ]
     assert row.runs == ()
-    assert row.runs_available is False
+    assert row.runs_available is True
     assert row.session_metrics_available is True
 
 
@@ -482,13 +517,11 @@ def test_reader_rejects_falsey_non_json_list_runs(tmp_path: Path, raw_runs: str)
 
     result = list(iter_usage_storage_rows(_source(database)))
 
-    assert result == [
-        UsageStorageDiagnostic(
-            path_label="code.db",
-            status="partial",
-            detail="malformed retained session",
-        ),
-    ]
+    assert len(result) == 1
+    assert isinstance(result[0], UsageSessionRow)
+    assert result[0].runs == ()
+    assert result[0].runs_available is False
+    assert "do not expose" not in repr(result)
 
 
 def test_missing_database_is_reported_without_creation(tmp_path: Path) -> None:
@@ -507,9 +540,10 @@ def test_reader_does_not_change_database_bytes(tmp_path: Path) -> None:
     """A successful read leaves the durable database bytes unchanged."""
     database = tmp_path / "code.db"
     _create_database(database)
+    source = _source(database)
     before = database.read_bytes()
 
-    result = list(iter_usage_storage_rows(_source(database)))
+    result = list(iter_usage_storage_rows(source))
 
     assert len(result) == 1
     assert database.read_bytes() == before
@@ -522,13 +556,11 @@ def test_malformed_runs_return_content_free_diagnostic(tmp_path: Path) -> None:
 
     result = list(iter_usage_storage_rows(_source(database)))
 
-    assert result == [
-        UsageStorageDiagnostic(
-            path_label="code.db",
-            status="partial",
-            detail="malformed retained session",
-        ),
-    ]
+    assert len(result) == 1
+    assert isinstance(result[0], UsageSessionRow)
+    assert result[0].runs == ()
+    assert result[0].runs_available is False
+    assert "do not expose" not in repr(result)
 
 
 def test_self_discovery_returns_only_current_private_database(tmp_path: Path) -> None:
@@ -635,24 +667,3 @@ def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
     assert [run.run_id for run in row.runs] == ["run-1", "run-2", "run-3"]
     assert row.runs[0].metrics == {"total_tokens": 99}
     assert row.runs[1].metrics == {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}
-    assert row.payload_bytes > 0
-
-
-def test_legacy_payload_merge_keeps_current_precedence_and_blob_duplicates() -> None:
-    """Current rows win, while repeated historical blob entries remain visible."""
-    current_runs = [{"run_id": "current", "metrics": {"total_tokens": 99}}]
-    legacy_payload = json.dumps(
-        json.dumps(
-            [
-                {"run_id": "current", "metrics": {"total_tokens": 1}},
-                {"run_id": "legacy", "metrics": {"total_tokens": 2}},
-                {"run_id": "legacy", "metrics": {"total_tokens": 3}},
-            ],
-        ),
-    )
-
-    assert merge_legacy_run_payloads(current_runs, legacy_payload) == [
-        {"run_id": "current", "metrics": {"total_tokens": 99}},
-        {"run_id": "legacy", "metrics": {"total_tokens": 2}},
-        {"run_id": "legacy", "metrics": {"total_tokens": 3}},
-    ]

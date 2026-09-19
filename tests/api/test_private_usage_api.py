@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import jwt
@@ -72,6 +73,7 @@ def test_personal_private_usage_uses_signed_requester(
         headers={**headers[user], "X-Matrix-User": ALICE},
     )
     assert response.status_code == 401
+    before_scan = datetime.now(UTC)
     response = client.get(
         "/api/usage/me/private-agents",
         headers=headers[user],
@@ -80,6 +82,8 @@ def test_personal_private_usage_uses_signed_requester(
     assert response.status_code == 200, response.text
     assert response.headers["cache-control"] == "no-store"
     report = response.json()
+    assert report["schema_version"] == 1
+    assert before_scan <= datetime.fromisoformat(report["generated_at"]) <= datetime.now(UTC)
     assert report["scope"] == "self"
     assert report["totals"]["total_tokens"] == tokens
     assert {row["agent_name"] for row in report["private_agent_breakdown"]} == agents

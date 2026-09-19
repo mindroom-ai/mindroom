@@ -22,9 +22,11 @@ from sqlalchemy import Engine, create_engine, event, select
 from mindroom import agno_compat_session_persistence, agno_compat_sqlite
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
+from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage_preflight import session_storage_preflight
+from mindroom.usage_storage import usage_table_sql
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -129,6 +131,8 @@ def _create_sqlite_state_storage(
     with preflight:
         db_dir = state_root / subdir
         db_dir.mkdir(parents=True, exist_ok=True)
+        if subdir == "sessions":
+            migrate_usage_database(db_dir / f"{storage_name}.db", session_table)
         db_file = str(db_dir / f"{storage_name}.db")
         # Both: the engine is what the database is reached through, and the path
         # is what it reports itself as. Handing over an engine alone leaves
@@ -296,6 +300,18 @@ class _ConversationSqliteDb(SqliteDb):
         )
         self._report_cache_counts()
         return session
+
+    def upsert_session(
+        self,
+        session: Session,
+        deserialize: bool | None = True,
+    ) -> Session | dict[str, Any] | None:
+        """Initialize empty usage after Agno lazily creates a new session store."""
+        stored = super().upsert_session(session, deserialize=deserialize)
+        if stored is not None:
+            with self.db_engine.begin() as connection:
+                connection.exec_driver_sql(usage_table_sql(self.session_table_name))
+        return stored
 
     def upsert_run(
         self,

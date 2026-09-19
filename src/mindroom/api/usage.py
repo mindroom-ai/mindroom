@@ -1,5 +1,6 @@
 """Dashboard API for aggregate-only retained token usage."""
 
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -14,11 +15,16 @@ from mindroom.api.usage_export import (
     context_is_current,
     usage_export_runner,
 )
-from mindroom.usage_stats import collect_admin_usage, collect_private_usage
+from mindroom.usage_stats import UsageReport, collect_admin_usage, collect_private_usage
 
 __all__ = ["get_private_usage", "get_usage", "get_usage_export", "router"]
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
+
+
+def _report_payload(report: UsageReport) -> dict[str, object]:
+    """Stamp completed scans once, so cached exports retain their generation time."""
+    return {**report.to_dict(), "schema_version": 1, "generated_at": datetime.now(UTC).isoformat()}
 
 
 @router.get("", dependencies=[Depends(verify_user)], response_model=None)
@@ -52,11 +58,13 @@ def _get_organization_usage(request: Request, *, include_daily: bool) -> dict[st
     )
     poll = usage_export_runner(api_app).poll(
         context,
-        lambda: collect_admin_usage(
-            config=config,
-            runtime_paths=runtime_paths,
-            include_daily=include_daily,
-        ).to_dict(),
+        lambda: _report_payload(
+            collect_admin_usage(
+                config=config,
+                runtime_paths=runtime_paths,
+                include_daily=include_daily,
+            ),
+        ),
         context_is_current=lambda: context_is_current(api_app, context),
     )
     if poll.status is UsageExportStatus.PENDING:
@@ -85,4 +93,4 @@ def get_private_usage(
         include_daily=include_daily,
     )
     response.headers["Cache-Control"] = "no-store"
-    return report.to_dict()
+    return _report_payload(report)

@@ -21,10 +21,12 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from mindroom.usage_stats_storage import (
+    UsageModelMetrics,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -115,8 +117,8 @@ def _row(
     *runs: UsageRunNode,
     entity_id: str | None = None,
     session_metrics: Mapping[str, object] | None = None,
+    session_model_metrics: tuple[UsageModelMetrics, ...] | None = (),
     row_key: str = "session-1",
-    payload_bytes: int = 0,
     runs_available: bool = True,
     session_metrics_available: bool = True,
 ) -> UsageSessionRow:
@@ -128,10 +130,229 @@ def _row(
         row_key=row_key,
         runs=tuple(runs),
         session_metrics=MappingProxyType(dict(session_metrics or {})),
-        payload_bytes=payload_bytes,
+        session_model_metrics=session_model_metrics,
         runs_available=runs_available,
         session_metrics_available=session_metrics_available,
     )
+
+
+def _model_metrics(
+    provider: str | None,
+    model: str | None,
+    **metrics: int,
+) -> UsageModelMetrics:
+    return UsageModelMetrics(provider, model, MappingProxyType(metrics))
+
+
+@pytest.mark.parametrize(
+    ("source_scope", "agent_name"),
+    [("shared_agent", "code"), ("team", None)],
+)
+def test_admin_exports_reconciled_cumulative_models_separately_from_retained_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_scope: str,
+    agent_name: str | None,
+) -> None:
+    """Compacted session totals retain exact per-model counters and session counts."""
+    source = _source(scope=source_scope, agent_name=agent_name)
+    session_totals = {
+        "input_tokens": 60,
+        "output_tokens": 40,
+        "total_tokens": 100,
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 10,
+        "reasoning_tokens": 9,
+        "audio_input_tokens": 8,
+        "audio_output_tokens": 7,
+        "audio_total_tokens": 15,
+    }
+    session_models = (
+        _model_metrics(
+            "provider-a",
+            "model-a",
+            input_tokens=20,
+            output_tokens=10,
+            total_tokens=30,
+            cache_read_tokens=10,
+            cache_write_tokens=4,
+            reasoning_tokens=3,
+            audio_input_tokens=2,
+            audio_output_tokens=1,
+            audio_total_tokens=3,
+        ),
+        _model_metrics(
+            "provider-a",
+            "model-a",
+            input_tokens=10,
+            output_tokens=10,
+            total_tokens=20,
+            cache_read_tokens=5,
+            cache_write_tokens=1,
+            reasoning_tokens=2,
+            audio_input_tokens=2,
+            audio_output_tokens=1,
+            audio_total_tokens=3,
+        ),
+        _model_metrics(
+            "provider-b",
+            "model-b",
+            input_tokens=30,
+            output_tokens=20,
+            total_tokens=50,
+            cache_read_tokens=15,
+            cache_write_tokens=5,
+            reasoning_tokens=4,
+            audio_input_tokens=4,
+            audio_output_tokens=5,
+            audio_total_tokens=9,
+        ),
+    )
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(total_tokens=20, model_provider="retained-provider", model="retained-model"),
+                    session_metrics=MappingProxyType(session_totals),
+                    session_model_metrics=session_models,
+                ),
+            ),
+        },
+    )
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+
+    assert payload["totals"] == session_totals
+    assert payload["model_breakdown"] == [
+        {
+            "provider": "retained-provider",
+            "model": "retained-model",
+            "totals": {
+                "input_tokens": 17,
+                "output_tokens": 3,
+                "total_tokens": 20,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "audio_input_tokens": 0,
+                "audio_output_tokens": 0,
+                "audio_total_tokens": 0,
+            },
+            "run_count": 1,
+        },
+    ]
+    assert payload["cumulative_model_breakdown"] == [
+        {
+            "provider": "provider-a",
+            "model": "model-a",
+            "totals": {
+                "input_tokens": 30,
+                "output_tokens": 20,
+                "total_tokens": 50,
+                "cache_read_tokens": 15,
+                "cache_write_tokens": 5,
+                "reasoning_tokens": 5,
+                "audio_input_tokens": 4,
+                "audio_output_tokens": 2,
+                "audio_total_tokens": 6,
+            },
+            "session_count": 1,
+        },
+        {
+            "provider": "provider-b",
+            "model": "model-b",
+            "totals": {
+                "input_tokens": 30,
+                "output_tokens": 20,
+                "total_tokens": 50,
+                "cache_read_tokens": 15,
+                "cache_write_tokens": 5,
+                "reasoning_tokens": 4,
+                "audio_input_tokens": 4,
+                "audio_output_tokens": 5,
+                "audio_total_tokens": 9,
+            },
+            "session_count": 1,
+        },
+    ]
+    assert payload["breakdown"][0]["cumulative_model_breakdown"] == payload["cumulative_model_breakdown"]
+    assert payload["cumulative_model_coverage"]["unavailable_sources"] == 0
+    assert "retained sessions" in payload["cumulative_model_coverage"]["note"]
+    assert "cumulative_model_breakdown" not in payload["user_breakdown"][0]
+
+
+@pytest.mark.parametrize(
+    "session_model_metrics",
+    [
+        (),
+        None,
+        (_model_metrics("provider-a", "model-a", total_tokens=-1),),
+        (_model_metrics("provider-a", "model-a", total_tokens=5),),
+        (_model_metrics(None, "model-a", input_tokens=97, output_tokens=3, total_tokens=100),),
+        (_model_metrics("provider-a", None, input_tokens=97, output_tokens=3, total_tokens=100),),
+        (
+            _model_metrics("provider-a", "model-a", input_tokens=97, output_tokens=3, total_tokens=100),
+            _model_metrics("provider-b", "model-b"),
+        ),
+    ],
+    ids=[
+        "absent",
+        "malformed",
+        "negative",
+        "unreconciled",
+        "missing-provider",
+        "missing-model",
+        "empty-entry",
+    ],
+)
+def test_admin_keeps_cumulative_totals_under_unknown_when_model_detail_is_unusable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_model_metrics: tuple[UsageModelMetrics, ...] | None,
+) -> None:
+    """Unusable cumulative attribution cannot discard session or retained-run totals."""
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(total_tokens=20),
+                    session_metrics=_metrics(100),
+                    session_model_metrics=session_model_metrics,
+                ),
+            ),
+        },
+    )
+
+    payload = collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
+
+    assert payload["totals"]["total_tokens"] == 100
+    assert payload["model_breakdown"][0]["totals"]["total_tokens"] == 20
+    assert payload["cumulative_model_breakdown"] == [
+        {
+            "provider": "unknown",
+            "model": "unknown",
+            "totals": {
+                "input_tokens": 97,
+                "output_tokens": 3,
+                "total_tokens": 100,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "reasoning_tokens": 0,
+                "audio_input_tokens": 0,
+                "audio_output_tokens": 0,
+                "audio_total_tokens": 0,
+            },
+            "session_count": 1,
+        },
+    ]
+    assert payload["cumulative_model_coverage"]["unavailable_sources"] == 1
 
 
 def _wire(
@@ -544,6 +765,7 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
         with sqlite3.connect(database) as connection:
             runs = connection.execute("SELECT runs FROM code_sessions").fetchone()[0]
             connection.execute("UPDATE code_sessions SET runs = ?", (json.loads(runs),))
+    migrate_usage_database(database, "code_sessions")
 
     report = collect_self_usage(
         agent_name="code",
@@ -566,6 +788,42 @@ def test_daily_models_read_real_agno_2_history(tmp_path: Path, double_encoded: b
     assert day["model_breakdown"][0]["provider"] == "unknown"
     assert day["model_breakdown"][0]["model"] == "unknown"
     assert day["model_breakdown"][0]["totals"]["total_tokens"] == 12
+
+
+def test_migration_keeps_valid_usage_beside_a_malformed_counter(tmp_path: Path) -> None:
+    """A damaged historical metric must flag incomplete coverage without hiding usable neighbors."""
+    paths = _paths(tmp_path)
+    database = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE code_sessions SET runs = ?",
+            (
+                json.dumps(
+                    [
+                        {"run_id": "valid", "user_id": "@alice:example.test", "metrics": {"total_tokens": 5}},
+                        {
+                            "run_id": "broken",
+                            "user_id": "@alice:example.test",
+                            "metrics": {"total_tokens": {"private": "content"}},
+                        },
+                    ],
+                ),
+            ),
+        )
+    migrate_usage_database(database, "code_sessions")
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=paths,
+        execution_identity=_identity(),
+    ).to_dict()
+
+    assert report["totals"]["total_tokens"] == 5
+    assert sum(model["totals"]["total_tokens"] for model in report["model_breakdown"]) == 5
+    assert report["coverage"]["unavailable_sources"] == 1
+    assert report["model_coverage"]["unavailable_sources"] == 1
 
 
 @pytest.mark.parametrize(

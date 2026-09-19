@@ -50,6 +50,7 @@ from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.legacy_private_storage import migrate_private_storage
+from mindroom.legacy_usage_storage import migrate_usage_storage
 from mindroom.matrix.client_room_admin import get_joined_rooms, get_room_members, invite_to_room
 from mindroom.matrix.health import reset_matrix_sync_health
 from mindroom.matrix.identity import managed_account_user_id
@@ -3028,6 +3029,7 @@ async def main(
 ) -> None:
     """Main entry point for the multi-agent bot system."""
     await migrate_private_storage(runtime_paths)
+    await migrate_usage_storage(runtime_paths)
     storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []

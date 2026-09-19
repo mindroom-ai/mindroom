@@ -854,14 +854,23 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 The two routes share report preparation and caching while authenticating every request through their own policy.
 When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
 Every report-state response uses `Cache-Control: no-store`.
+Completed HTTP reports include `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp set when the scan finishes.
+Cached polls return the original timestamp for that completed scan.
 
-The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, and `user_breakdown`.
+The completed organization-wide HTTP JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
 Counters include input, output, total, cache read/write, reasoning, and audio tokens.
 Models include their provider.
 Stored per-model details split runs that use several models; older runs fall back to their recorded model.
 Malformed or inconsistent model details retain the run's tokens under `unknown` and mark model coverage as incomplete.
 Requester aliases are combined; `user_id: null` holds unattributed usage.
+
+`cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
+The same rows appear within each entity in `breakdown`.
+Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
+All token counters must reconcile to the session aggregate.
+Missing, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark `cumulative_model_coverage` incomplete.
+Session aggregates do not provide dates or requester attribution for these model counters, and deleted sessions remain unavailable.
 
 Use `GET /api/usage?include_daily=true` or `GET /api/usage/export?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
@@ -874,8 +883,14 @@ The report-level `daily_coverage` applies to both the overall and per-user daily
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
-User and model breakdowns cover retained top-level runs.
-They can differ from session totals, which may include compacted history and nested team-member usage.
+User and model breakdowns cover stored top-level usage snapshots.
+Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
+Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.
+Explicit whole-session erasure removes its usage too.
+Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
+The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
+Breakdowns can still differ from session totals because history lost before migration and nested team-member usage may lack detailed attribution.
 Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
 `scanned_sources` counts discovered database candidates, including absent configured databases.
@@ -885,11 +900,11 @@ This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
 The organization-wide response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
-Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
+Rows separate stored session `totals`, `session_count`, and `cumulative_model_breakdown` from `retained_run_totals`, `run_count`, and `model_breakdown`.
 They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
 Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
-Compacted history can contribute to session totals without recoverable model or daily detail.
+History compacted before usage migration can contribute to session totals without recoverable model or daily detail.
 
 For an ownership-based view, combine private-agent session usage attributed to owners with retained usage outside private-agent instances attributed to requesters.
 Group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
@@ -897,7 +912,7 @@ For each token counter and user, calculate `user_breakdown.totals - private_agen
 Calculate over the union of users in both breakdowns; users with no private-agent row retain their full `user_breakdown.totals`.
 Use values from the same response and retain `user_id: null` as unattributed usage.
 For example, 60 retained tokens containing 20 private-agent tokens, plus a private-agent session total of 50, gives 90 tokens: `60 - 20 + 50`.
-This includes private history whose detailed runs were compacted without counting its retained runs twice.
+This includes private history whose detail was lost before usage migration without counting its stored usage twice.
 It also replaces recorded-requester attribution for private runs with session ownership: if Bob requested 20 retained tokens from Alice's private instance with 100 session tokens, this view assigns those 100 tokens to Alice and none to Bob.
 Keep `user_breakdown` unchanged when reporting who made the retained requests; the combined view answers a different ownership question.
 Usage outside private-agent instances still relies on retained requester-attributed runs; a shared conversation's recorded requester is not the owner of every run.
@@ -10711,16 +10726,25 @@ Token totals separately report input, output, cache-read, cache-write, reasoning
 The admin response groups session aggregates by configured agent or team ID.
 Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
 Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
-Both responses group retained top-level runs by provider and model in `model_breakdown`.
+Both responses group stored top-level usage snapshots by provider and model in `model_breakdown`.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
 Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.
 Malformed model details or details that do not account for the run's token totals put the run's tokens under `unknown` and mark model and daily coverage as partially unavailable.
 Model rows include token totals and run counts and are sorted by total tokens.
 Each model counts a run once, while daily and user run counts count that run once across all its models.
 Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
-Model coverage is reported separately because compacted history and nested team-member usage can contribute to report totals without model attribution.
+Model coverage is reported separately because history lost before usage migration and nested team-member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
+The HTTP usage routes add `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp when a scan finishes; cached responses retain that scan timestamp.
+
+Admin and all-private self reports also include `cumulative_model_breakdown` and `cumulative_model_coverage`.
+Cumulative model rows use per-model details stored with session aggregates, so they include compacted usage still present in retained sessions.
+Each row contains provider, model, all token counters, and `session_count`; a session using several models counts once in each model row.
+Duplicate entries for the same provider and model within one session are combined before that count is added.
+The details must reconcile every token counter to the session total; absent, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark cumulative model coverage incomplete.
+Session aggregates do not retain dates or requester attribution for these counters, and deleted sessions remain unavailable.
+Shared-agent self reports omit the cumulative fields because their totals are requester-filtered retained runs rather than whole session aggregates.
 
 ### Private-Agent Accounting
 
@@ -10728,9 +10752,9 @@ The tool does not change Agno persistence settings.
 Personal reports omit user identifiers and contain only the requester's own private agents.
 `get_my_private_usage()` combines those agents in the overall totals; `get_all_usage()` includes private rows alongside the instance-wide report.
 
-Each private row contains session `totals` and `session_count`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
+Each private row contains session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and `model_breakdown`.
 With `include_daily=True`, it also contains `daily_breakdown` using the same UTC dates and model/token counters as the other daily views.
-Session totals can include compacted history that no longer has retained model or daily detail; the two totals are intentionally separate.
+Session totals can include history compacted before usage migration that no longer has model or daily detail; the two totals are intentionally separate.
 
 For admin reports, session ownership comes from a validated private-instance identity record, falling back to the session's recorded requester.
 Retained runs keep their recorded requester, with the validated owner as fallback when requester metadata is missing.
@@ -10738,8 +10762,12 @@ Known aliases are combined; missing ownership remains `user_id: null`.
 `private_agent_coverage` describes unavailable attribution or metrics.
 All views share the same storage reader, run deduplication, token normalization, and daily grouping.
 Admin team totals use Agno's member-inclusive session aggregate without reading nested response content.
-Compacted shared-agent self-service runs and deleted sessions are unavailable to this read-only report.
-Agno 2.x session run blobs, including double-encoded JSON, and Agno 3 run tables are supported, including partly migrated databases.
+Usage snapshots survive compaction, edits, and regeneration; explicit whole-session erasure removes them.
+A one-time startup import in `legacy_usage_storage.py` reads available Agno 2.x session blobs and Agno 3 run rows, including partly migrated databases.
+The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+The importer retains unknown timestamps and attribution and reports malformed records as coverage gaps.
+Reports and tools read the current usage table without migrating or scanning conversation payloads.
+History lost before migration cannot be recovered by this report.
 Missing counters are reported as zero, so zero does not prove that an older provider recorded that token category.
 These counters support cost estimates, but do not guarantee exact billing: provider-specific charging rules and calls outside retained session storage are not captured.
 
@@ -18956,7 +18984,8 @@ The remaining rows include existing focused boundaries and later audit additions
 | Boundary | Trigger and current caller | Retained guarantees |
 | --- | --- | --- |
 | [`src/mindroom/mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | `GatewayOAuthStore` calls `migrate_schema` when opening SQLite. | The store retains its writer transaction, base DDL, and live processing; ordered expiry, accounting, lifecycle, account, and token-cutoff upgrades stay together. |
-| [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion and usage diagnostics encounter an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, diagnostics, and byte accounting remain with current owners. |
+| `src/mindroom/legacy_usage_storage.py` | Startup or direct storage opening finds a session database without an independent usage table. | Import only retained facts, publishing the table and seed atomically; current reporting never reads old run representations. |
+| [`src/mindroom/legacy_session_storage.py`][legacy-session] | Run deletion or initial usage migration encounters an Agno 2 `runs` blob. | Current rows win by `run_id`; descendant deletion, transaction ownership, and diagnostics remain with current owners. |
 | [`src/mindroom/legacy_openai_tool_replay.py`][legacy-openai] | OpenAI-family adapters encounter missing tool arguments, sparse placeholders, or Agno-only Responses spans without reusable ordered output. | Request-only repairs preserve call/result links while supplying empty arguments, removing placeholder pairs, and dropping unverifiable reasoning tails and provider item IDs; canonical content rendering stays in `openai_response_replay.py`. |
 | [`src/mindroom/legacy_handled_turns.py`][legacy-handled] | `HandledTurnLedger` finds `tracking/<agent>_responded.json`. | Insert-only adoption protects newer rows, fills absent indexes, retries interrupted work, and renames only after adoption. |
 | [`src/mindroom/event_journal/legacy_turn_records.py`][legacy-turn-records] | The handled-turn importer adopts missing journal indexes. | The journal transaction is retained and migration writes never use current upsert deletion semantics. |
@@ -18991,7 +19020,8 @@ When no stable tag contained an old native writer, the block uses an honest unre
 | Boundary owners | Behavioral evidence |
 | --- | --- |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
-| [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover precedence and retained duplicates. |
+| `legacy_usage_storage.py` | `tests/test_legacy_usage_storage.py` covers mixed schemas, current-row precedence, unknown dates, interruption rollback and retry, dormant stores, symlink isolation, and both startup entry points. |
+| [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover import precedence and available usage. |
 | [`legacy_openai_tool_replay.py`][legacy-openai] | [OpenAI model tests][openai-model-tests] cover missing arguments and placeholder pairs; [Responses replay tests][openai-replay-tests] and [history tests][native-history-tests] cover reasoning tails, filtered call/result links, bounded SQLite replay, and unchanged canonical state. |
 | [`legacy_handled_turns.py`][legacy-handled] and [`event_journal/legacy_turn_records.py`][legacy-turn-records] | [Handled-turn tests][handled-turn-tests] cover released JSON shapes, the deliberate unversioned cutoff, interrupted adoption, occupied indexes, reopen behavior, and reconstructed replay facts. |
 | [`event_journal/legacy_schema.py`][journal-legacy-schema] | [Journal upgrade tests][journal-upgrade-tests] cover released DDL, missing and already-added toolkit columns, rejection of stale approval clicks, preserved current generations and frozen deliveries, and stable repeat opening on both database backends. |
@@ -19066,7 +19096,7 @@ Journal IDs use `J` to avoid colliding with credential IDs.
 | S16 | Current behavior | [`external_triggers/store.py`][trigger-store] and [`external_triggers/replay_store.py`][replay-store] own current validation and replay deduplication; the only retained historical default supplies an empty `threads` map when that section is absent. |
 | S17 | Current behavior | [Receipts][scheduled-records], [todos][todo-state], [attachments][attachments], and workflows combine sparse fields with current identity and integrity checks. |
 | S18 | Isolated | [`session_storage_preflight.py`][session-preflight] archives incompatible owned sessions; MindRoom does not invoke Agno's historical migration manager. |
-| S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob merge, scrub, and double-JSON decoding; other Agno readers remain dependency-owned. |
+| S19 | Isolated | [`legacy_session_storage.py`][legacy-session] owns Agno 2 blob scrub and double-JSON decoding; other Agno readers remain dependency-owned. |
 | S20 | Dependency-owned | [`memory/config.py`][memory-config] leaves Mem0's history rewrite and default history path to Mem0. |
 
 ## Configuration and credentials
@@ -19339,6 +19369,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Retrying a stream can reuse partial assistant or tool state. | Establish retry ownership and test that partial output cannot be duplicated. | `agno_compat_openai_responses.py`. |
 | Native Responses error events are ignored and unread streams can remain open after parsing fails. | Preserve terminal error codes and explicitly close SDK streams on failure or consumer closure; retain incomplete-stream retry protections. | `agno_compat_openai_responses.py`. |
 | OpenAI usage parsing omits cache-write input tokens. | Preserve the SDK counter for Responses and Chat Completions, including older payloads where the field is absent. | `agno_compat_openai_responses.py`, `agno_compat_openai_chat.py`. |
+| Run saves commit internally, with no caller-owned transaction or persistence hook. | Tracking gap: an in-transaction hook is needed to persist application-owned usage atomically; no matching upstream issue or PR identified. | `agno_compat_sqlite.py` copies the Agno 3.0.9 run UPSERT; `usage_storage.py` owns the content-free schema and projection. |
 | SQLite journaling is forced, and cache statistics require private access. | Propose configurable pragmas; track public cache counters separately. | `agno_compat_sqlite.py`. |
 | Cancelled runs persist in detached tasks without an awaited drain boundary. | Expose completion for the exact cancelled run before caller-owned history writes. | `agno_compat_session_persistence.py`. |
 | Knowledge insertion lacks caller-controlled error propagation and validation. | Reproduce swallowed vector failures and propose validation before publishing content status. | `agno_compat_knowledge.py`. |
@@ -19365,7 +19396,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
-| `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
+| `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |

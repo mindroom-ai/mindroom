@@ -105,6 +105,8 @@ def test_usage_dashboard_uses_standard_api_key_auth_and_polling(
     assert ready.status_code == 200
     assert ready.headers["cache-control"] == "no-store"
     assert ready.json()["scope"] == "admin"
+    assert ready.json()["schema_version"] == 1
+    assert datetime.fromisoformat(ready.json()["generated_at"]).utcoffset() == timedelta(0)
 
 
 def test_usage_dashboard_sanitizes_failed_committed_configuration(

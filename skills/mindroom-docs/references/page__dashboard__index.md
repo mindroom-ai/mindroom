@@ -279,14 +279,23 @@ Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard 
 The two routes share report preparation and caching while authenticating every request through their own policy.
 When a report needs preparation, either route returns `202` with `{"status":"pending"}` and `Retry-After: 5`; after preparation succeeds, an authenticated poll returns the completed report.
 Every report-state response uses `Cache-Control: no-store`.
+Completed HTTP reports include `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp set when the scan finishes.
+Cached polls return the original timestamp for that completed scan.
 
-The JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, and `user_breakdown`.
+The completed organization-wide HTTP JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
 Counters include input, output, total, cache read/write, reasoning, and audio tokens.
 Models include their provider.
 Stored per-model details split runs that use several models; older runs fall back to their recorded model.
 Malformed or inconsistent model details retain the run's tokens under `unknown` and mark model coverage as incomplete.
 Requester aliases are combined; `user_id: null` holds unattributed usage.
+
+`cumulative_model_breakdown` uses per-model details stored with session aggregates and includes compacted usage still present in retained sessions.
+The same rows appear within each entity in `breakdown`.
+Each row contains all token counters and `session_count`; one multi-model session counts once for every model it used, and duplicate entries for the same provider and model are combined first.
+All token counters must reconcile to the session aggregate.
+Missing, malformed, negative, or inconsistent details preserve the full session under `unknown` and mark `cumulative_model_coverage` incomplete.
+Session aggregates do not provide dates or requester attribution for these model counters, and deleted sessions remain unavailable.
 
 Use `GET /api/usage?include_daily=true` or `GET /api/usage/export?include_daily=true` to also return `daily_breakdown` and `daily_coverage`.
 Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and a `model_breakdown` with input, output, total, cache-read, cache-write, reasoning, and audio counters.
@@ -299,8 +308,14 @@ The report-level `daily_coverage` applies to both the overall and per-user daily
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
-User and model breakdowns cover retained top-level runs.
-They can differ from session totals, which may include compacted history and nested team-member usage.
+User and model breakdowns cover stored top-level usage snapshots.
+Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
+Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.
+Explicit whole-session erasure removes its usage too.
+Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
+The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
+Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
+Breakdowns can still differ from session totals because history lost before migration and nested team-member usage may lack detailed attribution.
 Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
 `scanned_sources` counts discovered database candidates, including absent configured databases.
@@ -310,11 +325,11 @@ This is a retained-usage report, not a billing ledger.
 Responses contain no conversation content and use `Cache-Control: no-store`.
 
 The organization-wide response also contains `private_agent_breakdown`, with one row per canonical `user_id` and `agent_name`.
-Rows separate stored session `totals` and `session_count` from `retained_run_totals`, `run_count`, and `model_breakdown`.
+Rows separate stored session `totals`, `session_count`, and `cumulative_model_breakdown` from `retained_run_totals`, `run_count`, and `model_breakdown`.
 They include `daily_breakdown` when `include_daily=true`, with the same input, output, cache-read, cache-write, reasoning, and audio counters.
 Session totals use a validated private-instance owner or the recorded session requester; retained runs preserve their recorded requester, falling back to the validated owner when missing.
 Unknown ownership remains `user_id: null`, and `private_agent_coverage` reports unavailable attribution or metrics.
-Compacted history can contribute to session totals without recoverable model or daily detail.
+History compacted before usage migration can contribute to session totals without recoverable model or daily detail.
 
 For an ownership-based view, combine private-agent session usage attributed to owners with retained usage outside private-agent instances attributed to requesters.
 Group private-agent rows by `user_id` and replace their retained-run contribution to `user_breakdown` with their session totals.
@@ -322,7 +337,7 @@ For each token counter and user, calculate `user_breakdown.totals - private_agen
 Calculate over the union of users in both breakdowns; users with no private-agent row retain their full `user_breakdown.totals`.
 Use values from the same response and retain `user_id: null` as unattributed usage.
 For example, 60 retained tokens containing 20 private-agent tokens, plus a private-agent session total of 50, gives 90 tokens: `60 - 20 + 50`.
-This includes private history whose detailed runs were compacted without counting its retained runs twice.
+This includes private history whose detail was lost before usage migration without counting its stored usage twice.
 It also replaces recorded-requester attribution for private runs with session ownership: if Bob requested 20 retained tokens from Alice's private instance with 100 session tokens, this view assigns those 100 tokens to Alice and none to Bob.
 Keep `user_breakdown` unchanged when reporting who made the retained requests; the combined view answers a different ownership question.
 Usage outside private-agent instances still relies on retained requester-attributed runs; a shared conversation's recorded requester is not the owner of every run.

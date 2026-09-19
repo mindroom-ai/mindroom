@@ -541,8 +541,10 @@ depends_on = [
     "mindroom.agno_compat_session_persistence",
     "mindroom.constants",
     "mindroom.legacy_session_storage",
+    "mindroom.legacy_usage_storage",
     "mindroom.runtime_resolution",
     "mindroom.session_storage_preflight",
+    "mindroom.usage_storage",
 ]
 visibility = [
     "mindroom.agents",
@@ -564,6 +566,7 @@ visibility = [
 path = "mindroom.legacy_session_storage"
 depends_on = []
 visibility = [
+    "mindroom.legacy_usage_storage",
     "mindroom.agent_storage",
     "mindroom.usage_stats_storage",
 ]
@@ -1233,6 +1236,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.legacy_usage_storage",
     "mindroom.api.computers",
     "mindroom.worker_computer.auth",
     "mindroom.api.mcp_gateway",
@@ -2059,6 +2063,7 @@ depends_on = [
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.legacy_private_storage",
+    "mindroom.legacy_usage_storage",
     "mindroom.orchestration.computer_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
@@ -6339,7 +6344,7 @@ expose = [
 
 [[modules]]
 path = "mindroom.agno_compat_sqlite"
-depends_on = []
+depends_on = ["mindroom.usage_storage"]
 visibility = ["mindroom.agent_storage"]
 
 [[interfaces]]
@@ -6473,3 +6478,13 @@ visibility = ["mindroom.custom_tools.browser", "mindroom.worker_computer.mcp_pro
 [[interfaces]]
 from = ["mindroom.browser_profile"]
 expose = ["clear_stale_singleton_locks"]
+
+[[modules]]
+path = "mindroom.usage_storage"
+depends_on = []
+visibility = ["mindroom.agent_storage", "mindroom.agno_compat_sqlite", "mindroom.legacy_usage_storage", "mindroom.usage_stats_storage"]
+
+[[modules]]
+path = "mindroom.legacy_usage_storage"
+depends_on = ["mindroom.background_tasks", "mindroom.constants", "mindroom.legacy_session_storage", "mindroom.usage_storage"]
+visibility = ["mindroom.agent_storage", "mindroom.orchestrator", "mindroom.api.main"]
