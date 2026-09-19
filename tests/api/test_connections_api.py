@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 import jwt
+import nio
 import pytest
 import yaml
 from aioresponses import aioresponses
@@ -240,6 +241,32 @@ def test_avatar_unavailable_for_missing_or_invalid_profile(portal: dict[str, Any
         )
         response = portal["client"].get("/api/connections/agents/personal/avatar", headers=portal["headers"]["alice"])
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("stage", ["profile", "thumbnail"])
+def test_avatar_maps_matrix_response_errors_to_upstream_failure(portal: dict[str, Any], stage: str) -> None:
+    """Connections preserves Matrix response failures while retaining its separate authorization."""
+    matrix_client = AsyncMock()
+    matrix_client.user_id = "@personal:example.org"
+    matrix_client.get_profile.return_value = (
+        nio.ProfileGetError("rate limited", status_code="M_LIMIT_EXCEEDED")
+        if stage == "profile"
+        else nio.ProfileGetResponse(avatar_url="mxc://example.org/current-avatar")
+    )
+    matrix_client.thumbnail.return_value = nio.ThumbnailError("server error", status_code="M_UNKNOWN")
+    matrix_client.close = AsyncMock()
+
+    with patch(
+        "mindroom.api.connections.create_agent_http_client",
+        return_value=matrix_client,
+    ):
+        response = portal["client"].get(
+            "/api/connections/agents/personal/avatar",
+            headers=portal["headers"]["alice"],
+        )
+
+    assert response.status_code == 502
+    matrix_client.close.assert_awaited_once_with()
 
 
 @pytest.mark.parametrize(

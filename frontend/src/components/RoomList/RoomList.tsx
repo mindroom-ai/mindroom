@@ -1,3 +1,4 @@
+import { EntityAvatar } from "@/components/shared/EntityAvatar";
 import { useConfigStore } from "@/store/configStore";
 import { Home, Bot, Brain } from "lucide-react";
 import { pluralize } from "@/lib/utils";
@@ -43,6 +44,9 @@ export function RoomList() {
 
     return (
       <ItemCard
+        leading={
+          <EntityAvatar kind="room" id={room.id} name={room.display_name} />
+        }
         id={room.id}
         title={room.display_name}
         description={room.description}

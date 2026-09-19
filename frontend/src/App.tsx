@@ -431,7 +431,7 @@ function AppContent() {
               <RoutePanel
                 active={currentTab === "dashboard"}
                 label="Dashboard"
-                className="min-h-0 flex-1 overflow-auto p-3 md:p-5"
+                className="min-h-0 flex-1 overflow-auto"
               >
                 <div className="min-h-full">
                   <Dashboard />

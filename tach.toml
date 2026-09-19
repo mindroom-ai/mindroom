@@ -1135,6 +1135,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.logging_config",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.media",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.matrix.users",
@@ -1179,6 +1180,7 @@ depends_on = [
 path = "mindroom.api.connections"
 depends_on = [
     "mindroom.matrix.users",
+    "mindroom.matrix.media",
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.oauth",

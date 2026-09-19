@@ -19,6 +19,7 @@ export interface ItemCardBadge {
 }
 
 export interface ItemCardProps {
+  leading?: ReactNode;
   /**
    * Unique identifier for the item
    */
@@ -62,6 +63,7 @@ export interface ItemCardProps {
  */
 export function ItemCard({
   id,
+  leading,
   title,
   description,
   isSelected = false,
@@ -101,8 +103,9 @@ export function ItemCard({
       }
     >
       <div className={sharedStyles.item.cardContent}>
-        <div className="flex items-start justify-between">
-          <div className="flex-1">
+        <div className="flex items-start justify-between gap-3">
+          {leading}
+          <div className="min-w-0 flex-1">
             <h3 className={sharedStyles.item.cardTitle}>{title}</h3>
             {description && (
               <p className={sharedStyles.item.cardDescription}>{description}</p>

@@ -1,548 +1,276 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "./Dashboard";
 import { useConfigStore } from "@/store/configStore";
-import type { Agent, Config, Room, Team } from "@/types/config";
+import type { Config } from "@/types/config";
 
-global.fetch = vi.fn();
-
-const agents: Agent[] = [
-  {
-    id: "code",
-    display_name: "Code Agent",
-    role: "Writes and reviews code",
-    model: "default",
-    tools: ["browser", "shell"],
-    skills: ["review"],
-    instructions: [],
-    rooms: ["lobby"],
-  },
-  {
-    id: "analyst",
-    display_name: "Research Analyst",
-    role: "Finds evidence",
-    tools: ["web_search"],
-    skills: [],
-    instructions: [],
-    rooms: [],
-  },
-];
-
-const rooms: Room[] = [
-  {
-    id: "lobby",
-    display_name: "Lobby",
-    description: "General requests",
-    agents: ["code"],
-    model: "fast",
-  },
-];
-
-const teams: Team[] = [
-  {
-    id: "builders",
-    display_name: "Builder Team",
-    role: "Ships product changes",
-    agents: ["code", "analyst"],
-    rooms: ["lobby"],
-    mode: "coordinate",
-    model: "default",
-  },
-];
-
+const totals = {
+  input_tokens: 0,
+  output_tokens: 0,
+  total_tokens: 0,
+  cache_read_tokens: 0,
+  cache_write_tokens: 0,
+  reasoning_tokens: 0,
+  audio_input_tokens: 0,
+  audio_output_tokens: 0,
+  audio_total_tokens: 0,
+};
+const coverage = {
+  scanned_sources: 1,
+  unavailable_sources: 0,
+  note: "Recorded runs",
+};
+const report = {
+  schema_version: 1,
+  scope: "admin",
+  generated_at: "2026-09-19T12:00:00Z",
+  totals,
+  session_count: 888,
+  breakdown: [],
+  coverage,
+  cumulative_model_breakdown: [],
+  cumulative_model_coverage: coverage,
+  user_breakdown: [],
+  user_coverage: coverage,
+  daily_breakdown: [{ date: "2026-09-19", run_count: 42, totals }],
+  daily_coverage: coverage,
+};
+const schedule = {
+  task_id: "brief",
+  room_id: "lobby",
+  room_alias: null,
+  status: "pending",
+  schedule_type: "once",
+  next_run_at: "2026-09-20T01:30:00Z",
+  execute_at: null,
+  description: "Morning briefing",
+  message: "Hello",
+};
 const config: Config = {
-  memory: {
-    embedder: { provider: "openai", config: { model: "embedding" } },
-  },
-  models: {
-    default: { provider: "ollama", id: "qwen" },
-    fast: { provider: "ollama", id: "qwen-small" },
-  },
-  agents: Object.fromEntries(agents.map(({ id, ...agent }) => [id, agent])),
-  teams: Object.fromEntries(
-    teams.map(({ id, rooms: _, ...team }) => [id, team]),
-  ),
-  rooms: {
-    lobby: { display_name: "Lobby", description: "General requests" },
-  },
-  room_models: { lobby: "fast" },
+  agents: {},
+  models: {},
   defaults: { markdown: true },
   router: { model: "default" },
+  memory: { embedder: { provider: "openai", config: { model: "embedding" } } },
 };
-
-function Pathname() {
+function Path() {
   return (
     <output aria-label="Current pathname">{useLocation().pathname}</output>
   );
 }
-
-function renderDashboard() {
-  return render(
-    <MemoryRouter initialEntries={["/dashboard"]}>
-      <Dashboard />
-      <Pathname />
-    </MemoryRouter>,
+function renderHome() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/dashboard"]}>
+          <Dashboard />
+          <Path />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ),
+  };
+}
+function respond(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), { status });
+}
+function stubApis(
+  usage: unknown = report,
+  usageStatus = 200,
+  schedules: unknown = { timezone: "America/Los_Angeles", tasks: [schedule] },
+  scheduleStatus = 200,
+) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (String(url).includes("/usage")) return respond(usage, usageStatus);
+      if (String(url).includes("/schedules"))
+        return respond(schedules, scheduleStatus);
+      return respond({
+        runtime_phase: "ready",
+        admission_paused: false,
+        active_matrix_operations: 0,
+        active_openai_requests: 0,
+        status: "idle",
+      });
+    }),
   );
 }
-
-function seedDashboard(
-  overrides: Partial<ReturnType<typeof useConfigStore.getState>> = {},
-) {
+beforeEach(() => {
   useConfigStore.setState({
     config,
-    agents,
-    teams,
-    rooms,
-    ...overrides,
-  });
-}
-
-describe("Dashboard", () => {
-  beforeEach(() => {
-    useConfigStore.setState({
-      config: null,
-      agents: [],
-      teams: [],
-      rooms: [],
-      agentPoliciesByAgent: {},
-      agentPoliciesStale: false,
-      agentPoliciesRequestId: 0,
-      selectedAgentId: null,
-      selectedTeamId: null,
-      selectedRoomId: null,
-      isDirty: false,
-      isLoading: false,
-      diagnostics: [],
-      syncStatus: "disconnected",
-      privateWorkerScopeBackups: {},
-    });
-    vi.clearAllMocks();
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    delete (HTMLElement.prototype as { scrollIntoView?: unknown })
-      .scrollIntoView;
-  });
-
-  it("searches normalized tools with trimmed case-insensitive input", async () => {
-    const rawConfig = {
-      ...config,
-      agents: {
-        code: {
-          ...config.agents.code,
-          tools: ["browser", { shell: { sandbox: "tight" } }],
-        },
+    agents: [
+      {
+        id: "code",
+        display_name: "Code",
+        role: "Writes code",
+        tools: [],
+        skills: [],
+        instructions: [],
+        rooms: ["lobby"],
       },
-      teams: {},
-    };
-
-    (global.fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => rawConfig })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
-
-    await useConfigStore.getState().loadConfig();
-    renderDashboard();
-
-    fireEvent.change(screen.getByRole("searchbox"), {
-      target: { value: " SHELL " },
-    });
-
-    expect(
-      screen.getByRole("button", { name: /Code Agent/ }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
-  });
-
-  it("shows and searches the inherited scheduler tool", () => {
-    seedDashboard({
-      agents: [{ ...agents[0], tools: ["shell"] }],
-      rooms: [],
-      teams: [],
-    });
-    renderDashboard();
-
-    fireEvent.change(screen.getByRole("searchbox"), {
-      target: { value: "scheduler" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /Code Agent/ }));
-
-    expect(
-      within(screen.getByRole("complementary")).getByText("shell, scheduler"),
-    ).toBeVisible();
-  });
-
-  it("does not inherit default tools when the agent disables inheritance", () => {
-    seedDashboard({
-      agents: [
-        { ...agents[0], tools: ["shell"], include_default_tools: false },
-      ],
-      rooms: [],
-      teams: [],
-    });
-    renderDashboard();
-
-    fireEvent.change(screen.getByRole("searchbox"), {
-      target: { value: "scheduler" },
-    });
-    expect(
-      screen.queryByRole("button", { name: /Code Agent/ }),
-    ).not.toBeInTheDocument();
-
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: /Code Agent/ }));
-    expect(
-      within(screen.getByRole("complementary")).getByText("shell"),
-    ).toBeVisible();
-  });
-
-  it("uses normalized configured defaults and deduplicates authored tools", async () => {
-    const rawConfig = {
-      ...config,
-      agents: {
-        code: {
-          ...config.agents.code,
-          tools: ["shell"],
-        },
+    ],
+    rooms: [
+      {
+        id: "lobby",
+        display_name: "Lobby",
+        description: "A place to begin",
+        agents: ["code"],
       },
-      defaults: {
-        ...config.defaults,
-        tools: [{ shell: { sandbox: "tight" } }, "browser"],
-      },
-      teams: {},
-    };
-    (global.fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => rawConfig })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
+    ],
+    teams: [],
+    selectedAgentId: null,
+    selectedRoomId: null,
+    selectedTeamId: null,
+  });
+  stubApis();
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
-    await useConfigStore.getState().loadConfig();
-    renderDashboard();
-    fireEvent.change(screen.getByRole("searchbox"), {
-      target: { value: "browser" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: /Code Agent/ }));
-
+describe("Home", () => {
+  it("shows daily runs, exact accessible bars, report date and service timezone", async () => {
+    renderHome();
+    expect(screen.getByRole("heading", { name: "Home" })).toBeVisible();
+    expect(await screen.findByText("42")).toBeVisible();
+    expect(screen.queryByText("888")).not.toBeInTheDocument();
     expect(
-      within(screen.getByRole("complementary")).getByText("shell, browser"),
+      screen.getByRole("img", { name: "2026-09-19: 42 runs" }),
     ).toBeVisible();
+    expect(screen.getByText("Last 7 days · UTC")).toBeVisible();
+    expect(screen.getByText("Report date: Sep 19, 2026 · UTC")).toBeVisible();
+    expect(await screen.findByText("Morning briefing")).toBeVisible();
+    expect(screen.getByText("America/Los_Angeles")).toBeVisible();
+    expect(screen.getByText("6:30 PM")).toBeVisible();
+    expect(screen.getByText("Sep 19")).toBeVisible();
   });
-
-  it("does not fabricate default model metadata for a room without an override", () => {
-    seedDashboard({
-      config: {
-        ...config,
-        models: {
-          default: {
-            provider: "ollama",
-            id: "qwen-reasoner",
-            display_name: "Local Reasoner",
-          },
-          fast: {
-            provider: "openai",
-            id: "gpt-fast",
-            display_name: "Fast model",
-          },
-        },
-      },
-      agents: [
-        { ...agents[0], model: "fast" },
-        { ...agents[1], model: undefined },
-      ],
-      rooms: [{ ...rooms[0], agents: ["code"], model: undefined }],
-      teams: [{ ...teams[0], model: undefined }],
+  it("keeps runtime and schedules useful when config and usage are unavailable", async () => {
+    useConfigStore.setState({ config: null, agents: [], rooms: [] });
+    stubApis({}, 503);
+    renderHome();
+    expect(await screen.findByText("Usage unavailable")).toBeVisible();
+    expect(await screen.findByText("Idle")).toBeVisible();
+    expect(await screen.findByText("Morning briefing")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Retry usage" })).toBeVisible();
+  });
+  it("shows partial usage honestly and does not fill missing days with zero", async () => {
+    stubApis({
+      ...report,
+      daily_breakdown: [],
+      daily_coverage: { ...coverage, unavailable_sources: 1 },
     });
-    renderDashboard();
-
-    for (const term of [
-      "default",
-      "ollama",
-      "qwen-reasoner",
-      "LOCAL REASONER",
-    ]) {
-      fireEvent.change(screen.getByRole("searchbox"), {
-        target: { value: term },
-      });
-      expect(
-        screen.getByRole("button", { name: /Research Analyst/ }),
-      ).toBeInTheDocument();
-      expect(
-        screen.queryByRole("button", { name: /Lobby/ }),
-      ).not.toBeInTheDocument();
-    }
-
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
-    const roomRow = screen.getByRole("button", { name: /Lobby/ });
-    expect(within(roomRow).getByText(/no room override/i)).toBeVisible();
-    fireEvent.click(roomRow);
+    renderHome();
+    expect(await screen.findByText("Partial data")).toBeVisible();
     expect(
-      within(screen.getByRole("complementary")).getByText(
-        "Uses agent/team models",
-      ),
+      screen.getByRole("img", { name: "2026-09-19: unavailable" }),
     ).toBeVisible();
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
   });
-
-  it("searches explicit room override alias, provider, ID, and display name", () => {
-    seedDashboard({
-      config: {
-        ...config,
-        models: {
-          ...config.models,
-          fast: {
-            provider: "openai",
-            id: "gpt-fast",
-            display_name: "Fast model",
-          },
-        },
-      },
-      rooms: [{ ...rooms[0], model: "fast" }],
+  it("shows a real zero with complete empty coverage and useful empty schedules", async () => {
+    stubApis({ ...report, daily_breakdown: [] }, 200, {
+      timezone: "UTC",
+      tasks: [],
     });
-    renderDashboard();
-
-    for (const term of ["fast", "openai", "gpt-fast", "FAST MODEL"]) {
-      fireEvent.change(screen.getByRole("searchbox"), {
-        target: { value: term },
-      });
-      expect(screen.getByRole("button", { name: /Lobby/ })).toBeInTheDocument();
-    }
-
-    fireEvent.click(screen.getByRole("button", { name: /Lobby/ }));
-    expect(
-      within(screen.getByRole("complementary")).getByText(
-        "fast · openai/gpt-fast",
-      ),
-    ).toBeVisible();
+    renderHome();
+    expect(await screen.findByText("0")).toBeVisible();
+    expect(await screen.findByText("Nothing scheduled")).toBeVisible();
+    expect(screen.getByRole("link", { name: /All schedules/ })).toHaveAttribute(
+      "href",
+      "/schedules",
+    );
   });
-
-  it("uses default model metadata for a team whose model was omitted", () => {
-    seedDashboard({
-      config: {
-        ...config,
-        models: {
-          ...config.models,
-          default: {
-            provider: "ollama",
-            id: "qwen-reasoner",
-            display_name: "Local Reasoner",
-          },
-        },
-      },
-      teams: [{ ...teams[0], model: undefined }],
+  it.each([
+    { timezone: "UTC", tasks: [null] },
+    { timezone: "not/a-zone", tasks: [] },
+  ])(
+    "contains malformed schedules or timezone without hiding usage (%j)",
+    async (bad) => {
+      stubApis(report, 200, bad);
+      renderHome();
+      expect(await screen.findByText("Schedules unavailable")).toBeVisible();
+      expect(await screen.findByText("42")).toBeVisible();
+    },
+  );
+  it("polls 202 usage using Retry-After and stops once ready", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    let usageCalls = 0;
+    vi.mocked(fetch).mockImplementation(async (...args) => {
+      if (String(args[0]).includes("/usage")) {
+        usageCalls++;
+        if (usageCalls === 1)
+          return new Response("{}", {
+            status: 202,
+            headers: { "Retry-After": "1" },
+          });
+      }
+      return original(...args);
     });
-    renderDashboard();
-
-    for (const term of [
-      "default",
-      "ollama",
-      "qwen-reasoner",
-      "LOCAL REASONER",
-    ]) {
-      fireEvent.change(screen.getByRole("searchbox"), {
-        target: { value: term },
-      });
-      expect(
-        screen.getByRole("button", { name: /Builder Team/ }),
-      ).toBeInTheDocument();
-    }
-
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: /Builder Team/ }));
-    expect(
-      within(screen.getByRole("complementary")).getByText(
-        "default · ollama/qwen-reasoner",
-      ),
-    ).toBeVisible();
-  });
-
-  it("shows an explicit null team model without indexing default metadata", () => {
-    seedDashboard({
-      config: {
-        ...config,
-        models: {
-          ...config.models,
-          default: {
-            provider: "ollama",
-            id: "qwen-reasoner",
-            display_name: "Local Reasoner",
-          },
-        },
-      },
-      teams: [{ ...teams[0], model: null }],
+    renderHome();
+    expect(await screen.findByText("Preparing usage report…")).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
     });
-    renderDashboard();
-
-    for (const term of [
-      "default",
-      "ollama",
-      "qwen-reasoner",
-      "LOCAL REASONER",
-    ]) {
-      fireEvent.change(screen.getByRole("searchbox"), {
-        target: { value: term },
-      });
-      expect(
-        screen.queryByRole("button", { name: /Builder Team/ }),
-      ).not.toBeInTheDocument();
-    }
-
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
-    const teamRow = screen.getByRole("button", { name: /Builder Team/ });
-    expect(within(teamRow).getByText(/No model set/i)).toBeVisible();
-    fireEvent.click(teamRow);
-    expect(
-      within(screen.getByRole("complementary")).getByText("No model set"),
-    ).toBeVisible();
-  });
-
-  it("searches explicit team model alias, provider, ID, and display name", () => {
-    seedDashboard({
-      config: {
-        ...config,
-        models: {
-          ...config.models,
-          fast: {
-            provider: "openai",
-            id: "gpt-fast",
-            display_name: "Fast model",
-          },
-        },
-      },
-      teams: [{ ...teams[0], model: "fast" }],
+    expect(await screen.findByText("42")).toBeVisible();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
     });
-    renderDashboard();
-
-    for (const term of ["fast", "openai", "gpt-fast", "FAST MODEL"]) {
-      fireEvent.change(screen.getByRole("searchbox"), {
-        target: { value: term },
-      });
-      expect(
-        screen.getByRole("button", { name: /Builder Team/ }),
-      ).toBeInTheDocument();
-    }
-
-    fireEvent.click(screen.getByRole("button", { name: /Builder Team/ }));
-    expect(
-      within(screen.getByRole("complementary")).getByText(
-        "fast · openai/gpt-fast",
-      ),
-    ).toBeVisible();
+    expect(usageCalls).toBe(2);
   });
-
-  it("filters the directory by type and includes teams", () => {
-    seedDashboard();
-    renderDashboard();
-
-    fireEvent.change(screen.getByRole("combobox", { name: /type/i }), {
-      target: { value: "teams" },
-    });
-
-    expect(
-      screen.getByRole("button", { name: /Builder Team/ }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /Code Agent/ }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /Lobby/ }),
-    ).not.toBeInTheDocument();
+  it("contains schedule failure without hiding usage", async () => {
+    stubApis(report, 200, {}, 503);
+    renderHome();
+    expect(await screen.findByText("Schedules unavailable")).toBeVisible();
+    expect(await screen.findByText("42")).toBeVisible();
   });
-
-  it("opens the selected agent in its editor", () => {
-    seedDashboard();
-    renderDashboard();
-
-    fireEvent.click(screen.getByRole("button", { name: /Code Agent/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Open agent editor/i }));
-
+  it("opens real room and agent editors with their selection", async () => {
+    const view = renderHome();
+    fireEvent.click(screen.getByRole("button", { name: "Configure Lobby" }));
+    expect(useConfigStore.getState().selectedRoomId).toBe("lobby");
+    expect(screen.getByLabelText("Current pathname")).toHaveTextContent(
+      "/rooms",
+    );
+    view.unmount();
+    renderHome();
+    fireEvent.click(screen.getByRole("button", { name: "Configure Code" }));
     expect(useConfigStore.getState().selectedAgentId).toBe("code");
+    expect(useConfigStore.getState().selectedRoomId).toBeNull();
     expect(screen.getByLabelText("Current pathname")).toHaveTextContent(
       "/agents",
     );
   });
-
-  it("keeps same-id selections scoped to the entity type", () => {
-    seedDashboard({
-      teams: [{ ...teams[0], id: "code", display_name: "Code Team" }],
-    });
-    renderDashboard();
-
-    fireEvent.click(screen.getByRole("button", { name: /Code Team/ }));
-
-    expect(screen.getByRole("heading", { name: "Code Team" })).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: /Open team editor/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("reveals and focuses selected details on small screens", () => {
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-      configurable: true,
-      value: scrollIntoView,
-    });
-    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
-    seedDashboard();
-    renderDashboard();
-
-    fireEvent.click(screen.getByRole("button", { name: /Code Agent/ }));
-
-    const details = screen.getByRole("complementary");
-    expect(details).toHaveFocus();
-    expect(scrollIntoView).toHaveBeenCalledWith({
-      behavior: "auto",
-      block: "start",
-    });
-  });
-
-  it("offers a clear reset when no directory entries match", () => {
-    seedDashboard();
-    renderDashboard();
-
+  it("retains the directory behind Browse workspace and comes back without changing route", async () => {
+    renderHome();
+    fireEvent.click(screen.getByRole("button", { name: "Browse workspace" }));
+    expect(screen.getByRole("searchbox")).toBeVisible();
     fireEvent.change(screen.getByRole("searchbox"), {
-      target: { value: "no such workspace item" },
+      target: { value: "Writes code" },
     });
-
-    expect(screen.getByText(/No workspace items match/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Reset filters/i }));
     expect(
-      screen.getByRole("button", { name: /Code Agent/ }),
-    ).toBeInTheDocument();
-  });
-
-  it("does not present fabricated runtime status", () => {
-    seedDashboard();
-    renderDashboard();
-
-    expect(screen.queryByText(/Last updated/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Online|Busy|Idle/i)).not.toBeInTheDocument();
-    expect(screen.queryByTestId("network-graph")).not.toBeInTheDocument();
-  });
-
-  it("clears details when the selected item is removed", () => {
-    seedDashboard();
-    renderDashboard();
-
-    fireEvent.click(screen.getByRole("button", { name: /Code Agent/ }));
-    expect(screen.getByRole("heading", { name: "Code Agent" })).toBeVisible();
-
-    act(() => {
-      useConfigStore.setState({
-        agents: agents.filter(({ id }) => id !== "code"),
-      });
-    });
-
-    expect(
-      screen.queryByRole("button", { name: /Open agent editor/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: "Code Agent" }),
-    ).not.toBeInTheDocument();
+      within(screen.getByLabelText("Workspace directory")).getAllByRole(
+        "button",
+      ),
+    ).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Export config" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Back to home" }));
+    expect(screen.getByRole("heading", { name: "Home" })).toBeVisible();
+    expect(screen.getByLabelText("Current pathname")).toHaveTextContent(
+      "/dashboard",
+    );
   });
 });
