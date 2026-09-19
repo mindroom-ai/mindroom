@@ -232,3 +232,15 @@
     font-size: 16px;
   }
 }
+
+@media (max-width: 1023px) {
+  .rooms-layout .glass-panel {
+    height: auto;
+    overflow: visible;
+  }
+
+  .rooms-layout .overflow-y-auto {
+    max-height: none;
+    overflow-y: visible;
+  }
+}
