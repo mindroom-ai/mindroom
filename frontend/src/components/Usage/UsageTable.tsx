@@ -15,6 +15,31 @@ export const TOKEN_METRICS: Record<keyof TokenTotals, string> = {
 
 export const formatTokens = (value: number) => value.toLocaleString();
 
+export function UsageMetricSelect({
+  metric,
+  onChange,
+}: {
+  metric: keyof TokenTotals;
+  onChange: (metric: keyof TokenTotals) => void;
+}) {
+  return (
+    <label className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+      Token metric
+      <select
+        value={metric}
+        onChange={(event) => onChange(event.target.value as keyof TokenTotals)}
+        className="max-w-52 rounded-md border bg-background px-3 py-2 text-foreground"
+      >
+        {Object.entries(TOKEN_METRICS).map(([key, label]) => (
+          <option key={key} value={key}>
+            {label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 export interface UsageTableRow {
   key: string;
   label: string;
@@ -45,15 +70,18 @@ export function UsageTable({
       <table aria-label={label} className="w-full text-sm">
         <thead className="border-b text-xs text-muted-foreground">
           <tr>
-            <th scope="col" className="px-4 py-3 text-left font-medium">
+            <th scope="col" className="px-2 py-3 text-left font-medium sm:px-4">
               {label}
             </th>
-            <th scope="col" className="px-4 py-3 text-right font-medium">
+            <th
+              scope="col"
+              className="px-2 py-3 text-right font-medium sm:px-4"
+            >
               {countLabel}
             </th>
             <th
               scope="col"
-              className="w-2/5 min-w-24 px-4 py-3 text-right font-medium sm:min-w-36"
+              className="w-2/5 min-w-24 px-2 py-3 text-right font-medium sm:min-w-36 sm:px-4"
             >
               {TOKEN_METRICS[metric]}
             </th>
@@ -64,11 +92,14 @@ export function UsageTable({
             <tr key={row.key} className="hover:bg-muted/40">
               <th
                 scope="row"
-                className="max-w-80 px-4 py-4 text-left font-medium [overflow-wrap:anywhere]"
+                className="max-w-80 px-2 py-4 text-left font-medium [overflow-wrap:anywhere] sm:px-4"
               >
                 {row.onSelect ? (
                   <button
                     onClick={row.onSelect}
+                    aria-label={
+                      row.detail ? `${row.label} (${row.detail})` : undefined
+                    }
                     className="text-primary underline-offset-4 hover:underline focus-visible:underline focus-visible:outline-primary"
                   >
                     {row.label}
@@ -82,10 +113,10 @@ export function UsageTable({
                   </div>
                 )}
               </th>
-              <td className="px-4 py-4 text-right tabular-nums text-muted-foreground">
+              <td className="px-2 py-4 text-right tabular-nums text-muted-foreground sm:px-4">
                 {formatTokens(row.count)}
               </td>
-              <td className="px-4 py-4 text-right tabular-nums">
+              <td className="px-2 py-4 text-right tabular-nums sm:px-4">
                 {formatTokens(row.totals[metric])}
                 <div
                   aria-hidden="true"

@@ -20,6 +20,48 @@ const coverage = {
   note: "Retained usage from available sources.",
 };
 
+const retainedModel = {
+  provider: "example",
+  model: "example-model",
+  totals,
+  run_count: 1,
+};
+
+const cumulativeModel = {
+  provider: "example",
+  model: "example-model",
+  totals,
+  session_count: 1,
+};
+
+const daily = {
+  date: "2026-09-19",
+  totals,
+  run_count: 1,
+  model_breakdown: [retainedModel],
+};
+
+const requester = {
+  user_id: "user@example.test",
+  totals,
+  run_count: 1,
+  model_breakdown: [retainedModel],
+  daily_breakdown: [daily],
+};
+
+const emptyDaily = {
+  ...daily,
+  date: "2026-09-18",
+  model_breakdown: [],
+};
+
+const emptyRequester = {
+  ...requester,
+  user_id: null,
+  model_breakdown: [],
+  daily_breakdown: [],
+};
+
 const report = {
   schema_version: 1,
   generated_at: "2026-09-19T12:00:00Z",
@@ -32,32 +74,10 @@ const report = {
       key: "assistant",
       totals,
       session_count: 1,
-      cumulative_model_breakdown: [
-        {
-          provider: "example",
-          model: "example-model",
-          totals,
-          session_count: 1,
-        },
-      ],
+      cumulative_model_breakdown: [cumulativeModel],
       retained_run_totals: totals,
       run_count: 1,
-      user_breakdown: [
-        {
-          user_id: "user@example.test",
-          totals,
-          run_count: 1,
-          model_breakdown: [
-            {
-              provider: "example",
-              model: "example-model",
-              totals,
-              run_count: 1,
-            },
-          ],
-          daily_breakdown: [],
-        },
-      ],
+      user_breakdown: [requester, emptyRequester],
     },
   ],
   coverage,
@@ -65,9 +85,9 @@ const report = {
   model_coverage: coverage,
   cumulative_model_breakdown: [],
   cumulative_model_coverage: coverage,
-  user_breakdown: [],
+  user_breakdown: [requester, emptyRequester],
   user_coverage: coverage,
-  daily_breakdown: [],
+  daily_breakdown: [daily, emptyDaily],
   daily_coverage: coverage,
 };
 
@@ -200,7 +220,11 @@ describe("fetchUsage", () => {
     ],
     [
       "daily date",
-      { daily_breakdown: [{ date: "invalid", totals, run_count: 1 }] },
+      {
+        daily_breakdown: [
+          { date: "invalid", totals, run_count: 1, model_breakdown: [] },
+        ],
+      },
     ],
     ["report timestamp", { generated_at: "invalid" }],
     ["unsafe total", { totals: { ...totals, input_tokens: 9007199254740992 } }],
@@ -219,6 +243,121 @@ describe("fetchUsage", () => {
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ ...report, ...fields })),
     );
+    await expect(fetchUsage()).rejects.toThrow(
+      "Could not read usage data from the server. Try again.",
+    );
+  });
+
+  it.each([
+    [
+      "top-level requester models",
+      {
+        user_breakdown: [
+          {
+            ...requester,
+            model_breakdown: [{ ...retainedModel, run_count: 1.5 }],
+          },
+        ],
+      },
+    ],
+    [
+      "top-level requester daily models",
+      {
+        user_breakdown: [
+          {
+            ...requester,
+            daily_breakdown: [
+              {
+                ...daily,
+                model_breakdown: [{ ...retainedModel, provider: null }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      "per-entity requester models",
+      {
+        breakdown: [
+          {
+            ...report.breakdown[0],
+            user_breakdown: [
+              {
+                ...requester,
+                model_breakdown: [{ ...retainedModel, totals: {} }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      "per-entity requester daily models",
+      {
+        breakdown: [
+          {
+            ...report.breakdown[0],
+            user_breakdown: [
+              {
+                ...requester,
+                daily_breakdown: [
+                  {
+                    ...daily,
+                    model_breakdown: [{ ...retainedModel, model: {} }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      "top-level daily models",
+      {
+        daily_breakdown: [
+          {
+            ...daily,
+            model_breakdown: [{ ...retainedModel, run_count: -1 }],
+          },
+        ],
+      },
+    ],
+    [
+      "entity cumulative models",
+      {
+        breakdown: [
+          {
+            ...report.breakdown[0],
+            cumulative_model_breakdown: [
+              { ...cumulativeModel, session_count: "1" },
+            ],
+          },
+        ],
+      },
+    ],
+    [
+      "required requester drilldown arrays",
+      {
+        user_breakdown: [
+          {
+            user_id: "user@example.test",
+            totals,
+            run_count: 1,
+          },
+        ],
+      },
+    ],
+    [
+      "required daily model array",
+      { daily_breakdown: [{ date: "2026-09-19", totals, run_count: 1 }] },
+    ],
+  ])("rejects malformed nested %s", async (_name, fields) => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ ...report, ...fields })),
+    );
+
     await expect(fetchUsage()).rejects.toThrow(
       "Could not read usage data from the server. Try again.",
     );

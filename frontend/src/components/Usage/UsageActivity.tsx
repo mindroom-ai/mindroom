@@ -10,7 +10,7 @@ export function UsageActivity({
   generatedAt,
   metric,
 }: {
-  daily: UsageDailyRow[];
+  daily: Pick<UsageDailyRow, "date" | "totals" | "run_count">[];
   generatedAt: string;
   metric: keyof TokenTotals;
 }) {

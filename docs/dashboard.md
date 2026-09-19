@@ -38,11 +38,16 @@ The **Usage** tab shows token usage across the deployment using the existing [us
 - All-time recorded totals for input, output, and cache tokens
 - Daily activity with a UTC date range and an expandable data table
 - Searchable agent/team, model, and requester breakdowns, sorted by the selected token counter
-- Requester detail for each agent or team, including shared agents
+- Agent/team detail with requesters, cumulative models, and daily activity
+- Requester detail across agents, models, and daily activity, including usage of shared agents
+- Model detail across agents, requesters, and daily activity, keeping providers separate
 
 The token selector also exposes reasoning and audio counters when reported by the provider.
+Select a row in any breakdown to open its detail panel, where the same token selector is available.
 Date ranges apply only to daily activity; agent and model totals remain cumulative.
 Daily and requester detail can be lower than cumulative totals when older attribution is missing.
+Agent activity combines its requesters' dated runs; undated runs remain in recorded totals.
+A run using several models appears once in each model's run count, so model run counts should not be added together.
 Cache tokens may already be included in input counts, depending on the provider.
 This page shows recorded usage, not estimated spend or billing totals.
 

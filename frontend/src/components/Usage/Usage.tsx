@@ -13,38 +13,35 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { fetchUsage } from "@/services/usageService";
-import type { TokenTotals, UsageReport, UsageUserRow } from "@/types/usage";
+import type { TokenTotals, UsageReport } from "@/types/usage";
 import { UsageActivity } from "./UsageActivity";
+import { UsageDetail } from "./UsageDetail";
+import {
+  getUsageDetail,
+  modelRow,
+  requesterRow,
+  type UsageSelection,
+} from "./usageDetails";
 import {
   formatTokens,
-  TOKEN_METRICS,
+  UsageMetricSelect,
   UsageTable,
   type UsageTableRow,
 } from "./UsageTable";
 
-function requesterRows(users: UsageUserRow[]): UsageTableRow[] {
-  return users.map((row) => ({
-    key: row.user_id ?? "unknown",
-    label: row.user_id ?? "Unknown requester",
-    totals: row.totals,
-    count: row.run_count,
-  }));
-}
-
 function UsageReportView({ report }: { report: UsageReport }) {
   const [metric, setMetric] = useState<keyof TokenTotals>("total_tokens");
   const [search, setSearch] = useState("");
-  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
-  const entityTrigger = useRef<HTMLButtonElement | null>(null);
-  const entity = report.breakdown.find((row) => row.key === selectedEntity);
+  const [selection, setSelection] = useState<UsageSelection | null>(null);
+  const detailTrigger = useRef<HTMLButtonElement | null>(null);
+  const breakdownSearch = useRef<HTMLInputElement | null>(null);
+  const select =
+    (value: UsageSelection): UsageTableRow["onSelect"] =>
+    (event) => {
+      detailTrigger.current = event.currentTarget;
+      setSelection(value);
+    };
   const filterRows = (rows: UsageTableRow[]) =>
     rows.filter((row) =>
       `${row.label} ${row.detail ?? ""}`
@@ -56,17 +53,19 @@ function UsageReportView({ report }: { report: UsageReport }) {
     label: row.key,
     totals: row.totals,
     count: row.session_count,
-    onSelect: (event) => {
-      entityTrigger.current = event.currentTarget;
-      setSelectedEntity(row.key);
-    },
+    onSelect: select({ kind: "entity", key: row.key }),
   }));
   const models = report.cumulative_model_breakdown.map((row) => ({
-    key: JSON.stringify([row.provider, row.model]),
-    label: row.model || "Unknown model",
-    detail: row.provider || "Unknown provider",
-    totals: row.totals,
-    count: row.session_count,
+    ...modelRow(row),
+    onSelect: select({
+      kind: "model",
+      provider: row.provider,
+      model: row.model,
+    }),
+  }));
+  const requesters = report.user_breakdown.map((row) => ({
+    ...requesterRow(row),
+    onSelect: select({ kind: "requester", userId: row.user_id }),
   }));
   const unavailable = [
     report.coverage,
@@ -146,22 +145,7 @@ function UsageReportView({ report }: { report: UsageReport }) {
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">Explore usage</h2>
-        <label className="flex items-center gap-3 text-sm text-muted-foreground">
-          Token metric
-          <select
-            value={metric}
-            onChange={(event) =>
-              setMetric(event.target.value as keyof TokenTotals)
-            }
-            className="max-w-52 rounded-md border bg-background px-3 py-2 text-foreground"
-          >
-            {Object.entries(TOKEN_METRICS).map(([key, label]) => (
-              <option key={key} value={key}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <UsageMetricSelect metric={metric} onChange={setMetric} />
       </div>
       <UsageActivity
         daily={report.daily_breakdown}
@@ -195,6 +179,7 @@ function UsageReportView({ report }: { report: UsageReport }) {
               </TabsTrigger>
             </TabsList>
             <Input
+              ref={breakdownSearch}
               aria-label="Search breakdown"
               placeholder="Search breakdown"
               className="w-full sm:w-56"
@@ -205,7 +190,8 @@ function UsageReportView({ report }: { report: UsageReport }) {
           <TabsContent value="entities" className="mt-0">
             <p className="px-4 py-3 text-xs text-muted-foreground">
               All-time recorded totals, including shared and private instances.
-              Select an agent or team to see its recorded requesters.
+              Select an agent or team to explore its requesters, models, and
+              activity.
             </p>
             <UsageTable
               rows={filterRows(entities)}
@@ -217,7 +203,8 @@ function UsageReportView({ report }: { report: UsageReport }) {
           <TabsContent value="models" className="mt-0">
             <p className="px-4 py-3 text-xs text-muted-foreground">
               All-time recorded totals. A session using multiple models appears
-              under each model. Unknown means the model was not recorded.
+              under each model. Unknown means the model was not recorded. Select
+              a model to explore its agents, requesters, and activity.
             </p>
             <UsageTable
               rows={filterRows(models)}
@@ -230,10 +217,11 @@ function UsageReportView({ report }: { report: UsageReport }) {
             <p className="px-4 py-3 text-xs text-muted-foreground">
               Recorded runs only. Requesters identify who triggered a run,
               including on shared agents. Unknown means no requester was
-              recorded.
+              recorded. Select a requester to explore their agents, models, and
+              activity.
             </p>
             <UsageTable
-              rows={filterRows(requesterRows(report.user_breakdown))}
+              rows={filterRows(requesters)}
               label="Requesters"
               metric={metric}
               countLabel="Recorded runs"
@@ -241,41 +229,15 @@ function UsageReportView({ report }: { report: UsageReport }) {
           </TabsContent>
         </Tabs>
       </Card>
-      <Dialog
-        open={Boolean(entity)}
-        onOpenChange={(open) => {
-          if (!open) setSelectedEntity(null);
-        }}
-      >
-        <DialogContent
-          className="max-h-[85vh] w-[calc(100%-2rem)] max-w-3xl overflow-y-auto"
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            entityTrigger.current?.focus();
-          }}
-        >
-          {entity && (
-            <>
-              <DialogHeader>
-                <DialogTitle className="break-words pr-5">
-                  {entity.key}
-                </DialogTitle>
-                <DialogDescription>
-                  {formatTokens(entity.retained_run_totals[metric])} tokens
-                  across {formatTokens(entity.run_count)} recorded runs.
-                  Requester detail may cover less usage than the all-time total.
-                </DialogDescription>
-              </DialogHeader>
-              <UsageTable
-                rows={requesterRows(entity.user_breakdown)}
-                label="Recorded requesters"
-                metric={metric}
-                countLabel="Recorded runs"
-              />
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+      <UsageDetail
+        detail={getUsageDetail(report, selection, metric)}
+        generatedAt={report.generated_at}
+        metric={metric}
+        onMetricChange={setMetric}
+        onClose={() => setSelection(null)}
+        trigger={detailTrigger}
+        fallbackFocus={breakdownSearch}
+      />
     </>
   );
 }
