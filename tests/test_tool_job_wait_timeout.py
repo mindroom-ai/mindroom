@@ -53,6 +53,7 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
     model, backup = DelegationModel(id="primary"), DelegationModel(id="backup")
     install_tool_job_execution(model, FallbackConfig(on_error=[backup]))
     function = Function.from_callable(application)
+    function._agent = Agent(id="leader", model=model)
     try:
         with tool_runtime_context(context):
             formatted = (backup if fallback else model)._format_tools([function])

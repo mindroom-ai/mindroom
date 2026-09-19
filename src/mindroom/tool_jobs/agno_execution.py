@@ -80,7 +80,9 @@ def is_background_job_excluded(function: Function) -> bool:
 
 
 def is_framework_function(function: Function) -> bool:
-    """Recognize SDK orchestration calls that retain their existing execution owner."""
+    """Recognize SDK-owned calls without an independent application execution owner."""
+    if function._agent is None and function._team is None:
+        return True
     origin = callable_origin(function)
     return (
         origin["module"] == "agno.team._default_tools"
@@ -320,11 +322,15 @@ def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
-    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901 - Keep admission and cleanup together.
+    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901, PLR0911, PLR0915 - Keep admission and cleanup together.
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()
-        if runtime is None or context is None or resources is None or is_framework_function(call.function):
+        if runtime is None or context is None or resources is None:
+            return await original(call)
+        if is_framework_function(call.function):
+            await job_checkpoint()
+            check_current_execution_authority()
             return await original(call)
         mode = call_wait_mode(call, depth=depth)
         try:

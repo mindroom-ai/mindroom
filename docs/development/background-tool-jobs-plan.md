@@ -857,3 +857,8 @@ Delegation's own policy approval can pause before any child or job exists.
 That gate now restores the exact call's saved wait mode from its owning SDK run, including member runs, instead of recomputing it from the current exclusion list.
 The driver records a mode when it owns a call without an SDK capture, using the same metadata rather than another persistence format.
 Restart regressions cover both exclusion transitions and deliberately reuse a call ID in the team and member runs to verify that their policies stay separate.
+
+Automatic SDK learning reuses the agent's model but invokes internal extraction functions without an agent/team run owner.
+Those calls now keep SDK execution and native schemas; nested extraction retains and rechecks its outer tool's authority instead of inventing another job owner.
+The same boundary covers other internal model calls without adding a learning-specific allowlist or copying models.
+Real SDK regressions verify automatic and agent-requested learning with both shared and requester-scoped storage, including revocation immediately before the actual memory write.

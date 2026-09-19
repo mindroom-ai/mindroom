@@ -150,7 +150,7 @@ def _wrap_tool_schemas(
 # Upstream issue: No matching public accepted-operation extension point identified.
 # Upstream PR: None identified.
 # Remove when: SDK exposes public approved-call execution ownership.
-# Coverage: tests/test_tool_job_execution.py and tests/test_tool_job_control_calls.py.
+# Coverage: tests/test_tool_job_execution.py, tests/test_tool_job_control_calls.py, tests/test_tool_job_learning.py.
 def install_tool_job_execution(
     model: Model,
     fallback_config: FallbackConfig | None = None,

@@ -23,6 +23,7 @@ from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationState
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -121,6 +122,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
     )
     assert toolkit is not None
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
+    bind_toolkit_authority(toolkit, authored_name="delegate")
     output_args: dict[str, object] = (
         {} if mode == "automatic" else {"mindroom_output_path": "../escape.txt" if mode == "invalid" else "report.txt"}
     )
