@@ -158,7 +158,23 @@ function AppContent() {
       previousSelectedRoomId === null &&
       selectedRoomId !== null
     ) {
-      document.querySelector<HTMLElement>(".rooms-workspace")?.scrollTo(0, 0);
+      const workspace = document.querySelector<HTMLElement>(".rooms-workspace");
+      const roomsLayout =
+        workspace?.querySelector<HTMLElement>(".rooms-layout");
+      if (workspace && roomsLayout) {
+        const workspaceTop = workspace.getBoundingClientRect().top;
+        const layoutTop = roomsLayout.getBoundingClientRect().top;
+        const paddingTop = Number.parseFloat(
+          window.getComputedStyle(workspace).paddingTop,
+        );
+        workspace.scrollTo(
+          0,
+          Math.max(
+            0,
+            workspace.scrollTop + layoutTop - workspaceTop - paddingTop,
+          ),
+        );
+      }
     }
   }, [currentTab, selectedRoomId]);
 
@@ -527,7 +543,13 @@ function AppContent() {
                         selectedRoomId ? "block" : "hidden lg:block"
                       }`}
                     >
-                      <RoomEditor />
+                      <RoomEditor
+                        key={
+                          selectedRoomId === null
+                            ? "no-room"
+                            : `room:${selectedRoomId}`
+                        }
+                      />
                     </div>
                   </div>
                 </div>
