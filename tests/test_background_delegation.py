@@ -35,12 +35,14 @@ from mindroom.delegation.state import DelegationState
 from mindroom.response_turn import ResponsePausedForApproval, paused_attempt_from_response
 from mindroom.tool_jobs import runtime as background_module
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
     human_message_signal_context,
 )
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
@@ -101,6 +103,8 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
     runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
     delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
+    bind_toolkit_construction(delegate, ToolConstruction("delegate", None))
+    bind_toolkit_authority(delegate, authored_name="delegate")
     apply_tool_approval_capability(
         delegate,
         config,

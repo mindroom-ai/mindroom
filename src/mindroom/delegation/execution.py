@@ -61,7 +61,13 @@ from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_r
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
-from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
+from mindroom.tool_jobs.wait_timeout import (
+    ToolWaitMode,
+    application_arguments,
+    read_wait_timeout,
+    record_tool_wait_mode,
+    saved_tool_wait_mode,
+)
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -141,6 +147,32 @@ def _external_requirements(response: RunOutput | TeamRunOutput) -> list[RunRequi
 def has_delegation_state(response: RunOutput | TeamRunOutput) -> bool:
     """Return whether the native delegation driver owns this run's pause."""
     return bool(_external_requirements(response) or (response.metadata or {}).get(DELEGATION_STATE_KEY))
+
+
+def _delegation_wait_mode(
+    response: RunOutput | TeamRunOutput,
+    requirement: RunRequirement,
+    default: ToolWaitMode,
+) -> ToolWaitMode:
+    """Retain the external call's mode before its own policy gate admits a child."""
+    tool = requirement.tool_execution
+    assert tool is not None
+    assert tool.tool_call_id is not None
+    run_id = requirement.member_run_id or response.run_id
+    pending = [response]
+    while pending:
+        run = pending.pop()
+        if run.run_id == run_id and run_id is not None:
+            if mode := saved_tool_wait_mode(run.metadata, run_id, tool.tool_call_id):
+                return mode
+            if run.metadata is None:
+                run.metadata = {}
+            record_tool_wait_mode(run.metadata, run_id, tool.tool_call_id, default)
+            return default
+        if isinstance(run, TeamRunOutput):
+            pending.extend(run.member_responses)
+    msg = "Delegation requirement has no exact owning run"
+    raise RuntimeError(msg)
 
 
 async def _persist(entity: Agent | Team, response: RunOutput | TeamRunOutput, state: DelegationState) -> None:
@@ -814,13 +846,18 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
             retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             background = available_background
             excluded = tool.tool_name != "job" and toolkit_is_background_excluded("delegate", config, runtime_paths)
+            mode = _delegation_wait_mode(
+                response,
+                requirement,
+                "native" if excluded else "managed" if background is not None else "inline",
+            )
             # A saved approval keeps its accepted owner when startup policy changes.
             if retained is not None:
                 if background is not None and not background.has_job(retained.delegation_id):
                     background = None
-            elif excluded:
+            elif mode != "managed":
                 background = None
-                if "wait_timeout" in (tool.tool_args or {}):
+                if mode == "native" and "wait_timeout" in (tool.tool_args or {}):
                     tool.tool_call_error = True
                     resolve_result("wait_timeout is unavailable for the excluded delegate toolkit.")
                     continue

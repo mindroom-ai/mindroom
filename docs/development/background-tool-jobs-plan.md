@@ -852,3 +852,8 @@ Async calls receive independent leaf trackers; sync calls retain their complete 
 The adapter is gated by accepted execution ownership, so foreground execution keeps the SDK's normal behavior.
 Real workflow regressions execute multiple calculator calls sequentially and in parallel.
 Cancellation regressions verify that all started nested threads finish before job settlement and resource cleanup, with both sync and async hooks.
+
+Delegation's own policy approval can pause before any child or job exists.
+That gate now restores the exact call's saved wait mode from its owning SDK run, including member runs, instead of recomputing it from the current exclusion list.
+The driver records a mode when it owns a call without an SDK capture, using the same metadata rather than another persistence format.
+Restart regressions cover both exclusion transitions and deliberately reuse a call ID in the team and member runs to verify that their policies stay separate.
