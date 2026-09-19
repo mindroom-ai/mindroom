@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, useNavigate, useLocation } from "react-router-dom";
 import {
+  BarChart3,
   BookOpen,
   Bot,
   Brain,
@@ -35,6 +36,7 @@ import { Integrations } from "@/components/Integrations/Integrations";
 import { UnconfiguredRooms } from "@/components/UnconfiguredRooms/UnconfiguredRooms";
 import { SyncStatus } from "@/components/SyncStatus/SyncStatus";
 import { Dashboard } from "@/components/Dashboard/Dashboard";
+import { Usage } from "@/components/Usage/Usage";
 import { Skills } from "@/components/Skills/Skills";
 import { Schedules } from "@/components/Schedules/Schedules";
 import { Credentials } from "@/components/Credentials/Credentials";
@@ -75,6 +77,7 @@ const NAV_ITEMS: NavItem[] = [
     icon: LayoutDashboard,
     group: "Workspace",
   },
+  { value: "usage", label: "Usage", icon: BarChart3, group: "Workspace" },
   { value: "agents", label: "Agents", icon: Bot, group: "Workspace" },
   { value: "teams", label: "Teams", icon: Users, group: "Workspace" },
   { value: "rooms", label: "Rooms", icon: Home, group: "Workspace" },
@@ -657,6 +660,13 @@ function AppContent() {
               <div className="min-h-full">
                 <Dashboard />
               </div>
+            </TabsContent>
+
+            <TabsContent
+              value="usage"
+              className="flex-1 p-2 sm:p-4 overflow-auto min-h-0"
+            >
+              <Usage />
             </TabsContent>
 
             <TabsContent

@@ -602,6 +602,23 @@ The main dashboard shows system stats and monitoring:
 - **Search and filter** - Filter by agents, rooms, or teams
 - **Export Config** - Download configuration as JSON
 
+### Usage
+
+The **Usage** tab shows token usage across the deployment using the existing [usage report](#token-usage) and normal dashboard authentication.
+
+- All-time recorded totals for input, output, and cache tokens
+- Daily activity with a UTC date range and an expandable data table
+- Searchable agent/team, model, and requester breakdowns, sorted by the selected token counter
+- Requester detail for each agent or team, including shared agents
+
+The token selector also exposes reasoning and audio counters when reported by the provider.
+Date ranges apply only to daily activity; agent and model totals remain cumulative.
+Daily and requester detail can be lower than cumulative totals when older attribution is missing.
+Cache tokens may already be included in input counts, depending on the provider.
+This page shows recorded usage, not estimated spend or billing totals.
+
+The page waits automatically while a report is prepared. Use **Refresh** to request the latest available report; completed reports may be cached by the server for up to one minute.
+
 ### Agents
 
 Configure AI agents:
