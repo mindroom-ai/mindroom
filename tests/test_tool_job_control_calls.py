@@ -14,7 +14,7 @@ from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.thread_models import resolve_thread_model_override
@@ -44,7 +44,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
 ) -> None:
     """Control calls finish inline; unsupported wait budgets fail before changing the model."""
     config = Config(
-        background_tool_jobs=True,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
         agents={"leader": AgentConfig(display_name="Leader", tools=["thread_model"])},
         models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
     )

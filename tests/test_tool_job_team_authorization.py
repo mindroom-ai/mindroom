@@ -124,7 +124,7 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
     """A member result finishing after its parent turn is consumed by the resumed SDK member."""
     bot = _bot(tmp_path)
     config, paths = bot.config, bot.runtime_paths
-    config.background_tool_jobs = True
+    config.background_tool_jobs.enabled = True
     config.memory.backend = "none"
     config.defaults.tools = []
     config.agents["general"].learning = False

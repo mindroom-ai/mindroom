@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+from textwrap import dedent
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,15 +17,24 @@ from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.shell_execution import discard_background_record
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.plugins import isolated_plugin_runtime
+from mindroom.tool_system.runtime_context import (
+    build_execution_identity_from_runtime_context,
+    get_tool_runtime_context,
+    tool_runtime_context,
+)
 from mindroom.tools.shell import _process_registry
+from tests.conftest import test_runtime_paths
+from tests.test_config_lifecycle import _make_lifecycle
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_execution import DelegationModel, _call
 
@@ -49,7 +59,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
     paths = _runtime_paths(tmp_path)
     team, authored_name = request.param
     config = Config(
-        background_tool_jobs=True,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
         agents={"leader": AgentConfig(display_name="Leader", tools=[authored_name])},
     )
     context = _delegate_runtime_context(config, paths)
@@ -160,6 +170,21 @@ async def test_shell_native_handles_control_the_actual_process(
 
 
 @pytest.mark.asyncio
+async def test_empty_exclusion_list_includes_shell(shell_runtime: _ShellRuntime) -> None:
+    """An explicit empty list removes the shell default from execution and schemas."""
+    actor, model, runtime, owner, toolkit = shell_runtime
+    context = get_tool_runtime_context()
+    assert context is not None
+    context.config.background_tool_jobs.exclude_toolkits.clear()
+    result = await _invoke(actor, model, "run_shell_command", args="printf 'managed shell'")
+    assert not result.tool_call_error
+    assert "managed shell" in result.result
+    assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
+    schema = model._format_tools([toolkit.get_async_functions()["run_shell_command"]])[0]["function"]
+    assert "wait_timeout" in schema["parameters"]["properties"]
+
+
+@pytest.mark.asyncio
 async def test_shell_rejects_extra_wait_before_side_effect(tmp_path: Path, shell_runtime: _ShellRuntime) -> None:
     """A stale model call cannot silently create a second shell execution owner."""
     actor, model, runtime, owner, _ = shell_runtime
@@ -220,3 +245,99 @@ async def test_same_named_unrelated_function_still_backgrounds(shell_runtime: _S
         assert completed.job.result == "unrelated result"
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team", [False, True])
+@pytest.mark.parametrize("excluded_name", [None, "native_plugin", "different_runtime_name"])
+async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa: PLR0915
+    tmp_path: Path,
+    team: bool,
+    excluded_name: str | None,
+) -> None:
+    """YAML excludes complete registered toolkits, preserving native args across reload until restart."""
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "mindroom.plugin.json").write_text(json.dumps({"name": "native-demo", "tools_module": "tools.py"}))
+    (plugin / "tools.py").write_text(
+        dedent("""\
+        from pathlib import Path
+        from agno.tools import Toolkit
+        from mindroom.tool_system.declarations import ToolCategory
+        from mindroom.tool_system.registration import register_tool_with_metadata
+
+        class NativeTools(Toolkit):
+            def __init__(self):
+                super().__init__(name="different_runtime_name", tools=[self.native_step, self.native_status])
+
+            async def native_step(self, wait_timeout: int = 7) -> str:
+                Path(__file__).with_name("executions").write_text(f"step:{wait_timeout}\\n")
+                return f"step:{wait_timeout}"
+
+            async def native_status(self) -> str:
+                with Path(__file__).with_name("executions").open("a") as output:
+                    output.write("status\\n")
+                return "status"
+
+        @register_tool_with_metadata(name="native_plugin", display_name="Native", description="Native execution", category=ToolCategory.DEVELOPMENT)
+        def native_tools():
+            return NativeTools
+    """),
+    )
+    config = Config.model_validate(
+        {
+            "background_tool_jobs": {"enabled": True, "exclude_toolkits": [excluded_name] if excluded_name else []},
+            "agents": {"leader": {"display_name": "Leader", "tools": ["native_plugin"]}},
+            "plugins": [str(plugin)],
+        },
+    )
+    paths = test_runtime_paths(tmp_path)
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    pin_background_tool_jobs(config, paths)
+    excluded = excluded_name == "native_plugin"
+    try:
+        with isolated_plugin_runtime(config, paths), tool_runtime_context(context):
+            toolkit = get_tool_by_name("native_plugin", paths, runtime_config=config, worker_target=None)
+            bind_toolkit_authority(toolkit, authored_name="native_plugin")
+            model = DelegationModel(id="test")
+            install_tool_job_execution(model)
+            actor = (
+                Team(id="leader", model=model, tools=[toolkit], members=[])
+                if team
+                else Agent(id="leader", model=model, tools=[toolkit])
+            )
+            async with execution_resources():
+                # Editing the authored list must not mutate the startup snapshot.
+                if excluded:
+                    config.background_tool_jobs.exclude_toolkits.clear()
+                    lifecycle = _make_lifecycle(tmp_path, current_config=config)
+                    lifecycle.record_applied(config)
+                    assert lifecycle.status.status == "restart_required"
+                step = await _invoke(actor, model, "native_step", **({"wait_timeout": 3} if excluded else {}))
+                assert not step.tool_call_error
+                assert step.result == ("step:3" if excluded else "step:7")
+                status = await _invoke(actor, model, "native_status")
+                assert not status.tool_call_error
+                for name, function in toolkit.get_async_functions().items():
+                    function.process_entrypoint()
+                    properties = model._format_tools([function])[0]["function"]["parameters"]["properties"]
+                    if excluded and name == "native_step":
+                        assert properties["wait_timeout"]["type"] == "integer"
+                    elif excluded:
+                        assert "wait_timeout" not in properties
+                    else:
+                        assert "anyOf" in properties["wait_timeout"]
+                assert (plugin / "executions").read_text().splitlines() == [step.result, "status"]
+                assert len(await runtime.list_jobs(owner=owner, depth=0)) == (0 if excluded else 2)
+                if excluded:
+                    release_background_tool_jobs(paths)
+                    pin_background_tool_jobs(config, paths)
+                    await _invoke(actor, model, "native_status")
+                    assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
+    finally:
+        release_background_tool_jobs(paths)
+        register_background_runtime(paths, None)
+        await runtime.shutdown()

@@ -17,6 +17,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
@@ -79,7 +80,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     """Managed agent has one job schema."""
     paths = _runtime_paths(tmp_path)
     config = Config(
-        background_tool_jobs=True,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
         agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"] if delegate else [])},
         models={"default": {"provider": "openai", "id": "gpt-6-astra"}},
         memory={"backend": "none"},

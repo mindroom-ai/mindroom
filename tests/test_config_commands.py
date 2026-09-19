@@ -1779,10 +1779,12 @@ async def test_apply_config_change_preserves_call_profile_authorship(tmp_path: P
 @pytest.mark.asyncio
 @pytest.mark.parametrize("jobs_pending", [False, True])
 @pytest.mark.parametrize("journal_pending", [False, True])
+@pytest.mark.parametrize("setting", ["enabled", "exclude_toolkits"])
 async def test_apply_config_change_reports_all_pending_restart_conditions(
     tmp_path: Path,
     jobs_pending: bool,
     journal_pending: bool,
+    setting: str,
 ) -> None:
     """Sequential saved edits report every startup setting still awaiting restart."""
     config_path = tmp_path / "runtime-config.yaml"
@@ -1801,7 +1803,11 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
     pin_background_tool_jobs(startup, runtime_paths)
     try:
         if jobs_pending:
-            await apply_config_change("background_tool_jobs", True, runtime_paths)
+            await apply_config_change(
+                f"background_tool_jobs.{setting}",
+                True if setting == "enabled" else [],
+                runtime_paths,
+            )
         if journal_pending:
             await apply_config_change("event_journal.backend", "postgres", runtime_paths)
         response = await apply_config_change("defaults.markdown", False, runtime_paths)
@@ -1813,7 +1819,10 @@ async def test_apply_config_change_reports_all_pending_restart_conditions(
         assert ("will affect new agent interactions" in response) is not (jobs_pending or journal_pending)
         assert "in force is still postgres" not in response
         saved = load_config(runtime_paths)
-        assert saved.background_tool_jobs is jobs_pending
+        assert saved.background_tool_jobs.enabled is (jobs_pending and setting == "enabled")
+        assert saved.background_tool_jobs.exclude_toolkits == (
+            [] if jobs_pending and setting == "exclude_toolkits" else ["shell"]
+        )
         assert saved.event_journal.backend == ("postgres" if journal_pending else "sqlite")
         assert saved.defaults.markdown is False
     finally:

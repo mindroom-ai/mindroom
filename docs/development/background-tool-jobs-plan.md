@@ -4,7 +4,7 @@
 > This document is the shared scope and progress record for PR #2113.
 > Update checkboxes, decisions, and verification evidence as work lands; an unchecked item is not implemented or verified.
 
-**Current status (2026-09-17):** Implemented a restart-only, instance-wide `background_tool_jobs` option, disabled by default.
+**Current status (2026-09-19):** Implemented restart-only, instance-wide `background_tool_jobs` settings, disabled by default, with toolkit exclusions defaulting to `[shell]`.
 The earlier proposal to remove automatic joining is withdrawn because staggered completions could create excessive replies.
 Keep the existing waiting and grouping behavior while making the feature opt-in.
 PR #2113 remains open and unmerged.
@@ -21,7 +21,9 @@ Stored job outcomes provide recovery and discovery without replaying interrupted
 
 ## Agreed behavior
 
-- Generic background tool jobs require `background_tool_jobs: true`; the default is false, and changing it requires a restart.
+- Generic background tool jobs require `background_tool_jobs.enabled: true`; the default is false, and changing it requires a restart.
+- `background_tool_jobs.exclude_toolkits` excludes complete registered toolkits, including plugin/custom toolkits; an explicit list replaces the `[shell]` default.
+- Both settings are pinned at startup. Saved approvals and jobs retain their accepted owner across exclusion changes.
 - When disabled, ordinary tools use their existing execution path without the generic job schema, management tool, SDK adapters, or background execution resource ownership.
 - Saved work from an earlier enabled process stays parked while disabled; disabling must never replay accepted side effects or erase saved outcomes.
 - Every managed application tool call exposes an optional `wait_timeout`, expressed in seconds.
@@ -792,7 +794,8 @@ The shell's native timeout can finish a tool invocation while its process is sti
 Wrapping that invocation in a generic job produced a completed job containing a second background handle, so generic cancellation no longer owned the process.
 This was reproduced with a real process through both agent and team SDK dispatch.
 
-A single exclusion list of registered toolkit/function pairs now controls schema projection and execution admission, using existing construction identity so presets retain the same behavior.
+The initial correction used registered toolkit/function pairs for schema projection and execution admission, using existing construction identity so presets retained the same behavior.
+The configurable toolkit-level policy below supersedes that list.
 Shell run, check, and kill functions keep their existing arguments, process owner, and shell handles without a generic job or added `wait_timeout`.
 The normal application authorization boundary still applies, including current constructor grants inside a retained outer job.
 Human follow-ups do not detach excluded calls through the generic runtime; the shell's native timeout bounds their wait.
@@ -807,3 +810,22 @@ The redirected output retained all 262,144 payload bytes and its exact sentinels
 Independent review found that an integer wait budget beyond floating-point range raised an unhandled overflow and aborted the response.
 The shared validator now checks the representable nonnegative range before conversion, retaining the existing recoverable tool-error contract.
 Real SDK batch regressions cover streaming and blocking correction after rejection, with no invalid side effect and successful sibling execution.
+
+### Configurable toolkit exclusions (2026-09-19)
+
+The user-approved configuration replaces the root boolean with `background_tool_jobs.enabled` and `background_tool_jobs.exclude_toolkits`.
+There is no scalar compatibility shim for this unreleased option.
+The startup snapshot deep-copies both settings so in-place list edits cannot change active execution.
+The exclusion list uses registered toolkit names and covers all functions, including custom/plugin toolkits and preset-expanded tools; no plugin-specific opt-out API is needed.
+Explicit lists replace the default `[shell]`, including an empty list.
+
+Native delegation applies the same policy before accepting fresh subagent and follow-up turns.
+Saved approval continuations retain their accepted execution owner in either direction when exclusions change.
+The already-recovered job index distinguishes accepted background work from foreground continuations; authorized lookup still controls access.
+No additional persisted field or migration is required.
+
+Integration coverage exercises real plugin loading and SDK dispatch for agents and teams, native argument preservation, startup pinning, config-command restart notices, excluded delegation, stale wait rejection, and approval recovery after exclusions change.
+Verification passed: 212 focused tests; the full Python 3.13 suite passed 22,784 tests with 25 optional/environment skips, including 27 process/storage cases run separately.
+A real-model Matrix run passed 14 independent checks across native shell completion/cancellation, exact output capture, a human follow-up, both excluded plugin functions, native timeout argument preservation, and ordinary generic jobs alongside them.
+Repository hooks, type checks, Tach, and module privacy checks passed.
+Independent review status is tracked on the PR.

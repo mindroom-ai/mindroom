@@ -38,6 +38,7 @@ from mindroom.tool_jobs.runtime import (
     format_job_handle,
     get_background_runtime,
 )
+from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -59,22 +60,17 @@ type _CallResult = tuple[bool | AgentRunException, Timer, FunctionCall, Function
 type _Execute = Callable[[FunctionCall], Coroutine[object, object, _CallResult]]
 _EVENT_TYPES = {**RUN_EVENT_TYPE_REGISTRY, **TEAM_RUN_EVENT_TYPE_REGISTRY, **WORKFLOW_RUN_EVENT_TYPE_REGISTRY}
 
-# Registered toolkit names and function names. These tools already own their
-# background work; keep their native arguments, results, and control handles.
-_BACKGROUND_JOB_EXCLUSIONS = frozenset(
-    {
-        ("shell", "run_shell_command"),
-        ("shell", "check_shell_command"),
-        ("shell", "kill_shell_command"),
-    },
-)
-
 
 def is_background_job_excluded(function: Function) -> bool:
     """Share exact tool exclusions between schema projection and execution."""
     toolkit = function.source_toolkit
     construction = get_toolkit_construction(toolkit) if isinstance(toolkit, Toolkit) else None
-    return construction is not None and (construction.name, function.name) in _BACKGROUND_JOB_EXCLUSIONS
+    context = get_tool_runtime_context()
+    return (
+        construction is not None
+        and context is not None
+        and toolkit_is_background_excluded(construction.name, context.config, context.runtime_paths)
+    )
 
 
 def is_framework_function(function: Function) -> bool:

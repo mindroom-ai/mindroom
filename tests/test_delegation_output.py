@@ -17,12 +17,13 @@ from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
 from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationState
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -40,7 +41,7 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["explicit", "automatic", "invalid", "resumed", "resumed_invalid"])
-@pytest.mark.parametrize("execution", ["inline", "foreground", "detached"])
+@pytest.mark.parametrize("execution", ["inline", "foreground", "detached", "excluded"])
 async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR0912, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -50,7 +51,10 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
     """Persisted child approvals must not bypass path validation, redirection, or automatic saving."""
     paths = _runtime_paths(tmp_path)
     config = Config(
-        background_tool_jobs=execution != "inline",
+        background_tool_jobs=BackgroundToolJobsConfig(
+            enabled=execution != "inline",
+            exclude_toolkits=["shell", "delegate"] if execution == "excluded" else ["shell"],
+        ),
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"], private=AgentPrivateConfig(per="user")),
             "child": AgentConfig(display_name="Child", tools=["calculator"]),
@@ -76,6 +80,7 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
     runtime = ToolJobRuntime(tmp_path) if execution != "inline" else None
     register_background_runtime(paths, runtime)
     release = asyncio.Event()
+    signal = HumanMessageSignal()
     if execution != "detached":
         release.set()
 
@@ -88,6 +93,8 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         refresh_scheduler: KnowledgeRefreshScheduler | None,
         supports_native_tool_approval: bool,
     ) -> str:
+        if execution == "excluded":
+            signal.notify()
         await release.wait()
         return await run_delegated_child_response(
             child,
@@ -138,7 +145,10 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
     result_tool_name = "run_subagent"
     relocated_output = None
     try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
+        with (
+            tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
+            human_message_signal_context(signal),
+        ):
             response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
             result = await drive_delegations(parent, response, run_child=run_child, **options)
             if execution == "detached" and mode != "invalid":
@@ -179,6 +189,8 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
                 state = DelegationState.from_metadata(stored.metadata)
                 if mode == "resumed_invalid":
                     (workspace / "report.txt").symlink_to(tmp_path / "escape.txt")
+                if execution == "excluded" and mode == "resumed":
+                    config.background_tool_jobs.exclude_toolkits.remove("delegate")
                 result = await drive_delegations(
                     Agent(
                         id="leader",
@@ -195,6 +207,9 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
                     denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},
                 )
         assert result.status == RunStatus.completed
+        if execution == "excluded":
+            assert runtime is not None
+            assert await runtime.list_jobs(owner=identity, depth=0) == []
         delegation = next(tool for tool in result.tools or [] if tool.tool_name == result_tool_name)
         receipt = json.loads(delegation.result)["mindroom_tool_output"]
         if mode in {"invalid", "resumed_invalid"}:

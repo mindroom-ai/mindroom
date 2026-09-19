@@ -49,7 +49,7 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
 ) -> None:
     """Recovery must not replace a long edited answer with an empty presentation."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     bot.config.agents["general"].show_tool_calls = show_tools
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = replace(
@@ -232,7 +232,7 @@ async def test_prior_prose_does_not_hide_terminal_only_answer(
     ctx = make_turn_context("general", session_id="session1")
     config = _config()
     if joined:
-        config.background_tool_jobs = True
+        config.background_tool_jobs.enabled = True
 
         async def join(attempted: set[tuple[str, int]], **_kwargs: object) -> AsyncIterator[_ReadyJobContinuation]:
             if not attempted:
@@ -338,7 +338,7 @@ async def test_blocking_wait_cancellation_preserves_latest_presentation(  # noqa
     """A published wait is the cancellation baseline, including newly numbered tools."""
     bot = _bot(tmp_path)
     bot.config.memory.backend = "none"
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread")
     old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="saved result")

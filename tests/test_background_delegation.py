@@ -66,8 +66,16 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persisted", [False, True])
 @pytest.mark.parametrize(
-    ("tool_name", "budget", "depth"),
-    [("run_subagent", "bad", 0), ("run_subagent", 0, 1), ("continue_subagent", -1, 0), ("job", True, 0)],
+    ("tool_name", "budget", "depth", "excluded"),
+    [
+        ("run_subagent", "bad", 0, False),
+        ("run_subagent", 0, 1, False),
+        ("continue_subagent", -1, 0, False),
+        ("job", True, 0, False),
+        ("run_subagent", 0, 0, True),
+        ("run_subagent", None, 0, True),
+        ("continue_subagent", 0, 0, True),
+    ],
 )
 async def test_invalid_native_wait_resolves_exact_requirement_without_child_execution(  # noqa: PLR0915
     tmp_path: Path,
@@ -75,6 +83,7 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
     tool_name: str,
     budget: object,
     depth: int,
+    excluded: bool,
 ) -> None:
     """Fresh and restored external requirements return correctable tool failures before admission."""
     paths = _runtime_paths(tmp_path)
@@ -87,6 +96,8 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
         memory={"backend": "none"},
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
+    if excluded:
+        config.background_tool_jobs.exclude_toolkits.append("delegate")
     runtime = ToolJobRuntime(tmp_path)
     register_background_runtime(paths, runtime)
     delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
@@ -127,7 +138,8 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
     parent = Agent(id="leader", model=model, db=storage, tools=[delegate, jobs])
 
     async def run_child(_child: DelegationChild, **_kwargs: object) -> str:
-        pytest.fail("Invalid wait metadata must not execute a child")
+        msg = "Invalid wait metadata must not execute a child"
+        raise RuntimeError(msg)
 
     try:
         async with execution_resources():
@@ -248,6 +260,7 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("detach", "human"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize(("approval", "cancel_approval"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("exclude_after_acceptance", [False, True])
 async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -255,6 +268,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     approval: bool,
     human: bool,
     cancel_approval: bool,
+    exclude_after_acceptance: bool,
 ) -> None:
     """A released parent cannot cancel the child; later waits read its exact result."""
     paths = _runtime_paths(tmp_path)
@@ -393,6 +407,8 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             assert result.status == (RunStatus.paused if approval and not detach else RunStatus.completed)
             assert len(children) == 1
             child = children[0]
+            if exclude_after_acceptance:
+                config.background_tool_jobs.exclude_toolkits.append("delegate")
             if not approval or detach:
                 first = next(message.content for message in result.messages if message.tool_call_id == "first")
             if detach:
@@ -426,6 +442,11 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert side_effects == []
                 state = DelegationState.from_metadata(result.metadata)
                 call = _saved_approval_calls(state)[0]
+                if exclude_after_acceptance and not cancel_approval:
+                    await runtime.shutdown()
+                    runtime = ToolJobRuntime(tmp_path)
+                    await runtime.recover()
+                    register_background_runtime(paths, runtime)
                 assert call.toolkit_name == "file"
                 assert call.invoking_agent == "code"
                 assert call.tool_call_id == f"{child.delegation_id}:write-once"

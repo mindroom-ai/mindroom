@@ -914,7 +914,7 @@ async def test_blocking_team_cancellation_preserves_visible_presentation(tmp_pat
     """Stopping a fresh or recovered team keeps its latest Matrix prose and tool markers."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
-    config.background_tool_jobs = True
+    config.background_tool_jobs.enabled = True
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths, agent_name="ultimate")
     coordinator = _build_response_runner(
         bot,

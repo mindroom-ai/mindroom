@@ -244,7 +244,7 @@ Use `run_subagent` below when you need a fresh child's result before continuing.
 
 `delegate` exposes `run_subagent` to start a configured agent with fresh conversation context and `continue_subagent` to send follow-ups in that child session.
 Calls wait for the child's response by default.
-With the instance-wide `background_tool_jobs: true` option, managed Matrix calls wait until completion or a human follow-up, and expose the shared waiting controls below.
+With the instance-wide `background_tool_jobs.enabled: true` option, managed Matrix calls wait until completion or a human follow-up, and expose the shared waiting controls below, unless `delegate` is excluded.
 In that mode, set `wait_timeout=0` to return a job handle immediately, or a positive number of seconds to bound waiting while work continues.
 OpenAI-compatible calls without a managed completion channel retain synchronous behavior.
 When the caller has a workspace, both calls also accept the standard `mindroom_output_path` argument to save its result and return a file receipt.
@@ -285,11 +285,11 @@ Runtime-owned handle records live under `MINDROOM_STORAGE_PATH/subagent_sessions
 
 ### Background jobs
 
-This experimental feature requires the root configuration option `background_tool_jobs: true` and a restart.
+This experimental feature requires the root configuration option `background_tool_jobs.enabled: true` and a restart.
 It is disabled by default for the whole instance.
 When disabled, tools use their ordinary execution paths without the generic `wait_timeout` argument or `job` management function.
 This does not disable shell tools' own background commands.
-Changing the option during hot reload takes effect only after a restart.
+Changes to either `enabled` or `exclude_toolkits` during hot reload take effect only after a restart.
 Previously accepted job sources and related approvals stay parked while disabled; their saved outcomes remain available after re-enabling and restarting, without replaying the original tool calls.
 
 Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
@@ -298,12 +298,23 @@ This waiting budget is separate from a tool's own execution or network timeout.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
 
-Tools that already own background execution are excluded from generic jobs.
-The shared exclusion list in `tool_jobs/agno_execution.py` uses registered toolkit and function names and applies to both schemas and execution, including tools loaded through presets.
-It currently excludes shell's `run_shell_command`, `check_shell_command`, and `kill_shell_command`.
-Use the shell's native `timeout` to release its wait, then poll or stop its `shell:...` handle with the shell controls.
-These calls retain their native arguments and current permission checks; human input does not release their wait through the generic job runtime.
-Shell handles do not appear in `job(action="list")` or trigger generic completion delivery, and they cannot be controlled with `job`.
+Exclude complete toolkits in YAML when they should retain native execution:
+
+```yaml
+background_tool_jobs:
+  enabled: true
+  exclude_toolkits: [shell, my_plugin_toolkit]
+```
+
+The default list is `[shell]`; an explicit list replaces it, and `[]` excludes nothing.
+Names identify registered toolkits, including custom/plugin toolkits; plugin package names and individual function names do not match.
+Every function in an excluded toolkit keeps its native arguments and current permission checks, including when loaded through a preset.
+The generic runtime adds no `wait_timeout`, creates no job, and does not release these calls on human input.
+A tool's own argument named `wait_timeout` remains its native argument.
+Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and approval continuations retain their accepted execution owner.
+
+With the default shell exclusion, use the native `timeout` to release a shell wait, then poll or stop its `shell:...` handle with the shell controls.
+Shell handles do not appear in `job(action="list")` or trigger generic completion delivery, and cannot be controlled with `job`.
 
 | `wait_timeout` | Behavior |
 | --- | --- |

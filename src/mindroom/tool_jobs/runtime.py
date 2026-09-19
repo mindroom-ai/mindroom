@@ -238,6 +238,10 @@ class ToolJobRuntime:
             msg = "Tool job runtime is closed."
             raise JobAccessError(msg)
 
+    def has_job(self, job_id: str) -> bool:
+        """Recognize accepted ownership; access still requires an authorized lookup."""
+        return job_id in self._entries
+
     def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
         entry = self._entries.get(job_id)

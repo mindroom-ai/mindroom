@@ -16,6 +16,7 @@ from agno.run.agent import RunContentEvent, RunOutput
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -120,7 +121,10 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         await release.wait()
         return "durable report"
 
-    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
@@ -225,7 +229,10 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
             raise RuntimeError(msg)
         return "streamed report"
 
-    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)

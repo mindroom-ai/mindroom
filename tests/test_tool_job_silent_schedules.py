@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: Path) -> None:
     """Recovery remains runtime-owned without turning a quiet check into visible progress."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
     envelope = replace(
@@ -135,7 +135,7 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
 async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp_path: Path, *, native: bool) -> None:
     """SDK and native delegated calls carry quiet delivery into their restored completion envelope."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     envelope = _plain_request(_target(thread_id="$thread")).response_envelope
     envelope = replace(envelope, origin=replace(envelope.origin, source_kind=SILENT_SCHEDULE_SOURCE_KIND))

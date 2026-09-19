@@ -21,6 +21,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.event_journal import (
     EventClass,
@@ -92,7 +93,10 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         await release.wait()
         return "retained after restart"
 
-    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
@@ -289,7 +293,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     config = bot.config
-    config.background_tool_jobs = True
+    config.background_tool_jobs.enabled = True
     paths = bot.runtime_paths
     owner = ToolExecutionIdentity(
         channel="matrix",
@@ -415,7 +419,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         config.agents["general"].private = AgentPrivateConfig(per="user")
         register_background_runtime(paths, None)
         await runtime.shutdown()
-        config.background_tool_jobs = False
+        config.background_tool_jobs.enabled = False
         disabled = ToolJobRuntimeCoordinator(
             paths,
             lambda: config,

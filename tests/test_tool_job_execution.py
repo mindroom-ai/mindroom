@@ -24,6 +24,7 @@ from agno.tools.function import Function, FunctionCall, ToolResult
 from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import (
@@ -68,7 +69,7 @@ async def test_registered_sync_tool_completes_through_sdk_dispatch(
     paths = _runtime_paths(tmp_path)
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", tools=["coding"])},
-        background_tool_jobs=managed,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
     )
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)

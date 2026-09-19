@@ -32,7 +32,7 @@ from mindroom.delegation.sessions import (
 from mindroom.logging_config import get_logger
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
-from mindroom.tool_jobs.settings import background_tool_jobs_enabled
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
@@ -142,6 +142,7 @@ class DelegateTools(Toolkit):
     def _background_jobs_available(self) -> bool:
         return (
             background_tool_jobs_enabled(self._config, self._runtime_paths)
+            and not toolkit_is_background_excluded("delegate", self._config, self._runtime_paths)
             and self._execution_identity is not None
             and self._execution_identity.channel == "matrix"
             and get_background_runtime(self._runtime_paths) is not None

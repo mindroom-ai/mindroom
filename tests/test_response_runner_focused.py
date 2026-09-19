@@ -3428,7 +3428,7 @@ async def test_pause_writer_persists_background_tool_job_ownership(
 ) -> None:
     """The suspension writer freezes exact feature ownership before restart."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    runner.deps.runtime.config.background_tool_jobs = feature_enabled
+    runner.deps.runtime.config.background_tool_jobs.enabled = feature_enabled
     await _admit_approval_source(runner.deps.approval_store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     request = replace(
@@ -4709,7 +4709,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
 ) -> None:
     """Every chained generation must durably expose only its unresolved calls."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    runner.deps.runtime.config.background_tool_jobs = True
+    runner.deps.runtime.config.background_tool_jobs.enabled = True
     store = runner.deps.approval_store
     await _admit_approval_source(store)
     continuation = ApprovalContinuation(

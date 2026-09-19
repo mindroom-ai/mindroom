@@ -8,12 +8,14 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.event_journal import (
     ApprovalCall,
@@ -47,6 +49,25 @@ from tests.test_subagent_runtime import _job
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
+
+
+@pytest.mark.parametrize("exclusions", [None, [], ["shell", "native_plugin"]])
+def test_background_job_yaml_round_trip(exclusions: list[str] | None) -> None:
+    """The public mapping preserves explicit toolkit exclusions and the shell default."""
+    settings: dict[str, object] = {"enabled": True}
+    if exclusions is not None:
+        settings["exclude_toolkits"] = exclusions
+    config = Config.model_validate(yaml.safe_load(yaml.safe_dump({"background_tool_jobs": settings})))
+    assert config.background_tool_jobs.enabled
+    assert config.background_tool_jobs.exclude_toolkits == (["shell"] if exclusions is None else exclusions)
+    assert Config.model_validate(config.model_dump(mode="json")).background_tool_jobs == config.background_tool_jobs
+
+
+@pytest.mark.parametrize("settings", [True, {"exclude_toolkits": "shell"}, {"exclude_toolkit": ["shell"]}])
+def test_background_job_yaml_rejects_invalid_settings(settings: object) -> None:
+    """Reject the old scalar and malformed lists instead of silently ignoring policy."""
+    with pytest.raises(ValidationError):
+        Config.model_validate({"background_tool_jobs": settings})
 
 
 @pytest.mark.asyncio
@@ -183,10 +204,13 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
 def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial: bool) -> None:
     """Reload can publish other settings without switching execution ownership."""
     paths = test_runtime_paths(tmp_path)
-    config = Config(background_tool_jobs=initial)
+    config = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=initial))
     pin_background_tool_jobs(config, paths)
     try:
-        changed = Config(background_tool_jobs=not initial, timezone="Europe/Amsterdam")
+        changed = Config(
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=not initial),
+            timezone="Europe/Amsterdam",
+        )
         lifecycle = _make_lifecycle(tmp_path, current_config=config)
         lifecycle.record_applied(changed)
         assert background_tool_jobs_enabled(changed, paths) is initial
@@ -220,7 +244,7 @@ async def test_execution_scope_bypasses_owners_when_disabled(enabled: bool) -> N
 def test_agent_installs_job_adapters_only_when_enabled(tmp_path: Path, enabled: bool) -> None:
     """Construction in an off process must not patch a provider or the SDK resources."""
     config = Config(
-        background_tool_jobs=enabled,
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
         agents={"lead": AgentConfig(display_name="Lead", tools=[])},
         models={"default": ModelConfig(provider="ollama", id="test")},
     )
@@ -305,7 +329,7 @@ async def test_disabled_startup_parks_job_sources_and_completion_without_mutatio
     finally:
         await coordinator.stop()
 
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     restarted = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: None, AgentReplyMembershipIndex())
     try:
         await restarted.initialize(bot._journal_store)

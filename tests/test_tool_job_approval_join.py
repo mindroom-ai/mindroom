@@ -22,6 +22,7 @@ from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
 from mindroom.approval_execution import _continue_persisted_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.event_journal import ApprovalContinuation
 from mindroom.history.session_context import ScopeSessionContext
@@ -71,7 +72,10 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     human_release: bool,
 ) -> None:
     """Approved work stays owned and visibly waiting until a result or human release."""
-    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
@@ -289,7 +293,10 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
     show_tool_calls: bool,
 ) -> None:
     """A later native approval retains prose already published during a job wait."""
-    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
@@ -434,7 +441,10 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
     repeat_join: bool,
 ) -> None:
     """Both ordinary team entry points acknowledge only their saved native result receipt."""
-    config = Config(background_tool_jobs=True, agents={"leader": AgentConfig(display_name="Leader")})
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
     paths = _runtime_paths(tmp_path)
     identities = entity_ids(config, paths)
     context = _delegate_runtime_context(config, paths)

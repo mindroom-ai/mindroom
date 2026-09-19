@@ -22,7 +22,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ToolConfigEntry
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ToolConfigEntry
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.delegation.state import DelegationChild
@@ -108,7 +108,7 @@ def _config(tmp_path: Path) -> Config:
     access = ResponderAccessConfig(users=["@human:localhost"], current_room_members=False)
     return bind_runtime_paths(
         Config(
-            background_tool_jobs=True,
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
             agents={
                 "lead": AgentConfig(display_name="Lead", delegate_to=["worker"], access=access),
                 "worker": AgentConfig(display_name="Worker", access=access),

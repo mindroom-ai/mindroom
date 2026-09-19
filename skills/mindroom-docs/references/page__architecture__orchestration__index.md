@@ -157,7 +157,9 @@ The child uses the normal agent response envelope, so its history, tools, and mo
 Native Matrix approval pauses retain the parent wait and exact child run rather than keeping a Python call alive.
 Managed application calls and native delegation share a durable tool-job owner that retains execution after the foreground wait ends.
 Job IDs identify exact tool calls or delegation turns, while subagent IDs retain child conversations.
-Generic background execution is enabled only by the root `background_tool_jobs: true` option, which defaults to false and is pinned at startup.
+Generic background execution is enabled only by the root `background_tool_jobs.enabled: true` option, which defaults to false.
+The enabled flag and `exclude_toolkits` list (default `[shell]`) are pinned together at startup.
+Registered toolkit exclusions govern schema projection and admission, including native delegation; saved approvals retain their accepted owner.
 Disabled instances bypass the generic execution adapters, resource ownership, schemas, and completion worker.
 Sources belonging to previously accepted jobs or their pending approvals remain parked before journal dispatch while disabled, preserving recovery without side-effect replay.
 Completed jobs in enabled instances admit nonprojected internal event-journal sources carrying the original requester and exact recipient into the existing response owner.

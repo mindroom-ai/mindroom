@@ -105,7 +105,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
 async def test_completion_source_is_internal_and_has_no_conversation_projection(tmp_path: Path) -> None:
     """An outcome gains durable response ownership without adding a Matrix message."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     job = replace(_job(), owner=replace(_job().owner, agent_name="general", transport_agent_name=None))
     event = completion_event(job, sender_id=bot.matrix_id.full_id)
     envelope = completion_envelope(job, sender_id=bot.matrix_id.full_id)
@@ -127,7 +127,7 @@ async def test_completion_source_is_internal_and_has_no_conversation_projection(
 async def test_internal_completion_dispatch_does_not_parse_matrix_event(tmp_path: Path) -> None:
     """Journal replay sends internal work straight to its completion owner."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     dispatcher = unwrap_extracted_collaborator(bot._journal_dispatcher)
     job = replace(_job(), owner=replace(_job().owner, agent_name="general", transport_agent_name=None))
     event = completion_event(job, sender_id=bot.matrix_id.full_id)
@@ -172,7 +172,7 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
 async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consumed: bool) -> None:
     """Completion never competes with a stream or an already queued human response."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = _target(thread_id="$thread")
     request = _plain_request(target)
@@ -362,7 +362,7 @@ async def test_coordinator_wakes_conversation_without_matrix_notice(tmp_path: Pa
 async def test_internal_source_envelope_is_stable_after_runtime_recovery(tmp_path: Path) -> None:
     """Recovery cannot conflict with an outcome source admitted before the crash."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
     runtime = ToolJobRuntime(tmp_path)
 
@@ -399,7 +399,7 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
 ) -> None:
     """A crash during joining must recover the exact accepted work instead of repeating it."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$thread"))
     owner = replace(
@@ -456,7 +456,7 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
 async def test_blocking_join_updates_existing_response_placeholder(tmp_path: Path) -> None:
     """Blocking work exposes the interruptible wait on its owned visible response."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = replace(_plain_request(_target()), existing_event_id="$placeholder", existing_event_is_placeholder=True)
     edits = []
@@ -481,7 +481,7 @@ async def test_blocking_join_updates_existing_response_placeholder(tmp_path: Pat
 async def test_idle_completion_defers_to_still_pending_original_source(tmp_path: Path, thread_root: bool) -> None:
     """The original durable source keeps exclusive recovery ownership of accepted work."""
     bot = _bot(tmp_path)
-    bot.config.background_tool_jobs = True
+    bot.config.background_tool_jobs.enabled = True
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _plain_request(_target(thread_id="$event" if thread_root else "$thread"))
     owner = replace(

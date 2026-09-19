@@ -60,6 +60,7 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
+from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_jobs.wait_timeout import application_arguments, read_wait_timeout
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
@@ -742,7 +743,9 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
         msg = "Native delegation requires a Matrix execution owner"
         raise RuntimeError(msg)
     state = DelegationState.from_metadata(response.metadata)
-    background = get_background_runtime(runtime_paths) if delegation_depth == 0 and not job_owns_execution() else None
+    available_background = (
+        get_background_runtime(runtime_paths) if delegation_depth == 0 and not job_owns_execution() else None
+    )
     if not state.storage_bindings and isinstance(response, RunOutput):
         state.storage_bindings = freeze_delegation_storage(config, (agent_name,))
     pending_id = state.pending_child_id
@@ -808,6 +811,19 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 agent_name=agent_name,
                 on_event=on_event,
             )
+            retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
+            background = available_background
+            excluded = tool.tool_name != "job" and toolkit_is_background_excluded("delegate", config, runtime_paths)
+            # A saved approval keeps its accepted owner when startup policy changes.
+            if retained is not None:
+                if background is not None and not background.has_job(retained.delegation_id):
+                    background = None
+            elif excluded:
+                background = None
+                if "wait_timeout" in (tool.tool_args or {}):
+                    tool.tool_call_error = True
+                    resolve_result("wait_timeout is unavailable for the excluded delegate toolkit.")
+                    continue
             try:
                 wait_timeout = read_wait_timeout(
                     tool.tool_args,
@@ -819,7 +835,6 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 continue
             args = application_arguments(tool.tool_args) or {}
             model = args.get("model") if tool.tool_name == "run_subagent" else None
-            retained = next((item for item in state.children if item.parent_requirement_id == requirement.id), None)
             previous_child = None
             background_job = None
             if tool.tool_name == "job":
