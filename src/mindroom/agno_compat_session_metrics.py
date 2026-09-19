@@ -32,8 +32,8 @@ if TYPE_CHECKING:
 # Reason: Agent and Team add the full cumulative run metrics at every pause,
 # checkpoint and completion; the previous run has already been replaced in session.runs.
 # They also omit totals when a pre-created session has no session_data mapping.
-# Upstream issue: No matching session-accumulation issue identified.
-# Upstream PR: None identified for idempotent session accumulation.
+# Upstream issue: No separate issue; tracked by the PR below.
+# Upstream PR: https://github.com/agno-agi/agno/pull/10353
 # Remove when: Agno counts each run's usage once across pause/resume, checkpoints
 # and team-member saves, initializes totals for bare sessions, and preserves
 # totals for history removed by the owner.

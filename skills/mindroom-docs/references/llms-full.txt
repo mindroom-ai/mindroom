@@ -19363,6 +19363,7 @@ Paths are relative to `src/mindroom/`.
 
 | Agno weakness | Upstream issue / PR | Local workaround and remaining scope |
 | --- | --- | --- |
+| Session totals repeat cumulative run usage on checkpoints/resumes, or omit totals for bare sessions. | [PR #10353](https://github.com/agno-agi/agno/pull/10353), open. | `agno_compat_session_metrics.py`; remove after the pinned release includes the fix and approval, checkpoint, reload, and retained-history tests pass without the repair. |
 | Generic provider failures default to 502 and lose machine-readable error codes. | [Issue #8869](https://github.com/agno-agi/agno/issues/8869), [PR #8870](https://github.com/agno-agi/agno/pull/8870), both open; PR is partial. | `agno_compat_provider_errors.py`; the OpenAI error transport fix does not resolve all generic or non-OpenAI failures. |
 | Deleted runs survive in legacy blobs or deletion spans separate transactions. | [Issue #9934](https://github.com/agno-agi/agno/issues/9934), [PR #9939](https://github.com/agno-agi/agno/pull/9939), both open. | `agno_compat_sqlite.py`; preserve owner descendant deletion when the atomic upstream fix ships. |
 | New runs can sort before surviving runs after deletion. | [Issue #9936](https://github.com/agno-agi/agno/issues/9936), [PR #9938](https://github.com/agno-agi/agno/pull/9938), both open. | `agno_compat_sqlite.py`; verify insertion after existing indexes with the local override disabled. |
@@ -19389,7 +19390,6 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
-| Session totals add a run's full cumulative metrics again on pause/resume and checkpoints, or are omitted for sessions without a `session_data` mapping. | Initialize missing session totals and make Agent and Team accumulation idempotent for repeated saves of one run, including member contributions. | `agno_compat_session_metrics.py`; real approval/resume, checkpoint, reload and export reconciliation tests. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
