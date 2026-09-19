@@ -333,6 +333,7 @@ describe("WorkspaceDirectory", () => {
             display_name: "Local Reasoner",
           },
         },
+        router: { model: "fast" },
       },
       teams: [{ ...teams[0], model: undefined }],
     });
@@ -352,8 +353,17 @@ describe("WorkspaceDirectory", () => {
       ).toBeInTheDocument();
     }
 
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "qwen-small" },
+    });
+    expect(
+      screen.queryByRole("button", { name: /Builder Team/ }),
+    ).not.toBeInTheDocument();
+
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
-    fireEvent.click(screen.getByRole("button", { name: /Builder Team/ }));
+    const teamRow = screen.getByRole("button", { name: /Builder Team/ });
+    expect(within(teamRow).getByText(/model default/i)).toBeVisible();
+    fireEvent.click(teamRow);
     expect(
       within(screen.getByRole("complementary")).getByText(
         "default · ollama/qwen-reasoner",
@@ -499,6 +509,38 @@ describe("WorkspaceDirectory", () => {
       behavior: "auto",
       block: "start",
     });
+  });
+
+  it("restores focus to the selected kind-scoped directory row when details close", () => {
+    seedWorkspaceDirectory({
+      teams: [{ ...teams[0], id: "code", display_name: "Code Team" }],
+    });
+    renderWorkspaceDirectory();
+
+    const teamRow = screen.getByRole("button", { name: /Code Team/ });
+    fireEvent.click(teamRow);
+    const closeButton = screen.getByRole("button", { name: "Close details" });
+    closeButton.focus();
+    fireEvent.click(closeButton);
+
+    expect(teamRow).toHaveFocus();
+  });
+
+  it("moves focus to search when the selected row is filtered out on close", () => {
+    seedWorkspaceDirectory();
+    renderWorkspaceDirectory();
+
+    fireEvent.click(screen.getByRole("button", { name: /Code Agent/ }));
+    const search = screen.getByRole("searchbox");
+    fireEvent.change(search, { target: { value: "Research Analyst" } });
+    expect(
+      screen.queryByRole("button", { name: /Code Agent/ }),
+    ).not.toBeInTheDocument();
+    const closeButton = screen.getByRole("button", { name: "Close details" });
+    closeButton.focus();
+    fireEvent.click(closeButton);
+
+    expect(search).toHaveFocus();
   });
 
   it("offers a clear reset when no directory entries match", () => {

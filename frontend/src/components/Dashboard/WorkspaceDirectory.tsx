@@ -258,6 +258,9 @@ export function WorkspaceDirectory() {
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [selection, setSelection] = useState<Selection | null>(null);
   const detailsRef = useRef<HTMLElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const closeFocusKeyRef = useRef<string | null>(null);
 
   const modelLabel = useCallback(
     (model: string | undefined) => resolveModelMetadata(model, config).label,
@@ -397,6 +400,14 @@ export function WorkspaceDirectory() {
   }, [selection, selectedEntity]);
 
   useEffect(() => {
+    const focusKey = closeFocusKeyRef.current;
+    if (selection || !focusKey) return;
+
+    closeFocusKeyRef.current = null;
+    (rowRefs.current.get(focusKey) ?? searchRef.current)?.focus();
+  }, [selection]);
+
+  useEffect(() => {
     if (
       !selection ||
       !selectedEntity ||
@@ -470,6 +481,12 @@ export function WorkspaceDirectory() {
     navigate("/teams");
   };
 
+  const closeDetails = () => {
+    if (!selection) return;
+    closeFocusKeyRef.current = `${selection.kind}:${selection.id}`;
+    setSelection(null);
+  };
+
   if (!config) return <WorkspaceDirectorySkeleton />;
 
   const noConfiguredItems = directoryItems.length === 0;
@@ -529,6 +546,7 @@ export function WorkspaceDirectory() {
               aria-hidden="true"
             />
             <Input
+              ref={searchRef}
               type="search"
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
@@ -591,7 +609,7 @@ export function WorkspaceDirectory() {
                     variant="ghost"
                     size="icon"
                     className="h-8 w-8 shrink-0"
-                    onClick={() => setSelection(null)}
+                    onClick={closeDetails}
                     aria-label="Close details"
                   >
                     <X className="h-4 w-4" aria-hidden="true" />
@@ -640,6 +658,11 @@ export function WorkspaceDirectory() {
                   return (
                     <button
                       key={`${item.kind}:${item.id}`}
+                      ref={(node) => {
+                        const key = `${item.kind}:${item.id}`;
+                        if (node) rowRefs.current.set(key, node);
+                        else rowRefs.current.delete(key);
+                      }}
                       type="button"
                       aria-label={`${item.name}, ${KIND_LABELS[item.kind]}`}
                       aria-pressed={isSelected}
