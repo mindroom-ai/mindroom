@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
@@ -35,8 +36,10 @@ from mindroom.approval_tools import (
 from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
 from mindroom.delegation.state import DelegationState
 from mindroom.error_handling import run_error_event_text
+from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import close_agent_runtime_state_dbs
+from mindroom.history.session_context import ScopeSessionContext, close_agent_runtime_state_dbs
+from mindroom.history.types import HistoryScope
 from mindroom.matrix.typing import typing_indicator
 from mindroom.response_turn import (
     CompletedApprovalRun,
@@ -368,13 +371,14 @@ class AgentApprovalExecution:
                 execution_identity=execution_identity,
             )
         ).knowledge
-        history_storage = await asyncio.to_thread(
+        storage_factory = partial(
             create_session_storage,
             continuation.entity_name,
             config,
             self.runtime_paths,
             execution_identity,
         )
+        history_storage = await asyncio.to_thread(storage_factory)
         try:
             session = await asyncio.to_thread(
                 history_storage.get_session,
@@ -429,11 +433,23 @@ class AgentApprovalExecution:
             )
             validate_approval_tool_owners([agent], approved_calls, requirements)
 
-            with approval_denial_context(
-                agent,
-                {
-                    continuation.run_id: tuple(call for call in local_calls if not decisions.get(call.tool_call_id)),
-                },
+            scope_context = ScopeSessionContext(
+                scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
+                storage=history_storage,
+                session=cast("AgentSession", session),
+                session_id=continuation.session_id,
+                storage_factory=storage_factory,
+            )
+            with (
+                helper_usage_context(scope_context),
+                approval_denial_context(
+                    agent,
+                    {
+                        continuation.run_id: tuple(
+                            call for call in local_calls if not decisions.get(call.tool_call_id)
+                        ),
+                    },
+                ),
             ):
                 async with typing_indicator(
                     self.client(),
@@ -465,12 +481,7 @@ class AgentApprovalExecution:
         finally:
             try:
                 ai_runtime.register_queued_notice_storage(
-                    storage_factory=lambda: create_session_storage(
-                        continuation.entity_name,
-                        config,
-                        self.runtime_paths,
-                        execution_identity=execution_identity,
-                    ),
+                    storage_factory=storage_factory,
                     session_id=continuation.session_id,
                     session_type=SessionType.AGENT,
                     entity_name=continuation.entity_name,

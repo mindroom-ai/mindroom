@@ -16,19 +16,40 @@ from agno.metrics import MessageMetrics, RunMetrics
 from agno.models.message import Message
 from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput, RunStatus
+from agno.tools.calculator import CalculatorTools
 
 from mindroom.agent_storage import create_session_storage, get_agent_session, get_team_session
+from mindroom.agents import create_agent
+from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.approval import ToolApprovalConfig
+from mindroom.config.models import ToolConfigEntry
 from mindroom.custom_tools.dynamic_workflow import _aexecute_participant, _arun_agent
 from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
+from mindroom.event_journal import ApprovalCall, ApprovalContinuation
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, helper_usage_context, record_helper_usage
-from mindroom.history.session_context import open_bound_scope_session_context, open_resolved_scope_session_context
+from mindroom.history.session_context import (
+    close_agent_runtime_state_dbs,
+    close_team_runtime_state_dbs,
+    open_bound_scope_session_context,
+    open_resolved_scope_session_context,
+)
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import HookRegistry
 from mindroom.memory.auto_flush import _extract_memory_summary
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, paused_attempt_from_response
+from mindroom.teams import (
+    TeamMode,
+    _attach_team_pause_presentation,
+    build_materialized_team_instance,
+    continue_paused_team_run,
+    materialize_exact_team_members,
+)
+from mindroom.tool_system.runtime_context import ToolDispatchContext, build_execution_identity_from_runtime_context
 from mindroom.usage_stats import collect_admin_usage, collect_self_usage
 from mindroom.usage_storage import quote_identifier
+from tests.conftest import unwrap_extracted_collaborator
 from tests.history_helpers import (
     RecordingModel,
     _completed_run,
@@ -38,6 +59,8 @@ from tests.history_helpers import (
     _session,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.response_runner_helpers import _bot
+from tests.test_approval_dynamic_continuation import _call, _ScriptedModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -53,6 +76,240 @@ class _HelperModel(RecordingModel):
 
     async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
         yield self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", ["agent", "private_agent", "team"])
+@pytest.mark.parametrize("outcome", ["completed", "error", "cancel"])
+async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caller: str,
+    outcome: str,
+) -> None:
+    """Approval resume must retain paid helper output in its real caller store even if the resumed run fails."""
+    config, paths = _make_config(tmp_path)
+    config.agents["general"] = config.agents.pop("test_agent")
+    config.agents["general"].tools = [ToolConfigEntry(name="calculator")]
+    config.defaults.learning = False
+    config.memory.backend = "none"
+    config.models["default"].provider = "synthetic"
+    config.models["default"].id = "synthetic"
+    config.tool_approval = ToolApprovalConfig.model_validate(
+        {"default": "auto_approve", "rules": [{"match": "add", "action": "require_approval"}]},
+    )
+    config.agents["general"].private = (
+        AgentPrivateConfig(per="user", root="mind_data") if caller == "private_agent" else None
+    )
+    if caller == "team":
+        config.agents["second"] = AgentConfig(display_name="Second")
+        config.teams["reviewers"] = TeamConfig(display_name="Reviewers", role="Review", agents=["general", "second"])
+    persist_entity_accounts(config, paths)
+    context = replace(
+        _hook_runtime_context(
+            config=config,
+            runtime_paths=paths,
+            registry=HookRegistry.empty(),
+            session_id="approval-session",
+        ),
+        agent_name="general",
+    )
+    identity = build_execution_identity_from_runtime_context(context)
+    helper_context = replace(context, target=replace(context.target, session_id="ephemeral-participant-session"))
+    responses: list[ModelResponse | RuntimeError] = [
+        *(
+            [_call("delegate_task_to_member", "delegate", member_id="general", task="Add 2 and 3")]
+            if caller == "team"
+            else []
+        ),
+        _call("add", "approved", a=2, b=3),
+        *(
+            [RuntimeError("Resumed provider failed")] * 2
+            if outcome == "error"
+            else [ModelResponse(content="Finished.")] * 2
+        ),
+    ]
+    monkeypatch.setattr(
+        "mindroom.model_loading.get_model_instance",
+        lambda *_args, **_kwargs: _ScriptedModel(id="synthetic", responses=responses),
+    )
+    original_add = CalculatorTools.add
+    helper_results: list[object] = []
+
+    async def add(self: CalculatorTools, a: float, b: float) -> str:
+        helper = Agent(
+            model=_HelperModel(
+                id="helper-model",
+                provider="test-provider",
+                responses=[
+                    ModelResponse(
+                        content="Sample helper output.",
+                        response_usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
+                    ),
+                ],
+            ),
+            telemetry=False,
+        )
+        helper_results.append(await _arun_agent(helper_context, helper, "Sample task."))
+        if outcome == "cancel":
+            raise asyncio.CancelledError
+        return original_add(self, a, b)
+
+    monkeypatch.setattr(CalculatorTools, "add", add)
+    scope = HistoryScope(
+        kind="team" if caller == "team" else "agent",
+        scope_id="reviewers" if caller == "team" else "general",
+    )
+    open_scope = partial(
+        open_resolved_scope_session_context,
+        agent_name="general",
+        scope=scope,
+        session_id="approval-session",
+        config=config,
+        runtime_paths=paths,
+        execution_identity=identity,
+        create_session_if_missing=True,
+    )
+    with open_scope() as scope_context:
+        assert scope_context is not None
+        if caller == "team":
+            members = materialize_exact_team_members(
+                ["general", "second"],
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+                session_id="approval-session",
+                supports_native_tool_approval=True,
+            )
+            actor = build_materialized_team_instance(
+                requested_agent_names=["general", "second"],
+                agents=members.agents,
+                mode=TeamMode.COORDINATE,
+                config=config,
+                runtime_paths=paths,
+                scope_context=scope_context,
+                model_name="default",
+                configured_team_name="reviewers",
+                execution_identity=identity,
+            )
+            owners = toolkit_owners_for_agents(members.agents)
+        else:
+            actor = create_agent(
+                "general",
+                config,
+                paths,
+                identity,
+                session_id="approval-session",
+                history_storage=scope_context.storage,
+                supports_native_tool_approval=True,
+            )
+            owners = toolkit_owners_for_agents([actor])
+        try:
+            paused = await actor.arun("Add 2 and 3", session_id="approval-session", user_id=context.requester_id)
+            assert paused.status == RunStatus.paused
+            captured = paused_attempt_from_response(
+                paused,
+                fallback_session_id="approval-session",
+                fallback_run_id=paused.run_id,
+                toolkit_owners=owners,
+            )
+            assert captured is not None
+            if caller == "team":
+                captured = _attach_team_pause_presentation(
+                    captured,
+                    response=paused,
+                    config_names=["general", "second"],
+                    display_names=["General", "Second"],
+                    show_tool_calls=True,
+                )
+        finally:
+            if caller == "team":
+                close_team_runtime_state_dbs(
+                    agents=members.agents,
+                    team_db=actor.db,
+                    shared_scope_storage=scope_context.storage,
+                )
+            else:
+                close_agent_runtime_state_dbs(actor, shared_scope_storage=scope_context.storage)
+    calls = (ApprovalCall("approved", "add", "general", 2**62, toolkit_name="calculator"),)
+
+    async def resume() -> CompletedApprovalRun | PausedAttempt:
+        if caller == "team":
+            return await continue_paused_team_run(
+                member_names=("general", "second"),
+                mode=TeamMode.COORDINATE,
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+                session_id="approval-session",
+                run_id=paused.run_id,
+                user_id=context.requester_id,
+                configured_team_name="reviewers",
+                model_name="default",
+                decisions={"approved": True},
+                denial_reasons={"approved": None},
+                refresh_scheduler=None,
+                approval_calls=calls,
+                history_scope=scope,
+                prior_presentation_state=captured.response_presentation_state,
+                prior_response_text=captured.response_text,
+                prior_tool_trace=captured.tool_trace,
+            )
+        runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+        execution = replace(runner._approval_execution, config=lambda: config, runtime_paths=paths)
+        return await execution.continue_run(
+            ApprovalContinuation(
+                approval_id="sample-approval",
+                run_id=paused.run_id,
+                session_id="approval-session",
+                entity_kind="agent",
+                entity_name="general",
+                room_id=context.room_id,
+                thread_id=context.thread_id,
+                requester_id=context.requester_id,
+                response_event_id="$waiting",
+                sources=ResponseSources(("$source",), ("$source",)),
+                state="claimed",
+                calls=calls,
+                request_body="Add 2 and 3",
+            ),
+            execution_identity=identity,
+            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            decisions={"approved": True},
+            denial_reasons={"approved": None},
+            tool_trace_collector=[],
+            typing_log_context={},
+        )
+
+    assert get_helper_usage_owner() is None
+    if outcome == "completed":
+        assert isinstance(await resume(), CompletedApprovalRun)
+    else:
+        with pytest.raises(asyncio.CancelledError if outcome == "cancel" else RuntimeError):
+            await resume()
+    assert get_helper_usage_owner() is None
+    assert helper_results == ["Sample helper output."]
+    with open_scope() as scope_context:
+        assert scope_context is not None
+        storage = scope_context.storage
+        assert isinstance(storage, SqliteDb)
+        with storage.db_engine.connect() as connection:
+            rows = connection.exec_driver_sql(
+                f"SELECT session_id, usage_data FROM {quote_identifier(storage.session_table_name + '_usage')}",  # noqa: S608
+            ).all()
+    helpers = [
+        (session_id, json.loads(value))
+        for session_id, value in rows
+        if json.loads(value).get("kind") == "dynamic_workflow"
+    ]
+    assert len(helpers) == 1
+    assert helpers[0][0] == "approval-session"
+    assert helpers[0][1]["user_id"] == "@user:localhost"
+    assert helpers[0][1]["metrics"]["total_tokens"] == 22
+    assert "Sample helper output" not in json.dumps(helpers)
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    assert report.totals.total_tokens == 22
+    assert sum(row.run_count for row in report.model_breakdown) == 0
 
 
 @pytest.mark.asyncio
