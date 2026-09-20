@@ -103,6 +103,7 @@ _VOICE_COVERAGE_NOTE = (
     "GPT-Live provider-reported session duration, billed separately from delegated agent tokens. "
     "Each row is one provider session; created_at is when that session was first observed. "
     "Duration is not split across UTC days. Unfinalized rows are the last reported running totals. "
+    "Sources with missing caller attribution are marked unavailable. "
     "Earlier unrecorded calls, unreceived usage, and deleted sessions are unavailable."
 )
 
@@ -1005,6 +1006,8 @@ def _voice_rows(row: UsageSessionRow, unavailable: set[str]) -> list[UsageVoiceB
         if run.voice_seconds is None or run.created_at is None or run.model_provider is None or run.model is None:
             unavailable.add(row.source.path_label)
             continue
+        if run.requester_id is None:
+            unavailable.add(row.source.path_label)
         result.append(
             UsageVoiceBreakdownRow(
                 entity,

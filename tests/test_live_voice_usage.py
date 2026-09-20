@@ -65,6 +65,31 @@ async def test_voice_usage_keeps_caller_ownership(tmp_path: Path, private: bool)
     assert "voice_breakdown" not in personal
 
 
+def test_voice_duration_without_caller_keeps_usage_but_reports_incomplete_coverage(
+    request_usage: tuple[Config, RuntimePaths, SqliteDb],  # noqa: F811
+) -> None:
+    """Known voice duration must survive missing attribution without claiming complete coverage."""
+    config, paths, storage = request_usage
+    save_independent_usage(
+        storage,
+        session_id="session",
+        usage_id="live_voice:unattributed",
+        kind="live_voice",
+        requester_id=None,
+        run={
+            "model_provider": "OpenAI",
+            "model": "gpt-live-1",
+            "created_at": 1_700_000_000,
+            "voice_seconds": 12.5,
+            "voice_finalized": True,
+        },
+    )
+    report = collect_admin_usage(config=config, runtime_paths=paths).to_dict()
+    assert [(row["user_id"], row["duration_seconds"]) for row in report["voice_breakdown"]] == [(None, 12.5)]
+    assert report["voice_coverage"]["unavailable_sources"] == 1
+    assert report["totals"]["total_tokens"] == 250_014
+
+
 @pytest.mark.parametrize("seconds", [-1, True, "12", math.nan, math.inf, None, pytest.param(10**400, id="overflow")])
 def test_invalid_voice_duration_is_excluded_without_discarding_delegate_tokens(
     request_usage: tuple[Config, RuntimePaths, SqliteDb],  # noqa: F811

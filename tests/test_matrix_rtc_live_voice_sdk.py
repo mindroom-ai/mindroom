@@ -120,10 +120,12 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> _ProviderHTTP:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("remote_close", [False, True])
 @pytest.mark.parametrize("cancel_close", [False, True])
-async def test_live_sdk_retains_cumulative_voice_usage_through_close(
+@pytest.mark.parametrize("fail_final_write", [False, True])
+async def test_live_sdk_retains_cumulative_voice_usage_through_close(  # noqa: PLR0915
     provider: _ProviderHTTP,
     remote_close: bool,
     cancel_close: bool,
+    fail_final_write: bool,
 ) -> None:
     """Repeated totals cannot inflate usage, and teardown must persist the provider's final seconds."""
     updates: list[LiveVoiceUsage] = []
@@ -131,11 +133,17 @@ async def test_live_sdk_retains_cumulative_voice_usage_through_close(
     final_write_started = asyncio.Event()
     release_final_write = asyncio.Event()
     terminated: list[bool] = []
+    final_write_failed = False
 
     async def record_usage(usage: LiveVoiceUsage) -> None:
+        nonlocal final_write_failed
         if usage.finalized:
             final_write_started.set()
             await release_final_write.wait()
+            if fail_final_write and not final_write_failed:
+                final_write_failed = True
+                msg = "Transient storage failure"
+                raise OSError(msg)
         updates.append(usage)
         recorded.set()
 

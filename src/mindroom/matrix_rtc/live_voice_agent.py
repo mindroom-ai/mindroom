@@ -184,6 +184,7 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             self._exit_task: asyncio.Task[None] | None = None
             self._voice_started_at = time.time()
             self._voice_usage: dict[str, LiveVoiceUsage] = {}
+            self._failed_usage: dict[str, LiveVoiceUsage] = {}
             self._usage_tasks: set[asyncio.Task[None]] = set()
             self._usage_lock = asyncio.Lock()
 
@@ -255,7 +256,10 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                     try:
                         await options.record_usage(usage)
                     except Exception as error:
+                        self._failed_usage[usage.provider_session_id] = usage
                         logger.warning("call_live_usage_save_failed", error_type=type(error).__name__)
+                    else:
+                        self._failed_usage.pop(usage.provider_session_id, None)
 
         async def on_exit(self) -> None:
             self._exiting = True
@@ -278,6 +282,10 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 await asyncio.gather(self._provider_close_task, return_exceptions=True)
             if self._usage_tasks:
                 await asyncio.gather(*self._usage_tasks)
+            for usage in tuple(self._failed_usage.values()):
+                await self._record_usage(usage)
+            if self._failed_usage:
+                logger.error("call_live_usage_unpersisted", sessions=len(self._failed_usage))
 
     return LiveCallAgent()
 
