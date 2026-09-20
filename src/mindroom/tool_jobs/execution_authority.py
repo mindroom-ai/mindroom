@@ -52,8 +52,10 @@ def authorized_tool_call(
 def check_current_execution_authority(*, arguments: Mapping[str, Any] | None = None) -> None:
     """Revalidate after each cooperative checkpoint, including nested calls."""
     call = _CALL.get()
+    if call is None:
+        return
     context = get_tool_runtime_context()
     authorize = _AUTHORIZERS.get(context.runtime_paths.storage_root.resolve()) if context is not None else None
-    if call is not None and authorize is not None:
+    if authorize is not None:
         owner, function, accepted_arguments = call
         authorize(owner, function, accepted_arguments if arguments is None else arguments)

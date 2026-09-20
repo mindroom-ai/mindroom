@@ -1959,7 +1959,11 @@ def create_agent(
     agent = _initialize_agent_instance(
         name=agent_config.display_name,
         id=agent_name,
-        metadata={AUTHORITY_METADATA_KEY: authority_snapshot(config, agent_name)},
+        metadata=(
+            {AUTHORITY_METADATA_KEY: authority_snapshot(config, agent_name)}
+            if background_tool_jobs_enabled(config, runtime_paths)
+            else None
+        ),
         role=role_context.role,
         model=model,
         tools=tool_assembly.tools,

@@ -25,6 +25,7 @@ from mindroom.agent_storage import create_session_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import (
@@ -674,6 +675,86 @@ async def test_fast_generator_preserves_sdk_events(tmp_path: Path) -> None:
                 ]
         assert sum(isinstance(event, RunContentEvent) and event.content == "event text" for event in events) == 1
     finally:
+        await runtime.shutdown()
+        register_background_runtime(paths, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("later_counter", [0, 1, 9])
+async def test_saved_result_reread_preserves_later_session_state(
+    tmp_path: Path,
+    restart: bool,
+    later_counter: int,
+) -> None:
+    """Old output is readable across turns and restart without repeating mutations or conflict warnings."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    async def change_state(run_context: RunContext) -> str:
+        run_context.session_state["counter"] = 1
+        return "original output"
+
+    @owned_tool_execution
+    async def run(agent: Agent) -> RunOutput:
+        set_consumption_storage(storage_factory)
+        with tool_runtime_context(context):
+            return await agent.arun(
+                "continue",
+                session_id=context.session_id,
+                user_id=context.requester_id,
+                session_state=agent.session_state,
+            )
+
+    storage = storage_factory()
+    try:
+        model = DelegationModel(
+            id="test",
+            responses=[ModelResponse(tool_calls=[_call("change_state", "change")]), ModelResponse(content="done")],
+        )
+        install_tool_job_execution(model)
+        first = await run(
+            Agent(id="leader", model=model, tools=[change_state], db=storage, session_state={"counter": 0}),
+        )
+        assert storage.get_run(first.run_id).session_state["counter"] == 1
+        job = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        assert job.wait_acknowledged
+        if restart:
+            await runtime.shutdown()
+            runtime = ToolJobRuntime(tmp_path)
+            await runtime.recover()
+            register_background_runtime(paths, runtime)
+        model = DelegationModel(
+            id="test",
+            responses=[
+                ModelResponse(tool_calls=[_call("job", "reread", action="wait", job_id=job.job_id)]),
+                ModelResponse(content="read again"),
+            ],
+        )
+        install_tool_job_execution(model)
+        later = await run(
+            Agent(
+                id="leader",
+                model=model,
+                tools=[JobTools(paths, owner)],
+                db=storage,
+                session_state={"counter": later_counter},
+                overwrite_db_session_state=True,
+            ),
+        )
+        saved = storage.get_run(later.run_id)
+        assert saved.session_state["counter"] == later_counter
+        assert saved.tools[0].result == "original output"
+        assert await runtime.pending_outcomes() == []
+    finally:
+        storage.close()
         await runtime.shutdown()
         register_background_runtime(paths, None)
 

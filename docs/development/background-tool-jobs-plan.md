@@ -40,7 +40,7 @@ Stored job outcomes provide recovery and discovery without replaying interrupted
 - Already-consumed success, failure, and acknowledged cancellation cause no redundant completion response.
 - Runtime completion input is distinguished from a new human request while retaining the original requester's authorization scope.
 - Rich results, artifacts, approval continuations, and requester isolation remain supported.
-- A durable result envelope is limited to 64 MiB of default JSON UTF-8 encoding, including base64 expansion and cumulative container/scalar overhead; oversized output becomes a failed job with a size-limit error.
+- Each encoded value envelope is limited to 64 MiB of default JSON UTF-8 encoding, including base64 expansion and cumulative container/scalar overhead; oversized output becomes a failed job with a size-limit error. Result values, session-state deltas, and streamed events are encoded separately; the combined job snapshot can exceed this per-envelope limit.
 - Active jobs remain discoverable after a new turn or compaction loses a handle.
 - A restart preserves stored outcomes and marks abandoned local execution interrupted; it never reruns the tool automatically.
 
@@ -862,3 +862,16 @@ Automatic SDK learning reuses the agent's model but invokes internal extraction 
 Those calls now keep SDK execution and native schemas; nested extraction retains and rechecks its outer tool's authority instead of inventing another job owner.
 The same boundary covers other internal model calls without adding a learning-specific allowlist or copying models.
 Real SDK regressions verify automatic and agent-requested learning with both shared and requester-scoped storage, including revocation immediately before the actual memory write.
+
+### Focused review corrections (2026-09-20)
+
+The independent Claude Fable 5.1 review supports retaining the current architecture and its agreed behavior.
+The next bounded pass addresses reproduced failures without adding another ownership or persistence layer:
+
+- Retain an operation's returned outcome through cancellation during resource cleanup or result publication.
+- Apply a result's session-state delta only on its first consumption; later reads return the retained output.
+- Drain every accepted job and release the runtime lease even when shutdown snapshot writes fail, then report those failures.
+- Stop retrying a completion generation after successful durable journal admission; retain retries for failed admission and recovery after restart.
+- Omit background authority metadata when the effective startup setting is disabled, and make an unbound authority check return immediately.
+
+Verification requires regression tests that fail before each fix, SDK/SQLite coverage for repeated result reads across turns and restart, relevant live lifecycle scenarios, repository checks, and a fresh Fable 5.1 review at xhigh.

@@ -11698,6 +11698,7 @@ The same execution continues across subsequent parent turns, and its result rema
 
 The automatically added `job(action, job_id=None, limit=20, offset=0, wait_timeout=None)` function manages ordinary tools and native delegation.
 The management function never backgrounds itself.
+Enabling background jobs reserves the function name `job`; custom and plugin tools must use another function name.
 
 | Action | Behavior |
 | --- | --- |
@@ -11749,6 +11750,8 @@ Inspecting, listing, or scheduling internal completion work does not consume it.
 Consumed results, errors, and acknowledged cancellation do not cause another completion response.
 If the model does not retrieve a ready result, the outcome stays discoverable without an unlimited continuation loop.
 Completed outcomes survive restart; abandoned local execution becomes interrupted and is never restarted automatically.
+Reading an already consumed result returns its original output without reapplying session-state changes.
+Retained plugin jobs require the same plugin installation path and current grants; moving the plugin directory invalidates that recorded callable provenance.
 
 Each durable result envelope has a 64 MiB encoded JSON limit, including base64 expansion, its artifacts, and structural overhead.
 A job record can contain several envelopes for its result, state updates, events, and replay data, so this is not a limit on total job storage.

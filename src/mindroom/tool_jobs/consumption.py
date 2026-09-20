@@ -183,7 +183,7 @@ def session_state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
 
 
 def _merge_session_state(value: Any, job: BackgroundJob, call: FunctionCall) -> Any:  # noqa: ANN401
-    if job.status != "completed" or not job.result_payload:
+    if job.wait_acknowledged or job.status != "completed" or not job.result_payload:
         return value
     context = call.function._run_context
     state = context.session_state if context is not None else None

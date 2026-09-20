@@ -7,6 +7,8 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import nio
+
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.response_turn import (
@@ -354,6 +356,84 @@ async def test_coordinator_wakes_conversation_without_matrix_notice(tmp_path: Pa
         await coordinator.deliver_pending()
         bot.wake_tool_job_completion.assert_awaited_once_with(job)
         bot.client.room_send.assert_not_called()
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_successful_completion_admission_is_not_repeated_after_bot_replacement(tmp_path: Path) -> None:
+    """The durable journal owns an admitted generation, including after a bot is replaced."""
+    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    bot = _bot(tmp_path)
+    bot.running = True
+    bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
+    coordinator.bot_provider = lambda _name: bot
+    try:
+        job = await _finish_job(coordinator)
+        event = completion_event(job, sender_id=bot.matrix_id.full_id)
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        await coordinator.deliver_pending()
+        assert await store.is_pending(event.event_id)
+        await coordinator.deliver_pending()
+        bot.client.joined_rooms.assert_awaited_once()
+        replacement = _bot(tmp_path)
+        replacement.running = True
+        replacement.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
+        coordinator.bot_provider = lambda _name: replacement
+        await coordinator.deliver_pending()
+        replacement.client.joined_rooms.assert_not_awaited()
+        assert await replacement._journal_store.principal(replacement._journal_principal_id).is_pending(event.event_id)
+        await coordinator.stop()
+        await coordinator.runtime.recover()
+        await coordinator.deliver_pending()
+        replacement.client.joined_rooms.assert_awaited_once()
+        assert await store.is_pending(event.event_id)
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_completion_admission_retries_and_new_generation_is_admitted(tmp_path: Path) -> None:
+    """Only successful durable admission suppresses retries; approval outcomes keep distinct generations."""
+    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    bot = _bot(tmp_path)
+    bot.running = True
+    bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
+    coordinator.bot_provider = lambda _name: bot
+    fixture = _job()
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    async def complete() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "approved result")
+
+    try:
+        await coordinator.runtime.start(
+            JobSpec(fixture.job_id, fixture.tool_name, 0, kind=fixture.kind, adapter=fixture.adapter),
+            owner=fixture.owner,
+            operation=approval,
+        )
+        waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
+        await coordinator.runtime.release_wait(fixture.job_id, waited.token)
+        store = bot._journal_store.principal(bot._journal_principal_id)
+        first = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
+        with patch.object(type(store), "admit", side_effect=OSError("journal unavailable")):
+            await coordinator.deliver_pending()
+        assert not await store.is_pending(first.event_id)
+        await coordinator.deliver_pending()
+        assert await store.is_pending(first.event_id)
+        await coordinator.deliver_pending()
+        assert bot.client.joined_rooms.await_count == 2
+        await coordinator.runtime.continue_job(fixture.job_id, owner=fixture.owner, depth=0, operation=complete)
+        waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
+        await coordinator.runtime.release_wait(fixture.job_id, waited.token)
+        second = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
+        assert second.event_id != first.event_id
+        await coordinator.deliver_pending()
+        assert await store.is_pending(second.event_id)
+        await coordinator.deliver_pending()
+        assert bot.client.joined_rooms.await_count == 3
     finally:
         await coordinator.stop()
 

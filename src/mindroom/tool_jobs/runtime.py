@@ -399,6 +399,7 @@ class ToolJobRuntime:
             queued_message_signal_context,
         )
 
+        outcome = None
         try:
             with (
                 human_message_signal_context(entry.human_signal),
@@ -421,7 +422,9 @@ class ToolJobRuntime:
                     await self._persist(entry)
         except asyncio.CancelledError:
             async with self._lock:
-                if entry.job.status not in _TERMINAL and not entry.stopping:
+                if entry.stopping:
+                    entry.stopped_outcome = outcome
+                elif entry.job.status not in _TERMINAL:
                     entry.job.status = "interrupted" if self._closed else "cancelled"
                     await self._persist(entry)
             raise
@@ -807,28 +810,27 @@ class ToolJobRuntime:
     async def _shutdown(self) -> None:
         tasks = []
         cancellations = []
-        async with self._lock:
-            for entry in self._entries.values():
-                if entry.job.status not in _READY:
-                    entry.stopping = True
-                    entry.control.cancel()
-                else:
-                    await self._persist(entry, update_timestamp=False)
-                    entry.cancel_settlement_pending = False
-                self._release_control(entry)
-                cancellation = entry.cancel_task
-                cancellation_is_live = cancellation is not None and not cancellation.done()
-                if cancellation_is_live:
-                    cancellations.append(cancellation)
-                task = entry.task
-                if task is not None and not task.done():
-                    if not cancellation_is_live:
-                        task.cancel()
-                    tasks.append(task)
+        failures = []
         try:
+            async with self._lock:
+                for entry in self._entries.values():
+                    if entry.job.status not in _READY:
+                        entry.stopping = True
+                        entry.control.cancel()
+                    self._release_control(entry)
+                    cancellation = entry.cancel_task
+                    cancellation_is_live = cancellation is not None and not cancellation.done()
+                    if cancellation_is_live:
+                        cancellations.append(cancellation)
+                    task = entry.task
+                    if task is not None and not task.done():
+                        if not cancellation_is_live:
+                            task.cancel()
+                        tasks.append(task)
             await asyncio.gather(*tasks, *cancellations, return_exceptions=True)
             for entry in self._entries.values():
-                if entry.job.status not in _READY:
+                settling = entry.job.status not in _READY
+                if settling:
                     outcome = await self._cleanup(entry)
                     self._settle_stopped(
                         entry,
@@ -836,6 +838,13 @@ class ToolJobRuntime:
                         reason="Tool execution was interrupted by runtime shutdown; it was not replayed.",
                         outcome=outcome,
                     )
-                    await self._persist(entry)
+                try:
+                    await self._persist(entry, update_timestamp=settling)
+                    entry.cancel_settlement_pending = False
+                except Exception as error:
+                    failures.append(error)
         finally:
             self._lease.close()
+        if failures:
+            msg = "Tool job shutdown persistence failed"
+            raise ExceptionGroup(msg, failures)

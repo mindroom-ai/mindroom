@@ -70,6 +70,7 @@ class ToolJobRuntimeCoordinator:
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
+    _admitted: set[tuple[str, int]] = field(default_factory=set, init=False)
 
     async def initialize(self, journal: EventJournalStore | None = None) -> None:
         """Pin execution mode and index parked ownership before dispatch can start."""
@@ -243,6 +244,7 @@ class ToolJobRuntimeCoordinator:
         release_background_tool_jobs(self.runtime_paths)
         clear_parked_work(self.runtime_paths)
         self._initialized = False
+        self._admitted.clear()
 
     async def _run(self) -> None:
         while True:
@@ -255,7 +257,7 @@ class ToolJobRuntimeCoordinator:
                 await asyncio.wait_for(self.runtime.changed.wait(), timeout=_RETRY_SECONDS)
 
     async def deliver_pending(self) -> None:
-        """Wake pending outcomes; durable journal admission absorbs repeated wakeups."""
+        """Retry pending outcomes until the durable journal owns each generation."""
         for job in await self.runtime.pending_outcomes():
             try:
                 await self._deliver(job)
@@ -263,6 +265,9 @@ class ToolJobRuntimeCoordinator:
                 logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
 
     async def _deliver(self, job: BackgroundJob) -> None:
+        generation = (job.job_id, job.generation)
+        if generation in self._admitted:
+            return
         recipient = job.owner.transport_agent_name or job.owner.agent_name
         bot = self.bot_provider(recipient)
         if (
@@ -282,3 +287,4 @@ class ToolJobRuntimeCoordinator:
         current = await self.runtime.outcome(job.job_id, job.generation)
         if current is not None:
             await bot.wake_tool_job_completion(current)
+            self._admitted.add(generation)

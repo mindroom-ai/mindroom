@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 import yaml
+from agno.models.response import ModelResponse
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_storage import create_session_storage
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -30,6 +32,7 @@ from mindroom.event_journal import (
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_jobs.authorization import AUTHORITY_METADATA_KEY
 from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.resources import current_execution_resources
@@ -44,6 +47,7 @@ from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot
 from tests.test_config_lifecycle import _make_lifecycle
+from tests.test_delegation_execution import DelegationModel
 from tests.test_subagent_runtime import _job
 
 if TYPE_CHECKING:
@@ -68,6 +72,48 @@ def test_background_job_yaml_rejects_invalid_settings(settings: object) -> None:
     """Reject the old scalar and malformed lists instead of silently ignoring policy."""
     with pytest.raises(ValidationError):
         Config.model_validate({"background_tool_jobs": settings})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_saved_authority_metadata_uses_startup_feature_setting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    """Ordinary saved runs omit job authority, including after an ignored config toggle."""
+    config = Config(
+        agents={"lead": AgentConfig(display_name="Lead", tools=[], learning=False)},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
+    )
+    config.memory.backend = "none"
+    config.defaults.tools = []
+    paths = test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+    pin_background_tool_jobs(config, paths)
+    config.background_tool_jobs.enabled = not enabled
+    model = DelegationModel(id="test", responses=[ModelResponse(content="done")])
+    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
+    owner = _job().owner
+    storage = create_session_storage("lead", config, paths, owner)
+    try:
+        agent = create_agent(
+            "lead",
+            config,
+            paths,
+            owner,
+            session_id=owner.session_id,
+            history_storage=storage,
+            include_interactive_questions=False,
+        )
+        response = await agent.arun("hello", session_id=owner.session_id, user_id=owner.requester_id)
+        saved = storage.get_run(response.run_id)
+        assert (AUTHORITY_METADATA_KEY in (saved.metadata or {})) is enabled
+        if enabled:
+            assert saved.metadata[AUTHORITY_METADATA_KEY] == {"scope": None}
+    finally:
+        storage.close()
+        release_background_tool_jobs(paths)
 
 
 @pytest.mark.asyncio
