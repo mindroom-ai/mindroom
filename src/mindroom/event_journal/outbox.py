@@ -665,13 +665,19 @@ def recovery_initials(
     *,
     after: tuple[int, str] | None = None,
 ) -> tuple[MatrixDelivery | UnreadableMatrixDelivery, ...]:
-    """Enumerate orphaned INITIALs and acknowledged error-FINAL candidates."""
+    """Enumerate recoverable INITIALs without resurrecting redacted responses."""
     cursor_clause = "" if after is None else " AND (created_at_ns, delivery_id/*bytes*/) > (?, ?)"
     rows = transaction.fetchall(
         f"""
         SELECT {_OUTBOX_COLUMNS} FROM matrix_delivery_outbox AS delivery
         WHERE principal_id = ? AND event_type = 'm.room.message' AND stage = 'initial'
           AND attempted = 1 AND acknowledged_event_id IS NOT NULL AND retired = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM redaction_tombstones AS tombstone
+            WHERE tombstone.principal_id = delivery.principal_id
+              AND tombstone.room_id = delivery.room_id
+              AND tombstone.redacted_event_id = delivery.acknowledged_event_id
+          )
           AND EXISTS (
             SELECT 1 FROM room_membership AS membership
             WHERE membership.principal_id = delivery.principal_id AND membership.room_id = delivery.room_id

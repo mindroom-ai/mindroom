@@ -5116,6 +5116,46 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
 class TestOutbox:
     """Delivery survives a crash at every point around the network call."""
 
+    @pytest.mark.parametrize("redaction_scope", ["same", "other_room", "other_principal", "other_event"])
+    async def test_startup_recovery_skips_only_exact_redacted_response(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+        redaction_scope: str,
+    ) -> None:
+        """A deleted response is terminal evidence, while unrelated deletions are not."""
+        await alice.enqueue_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.INITIAL,
+            room_id=ROOM,
+            thread_id=None,
+            payload=text("Thinking..."),
+        )
+        await alice.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+        await alice.acknowledge_matrix_delivery(
+            delivery_id="$source",
+            stage=DeliveryStage.INITIAL,
+            event_id="$response",
+            delivered_projections=(),
+        )
+        assert len(await alice.recovery_initial_deliveries()) == 1
+
+        redaction_principal = journal_store.principal("agent@bob") if redaction_scope == "other_principal" else alice
+        await admit(
+            redaction_principal,
+            "$redaction",
+            room_id=OTHER_ROOM if redaction_scope == "other_room" else ROOM,
+            redacts="$unrelated" if redaction_scope == "other_event" else "$response",
+            kind=EventKind.REDACTION,
+        )
+
+        candidates = await alice.recovery_initial_deliveries()
+        assert len(candidates) == (0 if redaction_scope == "same" else 1)
+        # Keep the transport identity and ACK available for other lifecycle owners.
+        initial = await alice.load_matrix_delivery(delivery_id="$source", stage=DeliveryStage.INITIAL)
+        assert initial is not None
+        assert initial.acknowledged_event_id == "$response"
+
     @pytest.mark.ledger_loads_from_disk
     async def test_changed_source_claim_rolls_back_ack_without_losing_pending_owner(
         self,
