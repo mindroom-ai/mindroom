@@ -57,6 +57,10 @@ class _CompactionSummaryEmptyResultError(RuntimeError):
     """Raised when the summary model returns a success response with no text."""
 
 
+class _CompactionSummaryUsageError(RuntimeError):
+    """Usage persistence failed after a paid response; never retry the model for this."""
+
+
 _TYPED_SHRINKABLE_ERRORS = (
     _CompactionSummaryEmptyResultError,
     TimeoutError,
@@ -113,7 +117,7 @@ class SummaryRetryPolicy:
         every run; shrink targets clamp there so a granted shrink is issued only
         when it rebuilds to a strictly smaller request with summarizable content.
         """
-        if attempt >= self.max_attempts:
+        if isinstance(error, _CompactionSummaryUsageError) or attempt >= self.max_attempts:
             return None
         if self.should_shrink(error):
             smaller_budget = min(
@@ -202,17 +206,25 @@ async def generate_compaction_summary(
     timeout_seconds: float,
     on_response: Callable[[ModelResponse], Awaitable[None]] | None = None,
 ) -> SessionSummary:
-    """Issue one compaction summary call with tuned provider config and one timeout."""
+    """Bound the provider request, then persist returned usage before validating the summary."""
     timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
     configured_model = configure_summary_model(model, timeout_seconds=timeout_seconds)
     summary_output_limit = summary_output_token_limit(configured_model)
+    provider_done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
     async def _request_summary() -> ModelResponse:
-        response = await model.aresponse(
-            messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
-        )
+        try:
+            response = await model.aresponse(
+                messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
+            )
+        finally:
+            provider_done.set_result(None)
         if on_response is not None:
-            await on_response(response)
+            try:
+                await on_response(response)
+            except Exception as error:
+                msg = "Could not persist compaction summary usage"
+                raise _CompactionSummaryUsageError(msg) from error
         return response
 
     response_task = asyncio.create_task(
@@ -221,9 +233,18 @@ async def generate_compaction_summary(
     )
     try:
         done, _pending = await asyncio.wait(
-            {response_task},
+            {provider_done},
             timeout=timeout_seconds,
         )
+        if provider_done not in done:
+            request_task_cancel(response_task)
+            _detach_cancelled_compaction_request(
+                response_task,
+                reason="timeout",
+            )
+            msg = f"compaction summary timed out after {timeout_seconds}s"
+            raise _CompactionSummaryTimeoutError(msg)
+        response = await asyncio.shield(response_task)
     except asyncio.CancelledError:
         request_task_cancel(response_task)
         _detach_cancelled_compaction_request(
@@ -232,16 +253,6 @@ async def generate_compaction_summary(
         )
         raise
 
-    if response_task not in done:
-        request_task_cancel(response_task)
-        _detach_cancelled_compaction_request(
-            response_task,
-            reason="timeout",
-        )
-        msg = f"compaction summary timed out after {timeout_seconds}s"
-        raise _CompactionSummaryTimeoutError(msg)
-
-    response = response_task.result()
     raw_text = response.content if isinstance(response.content, str) else ""
     normalized_text = _normalize_compaction_summary_text(raw_text)
     if not normalized_text:

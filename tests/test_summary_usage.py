@@ -12,7 +12,8 @@ import pytest
 from agno.db.sqlite import SqliteDb
 from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
 from agno.models.response import ModelResponse
-from sqlalchemy import event
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
 
 from mindroom.history.compaction import (
     SummaryModel,
@@ -218,6 +219,114 @@ async def test_retry_keeps_cost_of_rejected_attempt(tmp_path: Path) -> None:
         assert report.daily_breakdown[0].run_count == 0
     finally:
         storage.close()
+
+
+@pytest.mark.asyncio
+async def test_usage_pool_timeout_cannot_issue_another_paid_summary(tmp_path: Path) -> None:
+    """A storage timeout must stay outside the model's shrink-and-retry policy."""
+    run = _completed_run("original")
+    _config, _paths, storage, scope, _context = _forced_compaction_context(
+        tmp_path,
+        session=_session("session", runs=[run]),
+    )
+    assert isinstance(storage, SqliteDb)
+    engine_url = storage.db_engine.url
+    storage.db_engine.dispose()
+    storage.db_engine = create_engine(engine_url, pool_size=1, max_overflow=0, pool_timeout=0.01)
+    model = _SummaryModel(
+        id="summary-model",
+        provider="test-provider",
+        responses=[
+            ModelResponse(
+                content=content,
+                response_usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
+            )
+            for content in ("Complete summary.", "Unnecessary second summary.")
+        ],
+    )
+    try:
+        with storage.db_engine.connect(), pytest.raises(RuntimeError, match="Could not persist") as error:
+            await _generate_compaction_summary_with_retry(
+                summary_model=SummaryModel(model=model, name="summary", input_budget_tokens=100_000),
+                previous_summary=None,
+                compactable_runs=[run],
+                initial_summary_input="Long input. " * 30_000,
+                initial_included_runs=[run],
+                session_id="session",
+                scope=scope,
+                history_settings=_ALL_HISTORY_SETTINGS,
+                summary_prompt="Summarize.",
+                timeout_seconds=10,
+                on_response=partial(record_summary_usage, storage=storage, session_id="session", requester_id=None),
+            )
+        assert isinstance(error.value.__cause__, SqlAlchemyTimeoutError)
+        assert len(model.responses) == 1
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_after_response", [False, True])
+async def test_summary_waits_for_locked_usage_storage_without_provider_timeout(
+    tmp_path: Path,
+    cancel_after_response: bool,
+) -> None:
+    """An on-time response stays accepted while its durable usage write waits for SQLite."""
+    config, paths, storage, _scope, _context = _forced_compaction_context(tmp_path, session=_session("session"))
+    assert isinstance(storage, SqliteDb)
+    recording = asyncio.Event()
+    recorded = asyncio.Event()
+    model = _SummaryModel(
+        id="summary-model",
+        provider="test-provider",
+        responses=[
+            ModelResponse(
+                content="Complete summary.",
+                response_usage=MessageMetrics(input_tokens=20, output_tokens=2, total_tokens=22),
+            ),
+        ],
+    )
+
+    async def record(response: ModelResponse) -> None:
+        recording.set()
+        try:
+            await record_summary_usage(model, response, storage=storage, session_id="session", requester_id=None)
+        finally:
+            recorded.set()
+
+    with storage.db_engine.connect() as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        task = asyncio.create_task(
+            generate_compaction_summary(
+                model=model,
+                summary_input="Input.",
+                summary_prompt="Summarize.",
+                timeout_seconds=0.01,
+                on_response=record,
+            ),
+        )
+        try:
+            await asyncio.wait_for(recording.wait(), timeout=2)
+            done, _pending = await asyncio.wait({task}, timeout=0.05)
+            assert not done, "Usage persistence must not turn a completed response into a provider timeout"
+            if cancel_after_response:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=2)
+            connection.rollback()
+            if not cancel_after_response:
+                summary = await asyncio.wait_for(task, timeout=2)
+                assert summary.summary == "Complete summary."
+            await asyncio.wait_for(recorded.wait(), timeout=2)
+            report = collect_admin_usage(config=config, runtime_paths=paths)
+            assert report.totals.total_tokens == 22
+            assert report.model_breakdown[0].run_count == 0
+        finally:
+            connection.rollback()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.wait_for(recorded.wait(), timeout=2)
+            storage.close()
 
 
 @pytest.mark.asyncio
