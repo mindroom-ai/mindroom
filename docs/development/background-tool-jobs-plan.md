@@ -943,3 +943,4 @@ A second real Matrix/model run passed nine retention assertions after aging one 
 The agent received the actual expiry notice, retained current session state, and did not repeat the original side effect; the receipt survived another restart.
 Fault-injection tests also cover a continuation snapshot published before a durability error and cancellation during worker encoding or a saved-result read.
 Successful snapshot writes clear cancellation-settlement retries at the persistence boundary, including when result acknowledgement repairs the failed save.
+That boundary also wakes existing waiters when a save fails, so a terminal cancellation cannot leave an unbounded wait asleep; the unsaved outcome remains eligible for persistence retry.

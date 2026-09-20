@@ -276,11 +276,14 @@ class ToolJobRuntime:
         def write() -> None:
             write_json_file_durable(path, {"schema_version": 1, **asdict(job)})
 
-        await run_blocking_until_complete(write)
-        entry.saved = True
-        entry.cancel_settlement_pending = False
-        entry.notify_changed()
-        self.changed.set()
+        try:
+            await run_blocking_until_complete(write)
+            entry.saved = True
+            entry.cancel_settlement_pending = False
+        finally:
+            # A failed save still leaves a new outcome for current waiters to observe.
+            entry.notify_changed()
+            self.changed.set()
 
     async def recover(self) -> list[BackgroundJob]:
         """Restore outcomes and approval snapshots, never automatically replay execution."""
@@ -456,8 +459,6 @@ class ToolJobRuntime:
                             "Tool job outcome save failed; retaining it in memory",
                             job_id=entry.job.job_id,
                         )
-                        entry.notify_changed()
-                        self.changed.set()
         except asyncio.CancelledError:
             async with self._lock:
                 if entry.stopping:

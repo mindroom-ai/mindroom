@@ -103,6 +103,57 @@ async def test_cancelled_saved_result_read_releases_its_claim(
 
 
 @pytest.mark.asyncio
+async def test_failed_cancellation_save_wakes_an_existing_waiter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal outcome must wake its claim owner even when the durable write fails."""
+    runtime = ToolJobRuntime(tmp_path)
+    cleaning, release = asyncio.Event(), asyncio.Event()
+    writer = runtime_module.write_json_file_durable
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def cleanup(_job: runtime_module.BackgroundJob) -> None:
+        cleaning.set()
+        await release.wait()
+
+    def fail_terminal(path: Path, payload: dict[str, object]) -> None:
+        if payload["status"] == "cancelled":
+            message = "terminal save failed"
+            raise OSError(message)
+        writer(path, payload)
+
+    await runtime.start(JobSpec("wake", "tool", 0), owner=_owner(), operation=operation, cancel=cleanup)
+    waiter = asyncio.create_task(runtime.wait("wake", owner=_owner(), depth=0))
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime_module, "write_json_file_durable", fail_terminal)
+            cancelling = asyncio.create_task(runtime.cancel("wake", owner=_owner(), depth=0, await_completion=True))
+            await cleaning.wait()
+            await asyncio.sleep(0)
+            assert not waiter.done()
+            release.set()
+            with pytest.raises(OSError, match="terminal save failed"):
+                await cancelling
+            done, _pending = await asyncio.wait({waiter}, timeout=0.2)
+            assert waiter in done, "terminal write failure left the existing waiter asleep"
+            waited = waiter.result()
+            assert waited.job.status == "cancelled"
+        await runtime.acknowledge_wait("wake", waited.token)
+        saved = runtime_module.read_job_snapshot(tmp_path / "tool_jobs" / "wake.json")
+        assert saved.wait_acknowledged
+        assert saved.status == "cancelled"
+    finally:
+        release.set()
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_consumption_repairs_failed_cancellation_save_before_reread(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
