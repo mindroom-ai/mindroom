@@ -18,6 +18,54 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
+async def test_outcome_write_failure_preserves_returned_value_until_storage_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed snapshot write cannot replace a completed side effect's output with the storage error."""
+    runtime = ToolJobRuntime(tmp_path)
+    release = asyncio.Event()
+    writer = runtime_module.write_json_file_durable
+
+    async def operation() -> BackgroundOutcome:
+        await release.wait()
+        (tmp_path / "effect.txt").write_text("once")
+        return BackgroundOutcome("completed", "retained output", result_payload={"artifact": [1, 2]})
+
+    def fail_outcome(path: Path, payload: dict[str, object]) -> None:
+        if payload["status"] == "completed":
+            msg = "outcome storage unavailable"
+            raise OSError(msg)
+        writer(path, payload)
+
+    try:
+        await runtime.start(JobSpec("write-failure", "tool", 0), owner=_owner(), operation=operation)
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime_module, "write_json_file_durable", fail_outcome)
+            release.set()
+            waited = await asyncio.wait_for(runtime.wait("write-failure", owner=_owner(), depth=0), 2)
+            assert waited.job.status == "completed"
+            assert waited.job.result == "retained output"
+            assert waited.job.result_payload == {"artifact": [1, 2]}
+            assert (tmp_path / "effect.txt").read_text() == "once"
+        await runtime.acknowledge_wait("write-failure", waited.token)
+        await runtime.shutdown()
+        restored = ToolJobRuntime(tmp_path)
+        try:
+            await restored.recover()
+            saved = await restored.lookup("write-failure", owner=_owner(), depth=0)
+            assert saved.status == "completed"
+            assert saved.result == "retained output"
+            assert saved.result_payload == {"artifact": [1, 2]}
+            assert saved.wait_acknowledged
+        finally:
+            await restored.shutdown()
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("shutdown", [False, True])
 async def test_returned_result_survives_stop_during_resource_cleanup(tmp_path: Path, shutdown: bool) -> None:
     """A completed side effect retains its output, but only after its resource cleanup drains."""

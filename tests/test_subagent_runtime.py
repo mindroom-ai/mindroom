@@ -50,6 +50,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     JobAccessError,
+    JobSpec,
     get_background_runtime,
     register_background_runtime,
 )
@@ -181,6 +182,71 @@ async def _finish_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
     result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
     await coordinator.runtime.release_wait(job.job_id, result.token)
     return result.job
+
+
+@pytest.mark.asyncio
+async def test_completion_scan_shares_membership_read_for_multiple_jobs(tmp_path: Path) -> None:
+    """One bot's ready burst and inaccessible outcomes cost one remote membership read per scan."""
+    coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    fixture = _job()
+
+    async def completed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "result")
+
+    try:
+        for name in ("one", "two"):
+            await coordinator.runtime.start(
+                JobSpec(name, fixture.tool_name, 0, kind=fixture.kind, adapter=fixture.adapter),
+                owner=fixture.owner,
+                operation=completed,
+            )
+            waited = await coordinator.runtime.wait(name, owner=fixture.owner, depth=0)
+            await coordinator.runtime.release_wait(name, waited.token)
+        bot = coordinator.bot_provider("team")
+        assert bot is not None
+        bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
+        await coordinator.deliver_pending()
+        assert bot.client.joined_rooms.await_count == 1
+        bot.wake_tool_job_completion.assert_not_awaited()
+        bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+        await coordinator.deliver_pending()
+        assert bot.client.joined_rooms.await_count == 2
+        assert bot.wake_tool_job_completion.await_count == 2
+        await coordinator.deliver_pending()
+        assert bot.client.joined_rooms.await_count == 2
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-process restart must choose fresh settings and a fresh runtime after a shutdown save error."""
+    config = _config(tmp_path)
+    coordinator = _delivery_coordinator(tmp_path, config)
+    await coordinator.initialize()
+    await _finish_job(coordinator)
+
+    async def failed_save(*_args: object, **_kwargs: object) -> None:
+        msg = "snapshot unavailable"
+        raise OSError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(coordinator.runtime, "_persist", failed_save)
+        with pytest.raises(ExceptionGroup):
+            await coordinator.stop()
+    config.background_tool_jobs.enabled = False
+    try:
+        await coordinator.sync()
+        assert get_background_runtime(coordinator.runtime_paths) is None
+        await coordinator.stop()
+        config.background_tool_jobs.enabled = True
+        await coordinator.sync()
+        assert get_background_runtime(coordinator.runtime_paths) is coordinator.runtime
+    finally:
+        await coordinator.stop()
 
 
 @pytest.mark.asyncio

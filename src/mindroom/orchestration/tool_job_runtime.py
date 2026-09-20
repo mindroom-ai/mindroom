@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from agno.tools.function import Function
+    from nio import AsyncClient
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
@@ -238,13 +239,15 @@ class ToolJobRuntimeCoordinator:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if self._runtime is not None:
-            await self._runtime.shutdown()
+        try:
+            if self._runtime is not None:
+                await self._runtime.shutdown()
+        finally:
             self._runtime = None
-        release_background_tool_jobs(self.runtime_paths)
-        clear_parked_work(self.runtime_paths)
-        self._initialized = False
-        self._admitted.clear()
+            release_background_tool_jobs(self.runtime_paths)
+            clear_parked_work(self.runtime_paths)
+            self._initialized = False
+            self._admitted.clear()
 
     async def _run(self) -> None:
         while True:
@@ -258,13 +261,14 @@ class ToolJobRuntimeCoordinator:
 
     async def deliver_pending(self) -> None:
         """Retry pending outcomes until the durable journal owns each generation."""
+        memberships: dict[AsyncClient, list[str] | None] = {}
         for job in await self.runtime.pending_outcomes():
             try:
-                await self._deliver(job)
+                await self._deliver(job, memberships)
             except Exception:
                 logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
 
-    async def _deliver(self, job: BackgroundJob) -> None:
+    async def _deliver(self, job: BackgroundJob, memberships: dict[AsyncClient, list[str] | None]) -> None:
         generation = (job.job_id, job.generation)
         if generation in self._admitted:
             return
@@ -279,7 +283,9 @@ class ToolJobRuntimeCoordinator:
         ):
             return
         client = bot.client
-        joined_rooms = await get_joined_rooms(client)
+        if client not in memberships:
+            memberships[client] = await get_joined_rooms(client)
+        joined_rooms = memberships[client]
         if joined_rooms is None or job.owner.room_id not in joined_rooms:
             return
         if self.bot_provider(recipient) is not bot or not bot.running or not self._authorized(job):

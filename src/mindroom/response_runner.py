@@ -2895,9 +2895,8 @@ class ResponseRunner:
                 )
                 and await self.deps.approval_store.is_pending(original_source_id)
             ):
-                # The original journal source already owns crash recovery. Its
-                # locked admission retrieves accepted work instead of replaying it.
-                await self.deps.approval_store.settle(event.event_id)
+                # The original source still owns recovery or turn recording.
+                # Keep this wake pending until it settles; it may leave the job unconsumed.
                 return
         request = ResponseRequest(
             thread_history=(),

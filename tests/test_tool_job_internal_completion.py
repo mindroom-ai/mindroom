@@ -605,7 +605,12 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
             await runner._resume_tool_job_completion(admitted, "recovered", 0)
         respond.assert_not_awaited()
         assert await runner.deps.approval_store.is_pending("$event")
-        assert not await runner.deps.approval_store.is_pending(event.event_id)
+        assert await runner.deps.approval_store.is_pending(event.event_id)
+        await runner.deps.approval_store.settle("$event")
+        with patch.object(runner, "generate_response", respond):
+            await runner._resume_tool_job_completion(admitted, "recovered", 0)
+        respond.assert_awaited_once()
+        assert respond.call_args.args[0].response_envelope.source_event_id == event.event_id
     finally:
         register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()

@@ -20,6 +20,7 @@ from mindroom.background_tasks import (
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
+from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.control import (
     HumanMessageSignal,
     JobControl,
@@ -50,6 +51,7 @@ type _OutcomeStatus = Literal["awaiting_approval", "completed", "failed", "cance
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
 _READY = _TERMINAL | {"awaiting_approval"}
 _UNAVAILABLE = "Tool job is not available in this conversation."
+logger = get_logger(__name__)
 
 
 class JobAccessError(ValueError):
@@ -401,16 +403,19 @@ class ToolJobRuntime:
 
         outcome = None
         try:
-            with (
-                human_message_signal_context(entry.human_signal),
-                job_control_context(entry.control),
-                queued_message_signal_context(None) as notice,
-            ):
-                try:
-                    async with execution_resources():
-                        outcome = await operation()
-                finally:
-                    await finalize_queued_notice_response_turn_async(notice)
+            try:
+                with (
+                    human_message_signal_context(entry.human_signal),
+                    job_control_context(entry.control),
+                    queued_message_signal_context(None) as notice,
+                ):
+                    try:
+                        async with execution_resources():
+                            outcome = await operation()
+                    finally:
+                        await finalize_queued_notice_response_turn_async(notice)
+            except Exception as error:
+                outcome = BackgroundOutcome("failed", str(error))
             async with self._lock:
                 if entry.stopping:
                     entry.stopped_outcome = outcome
@@ -419,7 +424,16 @@ class ToolJobRuntime:
                     entry.job.result = outcome.result
                     entry.job.approval_state = outcome.approval_state
                     entry.job.result_payload = outcome.result_payload
-                    await self._persist(entry)
+                    try:
+                        await self._persist(entry)
+                    except Exception:
+                        # Consumption acknowledgement and shutdown retry this exact snapshot.
+                        logger.exception(
+                            "Tool job outcome save failed; retaining it in memory",
+                            job_id=entry.job.job_id,
+                        )
+                        entry.notify_changed()
+                        self.changed.set()
         except asyncio.CancelledError:
             async with self._lock:
                 if entry.stopping:
@@ -428,14 +442,6 @@ class ToolJobRuntime:
                     entry.job.status = "interrupted" if self._closed else "cancelled"
                     await self._persist(entry)
             raise
-        except Exception as error:
-            async with self._lock:
-                if entry.stopping:
-                    entry.stopped_outcome = BackgroundOutcome("failed", str(error))
-                else:
-                    entry.job.status = "failed"
-                    entry.job.result = str(error)
-                    await self._persist(entry)
         finally:
             if entry.job.status in _TERMINAL:
                 self._release_control(entry)

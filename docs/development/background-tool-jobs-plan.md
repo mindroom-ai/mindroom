@@ -40,7 +40,8 @@ Stored job outcomes provide recovery and discovery without replaying interrupted
 - Already-consumed success, failure, and acknowledged cancellation cause no redundant completion response.
 - Runtime completion input is distinguished from a new human request while retaining the original requester's authorization scope.
 - Rich results, artifacts, approval continuations, and requester isolation remain supported.
-- Each encoded value envelope is limited to 64 MiB of default JSON UTF-8 encoding, including base64 expansion and cumulative container/scalar overhead; oversized output becomes a failed job with a size-limit error. Result values, session-state deltas, and streamed events are encoded separately; the combined job snapshot can exceed this per-envelope limit.
+- Each encoded value envelope is limited to 64 MiB of default JSON UTF-8 encoding, including base64 expansion and cumulative container/scalar overhead; oversized output becomes a failed job with a size-limit error.
+  Result values, session-state deltas, and streamed events are encoded separately; the combined job snapshot can exceed this per-envelope limit.
 - Active jobs remain discoverable after a new turn or compaction loses a handle.
 - A restart preserves stored outcomes and marks abandoned local execution interrupted; it never reruns the tool automatically.
 
@@ -866,7 +867,7 @@ Real SDK regressions verify automatic and agent-requested learning with both sha
 ### Focused review corrections (2026-09-20)
 
 The independent Claude Fable 5.1 review supports retaining the current architecture and its agreed behavior.
-The next bounded pass addresses reproduced failures without adding another ownership or persistence layer:
+The bounded correction pass addresses reproduced failures without adding another ownership or persistence layer:
 
 - Retain an operation's returned outcome through cancellation during resource cleanup or result publication.
 - Apply a result's session-state delta only on its first consumption; later reads return the retained output.
@@ -875,3 +876,24 @@ The next bounded pass addresses reproduced failures without adding another owner
 - Omit background authority metadata when the effective startup setting is disabled, and make an unbound authority check return immediately.
 
 Verification requires regression tests that fail before each fix, SDK/SQLite coverage for repeated result reads across turns and restart, relevant live lifecycle scenarios, repository checks, and a fresh Fable 5.1 review at xhigh.
+
+The first correction commit adds 46 production lines and removes 25 across five files, for a net increase of 21 lines.
+Its sixteen new regression cases cover the corrected boundaries and their enabled/disabled controls.
+The complete Python 3.13 suite for that commit verified 22,840 passing cases and 25 skips.
+One unchanged worker-computer test initially exceeded the Unix socket path limit under the Nix temporary directory; its isolated rerun with a shorter test directory passed.
+Repository hooks passed.
+A real `codex` / `gpt-6-astra` Matrix run passed 14 independent assertions across repeated result reads, session state after restart, human follow-ups during background execution, explicit cancellation, and interrupted execution after restart.
+The restart checks verified that existing streamed prose survived and the side effect was not replayed.
+Deterministic regressions cover cancellation after an operation has returned and injected shutdown write failures; the live run did not inject disk failures.
+
+The full re-review confirmed those corrections and identified adjacent completion and persistence gaps.
+Completion sources now remain pending while the originating turn is still being recorded, so the journal can retry after that source settles without losing the wake.
+An outcome-save error is logged and retains the returned value in memory; consumption acknowledgement and shutdown retry the exact snapshot when storage recovers.
+A crash before a successful retry cannot recover an outcome that storage never accepted.
+Coordinator shutdown releases its runtime reference and pinned settings even when snapshot persistence fails.
+Each completion scan shares one membership read per Matrix client, while later scans still retry failed admission and check current authorization.
+
+The reserved `job` function name remains an intentional, documented contract.
+No change was made to ad hoc completion's retrieval strategy without a demonstrated result-ownership or delivery failure.
+The suggested codec rewrite was rejected because a file-size precheck followed by an unbounded read does not preserve the existing cumulative allocation bound, especially when files grow or multiple artifacts are encoded.
+Further join-loop abstractions remain deferred because a lower line count alone does not justify another driver abstraction.
