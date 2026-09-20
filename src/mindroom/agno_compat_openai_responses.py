@@ -156,6 +156,15 @@ class OpenAIResponsesProviderCompat:
             metrics.cache_write_tokens = input_tokens_details.cache_write_tokens or 0
         return metrics
 
+    def _terminal_usage_metrics(self, event: ResponseStreamEvent) -> MessageMetrics | None:
+        """Read reported terminal counters consistently across sync and async streams."""
+        if (
+            isinstance(event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent))
+            and event.response.usage is not None
+        ):
+            return self._get_metrics(event.response.usage)
+        return None
+
     def _is_retryable_error(self, error: ModelProviderError) -> bool:
         """Reject retry only after an incomplete stream has retained output."""
         return not isinstance(error, IncompleteResponsesStreamError) and super()._is_retryable_error(  # ty: ignore[unresolved-attribute]
@@ -238,11 +247,8 @@ class OpenAIResponsesProviderCompat:
                 **params,
             ) as stream:
                 for event in stream:
-                    if (
-                        isinstance(event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent))
-                        and event.response.usage is not None
-                    ):
-                        terminal_usage = self._get_metrics(event.response.usage)
+                    if (usage := self._terminal_usage_metrics(event)) is not None:
+                        terminal_usage = usage
                     chunk, tool_use = self._parse_provider_response_delta(event, assistant_message, tool_use)
                     lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
                     yielded = yielded or not lifecycle_only
@@ -296,11 +302,8 @@ class OpenAIResponsesProviderCompat:
                 **params,
             ) as stream:
                 async for event in stream:
-                    if (
-                        isinstance(event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent))
-                        and event.response.usage is not None
-                    ):
-                        terminal_usage = self._get_metrics(event.response.usage)
+                    if (usage := self._terminal_usage_metrics(event)) is not None:
+                        terminal_usage = usage
                     chunk, tool_use = self._parse_provider_response_delta(event, assistant_message, tool_use)
                     lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
                     yielded = yielded or not lifecycle_only
