@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING, Literal, cast
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-type IndependentUsageKind = Literal["compaction_summary", "memory_auto_flush", "dynamic_workflow"]
-type UsageKind = Literal["run", "compaction_summary", "memory_auto_flush", "dynamic_workflow"]
+type IndependentUsageKind = Literal["compaction_summary", "memory_auto_flush", "dynamic_workflow", "live_voice"]
+type UsageKind = Literal["run"] | IndependentUsageKind
 
 TOKEN_FIELDS = (
     "input_tokens",
@@ -50,7 +50,17 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
     """Keep only attribution, timestamps and provider counters, never conversation content."""
     result = {
         key: run[key]
-        for key in ("run_id", "parent_run_id", "team_id", "user_id", "model_provider", "model", "created_at")
+        for key in (
+            "run_id",
+            "parent_run_id",
+            "team_id",
+            "user_id",
+            "model_provider",
+            "model",
+            "created_at",
+            "voice_seconds",
+            "voice_finalized",
+        )
         if key in run and isinstance(run[key], (str, int, float, type(None)))
     }
     if run.get("parent_run_id") is not None and "parent_run_id" not in result:

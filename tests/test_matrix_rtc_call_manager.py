@@ -54,6 +54,7 @@ from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
     LiveVoiceAgentOptions,
+    LiveVoiceUsage,
     RealtimeVoiceBridge,
     VoiceAgentOptions,
 )
@@ -62,6 +63,7 @@ from mindroom.model_loading import get_model_instance
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
+from mindroom.usage_stats import collect_admin_usage
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -753,7 +755,7 @@ def _assert_safe_oversized_live_instructions(instructions: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_model", [None, "delegate"])
-async def test_manager_selects_live_backend_with_normal_agent_delegate(
+async def test_manager_selects_live_backend_with_normal_agent_delegate(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     agent_model: str | None,
@@ -825,6 +827,33 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     assert options.on_tools_executed is not None
     assert options.on_session_error is not None
     assert options.on_session_terminated is not None
+    assert options.record_usage is not None
+    await options.record_usage(LiveVoiceUsage("provider-1", "gpt-live-1", 1_700_000_000, 12.5, False))
+    await options.record_usage(LiveVoiceUsage("provider-1", "gpt-live-1", 1_700_000_000, 20.0, True))
+    await options.record_usage(LiveVoiceUsage("provider-2", "gpt-live-1", 1_700_000_030, 7.5, False))
+    report = collect_admin_usage(config=config, runtime_paths=test_runtime_paths(tmp_path)).to_dict()
+    assert report["voice_breakdown"] == [
+        {
+            "entity": "helper",
+            "user_id": "@alice:example.org",
+            "provider": "OpenAI",
+            "model": "gpt-live-1",
+            "created_at": 1_700_000_000,
+            "duration_seconds": 20.0,
+            "finalized": True,
+        },
+        {
+            "entity": "helper",
+            "user_id": "@alice:example.org",
+            "provider": "OpenAI",
+            "model": "gpt-live-1",
+            "created_at": 1_700_000_030,
+            "duration_seconds": 7.5,
+            "finalized": False,
+        },
+    ]
+    assert report["totals"]["total_tokens"] == 0
+    assert report["model_breakdown"] == []
     await manager.shutdown()
 
 

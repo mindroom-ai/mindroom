@@ -557,6 +557,7 @@ visibility = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.session_context",
     "mindroom.history.storage",
+    "mindroom.matrix_rtc.call_tools",
     "mindroom.memory.auto_flush",
     "mindroom.response_lifecycle",
     "mindroom.teams",
@@ -3319,6 +3320,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
+    "mindroom.agent_storage",
     "mindroom.agno_compat_prepared_tools",
     "mindroom.agent_run_context",
     "mindroom.agents",
@@ -3341,6 +3343,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.live_voice_agent"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.logging_config",
     "mindroom.matrix_rtc.voice_agent",
 ]
