@@ -993,7 +993,7 @@ class _FakeContext:
 
 
 @pytest_asyncio.fixture
-async def local_preview_server() -> AsyncIterator[tuple[int, list[str]]]:
+async def local_preview_server() -> AsyncIterator[tuple[int, str, list[str]]]:
     """Serve a real loopback app and an observable forbidden redirect destination."""
     hits: list[str] = []
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
@@ -1010,6 +1010,9 @@ async def local_preview_server() -> AsyncIterator[tuple[int, list[str]]]:
             raise web.HTTPFound(location)
         if request.path == "/private-redirect":
             location = f"http://{private_host}:{private_port}/blocked"
+            raise web.HTTPFound(location)
+        if request.path == "/alias-redirect":
+            location = f"http://localhost.localdomain:{private_port}/blocked"
             raise web.HTTPFound(location)
         if request.path == "/metadata-redirect":
             location = "http://169.254.169.254/blocked"
@@ -1031,7 +1034,7 @@ async def local_preview_server() -> AsyncIterator[tuple[int, list[str]]]:
         await private_site.start()
         assert private_site._server is not None
         private_port = private_site._server.sockets[0].getsockname()[1]
-        yield port, hits
+        yield port, private_host, hits
     finally:
         await runner.cleanup()
 
@@ -1043,7 +1046,7 @@ async def test_local_preview_requires_computer_binding(
     binding: str,
     host: str,
     action: str,
-    local_preview_server: tuple[int, list[str]],
+    local_preview_server: tuple[int, str, list[str]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1051,7 +1054,7 @@ async def test_local_preview_requires_computer_binding(
     executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
     if executable is None:
         pytest.skip("Chromium required for local preview integration")
-    port, hits = local_preview_server
+    port, _private_host, hits = local_preview_server
     paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -1100,8 +1103,8 @@ async def test_local_preview_requires_computer_binding(
 
 
 @pytest.mark.asyncio
-async def test_computer_browser_upstream_preserves_http_and_local_preview(
-    local_preview_server: tuple[int, list[str]],
+async def test_computer_browser_upstream_preserves_http_and_local_preview(  # noqa: PLR0915 - complete browser/proxy lifecycle
+    local_preview_server: tuple[int, str, list[str]],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1144,14 +1147,16 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
         executable_override: str | None = None,
     ) -> dict[str, Any]:
         assert not headless
-        return original_launch(runtime_paths, profile_name, headless=True, executable_override=executable_override)
+        options = original_launch(runtime_paths, profile_name, headless=True, executable_override=executable_override)
+        options.setdefault("args", []).append(f"--host-resolver-rules=MAP localhost.localdomain {private_host}")
+        return options
 
     monkeypatch.setattr("mindroom.custom_tools.browser._persistent_launch_kwargs", headless_launch)
     tool = BrowserTools(paths)
     tool.bind_worker_display(":99", tmp_path / "workspace")
-    port, hits = local_preview_server
+    port, private_host, hits = local_preview_server
     try:
-        for host in ["localhost", "127.0.0.1"]:
+        for host in ["localhost", "127.0.0.1", "[::ffff:127.0.0.1]", "localhost."]:
             result = json.loads(await tool.browser(action="open", targetUrl=f"http://{host}:{port}/redirect"))
             assert result["title"] == "Preview loaded"
         assert "/app.js" in hits
@@ -1165,6 +1170,12 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
         with pytest.raises(PlaywrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"):
             await tool.browser(action="open", targetUrl=f"http://localhost:{port}/metadata-redirect")
         assert b"GET http://169.254.169.254/blocked HTTP/1.1" in requests
+        with pytest.raises(PlaywrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"):
+            await tool.browser(action="open", targetUrl=f"http://localhost:{port}/alias-redirect")
+        assert any(request.startswith(b"GET http://localhost.localdomain:") for request in requests)
+        assert "/blocked" not in hits
+        with pytest.raises(ServerFetchUrlError):
+            await tool.browser(action="open", targetUrl=f"http://localhost.localdomain:{port}/preview")
     finally:
         await tool.aclose()
         proxy.close()

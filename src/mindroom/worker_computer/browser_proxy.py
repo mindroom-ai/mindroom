@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 
 _SETUP_DEADLINE = 10.0
 _MAX_CONNECTIONS = 128
-COMPUTER_PROXY_BYPASS = "<-loopback>,localhost,*.localhost,127.0.0.0/8,[::1]"
+COMPUTER_PROXY_BYPASS = (
+    "<-loopback>,localhost,localhost.,*.localhost,*.localhost.,127.0.0.0/8,[::1],::ffff:127.0.0.0/104"
+)
 _REPLY_ADDRESS = b"\x00\x01\x00\x00\x00\x00\x00\x00"
 
 
@@ -25,7 +27,7 @@ def browser_upstream_proxy_url(runtime_env: Mapping[str, str], worker_env: Mappi
     settings: dict[str, str] = {}
     for env in (runtime_env, worker_env):
         for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
-            value = env.get(name, env.get(name.upper()))
+            value = env.get(name) or env.get(name.upper(), env.get(name))
             if value is not None:
                 settings[name] = value
     if "auto_proxy" in settings:

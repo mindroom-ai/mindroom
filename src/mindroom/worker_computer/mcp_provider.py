@@ -62,6 +62,8 @@ class WorkerBrowserMCP:
 
     def _server_parameters(self) -> StdioServerParameters:
         """Build fixed offline launch options; neither model nor workspace supplies code."""
+        proxy_server = self._proxy.endpoint if self._proxy is not None else self._upstream_proxy_url
+        assert proxy_server is not None
         env = get_default_environment()
         env.update(
             {
@@ -79,7 +81,7 @@ class WorkerBrowserMCP:
                 "--sandbox",
                 "--block-service-workers",
                 "--proxy-server",
-                self._upstream_proxy_url or (self._proxy.endpoint if self._proxy is not None else ""),
+                proxy_server,
                 "--proxy-bypass",
                 self._proxy_bypass,
                 "--executable-path",

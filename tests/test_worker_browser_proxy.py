@@ -24,6 +24,18 @@ from tests.browser_lifecycle_helpers import LifecycleBrowser
     ("runtime_env", "worker_env", "expected"),
     [
         ({}, {}, None),
+        ({"all_proxy": "", "ALL_PROXY": "http://runtime:3128"}, {}, "http://runtime:3128"),
+        ({}, {"all_proxy": "", "ALL_PROXY": "http://worker:3128"}, "http://worker:3128"),
+        (
+            {},
+            {
+                "http_proxy": "",
+                "HTTP_PROXY": "http://worker:3128",
+                "https_proxy": "",
+                "HTTPS_PROXY": "http://worker:3128",
+            },
+            "http://worker:3128",
+        ),
         ({"all_proxy": "http://old:3128"}, {"ALL_PROXY": "http://worker:3128"}, "http://worker:3128"),
         ({}, {"all_proxy": "http://worker:3128", "https_proxy": "http://other:3128"}, "http://worker:3128"),
         ({}, {"HTTP_PROXY": "http://worker:3128", "HTTPS_PROXY": "http://worker:3128"}, "http://worker:3128"),
@@ -165,7 +177,9 @@ async def test_computer_binding_uses_worker_local_browser_proxy(
         server, bypass = args[args.index("--proxy-server") + 1], args[args.index("--proxy-bypass") + 1]
     try:
         assert server == proxy_url
-        assert bypass == "<-loopback>,localhost,*.localhost,127.0.0.0/8,[::1]"
+        assert bypass == (
+            "<-loopback>,localhost,localhost.,*.localhost,*.localhost.,127.0.0.0/8,[::1],::ffff:127.0.0.0/104"
+        )
     finally:
         await toolkit.aclose()
 

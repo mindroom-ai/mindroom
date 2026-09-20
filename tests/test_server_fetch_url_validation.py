@@ -181,6 +181,33 @@ def test_loopback_opt_in_validates_every_dns_address(host: str, monkeypatch: pyt
         validated_connect_addresses(host, port=80, allow_private_networks=False, allow_loopback=True)
 
 
+@pytest.mark.parametrize("host", ["localhost", "localhost.localdomain", "preview.localhost"])
+@pytest.mark.parametrize("answer", ["8.8.8.8", "10.0.0.8"])
+def test_loopback_bypass_names_require_loopback_dns(
+    host: str,
+    answer: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proxy-bypassed local name cannot resolve to an external destination."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("127.0.0.1") + _addrinfo(answer),
+    )
+    with pytest.raises(ServerFetchUrlError):
+        validate_server_fetch_url(f"http://{host}/", allow_loopback=True)
+
+
+def test_loopback_only_keeps_ordinary_local_aliases_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only browser-guaranteed localhost names may receive the loopback exemption."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("127.0.0.1"),
+    )
+    with pytest.raises(ServerFetchUrlError):
+        validate_server_fetch_url("http://localhost.localdomain/", allow_loopback=True)
+    assert validate_server_fetch_url("http://localhost.localdomain/", allow_private_networks=True)
+
+
 def test_validate_server_fetch_url_keeps_metadata_blocked_when_private_is_enabled() -> None:
     """The local-network opt-in should not open cloud metadata endpoints."""
     with pytest.raises(ServerFetchUrlError):

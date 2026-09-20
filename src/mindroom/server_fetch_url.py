@@ -213,7 +213,7 @@ def _validated_host_addresses(
     if _is_metadata_hostname(ascii_host):
         _deny("metadata_hostname")
 
-    loopback_hostname = ascii_host in _LOCAL_HOSTNAMES or ascii_host.endswith(".localhost")
+    loopback_hostname = ascii_host == "localhost" or ascii_host.endswith(".localhost")
     if _is_local_hostname(ascii_host) and not (allow_private_networks or (allow_loopback and loopback_hostname)):
         _deny("private_hostname")
     if not resolve_hostnames:
@@ -221,6 +221,9 @@ def _validated_host_addresses(
 
     addresses = _resolve_host_addresses(ascii_host, port=port, scheme=scheme)
     for address in addresses:
+        local_address = (address.ipv4_mapped or address) if isinstance(address, ipaddress.IPv6Address) else address
+        if allow_loopback and loopback_hostname and not local_address.is_loopback:
+            _deny("private_hostname")
         _validate_ip_address(address, allow_private_networks=allow_private_networks, allow_loopback=allow_loopback)
     return addresses
 
