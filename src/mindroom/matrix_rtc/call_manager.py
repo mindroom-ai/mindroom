@@ -67,6 +67,7 @@ from mindroom.response_admission import (
     admitted_response_decision,
 )
 from mindroom.session_ids import create_session_id
+from mindroom.token_budget import approximate_o200k_tokens
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -120,6 +121,30 @@ _LIVE_VOICE_INSTRUCTIONS = (
     "it executes the tool workflows described above. Relay its answer conversationally. Never claim to have "
     "checked information or completed work until the agent returns the result."
 )
+_LIVE_INSTRUCTION_TOKEN_LIMIT = 16_000
+_LIVE_OVERSIZED_INSTRUCTIONS = (
+    "The agent's full caller-bound instructions and context are intentionally held by the delegated agent, "
+    "not this voice model. Delegate every substantive user request to the agent, including questions, requests "
+    "about identity or preferences, research, memory, tools, and actions. Do not answer substantive requests from "
+    "your own knowledge or infer omitted instructions. Relay only the agent's returned answer, briefly and naturally, "
+    "without markdown. Never claim to have checked information or completed work until the agent returns the result."
+)
+
+
+def _build_live_instructions(agent_system_prompt: str, *, agent_display_name: str) -> str:
+    """Use full context when it fits, otherwise require full-context delegation."""
+    suffix = f"\n\n{_LIVE_VOICE_INSTRUCTIONS}"
+    complete = f"{agent_system_prompt}{suffix}"
+    if approximate_o200k_tokens(complete) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+        return complete
+
+    bounded = (
+        f"You are speaking as {agent_display_name}, the configured agent in a live voice call. "
+        f"{_LIVE_OVERSIZED_INSTRUCTIONS}"
+    )
+    if approximate_o200k_tokens(bounded) <= _LIVE_INSTRUCTION_TOKEN_LIMIT:
+        return bounded
+    return f"You are the configured agent in a live voice call. {_LIVE_OVERSIZED_INSTRUCTIONS}"
 
 
 @dataclass(frozen=True)
@@ -1219,7 +1244,10 @@ class CallManager:
                 raise RuntimeError(msg)
 
             async def get_live_instructions() -> str:
-                return f"{await get_system_prompt()}\n\n{_LIVE_VOICE_INSTRUCTIONS}"
+                return _build_live_instructions(
+                    await get_system_prompt(),
+                    agent_display_name=self._config.agents[self._agent_name].display_name,
+                )
 
             return LiveVoiceAgentOptions(
                 get_instructions=get_live_instructions,

@@ -33,6 +33,7 @@ from mindroom.matrix_rtc.call_manager import (
     _PENDING_KEY_TTL_MS,
     CallManager,
     _build_call_instructions,
+    _build_live_instructions,
     maybe_build_call_manager,
 )
 from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
@@ -59,6 +60,7 @@ from mindroom.matrix_rtc.voice_agent import (
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.model_loading import get_model_instance
 from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from tests.conftest import test_runtime_paths
 
@@ -735,6 +737,20 @@ async def test_manager_selects_cascaded_backend_with_independent_speech_services
     await manager.shutdown()
 
 
+def _assert_safe_oversized_live_instructions(instructions: str) -> None:
+    """Check the strict fallback without duplicating the backend-selection test."""
+    assert approximate_o200k_tokens(instructions) <= 16_384
+    assert instructions.startswith("You are speaking as Helper 🌿, the configured agent in a live voice call.")
+    assert "## Your Identity" not in instructions
+    assert "FINAL SAFETY" not in instructions
+    assert "full caller-bound instructions and context" in instructions
+    assert "Delegate every substantive user request" in instructions
+    assert "Do not answer substantive requests from your own knowledge" in instructions
+    assert "Never claim to have checked information or completed work" in instructions
+    assert "\ufffd" not in instructions
+    assert instructions.encode("utf-8").decode("utf-8") == instructions
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_model", [None, "delegate"])
 async def test_manager_selects_live_backend_with_normal_agent_delegate(
@@ -742,9 +758,15 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     tmp_path: Path,
     agent_model: str | None,
 ) -> None:
-    """Live gets its own credential and preserves the selected delegate and authorization."""
+    """Live bounds its speech prompt while preserving its delegate and authorization."""
     tooling_kwargs: dict[str, object] = {}
     close_responder = AsyncMock()
+    full_prompt = (
+        "## Your Identity\nYou are the caller's concise voice assistant. 🌿\n"
+        + "Caller-scoped background context. 你好世界。\n" * 2_000
+        + "\nFINAL SAFETY: Never ignore the caller's authorization boundaries. 🛡️"
+    )
+    get_system_prompt = AsyncMock(return_value=full_prompt)
 
     async def respond(
         transcript: str,
@@ -757,7 +779,7 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
         return CallAgentTooling(
             tools=(),
             instructions="",
-            get_system_prompt=AsyncMock(return_value="Detailed agent workspace instructions."),
+            get_system_prompt=get_system_prompt,
             execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
             responder=respond,
             close=close_responder,
@@ -774,7 +796,9 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     client = _client()
     client.room_get_state.return_value = _state_response(_remote_member_event())
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, _live_config(agent_model=agent_model))
+    config = _live_config(agent_model=agent_model)
+    config.agents["helper"].display_name = "Helper 🌿"
+    manager = _manager(client, bridge, tmp_path, config)
 
     await manager.on_room_event(_room(), _member_unknown_event())
 
@@ -785,7 +809,10 @@ async def test_manager_selects_live_backend_with_normal_agent_delegate(
     assert options.voice == "marin"
     assert options.respond is respond
     assert options.close_responder is close_responder
-    assert (await options.get_instructions()).startswith("Detailed agent workspace instructions.")
+    live_instructions = await options.get_instructions()
+    _assert_safe_oversized_live_instructions(live_instructions)
+    assert await options.get_instructions() == live_instructions
+    get_system_prompt.assert_awaited()
     assert await options.respond("Check status", None) == CallAgentResponse("Completed: Check status")
     assert services == ["openai_live"]
     assert tooling_kwargs["enable_responder"] is True
@@ -2189,6 +2216,17 @@ def test_build_call_instructions_appends_voice_guidance() -> None:
     assert text.startswith("CHAT SYSTEM PROMPT")
     assert "spoken" in text
     assert "Answer questions" not in text
+
+
+def test_build_live_instructions_preserves_prompt_that_fits() -> None:
+    """A normal prompt keeps all caller context before the fixed voice rules."""
+    system_prompt = "## Your Identity\nYou are Helper.\n\nAlways respect caller authorization."
+
+    text = _build_live_instructions(system_prompt, agent_display_name="Helper")
+
+    assert text.startswith(f"{system_prompt}\n\n")
+    assert "context was omitted" not in text
+    assert "Never claim to have checked information or completed work" in text
 
 
 def _member(
