@@ -68,7 +68,36 @@ def project_usage(run: Mapping[str, object]) -> dict[str, object]:
         # An invalid details sentinel lets the reporter retain totals while reporting missing attribution.
         selected["details"] = _project_model_details(details)
     result["metrics"] = selected
+    requests = _project_requests(run.get("messages"))
+    if requests is not None:
+        result["requests"] = requests
     return result
+
+
+def _project_requests(messages: object) -> list[dict[str, object]] | None:
+    """Project only current assistant counters and timestamps, with no model guesses."""
+    if not isinstance(messages, list):
+        return None
+    requests: list[dict[str, object]] = []
+    for raw_message in messages:
+        if not isinstance(raw_message, dict):
+            continue
+        message = cast("dict[str, object]", raw_message)
+        if message.get("role") != "assistant" or message.get("from_history", False) is not False:
+            continue
+        message_metrics = message.get("metrics")
+        if not isinstance(message_metrics, dict):
+            continue
+        request_metrics = _project_metrics(cast("dict[str, object]", message_metrics))
+        if request_metrics:
+            created_at = message.get("created_at")
+            requests.append(
+                {
+                    "created_at": created_at if isinstance(created_at, (int, float)) else None,
+                    "metrics": request_metrics,
+                },
+            )
+    return requests
 
 
 def _project_metrics(metrics: Mapping[str, object]) -> dict[str, object]:

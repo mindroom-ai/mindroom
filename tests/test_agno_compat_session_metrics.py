@@ -272,12 +272,16 @@ async def test_approval_usage_reconciles_with_export_after_each_resume(
         response = await _execute_approval_step(agent, None, mode)
         for completed_pauses in range(pauses + 1):
             expected_tokens = 10 * (completed_pauses + 1) if completed_pauses < pauses else 10 * pauses + 20
-            report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True)
+            report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
             assert report.totals.total_tokens == expected_tokens
             assert sum(row.totals.total_tokens for row in report.model_breakdown) == expected_tokens
             assert sum(row.totals.total_tokens for row in report.cumulative_model_breakdown) == expected_tokens
             assert sum(row.totals.total_tokens for row in report.user_breakdown) == expected_tokens
             assert sum(row.totals.total_tokens for row in report.daily_breakdown) == expected_tokens
+            assert len(report.request_breakdown) == completed_pauses + 1
+            assert sum(row.totals.total_tokens for row in report.request_breakdown) == expected_tokens
+            assert report.request_coverage is not None
+            assert report.request_coverage.unavailable_sources == 0
             if completed_pauses == pauses:
                 assert response.status == RunStatus.completed
                 break

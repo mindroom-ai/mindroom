@@ -1,4 +1,4 @@
-"""Dashboard API for aggregate-only retained token usage."""
+"""Dashboard API for content-free retained token usage."""
 
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -28,18 +28,31 @@ def _report_payload(report: UsageReport) -> dict[str, object]:
 
 
 @router.get("", dependencies=[Depends(verify_user)], response_model=None)
-def get_usage(request: Request, include_daily: bool = False) -> dict[str, object] | Response:
+def get_usage(
+    request: Request,
+    include_daily: bool = False,
+    include_requests: bool = False,
+) -> dict[str, object] | Response:
     """Prepare retained usage under standard dashboard authentication."""
-    return _get_organization_usage(request, include_daily=include_daily)
+    return _get_organization_usage(request, include_daily=include_daily, include_requests=include_requests)
 
 
 @router.get("/export", dependencies=[Depends(require_usage_service)], response_model=None)
-def get_usage_export(request: Request, include_daily: bool = False) -> dict[str, object] | Response:
+def get_usage_export(
+    request: Request,
+    include_daily: bool = False,
+    include_requests: bool = False,
+) -> dict[str, object] | Response:
     """Return retained usage to the authenticated usage-export service."""
-    return _get_organization_usage(request, include_daily=include_daily)
+    return _get_organization_usage(request, include_daily=include_daily, include_requests=include_requests)
 
 
-def _get_organization_usage(request: Request, *, include_daily: bool) -> dict[str, object] | Response:
+def _get_organization_usage(
+    request: Request,
+    *,
+    include_daily: bool,
+    include_requests: bool,
+) -> dict[str, object] | Response:
     """Start or poll one application-scoped organization usage report."""
     headers = {"Cache-Control": "no-store"}
     unavailable = Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers=headers)
@@ -55,6 +68,7 @@ def _get_organization_usage(request: Request, *, include_daily: bool) -> dict[st
         runtime_paths=runtime_paths,
         generation=snapshot.generation,
         include_daily=include_daily,
+        include_requests=include_requests,
     )
     poll = usage_export_runner(api_app).poll(
         context,
@@ -63,6 +77,7 @@ def _get_organization_usage(request: Request, *, include_daily: bool) -> dict[st
                 config=config,
                 runtime_paths=runtime_paths,
                 include_daily=include_daily,
+                include_requests=include_requests,
             ),
         ),
         context_is_current=lambda: context_is_current(api_app, context),

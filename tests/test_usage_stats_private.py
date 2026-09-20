@@ -334,6 +334,26 @@ def test_combined_private_ownership_differs_from_recorded_requester(
     assert combined == {ALICE: 100, BOB: 30, shared_only_user: 40}
 
 
+def test_unknown_summary_preserves_private_ownership_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown requester detail can still be replaced with known private ownership."""
+    source = replace(_source(scope="private_agent", requester_isolated=True), owner_id=ALICE)
+    summary = replace(_run(requester_id=None, run_id="summary", total_tokens=110), kind="compaction_summary")
+    row = _row(source, _run(requester_id=ALICE), summary, session_metrics=_metrics(10))
+    _wire(monkeypatch, (source,), {source.path_label: (row,)})
+    report = usage_stats.collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
+    users = {row.user_id: row.totals.total_tokens for row in report.user_breakdown}
+    assert users == {ALICE: 10, None: 110}
+    owned = {row.user_id: row for row in report.private_agent_breakdown}
+    combined = {
+        user: users.get(user, 0) - detail.retained_run_totals.total_tokens + detail.totals.total_tokens
+        for user, detail in owned.items()
+    }
+    assert combined == {ALICE: 120, None: 0}
+
+
 def test_private_self_exports_only_owned_cumulative_models(tmp_path: Path) -> None:
     """All-private self reports expose no shared or other-owner cumulative totals."""
     data = private_usage_data(tmp_path)

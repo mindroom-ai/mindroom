@@ -343,6 +343,23 @@ The report-level `daily_coverage` applies to overall, per-user, and per-entity r
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
 The API and agent tools share storage reading, aggregation, and serialization.
 
+Use `GET /api/usage?include_requests=true` or `GET /api/usage/export?include_requests=true` to add `request_breakdown` and `request_coverage`.
+This option defaults to `false` and is available only on these organization HTTP routes, not agent tools or personal usage APIs.
+Each flat request row contains `entity`, canonical `user_id` (or `null`), `provider`, `model`, `kind`, an epoch-seconds `created_at`, and all nine token counters in `totals`.
+Rows preserve individual provider calls, including cache counters, so a consumer can apply context-length pricing without treating a multi-call run as one large request.
+No prices, provider thresholds, prompts, responses, session IDs, or run IDs are exported.
+Requests receive model attribution only when their counters reconcile exactly with the validated run totals and one known model bucket.
+Missing, malformed, mixed-model, or inconsistent request detail is excluded and marks `request_coverage` incomplete while aggregate totals remain available.
+Existing usage ledgers are not backfilled; initial migration can import request counters still present in retained messages, but missing history cannot be reconstructed.
+Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
+Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.
+
+Portable compaction summary calls with recorded provider counters contribute to token totals and model, user, and daily views, including retries and responses rejected as summaries.
+Their request rows have `kind: compaction_summary`; ordinary run requests have `kind: run`.
+Summary calls contribute zero to `run_count`, preserving its AI reply count meaning.
+Summary attribution uses the current requester and remains unknown when unavailable; timestamps record when usage was saved after the provider response.
+Historical summary costs were not retained and cannot be reconstructed.
+
 User and model breakdowns cover stored top-level usage snapshots.
 Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
 Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.

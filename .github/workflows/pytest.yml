@@ -28,7 +28,9 @@ jobs:
 
       - name: Run tests with pytest
         run: |
-          uv run pytest -m "not requires_matrix"
+          # Ubuntu's AppArmor profile permits the installed Chrome sandbox.
+          MINDROOM_TEST_BROWSER_EXECUTABLE="$(command -v google-chrome)" \
+            uv run pytest -m "not requires_matrix"
 
       - name: Check for uncommitted changes
         run: |

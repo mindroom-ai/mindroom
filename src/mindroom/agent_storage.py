@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import weakref
 from contextlib import nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from agno.db.base import BaseDb, SessionType
 from agno.db.sqlite import SqliteDb
@@ -26,10 +28,10 @@ from mindroom.legacy_usage_storage import migrate_usage_database
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage_preflight import session_storage_preflight
-from mindroom.usage_storage import usage_table_sql
+from mindroom.usage_storage import project_usage, usage_table_sql, usage_upsert_sql
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
     from agno.agent import Agent
@@ -59,8 +61,44 @@ __all__ = [
     "replace_runs",
     "run_session_storage_operation",
     "runs_without",
+    "save_compaction_usage",
     "save_runs",
 ]
+
+
+def save_compaction_usage(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    requester_id: str | None,
+    model_provider: str,
+    model: str,
+    metrics: Mapping[str, object],
+) -> None:
+    """Persist one incurred summary response independently of conversation changes."""
+    if not isinstance(storage, SqliteDb):
+        msg = "Compaction usage requires SQLite session storage"
+        raise TypeError(msg)
+    created_at = time.time()
+    usage_id = f"compaction:{uuid4()}"
+    snapshot = project_usage(
+        {
+            "run_id": usage_id,
+            "user_id": requester_id,
+            "model_provider": model_provider,
+            "model": model,
+            "created_at": created_at,
+            "metrics": dict(metrics),
+        },
+    )
+    snapshot["kind"] = "compaction_summary"
+    snapshot["requests"] = [{"created_at": created_at, "metrics": snapshot["metrics"]}]
+    with storage.db_engine.begin() as connection:
+        connection.exec_driver_sql(usage_table_sql(storage.session_table_name))
+        connection.exec_driver_sql(
+            usage_upsert_sql(storage.session_table_name),
+            (session_id, usage_id, json.dumps(snapshot)),
+        )
 
 
 async def run_session_storage_operation[Result](
