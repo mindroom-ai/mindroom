@@ -498,6 +498,20 @@ def test_script_recovery_contract_survives_image_upgrade() -> None:
     assert backend.script_recovery_signature() == initial
 
 
+def test_script_recovery_contract_omits_unset_runtime_class_but_rejects_a_configured_change() -> None:
+    """Existing scripts retain the default authority and cannot cross a RuntimeClass boundary."""
+    backend, _apps, _core = _backend(config_snapshot={})
+    initial_payload = backend._script_recovery_payload()
+    initial_signature = backend.script_recovery_signature()
+
+    assert "runtime_class_name" not in initial_payload["config"]
+
+    backend.config = replace(backend.config, runtime_class_name="sandboxed")
+
+    assert backend.script_recovery_signature() != initial_signature
+    assert backend._script_recovery_payload()["config"]["runtime_class_name"] == "sandboxed"
+
+
 @pytest.mark.parametrize("seccomp_enabled", [False, True])
 def test_pre_seccomp_recovery_preserves_exact_backend_authority(tmp_path: Path, seccomp_enabled: bool) -> None:
     """Only an unset seccomp policy can match the historical backend serialization."""
@@ -735,6 +749,7 @@ def _backend(
     auth_secret_name: str | None = None,
     reconcile_pod_templates: bool = True,
     seccomp_profile: _WorkerSeccompProfile | None = None,
+    runtime_class_name: str | None = None,
     agent_vault: KubernetesAgentVaultConfig | None = None,
     config_snapshot: dict[str, object] | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
@@ -772,6 +787,7 @@ def _backend(
         auth_secret_name=auth_secret_name,
         reconcile_pod_templates=reconcile_pod_templates,
         seccomp_profile=seccomp_profile,
+        runtime_class_name=runtime_class_name,
         agent_vault=agent_vault,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
@@ -1070,6 +1086,41 @@ def test_kubernetes_worker_localhost_seccomp_applies_only_to_main_container(tmp_
         "capabilities": {"drop": ["ALL"]},
         "seccompProfile": profile,
     }
+
+
+def test_kubernetes_worker_runtime_class_preserves_sandbox_security_context(tmp_path: Path) -> None:
+    """A RuntimeClass selects the pod runtime without weakening the existing sandbox settings."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+        runtime_class_name="sandboxed",
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    pod_spec = apps_api.created_bodies[0]["spec"]["template"]["spec"]
+    assert pod_spec["runtimeClassName"] == "sandboxed"
+    assert pod_spec["securityContext"]["seccompProfile"] == {"type": "RuntimeDefault"}
+    assert pod_spec["containers"][0]["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    }
+
+
+def test_kubernetes_worker_omits_runtime_class_when_unset(tmp_path: Path) -> None:
+    """The default pod template stays byte-compatible when no RuntimeClass is selected."""
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=tmp_path / "mindroom-test-storage",
+        ),
+    )
+
+    backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert "runtimeClassName" not in apps_api.created_bodies[0]["spec"]["template"]["spec"]
 
 
 def test_kubernetes_worker_startup_manifest_omits_credentials_encryption_key(tmp_path: Path) -> None:
@@ -3510,6 +3561,24 @@ def test_kubernetes_backend_reconciles_drifted_idle_worker_template(tmp_path: Pa
     container = recreated["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"]["limits"] == {"memory": "2Gi", "cpu": "1"}
     assert recreated["metadata"]["annotations"]["mindroom.ai/created-at"] == "0.0"
+
+
+def test_kubernetes_backend_recreates_ready_worker_for_changed_runtime_class(tmp_path: Path) -> None:
+    """An existing worker cannot be adopted across a RuntimeClass boundary."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    handle = backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
+    updated_backend, _, _ = _backend(runtime_paths=runtime_paths, runtime_class_name="sandboxed")
+    _wire_fake_apis(updated_backend, apps_api, core_api)
+
+    recreated = updated_backend.ensure_worker(WorkerSpec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert recreated.worker_key == _TEST_SCOPED_WORKER_KEY_A
+    assert apps_api.deleted_names == [handle.worker_id]
+    assert apps_api.created_bodies[-1]["spec"]["template"]["spec"]["runtimeClassName"] == "sandboxed"
 
 
 def test_kubernetes_backend_maintenance_lists_deployments_once(tmp_path: Path) -> None:

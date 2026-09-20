@@ -85,6 +85,10 @@
   value: {{ $values.kubernetesWorkerNamePrefix | quote }}
 - name: MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS
   value: {{ $values.kubernetesWorkerEnableServiceLinks | quote }}
+{{- with $values.kubernetesWorkerRuntimeClassName }}
+- name: MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME
+  value: {{ . | quote }}
+{{- end }}
 {{- with $workerSeccomp }}
 - name: MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON
   value: {{ toJson . | quote }}

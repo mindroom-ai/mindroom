@@ -343,6 +343,8 @@ class KubernetesWorkerBackend:
         config.pop("script_resource_profiles")
         config.pop("resource_requests")
         config.pop("resource_limits")
+        if config["runtime_class_name"] is None:
+            config.pop("runtime_class_name")
         return {
             "config": config,
             "owner": self.cleanup_locator,

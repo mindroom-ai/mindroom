@@ -75,6 +75,8 @@ def legacy_kubernetes_backend_recovery_signature(
     config_payload = asdict(config)
     config_payload.pop("image")
     config_payload.pop("image_pull_policy")
+    if config_payload["runtime_class_name"] is None:
+        config_payload.pop("runtime_class_name")
     payload = {
         "config": config_payload,
         "owner": owner,
