@@ -27,6 +27,7 @@ from mindroom.dynamic_workflows.runner import DynamicWorkflowExecutionError
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
 from mindroom.dynamic_workflows.validation import DynamicWorkflowError, collect_workflow_spec_errors
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.tool_approval import tool_may_require_approval
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
@@ -837,9 +838,12 @@ async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) ->
     # exceed 10 minutes. Consuming the event stream drives tool calls; yield_run_output makes
     # the final RunOutput the last streamed item, which works without a db.
     final_output: RunOutput | None = None
+    usage_owner = get_helper_usage_owner()
+    invocation_id = uuid4().hex
     with tool_runtime_context(context):
         event_stream = agent.arun(
             prompt,
+            run_id=invocation_id,
             user_id=context.requester_id,
             session_id=context.session_id,
             stream=True,
@@ -849,6 +853,14 @@ async def _arun_agent(context: ToolRuntimeContext, agent: Agent, prompt: str) ->
         async for event in event_stream:
             if isinstance(event, RunOutput):
                 final_output = event
+                if usage_owner is not None and agent.db is None:
+                    await record_helper_usage(
+                        event,
+                        owner=usage_owner,
+                        invocation_id=invocation_id,
+                        kind="dynamic_workflow",
+                        requester_id=context.requester_id,
+                    )
     if final_output is None:
         msg = "Dynamic Workflow participant run produced no output."
         raise DynamicWorkflowExecutionError(msg)

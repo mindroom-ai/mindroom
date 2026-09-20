@@ -23,6 +23,7 @@ import sys
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, NoReturn
 from uuid import uuid4
 
@@ -43,9 +44,10 @@ from mindroom.constants import (
 )
 from mindroom.delegation.state import DelegationState
 from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT, continuation_decision_from_tools
+from mindroom.helper_usage import helper_usage_context
 from mindroom.logging_config import get_logger
 from mindroom.streaming import StreamingLifecycleSuspensionError, StreamingPresentation
-from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -916,7 +918,8 @@ async def run_blocking_response_turn(
                 adapter.on_scope_opened(scope_context)
             for continuation_count in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1):
                 try:
-                    resolution = await adapter.run_attempt(run, continuation)
+                    with helper_usage_context(scope_context):
+                        resolution = await adapter.run_attempt(run, continuation)
                     settled = _settle_blocking_attempt(
                         ctx,
                         adapter,
@@ -1228,7 +1231,10 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         resolution = resumed_attempt.attempt
                         resumed_attempt = None
                     else:
-                        attempt_stream = adapter.run_attempt(run, continuation)
+                        attempt_stream = context_bound_async_stream(
+                            context_factory=lambda: helper_usage_context(scope_context),
+                            stream_factory=partial(adapter.run_attempt, run, continuation),
+                        )
                         async with closing_async_stream(attempt_stream):
                             async for item in attempt_stream:
                                 if isinstance(item, AttemptResolved):

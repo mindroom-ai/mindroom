@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -170,6 +171,39 @@ def test_request_export_keeps_short_calls_distinct_and_preserves_all_counters(
     assert "request_coverage" not in default
 
 
+@pytest.mark.parametrize("first_after_midnight", [False, True])
+@pytest.mark.parametrize("retained_run", [False, True])
+def test_daily_usage_follows_requests_across_midnight_without_counting_extra_replies(
+    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    first_after_midnight: bool,
+    retained_run: bool,
+) -> None:
+    """A run's earlier creation date must not pull later provider usage into that day."""
+    config, paths, storage = request_usage
+    midnight = int(datetime(2023, 11, 15, tzinfo=UTC).timestamp())
+    run = _run()
+    assert run.messages is not None
+    run.messages[2].created_at = midnight + (10 if first_after_midnight else -10)
+    run.messages[5].created_at = midnight + 30
+    storage.upsert_run(run, session_id="session")
+    if not retained_run:
+        with sqlite3.connect(storage.db_file) as connection:
+            connection.execute("DELETE FROM code_sessions_runs")
+
+    payload = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True).to_dict()
+    days = payload["daily_breakdown"]
+    expected = (
+        [("2023-11-15", 1, {field: _FIRST[field] + _SECOND[field] for field in _FIRST})]
+        if first_after_midnight
+        else [("2023-11-14", 1, _FIRST), ("2023-11-15", 0, _SECOND)]
+    )
+    assert [(day["date"], day["run_count"], day["totals"]) for day in days] == expected
+    assert payload["user_breakdown"][0]["daily_breakdown"] == days
+    assert payload["breakdown"][0]["user_breakdown"][0]["daily_breakdown"] == days
+    assert sum(day["run_count"] for day in days) == 1
+    assert all(day["model_breakdown"][0]["totals"] == day["totals"] for day in days)
+
+
 @pytest.mark.parametrize(
     "case",
     ["old", "malformed", "mixed_models", "unknown", "undated", *[f"{field}_mismatch" for field in _FIRST]],
@@ -183,8 +217,8 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
     with sqlite3.connect(storage.db_file) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         payload["requests"] = [
-            {"created_at": 1_700_000_001, "metrics": dict(_FIRST)},
-            {"created_at": 1_700_000_002, "metrics": dict(_SECOND)},
+            {"created_at": 1_700_086_401, "metrics": dict(_FIRST)},
+            {"created_at": 1_700_086_402, "metrics": dict(_SECOND)},
         ]
         if case == "old":
             del payload["requests"]
@@ -203,8 +237,11 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
         elif case == "undated":
             del payload["requests"][0]["created_at"]
         connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True, include_daily=True)
     assert report.totals.total_tokens == 250_014
+    assert [(day.date, day.run_count, day.totals.total_tokens) for day in report.daily_breakdown] == [
+        ("2023-11-14", 1, 250_014),
+    ]
     assert sum(row.totals.total_tokens for row in report.model_breakdown) == 250_014
     assert report.to_dict()["request_breakdown"] == []
     assert report.request_coverage is not None

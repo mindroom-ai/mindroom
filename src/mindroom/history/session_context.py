@@ -49,6 +49,7 @@ class ScopeSessionContext:
     session: AgentSession | TeamSession | None
     session_id: str | None = None
     storage_factory: Callable[[], BaseDb] | None = None
+    session_exists: bool = True
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ def _build_scope_session_context(
         return None
 
     session = get_team_session(storage, session_id) if scope.kind == "team" else get_agent_session(storage, session_id)
+    session_exists = session is not None
     if session is None and create_session_if_missing:
         session = new_scope_session(
             session_id=session_id,
@@ -162,6 +164,7 @@ def _build_scope_session_context(
         session=session,
         session_id=session_id,
         storage_factory=storage_factory,
+        session_exists=session_exists,
     )
 
 

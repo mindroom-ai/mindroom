@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -21,12 +22,17 @@ from agno.run.base import RunStatus
 from agno.session.agent import AgentSession
 from openai import AsyncOpenAI, OpenAI
 
+from mindroom.agent_storage import create_state_storage
 from mindroom.codex_model import CodexResponses
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import IncompleteResponsesStreamError
 from mindroom.openai_models import MindRoomOpenAIResponses
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.provider_media_fallback import install_provider_media_fallback
 from mindroom.system_prompt import render_session_context
+from mindroom.usage_stats import collect_admin_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -333,6 +339,232 @@ async def test_agent_records_truncated_followup_as_error_after_completed_tool(tm
         assert [(tool.tool_name, tool.result) for tool in run.tools] == [("get_status", "ready")]
         history = [*session.get_messages(agent_id="status_agent"), Message(role="user", content="Follow up")]
         assert "previous_response_id" not in model.get_request_params(messages=history)
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("status", "disconnect", "reported_usage"),
+    [
+        ("completed", False, True),
+        ("incomplete", False, True),
+        ("failed", False, True),
+        ("completed", True, True),
+        ("incomplete", False, False),
+        ("failed", False, False),
+        ("completed", True, False),
+    ],
+    ids=[
+        "completed",
+        "incomplete",
+        "failed",
+        "disconnect",
+        "unmetered-incomplete",
+        "unmetered-failed",
+        "unmetered-disconnect",
+    ],
+)
+async def test_terminal_usage_survives_stream_failure(
+    tmp_path: Path,
+    status: str,
+    *,
+    sync: bool,
+    disconnect: bool,
+    reported_usage: bool,
+) -> None:
+    """Received provider counters reach durable usage exactly once, including unsuccessful runs."""
+    response = _response("resp_usage", status)
+    if reported_usage:
+        response["usage"] = {
+            "input_tokens": 1000,
+            "input_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 40},
+            "output_tokens": 100,
+            "output_tokens_details": {"reasoning_tokens": 60},
+            "total_tokens": 1100,
+        }
+    if status == "failed":
+        response["error"] = {"code": "server_error", "message": "Generation failed"}
+    if status == "incomplete":
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    stream = _created("resp_usage") + _text() + _event(f"response.{status}", response=response)
+    provider_response = (
+        httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_InterruptedStream(stream))
+        if disconnect
+        else stream
+    )
+    storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
+    assert isinstance(storage, SqliteDb)
+    try:
+        async with _model(provider_response) as model:
+            agent = Agent(id="status_agent", model=model, db=storage, add_history_to_context=True)
+            if sync:
+                list(agent.run("Check status", session_id="status_session", stream=True))
+            else:
+                async for _ in agent.arun("Check status", session_id="status_session", stream=True):
+                    pass
+            session = storage.get_session("status_session", SessionType.AGENT)
+            assert isinstance(session, AgentSession)
+            completed = status == "completed" and not disconnect
+            assert RunStatus(session.runs[-1].status) is (RunStatus.completed if completed else RunStatus.error)
+            if not completed:
+                history = [*session.get_messages(agent_id="status_agent"), Message(role="user", content="Follow up")]
+                assert "previous_response_id" not in model.get_request_params(messages=history)
+        with sqlite3.connect(storage.db_file) as connection:
+            rows = connection.execute("SELECT usage_data FROM status_sessions_usage").fetchall()
+        assert len(rows) == 1
+        metrics = json.loads(rows[0][0])["metrics"]
+        expected = {
+            "input_tokens": 1000,
+            "cache_read_tokens": 800,
+            "cache_write_tokens": 40,
+            "output_tokens": 100,
+            "reasoning_tokens": 60,
+            "total_tokens": 1100,
+        }
+        if not reported_usage:
+            expected = dict.fromkeys(expected, 0)
+        assert {key: metrics.get(key, 0) for key in expected} == expected
+        model_metrics = metrics.get("details", {}).get("model", [])
+        if reported_usage:
+            assert len(model_metrics) == 1
+            assert {key: model_metrics[0][key] for key in expected} == expected
+        else:
+            assert all(not item.get(key, 0) for item in model_metrics for key in expected)
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize("complete_retry", [True, False], ids=["completed", "exhausted"])
+async def test_terminal_usage_survives_retry(tmp_path: Path, *, sync: bool, complete_retry: bool) -> None:
+    """Retry totals survive without inventing one provider request from two attempts."""
+    failed = _response("resp_failed", "failed")
+    failed["error"] = {"code": "server_error", "message": "Generation failed"}
+    failed["usage"] = {
+        "input_tokens": 1000,
+        "input_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 40},
+        "output_tokens": 100,
+        "output_tokens_details": {"reasoning_tokens": 60},
+        "total_tokens": 1100,
+    }
+    retry_status = "completed" if complete_retry else "failed"
+    retried = {
+        **_response("resp_retry", retry_status),
+        "usage": failed["usage"],
+        "error": None if complete_retry else failed["error"],
+    }
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = Config(agents={"status": AgentConfig(display_name="Status")})
+    storage = create_state_storage(
+        "status",
+        tmp_path / "agents/status",
+        subdir="sessions",
+        session_table="status_sessions",
+    )
+    assert isinstance(storage, SqliteDb)
+    try:
+        async with _model(
+            _created("resp_failed") + _event("response.failed", response=failed),
+            _created("resp_retry")
+            + (_text() if complete_retry else "")
+            + _event(f"response.{retry_status}", response=retried),
+        ) as model:
+            model.retries = 1
+            model.delay_between_retries = 0
+            agent = Agent(id="status", model=model, db=storage)
+            if sync:
+                list(agent.run("Check status", session_id="status_session", stream=True))
+            else:
+                async for _ in agent.arun("Check status", session_id="status_session", stream=True):
+                    pass
+        session = storage.get_session("status_session", SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        result = session.runs[-1]
+        assert RunStatus(result.status) is (RunStatus.completed if complete_retry else RunStatus.error)
+        if complete_retry:
+            assert result.content == "Ready"
+        assert result.metrics is not None
+        assert result.metrics.input_tokens == 2000
+        assert result.metrics.cache_read_tokens == 1600
+        assert result.metrics.cache_write_tokens == 80
+        assert result.metrics.output_tokens == 200
+        assert result.metrics.reasoning_tokens == 120
+        assert result.metrics.total_tokens == 2200
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert report.totals.total_tokens == 2200
+        assert report.to_dict()["request_breakdown"] == []
+        assert report.request_coverage is not None
+        assert report.request_coverage.unavailable_sources == 1
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streaming"])
+async def test_codex_blocking_usage_is_not_counted_twice(
+    tmp_path: Path,
+    *,
+    sync: bool,
+    stream: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent totals, assistant requests, and exports agree for Codex's stream-only endpoint."""
+    completed = _response("resp_completed", "completed")
+    completed["usage"] = {
+        "input_tokens": 1000,
+        "input_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 40},
+        "output_tokens": 100,
+        "output_tokens_details": {"reasoning_tokens": 60},
+        "total_tokens": 1100,
+    }
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = Config(agents={"status": AgentConfig(display_name="Status")})
+    storage = create_state_storage(
+        "status",
+        tmp_path / "agents/status",
+        subdir="sessions",
+        session_table="status_sessions",
+    )
+    assert isinstance(storage, SqliteDb)
+    try:
+        async with _model(_created() + _text() + _event("response.completed", response=completed)) as sdk_model:
+            model = CodexResponses(id="gpt-6-astra")
+            monkeypatch.setattr(model, "get_client", lambda: sdk_model.client)
+            monkeypatch.setattr(model, "get_async_client", lambda: sdk_model.async_client)
+            agent = Agent(id="status", model=model, db=storage, telemetry=False)
+            if sync and stream:
+                list(agent.run("Check status", session_id="status_session", stream=True))
+            elif sync:
+                agent.run("Check status", session_id="status_session")
+            elif stream:
+                async for _ in agent.arun("Check status", session_id="status_session", stream=True):
+                    pass
+            else:
+                await agent.arun("Check status", session_id="status_session")
+        session = storage.get_session("status_session", SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        run = session.runs[-1]
+        assert RunStatus(run.status) is RunStatus.completed
+        assert run.content == "Ready"
+        assert run.metrics is not None
+        assert run.metrics.input_tokens == 1000
+        assert run.messages is not None
+        assistant = next(message for message in run.messages if message.role == "assistant")
+        assert assistant.content == "Ready"
+        assert assistant.provider_data is not None
+        assert assistant.provider_data["response_id"] == "resp_completed"
+        assert assistant.metrics.input_tokens == 1000
+        assert assistant.metrics.cache_read_tokens == 800
+        assert assistant.metrics.cache_write_tokens == 40
+        assert assistant.metrics.output_tokens == 100
+        assert assistant.metrics.reasoning_tokens == 60
+        assert assistant.metrics.total_tokens == 1100
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert report.totals.total_tokens == 1100
+        assert [row["totals"]["total_tokens"] for row in report.to_dict()["request_breakdown"]] == [1100]
+        assert report.request_coverage is not None
+        assert report.request_coverage.unavailable_sources == 0
+    finally:
+        storage.close()
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])

@@ -8,8 +8,10 @@ import json
 import threading
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import Mock
 
 import pytest
+from agno.db.base import BaseDb
 from agno.models.response import ToolExecution
 from agno.run.base import RunStatus
 from agno.run.requirement import RunRequirement
@@ -17,6 +19,9 @@ from agno.run.team import TeamRunOutput
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
+from mindroom.helper_usage import get_helper_usage_owner
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.types import HistoryScope
 from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
@@ -42,8 +47,6 @@ from mindroom.tool_system.events import ToolTraceEntry
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
-
-    from mindroom.history.session_context import ScopeSessionContext
 
 
 @dataclass
@@ -198,8 +201,12 @@ class _AdapterLog:
 
 def _open_scope_factory(log: _AdapterLog) -> Callable[[], AbstractContextManager[ScopeSessionContext]]:
     def _open() -> AbstractContextManager[ScopeSessionContext]:
-        log.scope = object()
-        return contextlib.nullcontext(cast("ScopeSessionContext", log.scope))
+        log.scope = ScopeSessionContext(
+            scope=HistoryScope(kind="agent", scope_id="general"),
+            storage=Mock(spec=BaseDb),
+            session=None,
+        )
+        return contextlib.nullcontext(log.scope)
 
     return _open
 
@@ -490,6 +497,86 @@ def _bump(log: _AdapterLog, attr: str) -> None:
 
 async def _collect(stream: AsyncIterator[str]) -> list[str]:
     return [chunk async for chunk in stream]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ["blocking", "exhaust", "close"])
+async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finish: str) -> None:
+    """The caller's owner must follow each attempt pull and close without leaking at public yields."""
+    log = _AdapterLog()
+    storage = Mock(spec=BaseDb)
+    scope = ScopeSessionContext(
+        scope=HistoryScope(kind="agent", scope_id="general"),
+        storage=storage,
+        session=None,
+        session_id="session-1",
+        storage_factory=lambda: storage,
+    )
+    observed_phases: list[str] = []
+
+    def observe_owner(phase: str) -> None:
+        owner = get_helper_usage_owner()
+        assert owner is not None
+        assert owner.session_id == "session-1"
+        assert owner.storage_factory is scope.storage_factory
+        observed_phases.append(phase)
+
+    async def blocking_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> CompletedAttempt:
+        observe_owner("run")
+        return CompletedAttempt(response_text="done", replayable_text="done", has_visible_content=True)
+
+    async def streamed_attempt(
+        _run: TurnRunState,
+        _continuation_state: DynamicContinuationRunState,
+    ) -> AsyncGenerator[str | AttemptResolved, None]:
+        try:
+            observe_owner("first")
+            yield "first"
+            observe_owner("second")
+            yield AttemptResolved(CompletedAttempt(replayable_text="first", has_visible_content=True))
+        finally:
+            observe_owner("close")
+
+    assert get_helper_usage_owner() is None
+    if finish == "blocking":
+        assert (
+            await run_blocking_response_turn(
+                _ctx(),
+                _blocking_adapter(log, blocking_attempt, open_scope=lambda: contextlib.nullcontext(scope)),
+                TurnSinks(),
+                continuation=_continuation(),
+            )
+            == "done"
+        )
+        assert observed_phases == ["run"]
+    else:
+        stream = stream_response_turn(
+            _ctx(),
+            _streaming_adapter(log, streamed_attempt, open_scope=lambda: contextlib.nullcontext(scope)),
+            TurnSinks(),
+            continuation=_continuation(),
+        )
+        try:
+            assert await anext(stream) == "first"
+            assert get_helper_usage_owner() is None
+
+            async def finish_in_child() -> None:
+                if finish == "close":
+                    await stream.aclose()
+                else:
+                    assert await _collect(stream) == []
+                assert get_helper_usage_owner() is None
+
+            await asyncio.create_task(finish_in_child())
+        finally:
+            await stream.aclose()
+        assert observed_phases == (["first", "close"] if finish == "close" else ["first", "second", "close"])
+    assert get_helper_usage_owner() is None
+    assert log.finalized == 1
+    assert log.closed == 1
 
 
 @pytest.mark.asyncio

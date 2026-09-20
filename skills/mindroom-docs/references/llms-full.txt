@@ -907,8 +907,10 @@ Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and 
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
 This also applies to requesters inside each entity's `user_breakdown`.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
-Daily rows are sorted oldest first and use retained run creation timestamps.
-Missing or invalid timestamps exclude the run from daily rows and mark daily coverage as incomplete.
+Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and one model.
+Each run counts once on its earliest request date, so a later day can contain tokens with `run_count: 0`.
+Older or unreconciled request details fall back to the run creation date, which can shift usage across days and is not an exact provider billing date.
+When neither request details nor the run creation timestamp can date the usage, daily rows omit it and daily coverage is incomplete.
 Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
 The report-level `daily_coverage` applies to overall, per-user, and per-entity requester daily breakdowns.
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
@@ -925,11 +927,15 @@ Existing usage ledgers are not backfilled; initial migration can import request 
 Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
 Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.
 
-Portable compaction summary calls with recorded provider counters contribute to token totals and model, user, and daily views, including retries and responses rejected as summaries.
-Their request rows have `kind: compaction_summary`; ordinary run requests have `kind: run`.
-Summary calls contribute zero to `run_count`, preserving its AI reply count meaning.
-Summary attribution uses the current requester and remains unknown when unavailable; timestamps record when usage was saved after the provider response.
-Historical summary costs were not retained and cannot be reconstructed.
+Portable compaction summaries, background memory auto-flush extraction, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
+Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, or `kind: dynamic_workflow`; ordinary run requests use `kind: run`.
+Helpers contribute zero to `run_count`, preserving its AI reply count meaning.
+Embedded workflow usage belongs to the exact caller conversation scope bound by the response runtime, including its private or team store, rather than the participant's synthetic session.
+Helpers use the current trusted requester and remain unattributed when unavailable.
+Compaction timestamps record when usage was saved after the provider response; other helpers preserve returned run and message timestamps.
+Individual helper requests are exported only when returned message counters reconcile with the full helper usage; absent or partial request detail stays aggregate-only and marks request coverage incomplete.
+Usage from exceptions or cancellation before Agno returns a helper run output remains unavailable.
+Historical helper costs were not retained and cannot be reconstructed.
 
 User and model breakdowns cover stored top-level usage snapshots.
 Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
@@ -10774,7 +10780,9 @@ All three functions accept an optional `include_daily` boolean, which defaults t
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
+Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
+Each run counts once on its first request date, so tokens on later days do not add extra replies.
+Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
 The report's overall totals and overall `model_breakdown` expose the same counters.
@@ -10782,7 +10790,8 @@ For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includ
 Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
 
 `daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
-Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+Usage with neither valid request timestamps nor a usable run creation timestamp is excluded from daily rows and marks its source as partially unavailable, while its tokens remain eligible for the other totals.
+The run-date fallback cannot provide exact provider billing dates for historical or incomplete request detail.
 This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
 Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
 Both daily fields are omitted unless `include_daily=True`.
@@ -19445,6 +19454,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Hosted Responses tool-search items are omitted from replay data. | Reproduce lost hosted-search output and preserve ordered call/output items. | `agno_compat_openai_responses_items.py`. |
 | Retrying a stream can reuse partial assistant or tool state. | Establish retry ownership and test that partial output cannot be duplicated. | `agno_compat_openai_responses.py`. |
 | Native Responses error events are ignored and unread streams can remain open after parsing fails. | Preserve terminal error codes and explicitly close SDK streams on failure or consumer closure; retain incomplete-stream retry protections. | `agno_compat_openai_responses.py`. |
+| Unsuccessful Responses streams discard received usage, and successful retries replace earlier attempt counters. | Preserve reported terminal usage through failure cleanup and across retries without counting clean completions twice; tracked locally in [issue #1952](https://github.com/mindroom-ai/mindroom/issues/1952), with no matching upstream issue or PR identified. | `agno_compat_openai_responses.py`; real SDK, Agent, durable-usage, and export regressions in `tests/test_openai_responses_stream.py`. Combined retry counters stay aggregate-only in request exports. |
 | OpenAI usage parsing omits cache-write input tokens. | Preserve the SDK counter for Responses and Chat Completions, including older payloads where the field is absent. | `agno_compat_openai_responses.py`, `agno_compat_openai_chat.py`. |
 | Responses guesses inline-file MIME from opaque storage paths before original filenames. | Infer missing MIME from the original filename without mutating attachment metadata; retain binary MIME for compressed attachments stored under opaque paths. No matching upstream issue or PR identified. | `agno_compat_openai_responses.py`; synthetic attachment-to-request regression coverage in `tests/test_openai_models.py`. |
 | Run saves commit internally, with no caller-owned transaction or persistence hook. | Tracking gap: an in-transaction hook is needed to persist application-owned usage atomically; no matching upstream issue or PR identified. | `agno_compat_sqlite.py` copies the Agno 3.0.9 run UPSERT; `usage_storage.py` owns the content-free schema and projection. |
@@ -19485,7 +19495,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs, retained terminal metadata, and cache-write usage preservation. | `openai_models.py` retains provider classes and canonical history/replay policy. |
-| `agno_compat_openai_responses.py` | Responses SDK stream ownership, completion, response-ID publication, native failure normalization, retry protection, continuation adaptation, and cache-write usage preservation. | `openai_models.py` retains request configuration and native/portable replay policy; `provider_stream_retry.py` owns retry limits and delays. |
+| `agno_compat_openai_responses.py` | Responses SDK stream ownership, completion, response-ID publication, native failure normalization, retry protection, continuation adaptation, and preservation of terminal usage across failures and retries. | `openai_models.py` retains request configuration and native/portable replay policy; `provider_stream_retry.py` owns retry limits and delays. |
 | `agno_compat_openai_responses_items.py` | Capture of provider output items lost by Agno parsing. | `openai_response_replay.py` retains canonical filtering, output ordering, and replay selection. |
 | `agno_compat_claude.py` | Claude sampling and terminal metadata adaptation. | `claude_compat.py` retains typed refusal and native-compaction behavior. |
 | `agno_compat_vertex_claude_tools.py` | Non-mutating removal of unsupported provider-level strict flags before Agno tool formatting. | `vertex_claude_compat.py` retains context fitting, token counting, and native checkpoint policy. |

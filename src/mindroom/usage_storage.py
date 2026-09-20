@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+type IndependentUsageKind = Literal["compaction_summary", "memory_auto_flush", "dynamic_workflow"]
+type UsageKind = Literal["run", "compaction_summary", "memory_auto_flush", "dynamic_workflow"]
 
 TOKEN_FIELDS = (
     "input_tokens",
@@ -84,6 +87,13 @@ def _project_requests(messages: object) -> list[dict[str, object]] | None:
             continue
         message = cast("dict[str, object]", raw_message)
         if message.get("role") != "assistant" or message.get("from_history", False) is not False:
+            continue
+        provider_data = message.get("provider_data")
+        if (
+            isinstance(provider_data, dict)
+            and cast("dict[str, object]", provider_data).get("mindroom_aggregate_usage") is True
+        ):
+            # Retried attempts have aggregate counters, not one request's price or timestamp.
             continue
         message_metrics = message.get("metrics")
         if not isinstance(message_metrics, dict):

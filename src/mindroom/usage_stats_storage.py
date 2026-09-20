@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.usage_storage import UsageKind
 
 __all__ = [
     "TOKEN_FIELDS",
@@ -88,7 +89,7 @@ class UsageRequestMetrics:
 
 @dataclass(frozen=True, slots=True)
 class UsageRunNode:
-    """Usage fields from one retained top-level run or summary request."""
+    """Usage fields from one retained top-level run or independent helper."""
 
     team_id: str | None
     requester_id: str | None
@@ -101,11 +102,11 @@ class UsageRunNode:
     model_metrics: tuple[UsageModelMetrics, ...] | None = ()
     # None means request detail was absent or unusable, without discarding run totals.
     requests: tuple[UsageRequestMetrics, ...] | None = None
-    kind: Literal["run", "compaction_summary"] = "run"
+    kind: UsageKind = "run"
 
     @property
     def run_count(self) -> int:
-        """Summary requests incur tokens but are not AI replies."""
+        """Helper requests incur tokens but are not AI replies."""
         return int(self.kind == "run")
 
 
@@ -571,7 +572,7 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         raise TypeError
     run = cast("dict[str, object]", raw_run)
     kind = run.get("kind", "run")
-    if kind not in {"run", "compaction_summary"}:
+    if kind not in {"run", "compaction_summary", "memory_auto_flush", "dynamic_workflow"}:
         raise ValueError
     parent_run_id = run.get("parent_run_id")
     if parent_run_id is not None:
@@ -600,7 +601,7 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         team_id=_optional_string(run.get("team_id")),
         requester_id=(
             _optional_string(run.get("user_id"))
-            if kind == "compaction_summary"
+            if kind != "run"
             else metadata_requester or _optional_string(run.get("user_id")) or row_requester
         ),
         run_id=_optional_string(run.get("run_id")),
@@ -610,7 +611,7 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         created_at=created_at,
         model_metrics=_extract_model_metrics(run_metrics.get("details")),
         requests=_extract_request_metrics(run.get("requests")),
-        kind=cast("Literal['run', 'compaction_summary']", kind),
+        kind=cast("UsageKind", kind),
     )
 
 

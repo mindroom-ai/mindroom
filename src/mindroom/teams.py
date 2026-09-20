@@ -65,6 +65,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
+from mindroom.helper_usage import helper_usage_context
 from mindroom.history.agno_compat_message_builder import apply_patch as install_message_builder_patch
 from mindroom.history.interrupted_replay import (
     split_interrupted_tool_trace,
@@ -2749,10 +2750,11 @@ async def continue_paused_team_run(
                 if call.invoking_agent == configured_team_name and not decisions.get(call.tool_call_id)
             ),
         )
-        continued = await _collect_team_continuation(
-            continuation_stream,
-            presentation,
-        )
+        with helper_usage_context(scope):
+            continued = await _collect_team_continuation(
+                continuation_stream,
+                presentation,
+            )
         paused = paused_attempt_from_response(
             continued,
             fallback_session_id=session_id,

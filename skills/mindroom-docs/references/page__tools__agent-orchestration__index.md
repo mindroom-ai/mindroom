@@ -147,7 +147,9 @@ All three functions accept an optional `include_daily` boolean, which defaults t
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
+Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
+Each run counts once on its first request date, so tokens on later days do not add extra replies.
+Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
 The report's overall totals and overall `model_breakdown` expose the same counters.
@@ -155,7 +157,8 @@ For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includ
 Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
 
 `daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
-Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+Usage with neither valid request timestamps nor a usable run creation timestamp is excluded from daily rows and marks its source as partially unavailable, while its tokens remain eligible for the other totals.
+The run-date fallback cannot provide exact provider billing dates for historical or incomplete request detail.
 This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
 Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
 Both daily fields are omitted unless `include_daily=True`.

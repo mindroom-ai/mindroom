@@ -332,8 +332,10 @@ Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and 
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
 This also applies to requesters inside each entity's `user_breakdown`.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
-Daily rows are sorted oldest first and use retained run creation timestamps.
-Missing or invalid timestamps exclude the run from daily rows and mark daily coverage as incomplete.
+Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and one model.
+Each run counts once on its earliest request date, so a later day can contain tokens with `run_count: 0`.
+Older or unreconciled request details fall back to the run creation date, which can shift usage across days and is not an exact provider billing date.
+When neither request details nor the run creation timestamp can date the usage, daily rows omit it and daily coverage is incomplete.
 Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
 The report-level `daily_coverage` applies to overall, per-user, and per-entity requester daily breakdowns.
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
@@ -350,11 +352,15 @@ Existing usage ledgers are not backfilled; initial migration can import request 
 Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
 Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.
 
-Portable compaction summary calls with recorded provider counters contribute to token totals and model, user, and daily views, including retries and responses rejected as summaries.
-Their request rows have `kind: compaction_summary`; ordinary run requests have `kind: run`.
-Summary calls contribute zero to `run_count`, preserving its AI reply count meaning.
-Summary attribution uses the current requester and remains unknown when unavailable; timestamps record when usage was saved after the provider response.
-Historical summary costs were not retained and cannot be reconstructed.
+Portable compaction summaries, background memory auto-flush extraction, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
+Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, or `kind: dynamic_workflow`; ordinary run requests use `kind: run`.
+Helpers contribute zero to `run_count`, preserving its AI reply count meaning.
+Embedded workflow usage belongs to the exact caller conversation scope bound by the response runtime, including its private or team store, rather than the participant's synthetic session.
+Helpers use the current trusted requester and remain unattributed when unavailable.
+Compaction timestamps record when usage was saved after the provider response; other helpers preserve returned run and message timestamps.
+Individual helper requests are exported only when returned message counters reconcile with the full helper usage; absent or partial request detail stays aggregate-only and marks request coverage incomplete.
+Usage from exceptions or cancellation before Agno returns a helper run output remains unavailable.
+Historical helper costs were not retained and cannot be reconstructed.
 
 User and model breakdowns cover stored top-level usage snapshots.
 Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
