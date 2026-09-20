@@ -263,12 +263,12 @@ class ToolJobRuntime:
         return entry
 
     async def _persist(self, entry: _Entry, *, update_timestamp: bool = True) -> None:
-        job = entry.job
-        if update_timestamp:
-            job.updated_at = datetime.now(UTC).isoformat()
         if entry.cold:
             msg = "Cannot persist a job without its saved result"
             raise RuntimeError(msg)
+        job = entry.job
+        if update_timestamp:
+            job.updated_at = datetime.now(UTC).isoformat()
         entry.saved = False
         self._index_consumption(entry)
         path = self._path(job.job_id)
@@ -278,6 +278,7 @@ class ToolJobRuntime:
 
         await run_blocking_until_complete(write)
         entry.saved = True
+        entry.cancel_settlement_pending = False
         entry.notify_changed()
         self.changed.set()
 
@@ -672,7 +673,6 @@ class ToolJobRuntime:
             if entry.job.status in _TERMINAL:
                 if entry.cancel_settlement_pending:
                     await self._persist(entry)
-                    entry.cancel_settlement_pending = False
                     self._release_control(entry)
                 return await self._snapshot(entry)
             previous_status = entry.job.status
@@ -703,7 +703,6 @@ class ToolJobRuntime:
                 entry.wait_token = None
             entry.cancel_settlement_pending = True
             await self._persist(entry)
-            entry.cancel_settlement_pending = False
             self._release_control(entry)
             return await self._snapshot(entry)
 
@@ -938,7 +937,6 @@ class ToolJobRuntime:
                 try:
                     if settling or not entry.saved or not entry.job.wait_acknowledged:
                         await self._persist(entry, update_timestamp=settling)
-                    entry.cancel_settlement_pending = False
                 except Exception as error:
                     failures.append(error)
         finally:

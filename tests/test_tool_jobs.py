@@ -103,6 +103,40 @@ async def test_cancelled_saved_result_read_releases_its_claim(
 
 
 @pytest.mark.asyncio
+async def test_consumption_repairs_failed_cancellation_save_before_reread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acknowledgement can repair a terminal save without leaving a stale cancellation retry."""
+    runtime = ToolJobRuntime(tmp_path)
+    writer = runtime_module.write_json_file_durable
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    def fail_terminal(path: Path, payload: dict[str, object]) -> None:
+        if payload["status"] == "cancelled":
+            message = "terminal save failed"
+            raise OSError(message)
+        writer(path, payload)
+
+    try:
+        await runtime.start(JobSpec("cancel-retry", "tool", 0), owner=_owner(), operation=operation)
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime_module, "write_json_file_durable", fail_terminal)
+            with pytest.raises(OSError, match="terminal save failed"):
+                await runtime.cancel("cancel-retry", owner=_owner(), depth=0, await_completion=True)
+        waited = await runtime.wait("cancel-retry", owner=_owner(), depth=0)
+        await runtime.acknowledge_wait("cancel-retry", waited.token)
+        result = await runtime.cancel("cancel-retry", owner=_owner(), depth=0, await_completion=True)
+        assert result.status == "cancelled"
+        assert result.wait_acknowledged
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_published_continuation_failure_remains_discoverable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
