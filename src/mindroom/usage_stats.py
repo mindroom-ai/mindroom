@@ -76,7 +76,9 @@ _USER_COVERAGE_NOTE = (
 )
 _DAILY_COVERAGE_NOTE = (
     "Daily breakdown uses retained top-level runs and summary requests with usable token metrics and timestamps, "
-    "grouped by UTC date. Runs without usable timestamps are excluded. "
+    "grouped by UTC request date when request details reconcile. Each run counts once on its first request date. "
+    "Missing or unreconciled request details fall back to run creation date and may shift usage across days. "
+    "Runs without usable timestamps are excluded. "
     "Runs with unusable model details retain their totals under the unknown model. "
     "It does not necessarily sum to report totals, which may include history lost before usage migration "
     "and nested team-member usage. Deleted sessions are unavailable."
@@ -468,6 +470,13 @@ class _DailyUsageAccumulator:
         *,
         source_path: str,
     ) -> None:
+        requests = _reconciled_request_totals(run, totals, models)
+        if requests is not None:
+            model_key = next(iter(models))
+            for index, (created_at, request_totals) in enumerate(sorted(requests, key=lambda request: request[0])):
+                date = datetime.fromtimestamp(created_at, tz=UTC).date().isoformat()
+                self._add(date, request_totals, {model_key: request_totals}, count=run.run_count if index == 0 else 0)
+            return
         if run.created_at is None:
             self.unavailable_sources.add(source_path)
             return
@@ -476,8 +485,18 @@ class _DailyUsageAccumulator:
         except (OverflowError, OSError, ValueError):
             self.unavailable_sources.add(source_path)
             return
-        self.buckets.setdefault(date, _Aggregate()).add(totals, count=run.run_count)
-        _add_model_totals(self.model_buckets.setdefault(date, {}), models, count=run.run_count)
+        self._add(date, totals, models, count=run.run_count)
+
+    def _add(
+        self,
+        date: str,
+        totals: TokenTotals,
+        models: Mapping[tuple[str, str], TokenTotals],
+        *,
+        count: int,
+    ) -> None:
+        self.buckets.setdefault(date, _Aggregate()).add(totals, count=count)
+        _add_model_totals(self.model_buckets.setdefault(date, {}), models, count=count)
 
     def rows(self) -> tuple[UsageDailyBreakdownRow, ...]:
         """Build the same sorted daily rows for overall and per-user usage."""
@@ -512,11 +531,23 @@ class _RequestUsageAccumulator:
         for run, totals, models in entries:
             if run.kind == "run":
                 retained = retained.plus(totals)
-            requests = _reconciled_requests(entity, run, totals, models)
+            requests = _reconciled_request_totals(run, totals, models)
             if requests is None:
                 self.unavailable_sources.add(row.source.path_label)
             else:
-                self.requests.extend(requests)
+                provider, model = next(iter(models))
+                self.requests.extend(
+                    UsageRequestBreakdownRow(
+                        entity=entity,
+                        user_id=run.requester_id,
+                        model_provider=provider,
+                        model=model,
+                        kind=run.kind,
+                        created_at=created_at,
+                        totals=request_totals,
+                    )
+                    for created_at, request_totals in requests
+                )
         try:
             session_totals = _metrics_totals(row.session_metrics) or TokenTotals()
         except ValueError:
@@ -542,12 +573,11 @@ class _RequestUsageAccumulator:
         )
 
 
-def _reconciled_requests(
-    entity: str,
+def _reconciled_request_totals(
     run: UsageRunNode,
     totals: TokenTotals,
     models: Mapping[tuple[str, str], TokenTotals],
-) -> list[UsageRequestBreakdownRow] | None:
+) -> list[tuple[int | float, TokenTotals]] | None:
     """Only inherit attribution after all request counters match one known model."""
     if not run.requests or len(models) != 1:
         return None
@@ -555,7 +585,7 @@ def _reconciled_requests(
     if "unknown" in (provider, model) or model_totals != totals:
         return None
     combined = TokenTotals()
-    requests: list[UsageRequestBreakdownRow] = []
+    requests: list[tuple[int | float, TokenTotals]] = []
     try:
         for request in run.requests:
             request_totals = _metrics_totals(request.metrics)
@@ -563,17 +593,7 @@ def _reconciled_requests(
                 return None
             datetime.fromtimestamp(request.created_at, tz=UTC)
             combined = combined.plus(request_totals)
-            requests.append(
-                UsageRequestBreakdownRow(
-                    entity=entity,
-                    user_id=run.requester_id,
-                    model_provider=provider,
-                    model=model,
-                    kind=run.kind,
-                    created_at=request.created_at,
-                    totals=request_totals,
-                ),
-            )
+            requests.append((request.created_at, request_totals))
     except (OverflowError, OSError, ValueError):
         return None
     return requests if combined == totals else None

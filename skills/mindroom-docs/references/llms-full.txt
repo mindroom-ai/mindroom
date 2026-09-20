@@ -907,8 +907,10 @@ Each daily row includes a UTC `date`, combined token `totals`, `run_count`, and 
 With `include_daily=true`, each entry in `user_breakdown` also includes its own `daily_breakdown` with that same row structure.
 This also applies to requesters inside each entity's `user_breakdown`.
 User aliases are combined before daily grouping, and the `user_id: null` entry includes daily unattributed usage.
-Daily rows are sorted oldest first and use retained run creation timestamps.
-Missing or invalid timestamps exclude the run from daily rows and mark daily coverage as incomplete.
+Daily rows are sorted oldest first and use individual request timestamps when every counter reconciles to the recorded run and one model.
+Each run counts once on its earliest request date, so a later day can contain tokens with `run_count: 0`.
+Older or unreconciled request details fall back to the run creation date, which can shift usage across days and is not an exact provider billing date.
+When neither request details nor the run creation timestamp can date the usage, daily rows omit it and daily coverage is incomplete.
 Users with only undated retained runs have an empty `daily_breakdown`; their all-time totals still include those runs.
 The report-level `daily_coverage` applies to overall, per-user, and per-entity requester daily breakdowns.
 Omitting `include_daily` or setting it to `false` leaves out the daily fields.
@@ -10774,7 +10776,9 @@ All three functions accept an optional `include_daily` boolean, which defaults t
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
-Dates use each retained run's creation timestamp, are sorted oldest first, and omit days without usable retained usage.
+Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
+Each run counts once on its first request date, so tokens on later days do not add extra replies.
+Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
 The report's overall totals and overall `model_breakdown` expose the same counters.
@@ -10782,7 +10786,8 @@ For `get_all_usage(include_daily=True)`, each `user_breakdown` entry also includ
 Requester aliases share one user's daily history, and `user_id: null` contains unattributed daily usage.
 
 `daily_coverage` reports scanned sources, unavailable or partially readable sources, and the retained-history limitation.
-Runs with missing or invalid creation timestamps are excluded from daily rows and mark their source as partially unavailable, while their tokens remain eligible for the other totals.
+Usage with neither valid request timestamps nor a usable run creation timestamp is excluded from daily rows and marks its source as partially unavailable, while its tokens remain eligible for the other totals.
+The run-date fallback cannot provide exact provider billing dates for historical or incomplete request detail.
 This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
 Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
 Both daily fields are omitted unless `include_daily=True`.
