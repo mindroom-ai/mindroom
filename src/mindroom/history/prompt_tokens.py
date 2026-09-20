@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import partial
-from threading import Lock
+from threading import RLock
 from typing import TYPE_CHECKING, TypeGuard, cast
 from weakref import ref
 
@@ -58,7 +58,8 @@ class _PromptToolSurface:
 # Keyed by entity id because Agno Agent/Team instances are unhashable; each
 # entry holds a weakref whose eviction callback removes the entry on GC.
 _TOOL_SURFACE_CACHE: dict[int, tuple[ref[object], _PromptToolSurface]] = {}
-_TOOL_SURFACE_CACHE_LOCK = Lock()
+# Allocations under the lock can trigger GC and re-enter it through _evict.
+_TOOL_SURFACE_CACHE_LOCK = RLock()
 
 
 @dataclass(slots=True)
