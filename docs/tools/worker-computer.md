@@ -52,6 +52,23 @@ Keep the browser's default `target: host` for this managed worker browser.
 The connected-user `target: desktop` is a separate feature and is not supported inside the worker computer.
 Browser URL restrictions still apply; enabling a display does not enable access to private networks.
 
+### Preview a local web app
+
+The Computer browser can open a web server started by the agent's shell in the same worker.
+Start the server bound to `127.0.0.1`, then open its URL, for example `http://localhost:5173`, with the browser tool.
+The user sees the app in MindRoom Chat's Computer panel; no public port or preview URL is required.
+
+This loopback access is automatic for both `browser` and `browser_mcp` when bound to a dedicated Computer display.
+Other private addresses and cloud metadata endpoints remain blocked by default.
+Headless workers, unbound browsers, connected desktops, and ordinary server-side HTTP tools retain their existing policies.
+As with a local development browser, pages opened in Computer mode can make requests to services listening on the same worker's loopback interface.
+
+Without a configured upstream proxy, both providers enforce destinations through a worker-local proxy, including redirects.
+When the worker sets `all_proxy` or `ALL_PROXY` to an HTTP(S) proxy without embedded credentials, Chromium uses that proxy directly for external connections; only loopback bypasses it.
+Matching `http_proxy` and `https_proxy` settings are also supported. Per-scheme or automatic proxy configurations that cannot be preserved are rejected with a configuration error rather than silently bypassed; use `all_proxy` for these workers.
+The upstream proxy is trusted to resolve destination hostnames and enforce its own network restrictions, including blocking private and metadata addresses.
+This keeps domain-based firewall rules intact. A rejected proxy connection never falls back to a direct connection.
+
 For the runtime Helm chart:
 
 ```yaml
@@ -132,7 +149,7 @@ agents:
 ```
 
 Metadata and link-local addresses stay blocked even with this option.
-A worker-local destination proxy checks HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address.
+Without a configured upstream proxy, a worker-local destination proxy checks HTTP(S) connections, including redirect destinations and loopback, then connects to the validated numeric address. With an upstream proxy, that proxy owns destination enforcement as described above.
 The browser keeps normal TLS, origins, and redirect behavior.
 The URL callback also restricts request schemes; callback errors and timeouts deny requests, and service workers are blocked.
 This guard does not promise DNS-rebinding protection, coverage of every network protocol, or confinement of malicious shell code.

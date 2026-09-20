@@ -41,6 +41,11 @@ from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
+from mindroom.worker_computer.browser_proxy import (
+    COMPUTER_PROXY_BYPASS,
+    BrowserDestinationProxy,
+    browser_upstream_proxy_url,
+)
 
 if TYPE_CHECKING:
     from playwright.async_api import Download
@@ -261,6 +266,7 @@ class _BrowserProfileState:
 
     playwright: Playwright
     context: BrowserContext
+    destination_proxy: BrowserDestinationProxy | None = None
     tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
     cleanup_required: bool = False
@@ -587,6 +593,7 @@ class BrowserTools(Toolkit):
             {
                 "output_dir": str(output_dir),
                 "allow_private_networks": self._allow_private_networks,
+                "allow_loopback": self._worker_display is not None,
                 "default_target": self._default_target,
                 "timeout_seconds": self._timeout_seconds,
             },
@@ -835,7 +842,11 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=open"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
+            target_url = validate_server_fetch_url(
+                target_url,
+                allow_private_networks=self._allow_private_networks,
+                allow_loopback=self._worker_display is not None,
+            )
             return json.dumps(await self._open_tab(profile_name, target_url), sort_keys=True)
         if normalized_action == "focus":
             target_id = _clean_str(targetId)
@@ -881,7 +892,11 @@ class BrowserTools(Toolkit):
             if target_url is None:
                 msg = "targetUrl required for action=navigate"
                 raise ValueError(msg)
-            target_url = validate_server_fetch_url(target_url, allow_private_networks=self._allow_private_networks)
+            target_url = validate_server_fetch_url(
+                target_url,
+                allow_private_networks=self._allow_private_networks,
+                allow_loopback=self._worker_display is not None,
+            )
             return json.dumps(
                 await self._navigate(profile_name, target_url, _clean_str(targetId)),
                 sort_keys=True,
@@ -1591,6 +1606,7 @@ class BrowserTools(Toolkit):
             manager = async_playwright()
             acquisition = asyncio.create_task(manager.start())
             context: BrowserContext | None = None
+            destination_proxy: BrowserDestinationProxy | None = None
             try:
                 # The public manager cannot stop its transport during subprocess
                 # creation. Let acquisition settle before attempting cleanup.
@@ -1608,6 +1624,16 @@ class BrowserTools(Toolkit):
                 if self._worker_process_env is not None:
                     launch_kwargs["env"] = self._worker_process_env
                 if self._worker_display is not None:
+                    upstream = browser_upstream_proxy_url(self._runtime_paths.process_env, os.environ)
+                    if upstream:
+                        launch_kwargs["proxy"] = {"server": upstream, "bypass": COMPUTER_PROXY_BYPASS}
+                    else:
+                        destination_proxy = BrowserDestinationProxy(
+                            allow_private_networks=self._allow_private_networks,
+                            allow_loopback=True,
+                        )
+                        await destination_proxy.start()
+                        launch_kwargs["proxy"] = {"server": destination_proxy.endpoint, "bypass": "<-loopback>"}
                     launch_kwargs["chromium_sandbox"] = True
                     launch_kwargs["env"] = {
                         **os.environ,
@@ -1624,9 +1650,14 @@ class BrowserTools(Toolkit):
                     lambda route: continue_or_abort_browser_fetch(
                         route,
                         allow_private_networks=self._allow_private_networks,
+                        allow_loopback=self._worker_display is not None,
                     ),
                 )
-                state = _BrowserProfileState(playwright=playwright, context=context)
+                state = _BrowserProfileState(
+                    playwright=playwright,
+                    context=context,
+                    destination_proxy=destination_proxy,
+                )
 
                 def register_page(page: Page) -> None:
                     self._register_tab(state, page)
@@ -1643,15 +1674,19 @@ class BrowserTools(Toolkit):
 
                 async def cleanup_startup() -> None:
                     try:
-                        driver = await acquisition
-                    except BaseException:
-                        await manager.__aexit__(None, None, None)
-                    else:
                         try:
-                            if context is not None:
-                                await context.close()
-                        finally:
-                            await driver.stop()
+                            driver = await acquisition
+                        except BaseException:
+                            await manager.__aexit__(None, None, None)
+                        else:
+                            try:
+                                if context is not None:
+                                    await context.close()
+                            finally:
+                                await driver.stop()
+                    finally:
+                        if destination_proxy is not None:
+                            await destination_proxy.close()
 
                 cleanup = asyncio.create_task(cleanup_startup())
                 self._startup_cleanup_tasks.add(cleanup)
@@ -1677,7 +1712,11 @@ class BrowserTools(Toolkit):
         try:
             await state.context.close()
         finally:
-            await state.playwright.stop()
+            try:
+                await state.playwright.stop()
+            finally:
+                if state.destination_proxy is not None:
+                    await state.destination_proxy.close()
         del self._profiles[profile_name]
 
     async def _resolve_tab(

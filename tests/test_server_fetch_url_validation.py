@@ -14,6 +14,7 @@ from mindroom.server_fetch_url import (
     ServerFetchUrlError,
     validate_server_fetch_redirect_url,
     validate_server_fetch_url,
+    validated_connect_addresses,
 )
 
 
@@ -126,6 +127,58 @@ def test_validate_server_fetch_url_allows_private_when_explicitly_enabled() -> N
 def test_validate_server_fetch_url_allows_localhost_when_private_is_enabled() -> None:
     """The local-network opt-in should support local dev servers."""
     assert validate_server_fetch_url("http://localhost:5173/", allow_private_networks=True) == "http://localhost:5173/"
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.0.0.2", "[::1]", "[::ffff:127.0.0.1]"])
+def test_loopback_opt_in_allows_local_preview_addresses(host: str) -> None:
+    """Local previews need no access to the rest of the private network."""
+    url = f"http://{host}:5173/preview"
+    assert validate_server_fetch_url(url, allow_loopback=True) == url
+    addresses = validated_connect_addresses(
+        host.strip("[]"),
+        port=5173,
+        allow_private_networks=False,
+        allow_loopback=True,
+    )
+    assert addresses
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.1",
+        "169.254.169.254",
+        "100.100.100.200",
+        "metadata.google.internal",
+        "[fd00::1]",
+        "[fe80::1]",
+        "0.0.0.0",  # noqa: S104 - denied destination, not a listening address
+        "224.0.0.1",
+        "[::ffff:10.0.0.1]",
+        "[::ffff:169.254.169.254]",
+    ],
+)
+def test_loopback_opt_in_keeps_non_loopback_internal_destinations_blocked(host: str) -> None:
+    """Permitting a local app must not permit other workers or metadata endpoints."""
+    with pytest.raises(ServerFetchUrlError):
+        validate_server_fetch_url(f"http://{host}/", allow_loopback=True)
+    with pytest.raises(ServerFetchUrlError):
+        validated_connect_addresses(host.strip("[]"), port=80, allow_private_networks=False, allow_loopback=True)
+
+
+@pytest.mark.parametrize("host", ["localhost", "preview.localhost", "preview.example"])
+def test_loopback_opt_in_validates_every_dns_address(host: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A loopback answer cannot mask a second forbidden DNS answer."""
+    monkeypatch.setattr(
+        "mindroom.server_fetch_url.socket.getaddrinfo",
+        lambda *_args, **_kwargs: _addrinfo("127.0.0.1") + _addrinfo("10.0.0.8"),
+    )
+    with pytest.raises(ServerFetchUrlError):
+        validate_server_fetch_url(f"http://{host}/", allow_loopback=True)
+    with pytest.raises(ServerFetchUrlError):
+        validated_connect_addresses(host, port=80, allow_private_networks=False, allow_loopback=True)
 
 
 def test_validate_server_fetch_url_keeps_metadata_blocked_when_private_is_enabled() -> None:

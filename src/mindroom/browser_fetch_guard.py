@@ -14,7 +14,12 @@ if TYPE_CHECKING:
 _BROWSER_INTERNAL_SCHEMES = frozenset({"about", "blob", "data"})
 
 
-def validate_browser_fetch_url(url: str, *, allow_private_networks: bool = False) -> str:
+def validate_browser_fetch_url(
+    url: str,
+    *,
+    allow_private_networks: bool = False,
+    allow_loopback: bool = False,
+) -> str:
     """Validate a browser request URL while allowing non-network browser internals."""
     try:
         scheme = urlsplit(url).scheme.lower()
@@ -22,16 +27,22 @@ def validate_browser_fetch_url(url: str, *, allow_private_networks: bool = False
         raise ServerFetchUrlError(reason="invalid_host") from exc
     if scheme in _BROWSER_INTERNAL_SCHEMES:
         return url
-    return validate_server_fetch_url(url, allow_private_networks=allow_private_networks)
+    return validate_server_fetch_url(url, allow_private_networks=allow_private_networks, allow_loopback=allow_loopback)
 
 
-async def continue_or_abort_browser_fetch(route: Route, *, allow_private_networks: bool = False) -> None:
+async def continue_or_abort_browser_fetch(
+    route: Route,
+    *,
+    allow_private_networks: bool = False,
+    allow_loopback: bool = False,
+) -> None:
     """Continue public browser fetches and abort unsafe server-side destinations."""
     try:
         await asyncio.to_thread(
             validate_browser_fetch_url,
             route.request.url,
             allow_private_networks=allow_private_networks,
+            allow_loopback=allow_loopback,
         )
     except ServerFetchUrlError:
         await route.abort("blockedbyclient")

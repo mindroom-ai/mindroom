@@ -6,23 +6,66 @@ import asyncio
 import ipaddress
 import socket
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from mindroom.server_fetch_url import validated_connect_addresses
 
 if TYPE_CHECKING:
     from asyncio import StreamReader, StreamWriter
+    from collections.abc import Mapping
 
 _SETUP_DEADLINE = 10.0
 _MAX_CONNECTIONS = 128
+COMPUTER_PROXY_BYPASS = "<-loopback>,localhost,*.localhost,127.0.0.0/8,[::1]"
 _REPLY_ADDRESS = b"\x00\x01\x00\x00\x00\x00\x00\x00"
+
+
+def browser_upstream_proxy_url(runtime_env: Mapping[str, str], worker_env: Mapping[str, str]) -> str | None:
+    """Keep one configured browser egress route, failing closed on unsupported modes."""
+    settings: dict[str, str] = {}
+    for env in (runtime_env, worker_env):
+        for name in ("all_proxy", "http_proxy", "https_proxy", "auto_proxy", "socks_server"):
+            value = env.get(name, env.get(name.upper()))
+            if value is not None:
+                settings[name] = value
+    if "auto_proxy" in settings:
+        msg = "Computer browser requires all_proxy instead of automatic proxy configuration."
+        raise ValueError(msg)
+    proxy = settings.get("all_proxy")
+    http, https = settings.get("http_proxy"), settings.get("https_proxy")
+    if not proxy and http and http == https:
+        proxy = http
+    if not proxy and (http or https or settings.get("socks_server")):
+        msg = "Computer browser requires all_proxy or matching http_proxy and https_proxy settings."
+        raise ValueError(msg)
+    if proxy:
+        parsed = urlsplit(proxy)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            msg = "Computer browser requires an HTTP(S) proxy URL without embedded credentials."
+            raise ValueError(msg)
+        _ = parsed.port  # Validate malformed ports before launching either provider.
+    return proxy or None
 
 
 class BrowserDestinationProxy:
     """Validate each TCP destination, including redirects invisible to page routes."""
 
-    def __init__(self, *, allow_private_networks: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        allow_private_networks: bool = False,
+        allow_loopback: bool = False,
+    ) -> None:
         self.endpoint = ""
         self._allow_private_networks = allow_private_networks
+        self._allow_loopback = allow_loopback
         self._server: asyncio.Server | None = None
         self._port = 0
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
@@ -114,8 +157,17 @@ class BrowserDestinationProxy:
             host,
             port=port,
             allow_private_networks=self._allow_private_networks,
+            allow_loopback=self._allow_loopback,
         )
-        if port == self._port and any(address.is_loopback for address in addresses):
+        if port == self._port and any(
+            address.is_loopback
+            or (
+                isinstance(address, ipaddress.IPv6Address)
+                and address.ipv4_mapped is not None
+                and address.ipv4_mapped.is_loopback
+            )
+            for address in addresses
+        ):
             msg = "Browser proxy cannot connect to itself."
             raise ValueError(msg)
         for address in addresses:

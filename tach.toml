@@ -6302,6 +6302,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.browser_proxy"
 depends_on = []
+visibility = ["mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mcp", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
@@ -6309,7 +6310,7 @@ depends_on = ["mindroom.browser_profile", "mindroom.worker_computer.browser_bund
 
 [[modules]]
 path = "mindroom.custom_tools.browser_mcp"
-depends_on = ["mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.mcp_provider"]
+depends_on = ["mindroom.worker_computer.browser_proxy", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
 path = "mindroom.tools.browser_mcp"
