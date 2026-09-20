@@ -45,9 +45,10 @@ async def test_cancelled_request_retains_validation_capacity(
     loop = asyncio.get_running_loop()
     calls = 0
 
-    def validate(url: str, *, allow_private_networks: bool) -> str:
+    def validate(url: str, *, allow_private_networks: bool, allow_loopback: bool) -> str:
         nonlocal calls
         assert not allow_private_networks
+        assert not allow_loopback
         calls += 1
         if calls == 1:
             loop.call_soon_threadsafe(entered.set)
@@ -111,10 +112,10 @@ async def test_verifier_bounds_connections_at_accept_time(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("private", [False, True])
-async def test_verifier_auth_and_address_policy(private: bool) -> None:
+@pytest.mark.parametrize(("private", "loopback"), [(False, False), (True, False), (False, True)])
+async def test_verifier_auth_and_address_policy(private: bool, loopback: bool) -> None:
     """Private opt-in never allows metadata; callback is authenticated."""
-    verifier = BrowserURLVerifier(allow_private_networks=private)
+    verifier = BrowserURLVerifier(allow_private_networks=private, allow_loopback=loopback)
     await verifier.start()
     try:
         async with httpx.AsyncClient() as client:
@@ -122,7 +123,10 @@ async def test_verifier_auth_and_address_policy(private: bool) -> None:
             assert response.status_code == 403
             headers = {"Authorization": "Bearer " + verifier.token}
             for url, allowed in [
-                ("http://127.0.0.1", private),
+                ("http://127.0.0.1", private or loopback),
+                ("http://localhost:5173", private or loopback),
+                ("http://[::1]:5173", private or loopback),
+                ("http://10.0.0.1", private),
                 ("http://169.254.169.254", False),
                 ("http://8.8.8.8", True),
                 ("file:///etc/passwd", False),

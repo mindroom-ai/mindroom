@@ -8,11 +8,65 @@ import socket
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 import pytest
 from aiohttp import web
 
+from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.custom_tools.browser import BrowserTools
+from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.worker_computer import browser_proxy, mcp_provider
-from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
+from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, browser_upstream_proxy_url
+from tests.browser_lifecycle_helpers import LifecycleBrowser
+
+
+@pytest.mark.parametrize(
+    ("runtime_env", "worker_env", "expected"),
+    [
+        ({}, {}, None),
+        ({"all_proxy": "", "ALL_PROXY": "http://runtime:3128"}, {}, "http://runtime:3128"),
+        ({}, {"all_proxy": "", "ALL_PROXY": "http://worker:3128"}, "http://worker:3128"),
+        (
+            {},
+            {
+                "http_proxy": "",
+                "HTTP_PROXY": "http://worker:3128",
+                "https_proxy": "",
+                "HTTPS_PROXY": "http://worker:3128",
+            },
+            "http://worker:3128",
+        ),
+        ({"all_proxy": "http://old:3128"}, {"ALL_PROXY": "http://worker:3128"}, "http://worker:3128"),
+        ({}, {"all_proxy": "http://worker:3128", "https_proxy": "http://other:3128"}, "http://worker:3128"),
+        ({}, {"HTTP_PROXY": "http://worker:3128", "HTTPS_PROXY": "http://worker:3128"}, "http://worker:3128"),
+    ],
+)
+def test_browser_proxy_settings_preserve_worker_route(
+    runtime_env: dict[str, str],
+    worker_env: dict[str, str],
+    expected: str | None,
+) -> None:
+    """Case aliases cannot let primary settings shadow the worker's egress route."""
+    assert browser_upstream_proxy_url(runtime_env, worker_env) == expected
+
+
+@pytest.mark.parametrize(
+    "worker_env",
+    [
+        {"HTTPS_PROXY": "http://worker:3128"},
+        {"http_proxy": "http://worker:3128"},
+        {"http_proxy": "http://one:3128", "https_proxy": "http://two:3128"},
+        {"auto_proxy": ""},
+        {"SOCKS_SERVER": "socks5://worker:1080"},
+        {"ALL_PROXY": "socks5://worker:1080"},
+        {"ALL_PROXY": "http://user:pass@worker:3128"},
+        {"ALL_PROXY": "http://worker:3128/path"},
+    ],
+)
+def test_browser_proxy_settings_never_silently_bypass_unsupported_routes(worker_env: dict[str, str]) -> None:
+    """Unsupported browser proxy modes fail before any direct traffic can escape."""
+    with pytest.raises(ValueError, match="Computer browser requires"):
+        browser_upstream_proxy_url({}, worker_env)
 
 
 async def _connect(
@@ -40,8 +94,99 @@ async def _connect(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("private", [False, True])
-async def test_destination_policy_and_owned_tunnel_cleanup(private: bool) -> None:
+async def test_computer_mcp_binding_allows_own_preview_and_blocks_proxy_recursion(tmp_path: Path) -> None:
+    """Display binding supplies the same loopback policy to the verifier and TCP relay."""
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={},
+    )
+    toolkit = BrowserMCPTools(runtime_paths=paths)
+    toolkit.bind_worker_display(":99", tmp_path / "workspace")
+    provider = toolkit._provider
+    assert provider is not None
+    proxy, verifier = provider._proxy, provider._verifier
+    assert proxy is not None
+    await proxy.start()
+    await verifier.start()
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            headers = {"Authorization": "Bearer " + verifier.token}
+            result = await client.post(verifier.endpoint, json={"url": "http://localhost:5173"}, headers=headers)
+            assert result.json() == {"allowed": True}
+        verifier_url = urlsplit(verifier.endpoint)
+        reader, writer, status = await _connect(proxy, "127.0.0.1", verifier_url.port)
+        try:
+            assert status == 0
+            writer.write(b"POST /verify HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            assert (await reader.read()).startswith(b"HTTP/1.1 403")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+        for host in ["127.0.0.1", "::1", "::ffff:127.0.0.1"]:
+            reader, writer, status = await _connect(proxy, host, urlsplit(proxy.endpoint).port, literal=True)
+            assert status != 0
+            assert await reader.read() == b""
+            writer.close()
+            await writer.wait_closed()
+    finally:
+        await toolkit.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["browser", "browser_mcp"])
+async def test_computer_binding_uses_worker_local_browser_proxy(
+    provider: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both providers use the worker's proxy directly and bypass only loopback."""
+    proxy_url = "http://127.0.0.1:3128"
+    monkeypatch.setenv("ALL_PROXY", proxy_url)
+    monkeypatch.delenv("all_proxy", raising=False)
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"all_proxy": "http://127.0.0.1:1"},
+    )
+    if provider == "browser":
+        toolkit = BrowserTools(paths)
+        adapter = LifecycleBrowser()
+        launch_options: dict[str, object] = {}
+        original_launch = adapter.launch_persistent_context
+
+        async def launch(**kwargs: object) -> LifecycleBrowser:
+            launch_options.update(kwargs)
+            return await original_launch(**kwargs)
+
+        monkeypatch.setattr(adapter, "launch_persistent_context", launch)
+        monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+        toolkit.bind_worker_display(":99", tmp_path / "workspace")
+        state = await toolkit._ensure_profile("mindroom")
+        assert state.destination_proxy is None
+        proxy = launch_options["proxy"]
+        assert isinstance(proxy, dict)
+        server, bypass = proxy["server"], proxy["bypass"]
+    else:
+        toolkit = BrowserMCPTools(runtime_paths=paths)
+        toolkit.bind_worker_display(":99", tmp_path / "workspace")
+        assert toolkit._provider is not None
+        assert toolkit._provider._proxy is None
+        args = toolkit._provider._server_parameters().args
+        server, bypass = args[args.index("--proxy-server") + 1], args[args.index("--proxy-bypass") + 1]
+    try:
+        assert server == proxy_url
+        assert bypass == (
+            "<-loopback>,localhost,localhost.,*.localhost,*.localhost.,127.0.0.0/8,[::1],::ffff:127.0.0.0/104"
+        )
+    finally:
+        await toolkit.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("private", "loopback"), [(False, False), (True, False), (False, True)])
+async def test_destination_policy_and_owned_tunnel_cleanup(private: bool, loopback: bool) -> None:
     """Private opt-in permits a real tunnel, never metadata or proxy recursion."""
     reached = asyncio.Event()
     disconnected = asyncio.Event()
@@ -59,7 +204,7 @@ async def test_destination_policy_and_owned_tunnel_cleanup(private: bool) -> Non
 
     server = await asyncio.start_server(echo, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    proxy = BrowserDestinationProxy(allow_private_networks=private)
+    proxy = BrowserDestinationProxy(allow_private_networks=private, allow_loopback=loopback)
     await proxy.start()
     try:
         for host, destination_port in [
@@ -73,8 +218,8 @@ async def test_destination_policy_and_owned_tunnel_cleanup(private: bool) -> Non
             writer.close()
             await writer.wait_closed()
         reader, writer, status = await _connect(proxy, "127.0.0.1", port)
-        assert (status == 0) is private
-        if private:
+        assert (status == 0) is (private or loopback)
+        if private or loopback:
             writer.write(b"opaque TLS or HTTP bytes")
             await writer.drain()
             assert await reader.readexactly(24) == b"opaque TLS or HTTP bytes"
@@ -82,7 +227,7 @@ async def test_destination_policy_and_owned_tunnel_cleanup(private: bool) -> Non
             assert not reached.is_set()
         await asyncio.wait_for(proxy.close(), 1)
         assert await reader.read() == b""
-        if private:
+        if private or loopback:
             await asyncio.wait_for(disconnected.wait(), 1)
         writer.close()
         await writer.wait_closed()
@@ -99,7 +244,14 @@ async def test_validated_numeric_address_is_dialed_once(monkeypatch: pytest.Monk
     dialed = []
     original = asyncio.open_connection
 
-    def resolve(host: str, *, port: int, allow_private_networks: bool) -> list[ipaddress.IPv4Address]:
+    def resolve(
+        host: str,
+        *,
+        port: int,
+        allow_private_networks: bool,
+        allow_loopback: bool,
+    ) -> list[ipaddress.IPv4Address]:
+        assert not allow_loopback
         resolved.append((host, port, allow_private_networks))
         return [ipaddress.IPv4Address("8.8.8.8")]
 
@@ -278,9 +430,14 @@ async def test_pinned_browser_redirect_destinations(tmp_path: Path, monkeypatch:
     original_open = asyncio.open_connection
     original_parameters = mcp_provider.WorkerBrowserMCP._server_parameters
 
-    def validate(host: str, *, port: int, allow_private_networks: bool) -> object:
+    def validate(host: str, *, port: int, allow_private_networks: bool, allow_loopback: bool) -> object:
         try:
-            return original_validate(host, port=port, allow_private_networks=allow_private_networks)
+            return original_validate(
+                host,
+                port=port,
+                allow_private_networks=allow_private_networks,
+                allow_loopback=allow_loopback,
+            )
         except ValueError:
             if host == "127.0.0.1":
                 loop.call_soon_threadsafe(denied_connection.set)

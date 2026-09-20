@@ -20,7 +20,7 @@ from mindroom.worker_computer.browser_bundle import (
     COMPUTER_BROWSER_MCP_SERVER,
 )
 from mindroom.worker_computer.browser_guard import BrowserURLVerifier
-from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy
+from mindroom.worker_computer.browser_proxy import COMPUTER_PROXY_BYPASS, BrowserDestinationProxy
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 
 if TYPE_CHECKING:
@@ -39,18 +39,31 @@ class WorkerBrowserMCP:
         workspace: Path,
         storage_root: Path,
         allow_private_networks: bool = False,
+        allow_loopback: bool = False,
+        upstream_proxy_url: str | None = None,
     ) -> None:
         self._display = display
         self._workspace = workspace.resolve()
         self._profile = storage_root.resolve() / "browser-profiles" / "native-mcp"
         self._output = self._workspace / "browser"
-        self._verifier = BrowserURLVerifier(allow_private_networks=allow_private_networks)
-        self._proxy = BrowserDestinationProxy(allow_private_networks=allow_private_networks)
+        self._verifier = BrowserURLVerifier(
+            allow_private_networks=allow_private_networks,
+            allow_loopback=allow_loopback,
+        )
+        self._upstream_proxy_url = upstream_proxy_url
+        self._proxy_bypass = COMPUTER_PROXY_BYPASS if upstream_proxy_url and allow_loopback else "<-loopback>"
+        self._proxy = (
+            None
+            if upstream_proxy_url
+            else BrowserDestinationProxy(allow_private_networks=allow_private_networks, allow_loopback=allow_loopback)
+        )
         self._session: PlaywrightMCPSession | None = None
         self._ready = False
 
     def _server_parameters(self) -> StdioServerParameters:
         """Build fixed offline launch options; neither model nor workspace supplies code."""
+        proxy_server = self._proxy.endpoint if self._proxy is not None else self._upstream_proxy_url
+        assert proxy_server is not None
         env = get_default_environment()
         env.update(
             {
@@ -68,9 +81,9 @@ class WorkerBrowserMCP:
                 "--sandbox",
                 "--block-service-workers",
                 "--proxy-server",
-                self._proxy.endpoint,
+                proxy_server,
                 "--proxy-bypass",
-                "<-loopback>",
+                self._proxy_bypass,
                 "--executable-path",
                 COMPUTER_BROWSER_EXECUTABLE,
                 "--user-data-dir",
@@ -100,7 +113,8 @@ class WorkerBrowserMCP:
                 clear_stale_singleton_locks(self._profile)
                 output.mkdir(parents=True, exist_ok=True)
                 await self._verifier.start()
-                await self._proxy.start()
+                if self._proxy is not None:
+                    await self._proxy.start()
                 self._session = PlaywrightMCPSession(self._server_parameters())
                 tools = await self._session.list_tools()
                 verify_browser_mcp_catalog([tool.model_dump(by_alias=True) for tool in tools])
@@ -195,6 +209,7 @@ class WorkerBrowserMCP:
         finally:
             self._ready = False
             try:
-                await self._proxy.close()
+                if self._proxy is not None:
+                    await self._proxy.close()
             finally:
                 await self._verifier.close()

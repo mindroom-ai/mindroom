@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
+import shutil
+import socket
 import stat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlsplit
 
 import pytest
+import pytest_asyncio
+from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
 
-from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
     BrowserTools,
@@ -39,7 +45,7 @@ from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
     from playwright.async_api import Download as PlaywrightDownload
 
@@ -986,6 +992,196 @@ class _FakeContext:
         self.on = MagicMock()
 
 
+@pytest_asyncio.fixture
+async def local_preview_server() -> AsyncIterator[tuple[int, str, list[str]]]:
+    """Serve a real loopback app and an observable forbidden redirect destination."""
+    hits: list[str] = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect(("192.0.2.1", 9))
+        private_host = probe.getsockname()[0]
+    address = ipaddress.ip_address(private_host)
+    if not address.is_private or address.is_loopback:
+        pytest.skip("A private interface is required for the redirect regression")
+
+    async def serve(request: web.Request) -> web.Response:
+        hits.append(request.path)
+        if request.path == "/redirect":
+            location = "/preview"
+            raise web.HTTPFound(location)
+        if request.path == "/private-redirect":
+            location = f"http://{private_host}:{private_port}/blocked"
+            raise web.HTTPFound(location)
+        if request.path == "/alias-redirect":
+            location = f"http://localhost.localdomain:{private_port}/blocked"
+            raise web.HTTPFound(location)
+        if request.path == "/metadata-redirect":
+            location = "http://169.254.169.254/blocked"
+            raise web.HTTPFound(location)
+        if request.path == "/app.js":
+            return web.Response(text="document.title = 'Preview loaded';", content_type="text/javascript")
+        return web.Response(text='<script src="/app.js"></script><h1>Local preview</h1>', content_type="text/html")
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", serve)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    try:
+        await site.start()
+        assert site._server is not None
+        port = site._server.sockets[0].getsockname()[1]
+        private_site = web.TCPSite(runner, private_host, 0)
+        await private_site.start()
+        assert private_site._server is not None
+        private_port = private_site._server.sockets[0].getsockname()[1]
+        yield port, private_host, hits
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("binding", ["computer", "headless", "unbound"])
+@pytest.mark.parametrize(("host", "action"), [("127.0.0.1", "open"), ("localhost", "navigate")])
+async def test_local_preview_requires_computer_binding(
+    binding: str,
+    host: str,
+    action: str,
+    local_preview_server: tuple[int, str, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Only a dedicated Computer browser opens local pages and their subresources."""
+    executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
+    if executable is None:
+        pytest.skip("Chromium required for local preview integration")
+    port, _private_host, hits = local_preview_server
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": executable},
+    )
+    tool = BrowserTools(paths)
+    # Keep the real Computer binding and all network checks; only the display
+    # launch changes so this browser test runs on hosts without Xvnc.
+    original_launch = _persistent_launch_kwargs
+
+    def headless_launch(
+        runtime_paths: RuntimePaths,
+        profile_name: str,
+        *,
+        headless: bool,
+        executable_override: str | None = None,
+    ) -> dict[str, Any]:
+        assert headless is (binding != "computer")
+        return original_launch(runtime_paths, profile_name, headless=True, executable_override=executable_override)
+
+    monkeypatch.setattr("mindroom.custom_tools.browser._persistent_launch_kwargs", headless_launch)
+    if binding == "computer":
+        tool.bind_worker_display(":99", tmp_path / "workspace")
+    elif binding == "headless":
+        tool.bind_worker_headless(tmp_path / "workspace", dict(os.environ))
+    try:
+        url = f"http://{host}:{port}/redirect"
+        if binding != "computer":
+            with pytest.raises(ServerFetchUrlError):
+                await tool.browser(action=action, targetUrl=url)
+            assert not hits
+        else:
+            result = json.loads(await tool.browser(action=action, targetUrl=url))
+            assert result["title"] == "Preview loaded"
+            assert result["url"] == f"http://{host}:{port}/preview"
+            assert "/app.js" in hits
+            with pytest.raises(PlaywrightError, match="ERR_SOCKS_CONNECTION_FAILED"):
+                await tool.browser(action="open", targetUrl=f"http://{host}:{port}/private-redirect")
+            assert "/private-redirect" in hits
+            assert "/blocked" not in hits
+        for denied_host in ["10.0.0.1", "169.254.169.254"]:
+            with pytest.raises(ServerFetchUrlError):
+                await tool.browser(action="open", targetUrl=f"http://{denied_host}/")
+    finally:
+        await tool.aclose()
+
+
+@pytest.mark.asyncio
+async def test_computer_browser_upstream_preserves_http_and_local_preview(  # noqa: PLR0915 - complete browser/proxy lifecycle
+    local_preview_server: tuple[int, str, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Chromium owns proxy transport; redirects cannot bypass its upstream policy."""
+    executable = os.environ.get("MINDROOM_TEST_BROWSER_EXECUTABLE") or shutil.which("chromium")
+    if executable is None:
+        pytest.skip("Chromium required for proxy integration")
+    requests: list[bytes] = []
+
+    async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            headers = await reader.readuntil(b"\r\n\r\n")
+            requests.append(headers.split(b"\r\n", 1)[0])
+            if headers.startswith(b"GET http://8.8.8.8/preview "):
+                body = b"<title>Forwarded HTTP</title>"
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+            else:
+                writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+        except (ConnectionError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    proxy = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    monkeypatch.setenv("all_proxy", f"http://127.0.0.1:{proxy.sockets[0].getsockname()[1]}")
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": executable},
+    )
+    original_launch = _persistent_launch_kwargs
+
+    def headless_launch(
+        runtime_paths: RuntimePaths,
+        profile_name: str,
+        *,
+        headless: bool,
+        executable_override: str | None = None,
+    ) -> dict[str, Any]:
+        assert not headless
+        options = original_launch(runtime_paths, profile_name, headless=True, executable_override=executable_override)
+        options.setdefault("args", []).append(f"--host-resolver-rules=MAP localhost.localdomain {private_host}")
+        return options
+
+    monkeypatch.setattr("mindroom.custom_tools.browser._persistent_launch_kwargs", headless_launch)
+    tool = BrowserTools(paths)
+    tool.bind_worker_display(":99", tmp_path / "workspace")
+    port, private_host, hits = local_preview_server
+    try:
+        for host in ["localhost", "127.0.0.1", "[::ffff:127.0.0.1]", "localhost."]:
+            result = json.loads(await tool.browser(action="open", targetUrl=f"http://{host}:{port}/redirect"))
+            assert result["title"] == "Preview loaded"
+        assert "/app.js" in hits
+        assert not any(b"localhost" in request or b"127.0.0.1" in request for request in requests)
+        result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/preview"))
+        assert result["title"] == "Forwarded HTTP"
+        assert b"GET http://8.8.8.8/preview HTTP/1.1" in requests
+        with pytest.raises(PlaywrightError, match="ERR_TUNNEL_CONNECTION_FAILED"):
+            await tool.browser(action="open", targetUrl="https://8.8.8.8/denied")
+        assert b"CONNECT 8.8.8.8:443 HTTP/1.1" in requests
+        with pytest.raises(PlaywrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"):
+            await tool.browser(action="open", targetUrl=f"http://localhost:{port}/metadata-redirect")
+        assert b"GET http://169.254.169.254/blocked HTTP/1.1" in requests
+        with pytest.raises(PlaywrightError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"):
+            await tool.browser(action="open", targetUrl=f"http://localhost:{port}/alias-redirect")
+        assert any(request.startswith(b"GET http://localhost.localdomain:") for request in requests)
+        assert "/blocked" not in hits
+        with pytest.raises(ServerFetchUrlError):
+            await tool.browser(action="open", targetUrl=f"http://localhost.localdomain:{port}/preview")
+    finally:
+        await tool.aclose()
+        proxy.close()
+        await proxy.wait_closed()
+
+
 def _install_fake_persistent_playwright(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1011,6 +1207,67 @@ def _install_fake_persistent_playwright(
 
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: _FakePlaywrightStarter())
     return launch_kwargs, playwright
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["close", "launch_failure", "cancel_launch", "close_failure"])
+async def test_computer_browser_owns_destination_proxy_lifetime(
+    outcome: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No localhost proxy listener survives browser close or interrupted startup."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    tool = BrowserTools(paths)
+    tool.bind_worker_display(":99", tmp_path / "workspace")
+    adapter = LifecycleBrowser(pause_at="launch" if outcome == "cancel_launch" else None)
+    endpoint = None
+    original_launch = adapter.launch_persistent_context
+
+    async def launch(**kwargs: object) -> LifecycleBrowser:
+        nonlocal endpoint
+        proxy = kwargs.get("proxy")
+        assert isinstance(proxy, dict), "Computer browser must enforce TCP destinations"
+        endpoint = urlsplit(proxy["server"])
+        _reader, writer = await asyncio.open_connection(endpoint.hostname, endpoint.port)
+        writer.close()
+        await writer.wait_closed()
+        if outcome == "launch_failure":
+            msg = "fixture launch failed"
+            raise RuntimeError(msg)
+        return await original_launch(**kwargs)
+
+    monkeypatch.setattr(adapter, "launch_persistent_context", launch)
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
+    opening = asyncio.create_task(tool.browser("start"))
+    try:
+        if outcome == "cancel_launch":
+            await asyncio.wait_for(adapter.reached.wait(), 2)
+            opening.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await opening
+        elif outcome == "launch_failure":
+            with pytest.raises(RuntimeError, match="fixture launch failed"):
+                await opening
+        else:
+            await opening
+            if outcome == "close_failure":
+                monkeypatch.setattr(
+                    adapter,
+                    "close",
+                    AsyncMock(side_effect=[RuntimeError("fixture close failed"), None]),
+                )
+                with pytest.raises(ExceptionGroup, match="Failed to close browser profiles"):
+                    await tool.aclose()
+            else:
+                await tool.aclose()
+        assert endpoint is not None
+        with pytest.raises(ConnectionRefusedError):
+            await asyncio.open_connection(endpoint.hostname, endpoint.port)
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+        await tool.aclose()
 
 
 @pytest.mark.asyncio

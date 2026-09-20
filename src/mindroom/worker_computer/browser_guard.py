@@ -24,10 +24,11 @@ _MAX_CONNECTIONS = 128
 class BrowserURLVerifier:
     """Keep immutable network policy outside model arguments and browser JavaScript."""
 
-    def __init__(self, *, allow_private_networks: bool = False) -> None:
+    def __init__(self, *, allow_private_networks: bool = False, allow_loopback: bool = False) -> None:
         self.token = secrets.token_urlsafe(32)
         self.endpoint = ""
         self._allow_private_networks = allow_private_networks
+        self._allow_loopback = allow_loopback
         self._server: asyncio.Server | None = None
         self._connections: dict[asyncio.Task[None], StreamWriter] = {}
         self._validations: set[asyncio.Task[str]] = set()
@@ -119,6 +120,7 @@ class BrowserURLVerifier:
                 validate_browser_fetch_url,
                 url,
                 allow_private_networks=self._allow_private_networks,
+                allow_loopback=self._allow_loopback,
             ),
         )
         self._validations.add(task)
