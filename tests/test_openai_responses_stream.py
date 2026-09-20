@@ -434,7 +434,8 @@ async def test_terminal_usage_survives_stream_failure(
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
-async def test_terminal_usage_survives_retry(tmp_path: Path, *, sync: bool) -> None:
+@pytest.mark.parametrize("complete_retry", [True, False], ids=["completed", "exhausted"])
+async def test_terminal_usage_survives_retry(tmp_path: Path, *, sync: bool, complete_retry: bool) -> None:
     """Retry totals survive without inventing one provider request from two attempts."""
     failed = _response("resp_failed", "failed")
     failed["error"] = {"code": "server_error", "message": "Generation failed"}
@@ -445,7 +446,12 @@ async def test_terminal_usage_survives_retry(tmp_path: Path, *, sync: bool) -> N
         "output_tokens_details": {"reasoning_tokens": 60},
         "total_tokens": 1100,
     }
-    completed = {**_response("resp_completed", "completed"), "usage": failed["usage"]}
+    retry_status = "completed" if complete_retry else "failed"
+    retried = {
+        **_response("resp_retry", retry_status),
+        "usage": failed["usage"],
+        "error": None if complete_retry else failed["error"],
+    }
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(agents={"status": AgentConfig(display_name="Status")})
     storage = create_state_storage(
@@ -458,17 +464,24 @@ async def test_terminal_usage_survives_retry(tmp_path: Path, *, sync: bool) -> N
     try:
         async with _model(
             _created("resp_failed") + _event("response.failed", response=failed),
-            _created("resp_completed") + _text() + _event("response.completed", response=completed),
+            _created("resp_retry")
+            + (_text() if complete_retry else "")
+            + _event(f"response.{retry_status}", response=retried),
         ) as model:
             model.retries = 1
             model.delay_between_retries = 0
             agent = Agent(id="status", model=model, db=storage)
             if sync:
-                events = list(agent.run("Check status", stream=True, stream_events=True))
+                list(agent.run("Check status", session_id="status_session", stream=True))
             else:
-                events = [event async for event in agent.arun("Check status", stream=True, stream_events=True)]
-        result = next(event for event in events if isinstance(event, RunCompletedEvent))
-        assert result.content == "Ready"
+                async for _ in agent.arun("Check status", session_id="status_session", stream=True):
+                    pass
+        session = storage.get_session("status_session", SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        result = session.runs[-1]
+        assert RunStatus(result.status) is (RunStatus.completed if complete_retry else RunStatus.error)
+        if complete_retry:
+            assert result.content == "Ready"
         assert result.metrics is not None
         assert result.metrics.input_tokens == 2000
         assert result.metrics.cache_read_tokens == 1600
