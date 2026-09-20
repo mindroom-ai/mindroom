@@ -903,3 +903,42 @@ The orchestrator now logs that failure and continues stopping its other services
 A fault-injection regression exercises the real job runtime, coordinator, orchestrator, and journal closure.
 The duplicated job-result continuation policy now has one helper shared by blocking and streaming turns, preserving model selection and substantive prose while treating a quiet schedule's `NO_REPLY` as control data.
 The existing quiet-join regression now covers both drivers; no new loop or continuation owner was introduced.
+
+### Completed-result retention and payload processing (2026-09-20)
+
+The user selected 30-day retention for consumed full results, with permanent compact execution receipts.
+Active work, unread results, and pending approvals remain protected.
+Consulted Fable 5.1 at xhigh: retain the existing snapshot authority and load consumed payloads on demand instead of introducing an archive index or replacing persistence.
+The implementation keeps one JSON snapshot per job and a payload-free in-memory record after durable terminal consumption.
+Exact reads load the saved result on a worker; discovery and completion scans copy metadata only.
+The completion scan indexes unacknowledged jobs rather than scanning all consumed history.
+Startup does not rewrite unchanged snapshots, and shutdown does not rewrite acknowledged clean snapshots.
+Unconsumed outcomes still receive the existing final shutdown flush, including retries after earlier persistence failures.
+
+Hourly retention uses the existing journal's completed turn records and approval continuations.
+A job qualifies only when it is terminal, durably acknowledged, unclaimed, and older than 30 days since its last acknowledged read.
+The source turn must be recorded as completed and its conversation must have no pending approval continuation.
+Missing ownership evidence preserves the result.
+After checking the journal outside the runtime lock, cleanup rechecks the current claim and timestamp before atomically replacing the result with an expiry receipt.
+Receipts retain invocation and authorization metadata and refuse exact-call re-execution, including after restart.
+This bounds retained full results by the agreed policy; receipt metadata still grows with history, and startup still reads the retained snapshots.
+No second durable index, archive protocol, or background execution mode is introduced.
+
+The entire result envelope, including state delta, events, replay, and SDK control data, is encoded on a worker with the existing cumulative size limits.
+Snapshot serialization and copying also run off the event loop, without the redundant copy after dataclass conversion.
+Cancellation drains serialization and preserves an outcome already returned by the tool before releasing resources.
+Cancellation during a saved-result disk read releases its result claim.
+Approval ownership uses one coordinator helper, with the journal retaining the sticky marker across generations.
+Disabled startup uses the public exact turn-record reader to discover sibling sources.
+
+Verification covers retained reads and exact reattachment across restart, expiry and replay refusal, unfinished sources and approval protection, concurrent result claims, cancellation during serialization and disk reads, SDK state/events/control preservation, and persistence failures.
+Focused regressions, real SDK payload measurements, live Matrix lifecycle checks, repository hooks, and an independent Fable re-review are required before this correction is complete.
+
+The correction passed 1,391 integration tests with two optional skips and the repository hooks.
+The SDK probe retained zero full payloads in memory after 200 consumed jobs, while all saved results remained readable after restart.
+Recovery of those 200 records took approximately 35 ms on this machine, compared with approximately 570 ms before removing unchanged snapshot writes.
+The 16 MiB state probe's maximum event-loop heartbeat gap dropped from approximately 1.1 seconds to 39 ms; these are local measurements, not service guarantees.
+A real Matrix/model lifecycle run passed 14 assertions covering old-result reads, follow-ups, cancellation, restart, and preserved streamed prose.
+A second real Matrix/model run passed nine retention assertions after aging one consumed snapshot while the backend was stopped.
+The agent received the actual expiry notice, retained current session state, and did not repeat the original side effect; the receipt survived another restart.
+Fault-injection tests also cover a continuation snapshot published before a durability error and cancellation during worker encoding or a saved-result read.

@@ -27,6 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import HookRegistry
+from mindroom.tool_jobs import agno_execution
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,
@@ -38,12 +39,13 @@ from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.resources import (
     connect_async_execution_resource,
+    current_execution_resources,
     defer_execution_cleanup,
     disconnect_async_execution_resource,
     execution_resources,
 )
 from mindroom.tool_jobs.results import decode_tool_result, encode_tool_result
-from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import ToolJobRuntime, read_job_snapshot, register_background_runtime
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_bridge, prepend_tool_hook_bridge
@@ -56,6 +58,136 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["state", "stream", "control"])
+async def test_large_outcome_encoding_leaves_event_loop_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    """State, events, replay, and control data use the same worker as the tool value."""
+    text = "payload" * 16_384
+    loop_thread = threading.get_ident()
+    encoding_threads: list[int] = []
+
+    def encode(value: object) -> object:
+        if text in str(value):
+            encoding_threads.append(threading.get_ident())
+        return encode_tool_result(value)
+
+    async def tool(run_context: RunContext) -> str:
+        run_context.session_state["large"] = text
+        if kind == "control":
+            message = "stop requested"
+            raise StopAgentRun(message, agent_message=text)
+        return "saved"
+
+    async def streamed() -> AsyncIterator[RunContentEvent | str]:
+        yield RunContentEvent(content=text)
+        yield text
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    function = Function.from_callable(streamed if kind == "stream" else tool)
+    function._agent = Agent(id="leader")
+    function._run_context = RunContext(run_id="payload-run", session_id=context.session_id, session_state={})
+    monkeypatch.setattr(agno_execution, "encode_tool_result", encode)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                result = await model.arun_function_call(FunctionCall(function=function, call_id="payload-call"))
+        assert encoding_threads
+        assert all(thread != loop_thread for thread in encoding_threads)
+        owner = build_execution_identity_from_runtime_context(context)
+        listed = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        job = await runtime.lookup(listed.job_id, owner=owner, depth=0)
+        if kind == "stream":
+            assert decode_tool_result(job.result_payload["events"])[0]["content"] == text
+            assert decode_tool_result(job.result_payload["replay"])[-1]["text"] == text
+        else:
+            assert decode_tool_result(job.result_payload["state_delta"])["large"]["value"] == text
+        if kind == "control":
+            assert isinstance(result[0], AgentRunException)
+            assert result[0].agent_message == text
+        else:
+            assert result[0] is True
+    finally:
+        await runtime.shutdown()
+        register_background_runtime(paths, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_value(  # noqa: PLR0915 - SDK, resources, cancellation, and durable output.
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shutdown: bool,
+) -> None:
+    """An operation that returned before cancellation still owns its completed encoded outcome."""
+    started, release, closed = threading.Event(), threading.Event(), asyncio.Event()
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+
+    async def cleanup() -> None:
+        closed.set()
+
+    async def tool(run_context: RunContext) -> str:
+        resources = current_execution_resources()
+        assert resources is not None
+        reference = resources.acquire()
+        assert defer_execution_cleanup(cleanup)
+        await reference.release()
+        run_context.session_state["changed"] = "encoded state"
+        return "completed before cancellation"
+
+    def encode(value: object) -> object:
+        if isinstance(value, dict) and "changed" in value:
+            started.set()
+            assert release.wait(5)
+        return encode_tool_result(value)
+
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    function = Function.from_callable(tool)
+    function._agent = Agent(id="leader")
+    function._run_context = RunContext(run_id="encoding", session_id=context.session_id, session_state={})
+    monkeypatch.setattr(agno_execution, "encode_tool_result", encode)
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                result = await model.arun_function_call(
+                    FunctionCall(function=function, call_id="call", arguments={"wait_timeout": 0}),
+                )
+                job_id = json.loads(result[3].result)["job_id"]
+                assert await asyncio.to_thread(started.wait, 5)
+                if shutdown:
+                    stopping = asyncio.create_task(runtime.shutdown())
+                    await asyncio.sleep(0)
+                else:
+                    requested = await runtime.cancel(job_id, owner=owner, depth=0)
+                    assert requested.status == "cancel_requested"
+                    stopping = asyncio.create_task(runtime.cancel(job_id, owner=owner, depth=0, await_completion=True))
+                assert not closed.is_set()
+                release.set()
+                await stopping
+                assert closed.is_set()
+                saved = read_job_snapshot(tmp_path / "tool_jobs" / f"{job_id}.json")
+                assert saved.status == "completed"
+                assert saved.result == "completed before cancellation"
+                assert decode_tool_result(saved.result_payload["state_delta"])["changed"]["value"] == "encoded state"
+    finally:
+        release.set()
+        await runtime.shutdown()
+        register_background_runtime(paths, None)
 
 
 @pytest.mark.asyncio

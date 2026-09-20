@@ -6,6 +6,7 @@ import asyncio
 import json
 import threading
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +18,205 @@ from tests.test_background_subagents import _owner
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(tmp_path: Path) -> None:
+    """Acknowledged history keeps disk results and replay ownership without resident payloads."""
+    runtime = ToolJobRuntime(tmp_path)
+    value = "large result" * 10_000
+    calls = 0
+
+    async def operation() -> BackgroundOutcome:
+        nonlocal calls
+        calls += 1
+        return BackgroundOutcome("completed", value, result_payload={"value": value})
+
+    spec = JobSpec("consumed", "tool", 0)
+    await runtime.start(spec, owner=_owner(), operation=operation)
+    waited = await runtime.wait(spec.job_id, owner=_owner(), depth=0)
+    await runtime.cancel(spec.job_id, owner=_owner(), depth=0, await_completion=True)
+    await runtime.acknowledge_wait(spec.job_id, waited.token)
+    path = tmp_path / "tool_jobs" / "consumed.json"
+    published = path.stat().st_mtime_ns
+    try:
+        assert runtime._entries[spec.job_id].job.result_payload is None
+        assert runtime._entries[spec.job_id].cancel_task is None
+        assert len(runtime._entries[spec.job_id].job.result) < 1000
+        assert (await runtime.lookup(spec.job_id, owner=_owner(), depth=0)).result_payload == {"value": value}
+        assert await runtime.pending_outcomes() == []
+    finally:
+        await runtime.shutdown()
+    assert path.stat().st_mtime_ns == published
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        assert path.stat().st_mtime_ns == published
+        assert restored._entries[spec.job_id].job.result_payload is None
+        await restored.start(spec, owner=_owner(), operation=operation, reattach=True)
+        reread = await restored.wait(spec.job_id, owner=_owner(), depth=0)
+        assert reread.job.result == value
+        assert reread.job.result_payload == {"value": value}
+        assert calls == 1
+        await restored.acknowledge_wait(spec.job_id, reread.token)
+        assert restored._entries[spec.job_id].job.result_payload is None
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_saved_result_read_releases_its_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a disk reread must not leave a forgotten waiter owning the result."""
+    runtime = ToolJobRuntime(tmp_path)
+    started, release = threading.Event(), threading.Event()
+    reader = runtime_module.read_job_snapshot
+
+    def gated_read(path: Path) -> runtime_module.BackgroundJob:
+        started.set()
+        assert release.wait(5)
+        return reader(path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    await runtime.start(JobSpec("read", "tool", 0), owner=_owner(), operation=operation)
+    waited = await runtime.wait("read", owner=_owner(), depth=0)
+    await runtime.acknowledge_wait("read", waited.token)
+    monkeypatch.setattr(runtime_module, "read_job_snapshot", gated_read)
+    reading = asyncio.create_task(runtime.wait("read", owner=_owner(), depth=0))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        reading.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        retried = await runtime.wait("read", owner=_owner(), depth=0)
+        assert retried.token is not None
+        assert retried.job.result == "saved"
+        await runtime.release_wait("read", retried.token)
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_published_continuation_failure_remains_discoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pending index follows in-memory ownership when publication fails after replacement."""
+    runtime = ToolJobRuntime(tmp_path)
+    writer = runtime_module.write_json_file_durable
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", "approval needed")
+
+    async def forbidden() -> BackgroundOutcome:
+        pytest.fail("ambiguous admission must not launch execution")
+
+    def published_then_failed(path: Path, payload: dict[str, object]) -> None:
+        writer(path, payload)
+        if payload["generation"] == 1 and payload["status"] == "running":
+            message = "directory sync failed"
+            raise OSError(message)
+
+    try:
+        await runtime.start(JobSpec("continued", "tool", 0), owner=_owner(), operation=approval)
+        waited = await runtime.wait("continued", owner=_owner(), depth=0)
+        await runtime.acknowledge_wait("continued", waited.token)
+        monkeypatch.setattr(runtime_module, "write_json_file_durable", published_then_failed)
+        with pytest.raises(OSError, match="directory sync failed"):
+            await runtime.continue_job("continued", owner=_owner(), depth=0, operation=forbidden)
+        pending = await runtime.pending_outcomes()
+        assert [(job.job_id, job.status) for job in pending] == [("continued", "interrupted")]
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_expiry_rechecks_a_read_completed_during_source_lookup(tmp_path: Path) -> None:
+    """A concurrent reader renews retention before a previously eligible candidate is compacted."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    async def source_finished(job: runtime_module.BackgroundJob) -> bool:
+        waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
+        await runtime.acknowledge_wait(job.job_id, waited.token)
+        return True
+
+    try:
+        await runtime.start(JobSpec("reread", "tool", 0), owner=_owner(), operation=operation)
+        waited = await runtime.wait("reread", owner=_owner(), depth=0)
+        await runtime.acknowledge_wait("reread", waited.token)
+        cutoff = datetime.now(UTC) - timedelta(days=30)
+        runtime._entries["reread"].job.updated_at = (cutoff - timedelta(seconds=1)).isoformat()
+        await runtime.expire_consumed(before=cutoff, source_finished=source_finished)
+        saved = await runtime.lookup("reread", owner=_owner(), depth=0)
+        assert not saved.result_expired
+        assert saved.result == "saved"
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path) -> None:
+    """Only old consumed terminal results with a finished source may expire."""
+    runtime = ToolJobRuntime(tmp_path)
+    calls: list[str] = []
+    specs = [JobSpec(name, "tool", 0) for name in ("expire", "approval", "unread", "recent", "claimed")]
+
+    async def completed() -> BackgroundOutcome:
+        calls.append("executed")
+        return BackgroundOutcome("completed", "saved", result_payload={"value": "saved"})
+
+    async def source_finished(job: runtime_module.BackgroundJob) -> bool:
+        return job.job_id != "approval"
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=30)
+    claimed = None
+    try:
+        for spec in specs:
+            await runtime.start(spec, owner=_owner(), operation=completed)
+            waited = await runtime.wait(spec.job_id, owner=_owner(), depth=0)
+            if spec.job_id != "unread":
+                await runtime.acknowledge_wait(spec.job_id, waited.token)
+            else:
+                await runtime.release_wait(spec.job_id, waited.token)
+            if spec.job_id != "recent":
+                runtime._entries[spec.job_id].job.updated_at = (cutoff - timedelta(seconds=1)).isoformat()
+        claimed = await runtime.wait("claimed", owner=_owner(), depth=0)
+        await runtime.expire_consumed(before=cutoff, source_finished=source_finished)
+        expired = await runtime.lookup("expire", owner=_owner(), depth=0)
+        assert expired.result_expired
+        assert expired.result_payload is None
+        for name in ("approval", "unread", "recent", "claimed"):
+            saved = await runtime.lookup(name, owner=_owner(), depth=0)
+            assert not saved.result_expired
+            assert saved.result_payload == {"value": "saved"}
+        assert [job.job_id for job in await runtime.pending_outcomes()] == ["unread"]
+    finally:
+        if claimed is not None:
+            await runtime.release_wait("claimed", claimed.token)
+        await runtime.shutdown()
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        with pytest.raises(runtime_module.JobAccessError, match="expired"):
+            await restored.start(specs[0], owner=_owner(), operation=completed, reattach=True)
+        with pytest.raises(ValueError, match="already exists"):
+            await restored.start(specs[0], owner=_owner(), operation=completed)
+        assert len(calls) == 5
+        waited = await restored.wait("expire", owner=_owner(), depth=0)
+        assert "expired" in waited.job.result
+        assert waited.job.wait_acknowledged
+    finally:
+        await restored.shutdown()
 
 
 @pytest.mark.asyncio
@@ -495,7 +695,7 @@ async def test_reads_are_copies_and_consumption_hides_pending_results(
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "answer", result_payload={"exact": [1]})
 
-    job = await runtime.start(JobSpec("read", "tool", 0), owner=_owner(), operation=operation)
+    job = await runtime.start(JobSpec("read", "tool", 0, adapter={"context": [1]}), owner=_owner(), operation=operation)
     result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     await runtime.release_wait(job.job_id, result.token)
     writer = runtime_module.write_json_file_durable
@@ -508,12 +708,15 @@ async def test_reads_are_copies_and_consumption_hides_pending_results(
     snapshot = await runtime.lookup(job.job_id, owner=_owner(), depth=0)
     snapshot.result_payload["exact"].append(2)
     pending = await runtime.pending_outcomes()
-    pending[0].result_payload["exact"].append(3)
+    assert pending[0].result_payload is None
+    pending[0].adapter["context"].append(3)
     outcome = await runtime.outcome(job.job_id, job.generation)
     assert outcome is not None
-    outcome.result_payload["exact"].append(4)
+    assert outcome.result_payload is None
+    outcome.adapter["context"].append(4)
     listed = await runtime.list_jobs(owner=_owner(), depth=0)
-    assert listed[0].result_payload == {"exact": [1]}
+    assert listed[0].result_payload is None
+    assert listed[0].adapter == {"context": [1]}
     monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
     waited = await runtime.wait(job.job_id, owner=_owner(), depth=0)
     await runtime.acknowledge_wait(job.job_id, waited.token)

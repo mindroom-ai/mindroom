@@ -362,6 +362,12 @@ class ApprovalResponseCoordinator:
         if continuation.state == "ready":
             self.retry_sources(continuation.room_id, continuation.source_event_ids)
 
+    def requires_background_jobs(self, paused: PausedAttempt, calls: tuple[ApprovalCall, ...]) -> bool:
+        """Recognize managed execution or native job ownership in a new pause."""
+        return (
+            paused.requires_background_tool_jobs and background_tool_jobs_enabled(self.config(), self.runtime_paths)
+        ) or any(call.toolkit_name == "job" for call in calls)
+
     async def advance_pause(
         self,
         current: ApprovalContinuation,
@@ -388,14 +394,7 @@ class ApprovalResponseCoordinator:
             run_id=paused.run_id,
             session_id=paused.session_id,
             calls=plan.calls,
-            requires_background_tool_jobs=(
-                current.requires_background_tool_jobs
-                or (
-                    paused.requires_background_tool_jobs
-                    and background_tool_jobs_enabled(self.config(), self.runtime_paths)
-                )
-                or any(call.toolkit_name == "job" for call in plan.calls)
-            ),
+            requires_background_tool_jobs=self.requires_background_jobs(paused, plan.calls),
             runtime_model_name=paused.runtime_model_name,
             continuation_count=max(current.continuation_count, paused.continuation_count),
             response_text=paused.response_text,

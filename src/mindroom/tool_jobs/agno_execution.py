@@ -23,7 +23,11 @@ from agno.tools.function import FunctionCall, FunctionExecutionResult, ToolResul
 from agno.utils.timer import Timer
 from pydantic import BaseModel
 
-from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.background_tasks import (
+    run_blocking_until_complete,
+    run_coroutine_until_complete,
+    wait_for_future_until_complete,
+)
 from mindroom.custom_tools.job import is_job_function
 from mindroom.tool_jobs.authorization import function_authority
 from mindroom.tool_jobs.consumption import consume_tool_job, consuming_function_call, session_state_delta
@@ -241,22 +245,30 @@ async def _run_operation(
             check_current_execution_authority()
             success, timer, _, result = await original(owned_call)
             value, events, replay = await _drain_result(result.result)
-            isolated = owned_call.function._run_context
-            delta = session_state_delta(baseline, isolated.session_state or {}) if isolated is not None else {}
-            payload = {
-                "value": await run_blocking_until_complete(encode_tool_result, value),
-                "state_delta": encode_tool_result(delta),
-                "error": owned_call.error or result.error,
-                "elapsed": timer.elapsed,
-                "events": encode_tool_result(events),
-                "replay": encode_tool_result(replay),
-                "control": _control_payload(success) if isinstance(success, AgentRunException) else None,
-            }
-            return BackgroundOutcome(
-                "completed" if success is True else "failed",
-                result=value.content if isinstance(value, ToolResult) else str(value),
-                result_payload=payload,
-            )
+
+            def encode_outcome() -> BackgroundOutcome:
+                isolated = owned_call.function._run_context
+                delta = session_state_delta(baseline, isolated.session_state or {}) if isolated is not None else {}
+                return BackgroundOutcome(
+                    "completed" if success is True else "failed",
+                    result=value.content if isinstance(value, ToolResult) else str(value),
+                    result_payload={
+                        "value": encode_tool_result(value),
+                        "state_delta": encode_tool_result(delta),
+                        "error": owned_call.error or result.error,
+                        "elapsed": timer.elapsed,
+                        "events": encode_tool_result(events),
+                        "replay": encode_tool_result(replay),
+                        "control": _control_payload(success) if isinstance(success, AgentRunException) else None,
+                    },
+                )
+
+            encoding = asyncio.create_task(asyncio.to_thread(encode_outcome))
+            try:
+                return await wait_for_future_until_complete(encoding)
+            except asyncio.CancelledError:
+                # The tool already returned; stopping its serializer must not erase that outcome.
+                return encoding.result()
     finally:
         await reference.release()
 

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from agno.tools import Toolkit
 
 from mindroom.tool_jobs.consumption import consume_tool_job
-from mindroom.tool_jobs.runtime import JobAccessError, get_background_runtime
+from mindroom.tool_jobs.runtime import JOB_SUMMARY_MAX_CHARS, JobAccessError, get_background_runtime
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -31,16 +31,13 @@ def is_job_function(function: Function) -> bool:
     )
 
 
-_SUMMARY_MAX_CHARS = 500
-
-
 def _summary(job: BackgroundJob) -> dict[str, Any]:
     return {
         "job_id": job.job_id,
         "tool": job.tool_name,
         "status": job.status,
-        "summary": job.result[:_SUMMARY_MAX_CHARS] if job.result is not None else None,
-        "summary_truncated": job.result is not None and len(job.result) > _SUMMARY_MAX_CHARS,
+        "summary": job.result[:JOB_SUMMARY_MAX_CHARS] if job.result is not None else None,
+        "summary_truncated": job.result is not None and len(job.result) > JOB_SUMMARY_MAX_CHARS,
     }
 
 

@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.event_journal import EventKind
-from mindroom.handled_turns import TurnRecordCodec
 from mindroom.tool_jobs.runtime import read_job_snapshot
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 
@@ -71,12 +69,10 @@ async def index_parked_work(
     """Inspect saved ownership once; never recover, acknowledge, or execute it."""
     parked = await asyncio.to_thread(_saved_sources, runtime_paths)
     if journal is not None:
-        for entity_name in {entity for entity, _source in parked.sources}:
-            for event_id, _anchor, payload in await journal.turn_records(entity_name).load_all():
-                if (entity_name, event_id) in parked.sources:
-                    record = TurnRecordCodec._from_ledger_record(event_id, json.loads(payload))
-                    if record is not None:
-                        parked.sources.update((entity_name, source) for source in record.source_event_ids)
+        for entity_name, event_id in tuple(parked.sources):
+            record = await journal.turn_records(entity_name).load(event_id)
+            if record is not None:
+                parked.sources.update((entity_name, source) for source in record.source_event_ids)
         cursor: tuple[str, str] | None = None
         while owners := await journal.approval_continuations(limit=100, after=cursor):
             for _principal_id, continuation in owners:

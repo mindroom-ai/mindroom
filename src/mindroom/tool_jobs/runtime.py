@@ -51,6 +51,7 @@ type _OutcomeStatus = Literal["awaiting_approval", "completed", "failed", "cance
 _TERMINAL = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
 _READY = _TERMINAL | {"awaiting_approval"}
 _UNAVAILABLE = "Tool job is not available in this conversation."
+JOB_SUMMARY_MAX_CHARS = 500
 logger = get_logger(__name__)
 
 
@@ -99,6 +100,7 @@ class BackgroundJob:
     approval_state: dict[str, Any] = field(default_factory=dict)
     generation: int = 0
     wait_acknowledged: bool = False
+    result_expired: bool = False
 
 
 def read_job_snapshot(path: Path) -> BackgroundJob:
@@ -150,6 +152,8 @@ class _Entry:
     wait_token: str | None = None
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] | None = None
     stopping: bool = False
+    saved: bool = False
+    cold: bool = False
     stopped_outcome: BackgroundOutcome | None = None
     cancel_task: asyncio.Task[BackgroundJob] | None = None
     cancel_settlement_pending: bool = False
@@ -202,6 +206,7 @@ class ToolJobRuntime:
         self._authorize = authorize
         self._cancel = cancel
         self._entries: dict[str, _Entry] = {}
+        self._unacknowledged: set[str] = set()
         self._lock = asyncio.Lock()
         self._closed = False
         self._recovered = False
@@ -261,8 +266,18 @@ class ToolJobRuntime:
         job = entry.job
         if update_timestamp:
             job.updated_at = datetime.now(UTC).isoformat()
-        payload = {"schema_version": 1, **deepcopy(asdict(job))}
-        await run_blocking_until_complete(write_json_file_durable, self._path(job.job_id), payload)
+        if entry.cold:
+            msg = "Cannot persist a job without its saved result"
+            raise RuntimeError(msg)
+        entry.saved = False
+        self._index_consumption(entry)
+        path = self._path(job.job_id)
+
+        def write() -> None:
+            write_json_file_durable(path, {"schema_version": 1, **asdict(job)})
+
+        await run_blocking_until_complete(write)
+        entry.saved = True
         entry.notify_changed()
         self.changed.set()
 
@@ -271,7 +286,7 @@ class ToolJobRuntime:
         async with self._lock:
             self._ensure_open()
             if self._recovered:
-                return [self._snapshot(entry) for entry in self._entries.values()]
+                return [await self._snapshot(entry, include_result=False) for entry in self._entries.values()]
             for path in sorted(self._root.glob("*.json")):
                 if path.stem in self._entries:
                     continue
@@ -285,7 +300,7 @@ class ToolJobRuntime:
                 # Coverage: tests/test_tool_jobs.py::test_legacy_job_snapshot_preserves_outcome_and_consumption
                 # Coverage: tests/test_tool_jobs.py::test_legacy_paused_execution_is_interrupted_without_replay
                 job = await asyncio.to_thread(read_job_snapshot, path)
-                entry = _Entry(job)
+                entry = _Entry(job, saved=True)
                 interrupted = job.status not in _READY
                 if interrupted:
                     outcome = await self._cancel(job) if self._cancel is not None else None
@@ -295,11 +310,14 @@ class ToolJobRuntime:
                         reason="Tool execution was interrupted by a runtime restart; it was not replayed.",
                         outcome=outcome,
                     )
-                await self._persist(entry, update_timestamp=interrupted)
+                if interrupted:
+                    await self._persist(entry)
+                self._index_consumption(entry)
+                self._cool(entry)
                 self._entries[job.job_id] = entry
                 self._restore_approval_signal(entry)
             self._recovered = True
-            return [self._snapshot(entry) for entry in self._entries.values()]
+            return [await self._snapshot(entry, include_result=False) for entry in self._entries.values()]
 
     def _restore_approval_signal(self, entry: _Entry) -> None:
         """Observe future human ingress while a recovered approval awaits reattachment."""
@@ -332,6 +350,8 @@ class ToolJobRuntime:
                 raise RuntimeError(msg)
             if reattach and spec.job_id in self._entries:
                 existing = self._entry(spec.job_id, owner, spec.depth)
+                if existing.job.result_expired:
+                    raise JobAccessError(existing.job.result)
                 if (
                     existing.job.tool_name != spec.tool_name
                     or existing.job.toolkit_name != spec.toolkit_name
@@ -341,7 +361,7 @@ class ToolJobRuntime:
                     raise JobAccessError(_UNAVAILABLE)
                 if existing.wait_token is None:
                     existing.wait_token = initial_wait_token
-                return self._snapshot(existing)
+                return await self._snapshot(existing)
             if spec.job_id in self._entries or self._path(spec.job_id).exists():
                 msg = "Tool job already exists."
                 raise ValueError(msg)
@@ -356,10 +376,11 @@ class ToolJobRuntime:
                 wait_token=initial_wait_token,
             )
             self._entries[job.job_id] = entry
+            self._index_consumption(entry)
             if entry.human_signal is not None:
                 entry.human_signal.subscribe(entry.notify_changed)
             await run_coroutine_until_complete(self._persist_and_launch(entry, operation))
-            return self._snapshot(entry)
+            return await self._snapshot(entry)
 
     async def _persist_and_launch(
         self,
@@ -376,10 +397,12 @@ class ToolJobRuntime:
                 saved = json.loads(await asyncio.to_thread(self._path(entry.job.job_id).read_text))
                 if saved["generation"] == previous[0].generation:
                     entry.job, entry.wait_token = previous
+                    self._index_consumption(entry)
                     raise
             self._release_control(entry)
             if not self._path(entry.job.job_id).exists():
                 self._entries.pop(entry.job.job_id)
+                self._unacknowledged.discard(entry.job.job_id)
             else:
                 entry.job.status = "interrupted"
                 entry.job.result = "Job admission failed after publication; execution was not started."
@@ -455,11 +478,35 @@ class ToolJobRuntime:
         """Inspect an exact job after validating its current caller and authorization."""
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
-            return self._snapshot(entry)
+            return await self._snapshot(entry)
 
-    @staticmethod
-    def _snapshot(entry: _Entry) -> BackgroundJob:
-        return deepcopy(entry.job)
+    def _index_consumption(self, entry: _Entry) -> None:
+        if entry.job.wait_acknowledged:
+            self._unacknowledged.discard(entry.job.job_id)
+        else:
+            self._unacknowledged.add(entry.job.job_id)
+
+    def _cool(self, entry: _Entry) -> None:
+        """Keep only discovery metadata in memory after durable terminal consumption."""
+        if entry.saved and entry.job.status in _TERMINAL and entry.job.wait_acknowledged:
+            entry.job = replace(
+                entry.job,
+                result=entry.job.result[: JOB_SUMMARY_MAX_CHARS + 1] if entry.job.result is not None else None,
+                result_payload=None,
+                approval_state={},
+            )
+            entry.cold = not entry.job.result_expired
+            self._release_control(entry)
+            entry.human_signal = None
+            entry.cancel = None
+            entry.task = None
+            entry.cancel_task = None
+
+    async def _snapshot(self, entry: _Entry, *, include_result: bool = True) -> BackgroundJob:
+        if include_result and entry.cold:
+            return await run_blocking_until_complete(read_job_snapshot, self._path(entry.job.job_id))
+        job = entry.job if include_result else replace(entry.job, result_payload=None, approval_state={})
+        return await run_blocking_until_complete(deepcopy, job)
 
     async def list_jobs(
         self,
@@ -485,7 +532,7 @@ class ToolJobRuntime:
             ]
             entries.sort(key=lambda entry: entry.job.updated_at, reverse=True)
             entries.sort(key=lambda entry: entry.job.status in _TERMINAL)
-            return [self._snapshot(entry) for entry in entries[offset : offset + limit]]
+            return [await self._snapshot(entry, include_result=False) for entry in entries[offset : offset + limit]]
 
     async def wait(
         self,
@@ -508,7 +555,7 @@ class ToolJobRuntime:
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
             if entry.wait_token is not None and entry.wait_token != reserved_token:
-                return _BackgroundWait(self._snapshot(entry), delivery_queued=True)
+                return _BackgroundWait(await self._snapshot(entry), delivery_queued=True)
             entry.wait_token = token
             human_notified = asyncio.Event()
             if entry.human_signal is not None:
@@ -518,13 +565,14 @@ class ToolJobRuntime:
                 async with self._lock:
                     self._entry(job_id, owner, depth)
                     if entry.job.status in _READY:
+                        snapshot = await self._snapshot(entry)
                         retained = True
-                        return _BackgroundWait(self._snapshot(entry), token)
+                        return _BackgroundWait(snapshot, token)
                     if human_notified.is_set():
-                        return _BackgroundWait(self._snapshot(entry))
+                        return _BackgroundWait(await self._snapshot(entry))
                     remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
                     if remaining is not None and remaining <= 0:
-                        return _BackgroundWait(self._snapshot(entry))
+                        return _BackgroundWait(await self._snapshot(entry))
                     changed = entry.changed
                 changed_wait = asyncio.create_task(changed.wait())
                 human_wait = asyncio.create_task(human_notified.wait())
@@ -560,9 +608,13 @@ class ToolJobRuntime:
             if token is None or entry.wait_token != token:
                 msg = "Tool job wait claim no longer belongs to this waiter."
                 raise ValueError(msg)
+            if entry.cold:
+                entry.job = await self._snapshot(entry)
+                entry.cold = False
             entry.job.wait_acknowledged = True
             await self._persist(entry)
             entry.wait_token = None
+            self._cool(entry)
 
     async def cancel(
         self,
@@ -584,7 +636,7 @@ class ToolJobRuntime:
             async with self._lock:
                 if task.done():
                     return task.result()
-                return self._snapshot(entry)
+                return await self._snapshot(entry)
         finally:
             admitted.cancel()
             await asyncio.gather(admitted, return_exceptions=True)
@@ -600,7 +652,7 @@ class ToolJobRuntime:
             if self._closed:
                 return None
             entry = self._entries.get(job_id)
-            if entry is None or not matches(self._snapshot(entry)):
+            if entry is None or not matches(await self._snapshot(entry)):
                 return None
             task = self._cancellation_task(entry)
         return await wait_for_future_until_complete(task)
@@ -622,7 +674,7 @@ class ToolJobRuntime:
                     await self._persist(entry)
                     entry.cancel_settlement_pending = False
                     self._release_control(entry)
-                return self._snapshot(entry)
+                return await self._snapshot(entry)
             previous_status = entry.job.status
             previous_updated_at = entry.job.updated_at
             was_approval = previous_status == "awaiting_approval"
@@ -653,7 +705,7 @@ class ToolJobRuntime:
             await self._persist(entry)
             entry.cancel_settlement_pending = False
             self._release_control(entry)
-            return self._snapshot(entry)
+            return await self._snapshot(entry)
 
     async def _cleanup(self, entry: _Entry) -> BackgroundOutcome | None:
         try:
@@ -721,7 +773,7 @@ class ToolJobRuntime:
             await run_coroutine_until_complete(
                 self._persist_and_launch(entry, operation, previous=(previous, previous_token)),
             )
-            return self._snapshot(entry)
+            return await self._snapshot(entry)
 
     def _unconsumed(self, entry: _Entry) -> bool:
         return not entry.job.wait_acknowledged and entry.wait_token is None and self._allowed(entry.job)
@@ -732,9 +784,9 @@ class ToolJobRuntime:
             if self._closed:
                 return []
             return [
-                self._snapshot(entry)
-                for entry in self._entries.values()
-                if entry.job.status in _READY and self._unconsumed(entry)
+                await self._snapshot(entry, include_result=False)
+                for job_id in tuple(self._unacknowledged)
+                if (entry := self._entries[job_id]).job.status in _READY and self._unconsumed(entry)
             ]
 
     async def outcome(self, job_id: str, generation: int) -> BackgroundJob | None:
@@ -749,7 +801,7 @@ class ToolJobRuntime:
                 or not self._unconsumed(entry)
             ):
                 return None
-            return self._snapshot(entry)
+            return await self._snapshot(entry, include_result=False)
 
     async def source_jobs(
         self,
@@ -770,7 +822,7 @@ class ToolJobRuntime:
             if self._closed:
                 return []
             return [
-                self._snapshot(entry)
+                await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
                 if entry.job.adapter.get("source_event_id") == source_event_id
                 and (entry.job.owner.transport_agent_name or entry.job.owner.agent_name) == transport_agent_name
@@ -794,7 +846,7 @@ class ToolJobRuntime:
             if self._closed:
                 return []
             return [
-                self._snapshot(entry)
+                await self._snapshot(entry, include_result=False)
                 for entry in self._entries.values()
                 if (entry.job.owner.transport_agent_name or entry.job.owner.agent_name) == transport_agent_name
                 and entry.job.owner.room_id == room_id
@@ -805,6 +857,45 @@ class ToolJobRuntime:
                 and self._unconsumed(entry)
             ]
 
+    async def expire_consumed(
+        self,
+        *,
+        before: datetime,
+        source_finished: Callable[[BackgroundJob], Awaitable[bool]],
+    ) -> None:
+        """Replace old consumed results with receipts after their response ownership settles."""
+        async with self._lock:
+            if self._closed:
+                return
+            candidates = [
+                await self._snapshot(entry, include_result=False)
+                for entry in self._entries.values()
+                if entry.job.status in _TERMINAL
+                and entry.job.wait_acknowledged
+                and not entry.job.result_expired
+                and entry.wait_token is None
+                and entry.saved
+                and datetime.fromisoformat(entry.job.updated_at) < before
+            ]
+        for job in candidates:
+            if not await source_finished(job):
+                continue
+            async with self._lock:
+                if self._closed:
+                    return
+                entry = self._entries[job.job_id]
+                if entry.wait_token is not None or entry.job.updated_at != job.updated_at or not entry.saved:
+                    continue
+                entry.job = replace(
+                    entry.job,
+                    result="Tool result expired after 30 days; its execution receipt prevents replay.",
+                    result_payload=None,
+                    approval_state={},
+                    result_expired=True,
+                )
+                entry.cold = False
+                await self._persist(entry, update_timestamp=False)
+
     async def shutdown(self) -> None:
         """Settle owned work as interrupted and release the process liveness lease."""
         if self._shutdown_task is None:
@@ -813,7 +904,7 @@ class ToolJobRuntime:
             self._shutdown_task = asyncio.create_task(self._shutdown())
         await wait_for_future_until_complete(self._shutdown_task)
 
-    async def _shutdown(self) -> None:
+    async def _shutdown(self) -> None:  # noqa: C901 - Drain execution and retry unsaved outcomes before releasing storage.
         tasks = []
         cancellations = []
         failures = []
@@ -845,7 +936,8 @@ class ToolJobRuntime:
                         outcome=outcome,
                     )
                 try:
-                    await self._persist(entry, update_timestamp=settling)
+                    if settling or not entry.saved or not entry.job.wait_acknowledged:
+                        await self._persist(entry, update_timestamp=settling)
                     entry.cancel_settlement_pending = False
                 except Exception as error:
                     failures.append(error)

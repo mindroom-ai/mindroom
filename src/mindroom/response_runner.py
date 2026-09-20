@@ -1432,11 +1432,7 @@ class ResponseRunner:
                     transport_sender_id=request.response_envelope.sender_id,
                     source_kind=request.response_envelope.source_kind,
                     requires_background_tool_jobs=(
-                        (
-                            paused.requires_background_tool_jobs
-                            and background_tool_jobs_enabled(self.deps.runtime.config, self.deps.runtime_paths)
-                        )
-                        or any(call.toolkit_name == "job" for call in plan.calls)
+                        self._approval_responses.requires_background_jobs(paused, plan.calls)
                         or request.response_envelope.source_kind in {"tool_job_completion", "tool_job_recovery"}
                         or request.response_envelope.hook_source in {"tool_job_completion", "tool_job_recovery"}
                     ),

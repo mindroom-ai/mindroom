@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -72,11 +73,13 @@ class ToolJobRuntimeCoordinator:
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
     _admitted: set[tuple[str, int]] = field(default_factory=set, init=False)
+    _journal: EventJournalStore | None = field(default=None, init=False)
 
     async def initialize(self, journal: EventJournalStore | None = None) -> None:
         """Pin execution mode and index parked ownership before dispatch can start."""
         if self._initialized:
             return
+        self._journal = journal
         config = self.config_provider()
         if config is None:
             return
@@ -247,13 +250,18 @@ class ToolJobRuntimeCoordinator:
             release_background_tool_jobs(self.runtime_paths)
             clear_parked_work(self.runtime_paths)
             self._initialized = False
+            self._journal = None
             self._admitted.clear()
 
     async def _run(self) -> None:
+        next_retention = 0.0
         while True:
             self.runtime.changed.clear()
             try:
                 await self.deliver_pending()
+                if asyncio.get_running_loop().time() >= next_retention:
+                    await self._expire_consumed_results()
+                    next_retention = asyncio.get_running_loop().time() + 3600
             except Exception:
                 logger.exception("Background tool job completion scan failed; retrying")
             with suppress(TimeoutError):
@@ -262,11 +270,41 @@ class ToolJobRuntimeCoordinator:
     async def deliver_pending(self) -> None:
         """Retry pending outcomes until the durable journal owns each generation."""
         memberships: dict[AsyncClient, list[str] | None] = {}
-        for job in await self.runtime.pending_outcomes():
+        pending = await self.runtime.pending_outcomes()
+        self._admitted.intersection_update((job.job_id, job.generation) for job in pending)
+        for job in pending:
             try:
                 await self._deliver(job, memberships)
             except Exception:
                 logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
+
+    async def _expire_consumed_results(self) -> None:
+        """Retain results for thirty days and as long as response or approval work owns them."""
+        journal = self._journal
+        if journal is None:
+            return
+        protected_sessions: set[tuple[str, str]] = set()
+        cursor: tuple[str, str] | None = None
+        while owners := await journal.approval_continuations(limit=100, after=cursor):
+            protected_sessions.update((owner.entity_name, owner.session_id) for _principal, owner in owners)
+            cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
+        finished: dict[tuple[str, str], bool] = {}
+
+        async def source_finished(job: BackgroundJob) -> bool:
+            entity = job.owner.transport_agent_name or job.owner.agent_name
+            source = job.adapter.get("source_event_id")
+            if not isinstance(source, str) or (entity, job.owner.session_id) in protected_sessions:
+                return False
+            key = (entity, source)
+            if key not in finished:
+                record = await journal.turn_records(entity).load(source)
+                finished[key] = record is not None and record.completed
+            return finished[key]
+
+        await self.runtime.expire_consumed(
+            before=datetime.now(UTC) - timedelta(days=30),
+            source_finished=source_finished,
+        )
 
     async def _deliver(self, job: BackgroundJob, memberships: dict[AsyncClient, list[str] | None]) -> None:
         generation = (job.job_id, job.generation)
