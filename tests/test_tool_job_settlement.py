@@ -7,14 +7,52 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+from structlog.testing import capture_logs
 
+from mindroom.config.main import Config
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime
+from tests.bot_helpers import _runtime_bound_config
+from tests.conftest import runtime_paths_for
 from tests.test_background_subagents import _owner
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+@pytest.mark.asyncio
+async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job write failure must remain visible while later services and the shared journal close."""
+    config = _runtime_bound_config(Config(), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
+    orchestrator.config = config
+    orchestrator._shared_journal_store()
+    runtime = ToolJobRuntime(orchestrator.storage_path)
+    orchestrator._tool_job_runtime._runtime = runtime
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "retained result")
+
+    def fail_save(_path: Path, _payload: dict[str, object]) -> None:
+        msg = "job storage unavailable"
+        raise OSError(msg)
+
+    try:
+        await runtime.start(JobSpec("shutdown", "tool", 0), owner=_owner(), operation=operation)
+        await runtime.wait("shutdown", owner=_owner(), depth=0)
+        with monkeypatch.context() as patch, capture_logs() as logs:
+            patch.setattr(runtime_module, "write_json_file_durable", fail_save)
+            await orchestrator.stop()
+        assert orchestrator._open_journal is None
+        assert any(entry["event"] == "Background tool job runtime shutdown failed" for entry in logs)
+        assert any(entry["event"] == "All agent bots stopped" for entry in logs)
+    finally:
+        await orchestrator.stop()
 
 
 @pytest.mark.asyncio

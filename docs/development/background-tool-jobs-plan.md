@@ -897,3 +897,9 @@ The reserved `job` function name remains an intentional, documented contract.
 No change was made to ad hoc completion's retrieval strategy without a demonstrated result-ownership or delivery failure.
 The suggested codec rewrite was rejected because a file-size precheck followed by an unbounded read does not preserve the existing cumulative allocation bound, especially when files grow or multiple artifacts are encoded.
 Further join-loop abstractions remain deferred because a lower line count alone does not justify another driver abstraction.
+
+The focused re-review confirmed the corrections and found that a shutdown snapshot error could still abort the orchestrator before later cleanup.
+The orchestrator now logs that failure and continues stopping its other services and shared journal, matching the existing script-runtime shutdown boundary.
+A fault-injection regression exercises the real job runtime, coordinator, orchestrator, and journal closure.
+The duplicated job-result continuation policy now has one helper shared by blocking and streaming turns, preserving model selection and substantive prose while treating a quiet schedule's `NO_REPLY` as control data.
+The existing quiet-join regression now covers both drivers; no new loop or continuation owner was introduced.

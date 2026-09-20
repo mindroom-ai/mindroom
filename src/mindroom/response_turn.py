@@ -895,6 +895,31 @@ def _advance_turn_continuation(
     return advanced
 
 
+def _advance_job_continuation(
+    ctx: ResponseTurnContext,
+    adapter: BlockingTurnAdapter | StreamingTurnAdapter[Any],
+    sinks: TurnSinks,
+    run: TurnRunState,
+    resolution: CompletedAttempt,
+    continuation: DynamicContinuationRunState,
+    prompt: str,
+) -> DynamicContinuationRunState:
+    """Retain model selection and substantive prose while retrieving ready job results."""
+    return _advance_turn_continuation(
+        sinks,
+        adapter.release_attempt_entity,
+        run,
+        resolution,
+        continuation,
+        next_prompt=prompt,
+        active_model_name=continuation.active_model_name,
+        apply_model_to_team_members=continuation.apply_model_to_team_members,
+        preserve_response=not (
+            ctx.allow_no_report_response and is_silent_schedule_no_report_response(resolution.replayable_text)
+        ),
+    )
+
+
 def _enter_scope_context(
     open_scope: Callable[[], AbstractContextManager[ScopeSessionContext | None]],
 ) -> tuple[AbstractContextManager[ScopeSessionContext | None], ScopeSessionContext | None]:
@@ -1157,19 +1182,14 @@ async def _settle_joined_blocking_attempt(
                     ),
                 )
             else:
-                joined_continuation = _advance_turn_continuation(
+                joined_continuation = _advance_job_continuation(
+                    ctx,
+                    adapter,
                     sinks,
-                    adapter.release_attempt_entity,
                     run,
                     resolution,
                     continuation,
-                    next_prompt=joined.prompt,
-                    active_model_name=continuation.active_model_name,
-                    apply_model_to_team_members=continuation.apply_model_to_team_members,
-                    preserve_response=not (
-                        ctx.allow_no_report_response
-                        and is_silent_schedule_no_report_response(resolution.replayable_text)
-                    ),
+                    joined.prompt,
                 )
     if joined_continuation is not None:
         return joined_continuation
@@ -1418,19 +1438,14 @@ async def stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                             if isinstance(joined, str):
                                 yield BackgroundWaitChunk(joined)
                             else:
-                                continuation = _advance_turn_continuation(
+                                continuation = _advance_job_continuation(
+                                    ctx,
+                                    adapter,
                                     sinks,
-                                    adapter.release_attempt_entity,
                                     run,
                                     resolution,
                                     continuation,
-                                    next_prompt=joined.prompt,
-                                    active_model_name=continuation.active_model_name,
-                                    apply_model_to_team_members=continuation.apply_model_to_team_members,
-                                    preserve_response=not (
-                                        ctx.allow_no_report_response
-                                        and is_silent_schedule_no_report_response(resolution.replayable_text)
-                                    ),
+                                    joined.prompt,
                                 )
                                 keep_going = True
                     if not keep_going:

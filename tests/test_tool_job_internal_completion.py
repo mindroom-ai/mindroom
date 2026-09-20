@@ -46,6 +46,7 @@ from tests.test_subagent_runtime import _job
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize(
     ("first", "last", "expected"),
     [
@@ -60,6 +61,7 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
     first: str,
     last: str,
     expected: str,
+    streaming: bool,
 ) -> None:
     """Quiet continuations retain substantive findings while treating NO_REPLY as control data."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
@@ -81,6 +83,9 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
         text = next(answers)
         return CompletedAttempt(response_text=text, replayable_text=text, has_visible_content=True)
 
+    async def stream_attempt(run: TurnRunState, state: DynamicContinuationRunState) -> AsyncIterator[AttemptResolved]:
+        yield AttemptResolved(await attempt(run, state))
+
     try:
         await runtime.start(
             JobSpec("quiet", "tool", 0, adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND}),
@@ -90,13 +95,22 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
         waited = await runtime.wait("quiet", owner=owner, depth=0)
         await runtime.release_wait("quiet", waited.token)
         with tool_runtime_context(context):
-            answer = await run_blocking_response_turn(
-                _ctx(allow_no_report_response=True),
-                _blocking_adapter(_AdapterLog(), attempt),
-                TurnSinks(turn_recorder=recorder),
-                continuation=_continuation(),
-            )
-        assert answer == expected
+            if streaming:
+                async for _ in stream_response_turn(
+                    _ctx(allow_no_report_response=True),
+                    _streaming_adapter(_AdapterLog(), stream_attempt),
+                    TurnSinks(turn_recorder=recorder),
+                    continuation=_continuation(),
+                ):
+                    pass
+            else:
+                answer = await run_blocking_response_turn(
+                    _ctx(allow_no_report_response=True),
+                    _blocking_adapter(_AdapterLog(), attempt),
+                    TurnSinks(turn_recorder=recorder),
+                    continuation=_continuation(),
+                )
+                assert answer == expected
         assert recorder.assistant_text == expected
     finally:
         register_background_runtime(paths, None)

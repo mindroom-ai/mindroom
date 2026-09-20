@@ -2481,7 +2481,10 @@ class _MultiAgentOrchestrator:
             await _run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
             logger.exception("Background script runtime shutdown failed")
-        await _run_shutdown_step("tool_job_runtime", self._tool_job_runtime.stop())
+        try:
+            await _run_shutdown_step("tool_job_runtime", self._tool_job_runtime.stop())
+        except Exception:
+            logger.exception("Background tool job runtime shutdown failed")
         await _run_shutdown_step("approval_runtime", shutdown_approval_runtime())
         await _run_shutdown_step("config_reload", self.config_reload.cancel())
         owner = self._mcp_catalog_change_task_owner
