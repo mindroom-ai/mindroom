@@ -6,6 +6,7 @@ import json
 import math
 import re
 import sqlite3
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -103,6 +104,8 @@ class UsageRunNode:
     # None means request detail was absent or unusable, without discarding run totals.
     requests: tuple[UsageRequestMetrics, ...] | None = None
     kind: UsageKind = "run"
+    voice_seconds: float | None = None
+    voice_finalized: bool = False
 
     @property
     def run_count(self) -> int:
@@ -572,7 +575,7 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         raise TypeError
     run = cast("dict[str, object]", raw_run)
     kind = run.get("kind", "run")
-    if kind not in {"run", "compaction_summary", "memory_auto_flush", "dynamic_workflow"}:
+    if kind not in {"run", "compaction_summary", "memory_auto_flush", "dynamic_workflow", "live_voice"}:
         raise ValueError
     parent_run_id = run.get("parent_run_id")
     if parent_run_id is not None:
@@ -597,6 +600,15 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         or (isinstance(created_at, float) and not math.isfinite(created_at))
     ):
         created_at = None
+    voice_seconds = run.get("voice_seconds") if kind == "live_voice" else None
+    voice_finalized = run.get("voice_finalized", False)
+    if kind == "live_voice" and (
+        isinstance(voice_seconds, bool)
+        or not isinstance(voice_seconds, (int, float))
+        or not 0 <= voice_seconds <= sys.float_info.max
+        or not isinstance(voice_finalized, bool)
+    ):
+        raise ValueError
     return UsageRunNode(
         team_id=_optional_string(run.get("team_id")),
         requester_id=(
@@ -612,6 +624,8 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         model_metrics=_extract_model_metrics(run_metrics.get("details")),
         requests=_extract_request_metrics(run.get("requests")),
         kind=cast("UsageKind", kind),
+        voice_seconds=float(voice_seconds) if isinstance(voice_seconds, (int, float)) else None,
+        voice_finalized=voice_finalized is True,
     )
 
 

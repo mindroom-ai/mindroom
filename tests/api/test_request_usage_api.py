@@ -29,6 +29,92 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.parametrize("route", ["/api/usage", "/api/usage/export"])
+def test_live_voice_duration_exports_separately_from_delegate_tokens(
+    temp_config_file: Path,
+    tmp_path: Path,
+    usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],  # noqa: F811
+    route: str,
+) -> None:
+    """Cumulative voice updates must not duplicate duration or change delegated token counters."""
+    env, key = usage_service_auth
+    headers = {"Cf-Access-Jwt-Assertion": _service_assertion(key)}
+    if route == "/api/usage":
+        env = {"MINDROOM_API_KEY": "test-usage-key"}
+        headers = {"Authorization": "Bearer test-usage-key"}
+    client, storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
+    storage = create_state_storage(
+        "test_agent",
+        storage_root / "agents/test_agent",
+        subdir="sessions",
+        session_table="test_agent_sessions",
+    )
+    run = _run()
+    run.agent_id = "test_agent"
+    assert run.metrics is not None
+    storage.upsert_session(
+        AgentSession(
+            session_id="session",
+            agent_id="test_agent",
+            session_data={"session_metrics": run.metrics.to_dict()},
+        ),
+    )
+    storage.upsert_run(run, session_id="session")
+    for seconds, finalized in [(12.0, False), (15.5, False), (15.5, True)]:
+        save_independent_usage(
+            storage,
+            session_id="session",
+            usage_id="live_voice:provider-session",
+            kind="live_voice",
+            requester_id="@alice:example.org",
+            run={
+                "model_provider": "OpenAI",
+                "model": "gpt-live-1",
+                "created_at": 1_700_000_000,
+                "voice_seconds": seconds,
+                "voice_finalized": finalized,
+            },
+        )
+    storage.delete_runs(["run-1"])
+    storage.close()
+    runner, workers = _install_manual_export_runner(client)
+    try:
+        assert client.get(route).status_code == 401
+        assert client.get(route, headers=headers).status_code == 202
+        workers.run_next()
+        response = client.get(route, headers=headers)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["voice_breakdown"] == [
+            {
+                "entity": "test_agent",
+                "user_id": "@alice:example.org",
+                "provider": "OpenAI",
+                "model": "gpt-live-1",
+                "created_at": 1_700_000_000,
+                "duration_seconds": 15.5,
+                "finalized": True,
+            },
+        ]
+        assert payload["totals"] == {
+            "input_tokens": 250_000,
+            "output_tokens": 14,
+            "total_tokens": 250_014,
+            "cache_read_tokens": 210,
+            "cache_write_tokens": 90,
+            "reasoning_tokens": 7,
+            "audio_input_tokens": 3,
+            "audio_output_tokens": 5,
+            "audio_total_tokens": 8,
+        }
+        assert sum(row["run_count"] for row in payload["model_breakdown"]) == 1
+        assert all(row["model"] != "gpt-live-1" for row in payload["model_breakdown"])
+        assert payload["voice_coverage"]["unavailable_sources"] == 0
+    finally:
+        runner.close()
+        config_lifecycle.app_state(client.app).usage_export_runner = None
+
+
+@pytest.mark.parametrize("route", ["/api/usage", "/api/usage/export"])
 def test_request_export_flag_authentication_and_cache_variants(
     temp_config_file: Path,
     tmp_path: Path,

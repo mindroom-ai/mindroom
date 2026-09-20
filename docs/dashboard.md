@@ -356,6 +356,18 @@ Existing usage ledgers are not backfilled; initial migration can import request 
 Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
 Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.
 
+Organization reports also include `voice_breakdown` and `voice_coverage` for GPT-Live calls.
+Each voice row contains `entity`, canonical `user_id` (or `null`), `provider`, `model`, epoch-seconds `created_at`, `duration_seconds`, and `finalized`.
+Missing caller attribution retains duration with `user_id: null` and marks voice coverage incomplete.
+Rows represent provider sessions, so reconnecting creates a separate row even within the same call.
+Duration comes from the provider's cumulative usage reports; repeated updates replace the saved snapshot instead of adding the cumulative total again.
+`finalized: true` means the provider's final usage event was received and saved; otherwise duration is the latest reported running total, including calls interrupted by connection loss or a process crash.
+`created_at` records when the provider session was first observed, and duration is not split across UTC days.
+Sum `duration_seconds` across these rows to group voice use by caller, agent, or model; apply duration pricing separately from delegated agent token pricing.
+Voice duration does not increase token totals, request rows, or AI reply counts, and delegated agent tokens continue through normal usage accounting.
+Only new recorded calls appear; older voice duration and usage never reported or saved cannot be reconstructed.
+These rows contain no audio, transcripts, conversation IDs, or provider session IDs and are restricted to organization reports.
+
 Portable compaction summaries, background memory auto-flush extraction, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
 Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, or `kind: dynamic_workflow`; ordinary run requests use `kind: run`.
 Helpers contribute zero to `run_count`, preserving its AI reply count meaning.

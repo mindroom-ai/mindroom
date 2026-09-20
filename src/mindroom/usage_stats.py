@@ -41,6 +41,7 @@ __all__ = [
     "UsageReport",
     "UsageRequestBreakdownRow",
     "UsageUserBreakdownRow",
+    "UsageVoiceBreakdownRow",
     "collect_admin_usage",
     "collect_private_usage",
     "collect_self_usage",
@@ -97,6 +98,13 @@ _REQUEST_COVERAGE_NOTE = (
     "Missing, unreadable, mixed-model, or mismatched details are excluded without changing aggregate totals. "
     "Usage lost before request capture, nested team-member requests, and deleted sessions cannot be reconstructed. "
     "Unavailable sources include retained session usage without matching request detail."
+)
+_VOICE_COVERAGE_NOTE = (
+    "GPT-Live provider-reported session duration, billed separately from delegated agent tokens. "
+    "Each row is one provider session; created_at is when that session was first observed. "
+    "Duration is not split across UTC days. Unfinalized rows are the last reported running totals. "
+    "Sources with missing caller attribution are marked unavailable. "
+    "Earlier unrecorded calls, unreceived usage, and deleted sessions are unavailable."
 )
 
 
@@ -324,6 +332,31 @@ class UsageRequestBreakdownRow:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageVoiceBreakdownRow:
+    """One provider voice session, without conversation content or identifiers."""
+
+    entity: str
+    user_id: str | None
+    model_provider: str
+    model: str
+    created_at: int | float
+    duration_seconds: float
+    finalized: bool
+
+    def to_dict(self) -> dict[str, object]:
+        """Return voice duration separately from token counters."""
+        return {
+            "entity": self.entity,
+            "user_id": self.user_id,
+            "provider": self.model_provider,
+            "model": self.model,
+            "created_at": self.created_at,
+            "duration_seconds": self.duration_seconds,
+            "finalized": self.finalized,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class UsageReport:
     """Content-free retained token usage, with optional request detail."""
 
@@ -343,6 +376,8 @@ class UsageReport:
     private_agent_coverage: UsageCoverage | None = None
     request_breakdown: tuple[UsageRequestBreakdownRow, ...] = ()
     request_coverage: UsageCoverage | None = None
+    voice_breakdown: tuple[UsageVoiceBreakdownRow, ...] = ()
+    voice_coverage: UsageCoverage | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Return the stable custom-tool payload fields."""
@@ -356,6 +391,9 @@ class UsageReport:
             "model_coverage": self.model_coverage.to_dict(),
         }
         if self.scope == "admin":
+            payload["voice_breakdown"] = [row.to_dict() for row in self.voice_breakdown]
+            if self.voice_coverage is not None:
+                payload["voice_coverage"] = self.voice_coverage.to_dict()
             payload["user_breakdown"] = [row.to_dict() for row in self.user_breakdown]
             payload["user_coverage"] = replace(self.model_coverage, note=_USER_COVERAGE_NOTE).to_dict()
             if self.request_coverage is not None:
@@ -846,8 +884,11 @@ def _collect_usage(
     entity_models: dict[str, _ModelUsageAccumulator] = {}
     private_usage = _PrivateUsageAccumulator(include_daily)
     scanned_sources: set[str] = set()
+    voice_rows: list[UsageVoiceBreakdownRow] = []
+    voice_unavailable: set[str] = set()
     for discovered in sources:
         if isinstance(discovered, UsageStorageDiagnostic):
+            voice_unavailable.add(discovered.path_label)
             usage.unavailable_sources.add(discovered.path_label)
             usage.cumulative_model_unavailable_sources.add(discovered.path_label)
             model_usage.unavailable_sources.add(discovered.path_label)
@@ -860,6 +901,7 @@ def _collect_usage(
         mode = "runs" if scope == "self" and not source.requester_isolated else "both"
         for item in iter_usage_storage_rows(source, mode=mode):
             if isinstance(item, UsageStorageDiagnostic):
+                voice_unavailable.add(item.path_label)
                 usage.unavailable_sources.add(item.path_label)
                 usage.cumulative_model_unavailable_sources.add(item.path_label)
                 model_usage.unavailable_sources.add(item.path_label)
@@ -894,6 +936,7 @@ def _collect_usage(
             )
             if scope == "admin":
                 _add_entity_runs(entity_models, row, entries, include_daily=include_daily)
+                voice_rows.extend(_voice_rows(row, voice_unavailable))
             request_usage.add_row(row, entries)
             if scope == "admin" or _self_source_allowed(source, expected_agent):
                 private_usage.add_row(row, entries, scope=scope, requester_id=expected_requester)
@@ -936,6 +979,8 @@ def _collect_usage(
         private_agent_breakdown=private_usage.rows() if expected_agent is None else (),
         private_agent_coverage=private_usage.coverage() if expected_agent is None else None,
         request_breakdown=request_usage.rows(),
+        voice_breakdown=tuple(sorted(voice_rows, key=lambda row: (row.created_at, row.entity, row.user_id or ""))),
+        voice_coverage=UsageCoverage(len(scanned_sources), len(voice_unavailable), _VOICE_COVERAGE_NOTE),
         request_coverage=UsageCoverage(
             scanned_sources=len(scanned_sources),
             unavailable_sources=len(
@@ -946,6 +991,35 @@ def _collect_usage(
         if request_usage.enabled
         else None,
     )
+
+
+def _voice_rows(row: UsageSessionRow, unavailable: set[str]) -> list[UsageVoiceBreakdownRow]:
+    if not row.runs_available:
+        unavailable.add(row.source.path_label)
+    entity = _admin_entity_id(row)
+    if entity is None:
+        return []
+    result = []
+    for run in row.runs:
+        if run.kind != "live_voice":
+            continue
+        if run.voice_seconds is None or run.created_at is None or run.model_provider is None or run.model is None:
+            unavailable.add(row.source.path_label)
+            continue
+        if run.requester_id is None:
+            unavailable.add(row.source.path_label)
+        result.append(
+            UsageVoiceBreakdownRow(
+                entity,
+                run.requester_id,
+                run.model_provider,
+                run.model,
+                run.created_at,
+                run.voice_seconds,
+                run.voice_finalized,
+            ),
+        )
+    return result
 
 
 def _add_entity_runs(

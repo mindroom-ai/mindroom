@@ -32,6 +32,7 @@ from agno.session import AgentSession as AgnoAgentSession
 from agno.tools.function import Function, FunctionCall
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
+from mindroom.agent_storage import create_session_storage, run_session_storage_operation, save_independent_usage
 from mindroom.agents import create_agent
 from mindroom.agno_compat_prepared_tools import prepare_agent_tools
 from mindroom.background_tasks import (
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -100,6 +102,44 @@ class CallAgentResponse:
     text: str
     tool_names: tuple[str, ...] = ()
     turn_id: str | None = None
+
+
+async def record_call_voice_usage(
+    usage: LiveVoiceUsage,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    """Upsert billed voice duration in the same caller-owned ledger as its delegate."""
+    agent_name = execution_identity.agent_name
+    session_id = execution_identity.session_id
+    if agent_name is None or session_id is None:
+        msg = "Voice usage requires an owned agent conversation"
+        raise ValueError(msg)
+    await run_session_storage_operation(
+        functools.partial(create_session_storage, agent_name, config, runtime_paths, execution_identity),
+        functools.partial(
+            save_independent_usage,
+            session_id=session_id,
+            usage_id=f"live_voice:{usage.provider_session_id}",
+            kind="live_voice",
+            requester_id=execution_identity.requester_id,
+            initial_session=AgnoAgentSession(
+                session_id=session_id,
+                agent_id=agent_name,
+                created_at=int(usage.created_at),
+                updated_at=int(usage.created_at),
+            ),
+            run={
+                "model_provider": "OpenAI",
+                "model": usage.model,
+                "created_at": usage.created_at,
+                "voice_seconds": usage.duration_seconds,
+                "voice_finalized": usage.finalized,
+            },
+        ),
+    )
 
 
 @dataclass(frozen=True)

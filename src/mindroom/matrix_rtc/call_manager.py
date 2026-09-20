@@ -13,6 +13,7 @@ import asyncio
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -38,7 +39,7 @@ from mindroom.matrix_rtc.call_session import (
     CallStartRevokedError,
     required_device_id,
 )
-from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools
+from mindroom.matrix_rtc.call_tools import CallAgentTooling, build_call_tools, record_call_voice_usage
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -1255,6 +1256,12 @@ class CallManager:
                 api_key=backend.realtime_api_key,
                 voice=live_config.voice,
                 respond=tooling.responder,
+                record_usage=partial(
+                    record_call_voice_usage,
+                    config=self._config,
+                    runtime_paths=self._runtime_paths,
+                    execution_identity=tooling.execution_identity,
+                ),
                 close_responder=tooling.close,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 on_conversation_turn=transcript.record,

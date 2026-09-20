@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import time
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
-from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions, LiveVoiceAgentOptions, RealtimeVoiceBridge
+from mindroom.matrix_rtc.voice_agent import (
+    CallVoiceAgentOptions,
+    LiveVoiceAgentOptions,
+    LiveVoiceUsage,
+    RealtimeVoiceBridge,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -172,6 +180,13 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             self._delegations: _LiveDelegationRunner | None = None
             self._live_session: GPTLiveSession | None = None
             self._provider_close_task: asyncio.Task[None] | None = None
+            self._exiting = False
+            self._exit_task: asyncio.Task[None] | None = None
+            self._voice_started_at = time.time()
+            self._voice_usage: dict[str, LiveVoiceUsage] = {}
+            self._failed_usage: dict[str, LiveVoiceUsage] = {}
+            self._usage_tasks: set[asyncio.Task[None]] = set()
+            self._usage_lock = asyncio.Lock()
 
         async def on_enter(self) -> None:
             session = self.duplex_session
@@ -193,7 +208,11 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 self._delegations.on_reconnected()
 
         def _on_server_event(self, event: dict[str, Any]) -> None:
-            if event.get("type") != "session.closed" or self._provider_close_task is not None:
+            if event.get("type") == "session.started":
+                self._voice_started_at = time.time()
+            if event.get("type") in {"session.usage.updated", "session.closed"}:
+                self._capture_usage(event)
+            if event.get("type") != "session.closed" or self._provider_close_task is not None or self._exiting:
                 return
             if self._delegations is not None:
                 self._delegations.stop()
@@ -205,16 +224,68 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             if options.on_session_terminated is not None:
                 options.on_session_terminated(True)
 
+        def _capture_usage(self, event: dict[str, Any]) -> None:
+            session_id = self._live_session.session_id if self._live_session is not None else None
+            raw_usage = event.get("usage")
+            seconds = raw_usage.get("seconds") if isinstance(raw_usage, dict) else None
+            if options.record_usage is None or not session_id:
+                return
+            if (
+                isinstance(seconds, bool)
+                or not isinstance(seconds, (int, float))
+                or not 0 <= seconds <= sys.float_info.max
+            ):
+                logger.warning("call_live_usage_invalid")
+                return
+            previous = self._voice_usage.get(session_id)
+            usage = LiveVoiceUsage(
+                provider_session_id=session_id,
+                model=options.model,
+                created_at=previous.created_at if previous is not None else self._voice_started_at,
+                duration_seconds=max(float(seconds), previous.duration_seconds if previous is not None else 0.0),
+                finalized=event["type"] == "session.closed" or (previous is not None and previous.finalized),
+            )
+            self._voice_usage[session_id] = usage
+            task = asyncio.create_task(self._record_usage(usage))
+            self._usage_tasks.add(task)
+            task.add_done_callback(self._usage_tasks.discard)
+
+        async def _record_usage(self, usage: LiveVoiceUsage) -> None:
+            if options.record_usage is not None:
+                async with self._usage_lock:
+                    try:
+                        await options.record_usage(usage)
+                    except Exception as error:
+                        self._failed_usage[usage.provider_session_id] = usage
+                        logger.warning("call_live_usage_save_failed", error_type=type(error).__name__)
+                    else:
+                        self._failed_usage.pop(usage.provider_session_id, None)
+
         async def on_exit(self) -> None:
+            self._exiting = True
+            if self._exit_task is None:
+                self._exit_task = asyncio.create_task(self._close())
+            await wait_for_future_until_complete(self._exit_task)
+
+        async def _close(self) -> None:
+            if self._delegations is not None:
+                await self._delegations.aclose()
             if self._live_session is not None:
+                # Keep usage subscribed while the provider drains its final duration.
+                # A disconnected SDK session re-raises its already-reported transport error.
+                await asyncio.gather(self._live_session.aclose(), return_exceptions=True)
                 self._live_session.off("delegation_created", self._on_delegation)
                 self._live_session.off("session_reconnected", self._on_reconnected)
                 self._live_session.off("openai_server_event_received", self._on_server_event)
                 self._live_session = None
-            if self._delegations is not None:
-                await self._delegations.aclose()
             if self._provider_close_task is not None:
                 await asyncio.gather(self._provider_close_task, return_exceptions=True)
+            if self._usage_tasks:
+                await asyncio.gather(*self._usage_tasks)
+            for usage in tuple(self._failed_usage.values()):
+                await self._record_usage(usage)
+            if self._failed_usage:
+                logger.error("call_live_usage_unpersisted", sessions=len(self._failed_usage))
 
     return LiveCallAgent()
 
