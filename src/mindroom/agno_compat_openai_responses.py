@@ -14,6 +14,7 @@ from openai.types.responses import (
     ResponseCreatedEvent,
     ResponseErrorEvent,
     ResponseFailedEvent,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseOutputItemDoneEvent,
 )
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
     from agno.media import File
     from agno.metrics import MessageMetrics
+    from agno.models.base import MessageData
     from agno.models.message import Message
     from agno.models.openai import OpenAIResponses
     from agno.models.response import ModelResponse
@@ -94,6 +96,16 @@ _RESPONSES_FILE_MIME_TYPES = {
 # Remove when: The pinned Agno parser preserves cache-write tokens while still
 # accepting provider payloads that predate the newer field.
 # Coverage: tests/test_openai_models.py::test_openai_metrics_preserve_sdk_input_details.
+
+# AGNO_COMPAT: Failed Responses streams discard received terminal usage.
+# Reason: Agno parses usage only on response.completed, then transfers it to
+# assistant metrics only at clean EOF; failure cleanup therefore counts zero.
+# Upstream issue: None identified; tracked locally at https://github.com/mindroom-ai/mindroom/issues/1952.
+# Upstream PR: None identified; PR #10135 does not preserve failed-stream usage.
+# Remove when: Agno preserves reported completed, incomplete, and failed usage
+# on stream failure or cancellation without counting successful streams twice.
+# Coverage: tests/test_openai_responses_stream.py::test_terminal_usage_survives_stream_failure;
+# tests/test_openai_responses_stream.py::test_codex_blocking_usage_is_not_counted_twice.
 
 
 def _stream_error_types(error: BaseException) -> str:
@@ -211,6 +223,8 @@ class OpenAIResponsesProviderCompat:
     ) -> Iterator[ModelResponse]:
         """Own the SDK stream until completion, failure, or consumer closure."""
         completed = False
+        handed_off = False
+        terminal_usage: MessageMetrics | None = None
         yielded = False
         model = cast("OpenAIResponses", self)
         tool_use: dict[str, Any] = {}
@@ -224,11 +238,17 @@ class OpenAIResponsesProviderCompat:
                 **params,
             ) as stream:
                 for event in stream:
+                    if (
+                        isinstance(event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent))
+                        and event.response.usage is not None
+                    ):
+                        terminal_usage = self._get_metrics(event.response.usage)
                     chunk, tool_use = self._parse_provider_response_delta(event, assistant_message, tool_use)
                     lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
                     yielded = yielded or not lifecycle_only
                     completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
                     yield chunk
+            handed_off = completed
         except ModelAuthenticationError:
             raise
         except Exception as cause:
@@ -242,6 +262,8 @@ class OpenAIResponsesProviderCompat:
             msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(cause)})"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from cause
         finally:
+            if not handed_off and terminal_usage is not None:
+                assistant_message.metrics += terminal_usage
             assistant_message.metrics.stop_timer()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
@@ -259,6 +281,8 @@ class OpenAIResponsesProviderCompat:
     ) -> AsyncIterator[ModelResponse]:
         """Own the async SDK stream until completion, failure, or cancellation."""
         completed = False
+        handed_off = False
+        terminal_usage: MessageMetrics | None = None
         yielded = False
         model = cast("OpenAIResponses", self)
         tool_use: dict[str, Any] = {}
@@ -272,11 +296,17 @@ class OpenAIResponsesProviderCompat:
                 **params,
             ) as stream:
                 async for event in stream:
+                    if (
+                        isinstance(event, (ResponseCompletedEvent, ResponseIncompleteEvent, ResponseFailedEvent))
+                        and event.response.usage is not None
+                    ):
+                        terminal_usage = self._get_metrics(event.response.usage)
                     chunk, tool_use = self._parse_provider_response_delta(event, assistant_message, tool_use)
                     lifecycle_only = bool(chunk.extra and chunk.extra.pop(_LIFECYCLE_ONLY_KEY, False))
                     yielded = yielded or not lifecycle_only
                     completed = completed or bool(chunk.provider_data and chunk.provider_data.get("response_id"))
                     yield chunk
+            handed_off = completed
         except ModelAuthenticationError:
             raise
         except Exception as cause:
@@ -290,10 +320,47 @@ class OpenAIResponsesProviderCompat:
             msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(cause)})"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from cause
         finally:
+            if not handed_off and terminal_usage is not None:
+                assistant_message.metrics += terminal_usage
             assistant_message.metrics.stop_timer()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id)
+
+    # AGNO_COMPAT: A successful stream retry replaces earlier failed-attempt usage.
+    # Reason: Agno replaces assistant metrics with only the successful stream's
+    # metrics, dropping counters retained during failed invocation cleanup.
+    # Upstream issue: None identified; tracked locally at https://github.com/mindroom-ai/mindroom/issues/1952.
+    # Upstream PR: None identified.
+    # Remove when: Agno carries received usage across stream retries exactly once.
+    # Coverage: tests/test_openai_responses_stream.py::test_terminal_usage_survives_retry.
+    def _populate_assistant_message_from_stream_data(
+        self,
+        assistant_message: Message,
+        stream_data: MessageData,
+    ) -> None:
+        """Retain earlier failed-attempt counters when a later attempt completes."""
+        prior = assistant_message.metrics
+        if any(
+            (
+                prior.input_tokens,
+                prior.output_tokens,
+                prior.total_tokens,
+                prior.cache_read_tokens,
+                prior.cache_write_tokens,
+                prior.reasoning_tokens,
+            ),
+        ):
+            stream_data.response_provider_data = {
+                **(stream_data.response_provider_data or {}),
+                "mindroom_aggregate_usage": True,
+            }
+        if stream_data.response_metrics is not None:
+            stream_data.response_metrics += prior
+        super()._populate_assistant_message_from_stream_data(  # ty: ignore[unresolved-attribute]
+            assistant_message,
+            stream_data,
+        )
 
     def _parse_provider_response_delta(
         self,

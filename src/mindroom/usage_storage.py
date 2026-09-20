@@ -85,6 +85,13 @@ def _project_requests(messages: object) -> list[dict[str, object]] | None:
         message = cast("dict[str, object]", raw_message)
         if message.get("role") != "assistant" or message.get("from_history", False) is not False:
             continue
+        provider_data = message.get("provider_data")
+        if (
+            isinstance(provider_data, dict)
+            and cast("dict[str, object]", provider_data).get("mindroom_aggregate_usage") is True
+        ):
+            # Retried attempts have aggregate counters, not one request's price or timestamp.
+            continue
         message_metrics = message.get("metrics")
         if not isinstance(message_metrics, dict):
             continue
