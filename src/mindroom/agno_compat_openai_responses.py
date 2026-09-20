@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import mimetypes
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from agno.exceptions import ContextWindowExceededError, ModelAuthenticationError, ModelProviderError
@@ -21,6 +23,7 @@ from mindroom.error_handling import IncompleteResponsesStreamError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
+    from agno.media import File
     from agno.metrics import MessageMetrics
     from agno.models.message import Message
     from agno.models.openai import OpenAIResponses
@@ -32,6 +35,15 @@ if TYPE_CHECKING:
 
 _RESPONSE_ITEMS_BUFFER_KEY = "mindroom_response_items"
 _LIFECYCLE_ONLY_KEY = "mindroom_stream_lifecycle_only"
+
+# These supported formats are missing or use a different MIME in Python's
+# built-in database; host /etc/mime.types must not decide whether they work.
+_RESPONSES_FILE_MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".sh": "text/x-sh",
+}
 
 # AGNO_COMPAT: Responses streams accept incomplete EOF and publish IDs too early.
 # Reason: Agno 3.0.9 accepts EOF without response.completed and publishes a
@@ -101,6 +113,25 @@ class OpenAIResponsesProviderCompat:
 
     id: str
     name: str
+
+    # AGNO_COMPAT: Responses guesses file MIME from opaque storage paths first.
+    # Reason: Agno 3.0.9 ignores the original filename when filepath is set,
+    # sending application/octet-stream for attachments stored with a .bin suffix.
+    # Upstream issue: No matching issue identified; filename precedence is untracked.
+    # Upstream PR: None identified.
+    # Remove when: Agno infers missing MIME from the original filename before the
+    # storage path; retain binary MIME for compressed attachments with opaque paths.
+    # Coverage: tests/test_openai_models.py::test_responses_file_mime_uses_original_attachment_filename;
+    # tests/test_openai_models.py::test_responses_file_mime_preserves_remote_references.
+    def _format_file_for_input(self, file: File) -> dict[str, Any] | None:
+        """Infer missing inline MIME from the display name without changing history."""
+        filename = file.filename or file.name
+        if not file.mime_type and not file.url and filename and (file.filepath or file.content):
+            mime_type, encoding = mimetypes.guess_type(filename)
+            mime_type = _RESPONSES_FILE_MIME_TYPES.get(Path(filename).suffix.lower(), mime_type)
+            if mime_type and encoding is None:
+                file = file.model_copy(update={"mime_type": mime_type})
+        return super()._format_file_for_input(file)  # ty: ignore[unresolved-attribute]
 
     def _using_reasoning_model(self) -> bool:
         """Enable the Responses continuation capability for every model ID."""

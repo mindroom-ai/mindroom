@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 from typing import TYPE_CHECKING, Literal
 
 import httpx
 import pytest
+from agno.media import File
 from agno.models.azure.openai_chat import AzureOpenAI
 from agno.models.deepseek import DeepSeek
 from agno.models.llama_cpp import LlamaCpp
@@ -16,6 +18,8 @@ from agno.models.openrouter import OpenRouter
 from openai import OpenAI
 from openai.types.chat.chat_completion_chunk import ChoiceDeltaToolCall, ChoiceDeltaToolCallFunction
 
+from mindroom.attachment_media import attachment_records_to_media
+from mindroom.attachments import AttachmentRecord
 from mindroom.azure_openai_model import MindRoomAzureOpenAI
 from mindroom.legacy_openai_tool_replay import repair_legacy_openai_tool_replay
 from mindroom.openai_models import (
@@ -28,6 +32,8 @@ from mindroom.openai_models import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from openai.types.completion_usage import CompletionUsage
     from openai.types.responses import ResponseUsage
 
@@ -41,6 +47,92 @@ _CHAT_WIRE_PAIRS = [
 ]
 
 type _OpenAIRoute = Literal["chat", "responses"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "declared_mime", "expected_mime"),
+    [
+        ("notes.txt", "application/octet-stream", "text/plain"),
+        ("notes.md", "text/markdown; charset=utf-8", "text/markdown"),
+        ("script.sh", "text/x-sh", "text/x-sh"),
+        ("report.pdf", None, "application/pdf"),
+        (
+            "report.docx",
+            None,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        (
+            "report.pptx",
+            None,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
+        (
+            "report.xlsx",
+            None,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+        ("notes.txt", "application/pdf", "application/pdf"),
+        ("unknown.bin", None, "application/octet-stream"),
+        ("archive.zip", "application/zip", "application/zip"),
+        ("notes.txt.gz", None, "application/octet-stream"),
+    ],
+)
+def test_responses_file_mime_uses_original_attachment_filename(
+    tmp_path: Path,
+    filename: str,
+    declared_mime: str | None,
+    expected_mime: str,
+) -> None:
+    """Opaque storage names must not hide a file's original type from Responses."""
+    stored_path = tmp_path / "stored.bin"
+    payload = b"synthetic attachment"
+    stored_path.write_bytes(payload)
+    record = AttachmentRecord(
+        attachment_id="att_document",
+        local_path=stored_path,
+        kind="file",
+        filename=filename,
+        mime_type=declared_mime,
+    )
+    _, _, files, _ = attachment_records_to_media([record])
+    message = Message(role="user", content="Read the attachment.", files=files)
+    original = message.model_dump()
+
+    formatted = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")._format_messages([message])
+
+    assert formatted[0]["content"] == [
+        {"type": "input_text", "text": "Read the attachment."},
+        {
+            "type": "input_file",
+            "filename": filename,
+            "file_data": f"data:{expected_mime};base64,{base64.b64encode(payload).decode()}",
+        },
+    ]
+    assert message.model_dump() == original
+    assert files[0].id == record.attachment_id
+    assert files[0].filepath == str(stored_path)
+    assert files[0].get_content_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    ("file", "expected"),
+    [
+        (
+            File(url="https://example.com/report.pdf", filename="notes.txt"),
+            {"type": "input_file", "file_url": "https://example.com/report.pdf"},
+        ),
+        (File(id="file-document", filename="notes.txt"), {"type": "input_file", "file_id": "file-document"}),
+    ],
+)
+def test_responses_file_mime_preserves_remote_references(file: File, expected: dict[str, str]) -> None:
+    """Filename inference must not turn remote files into local data blocks."""
+    message = Message(role="user", content="Read the attachment.", files=[file])
+    original = message.model_dump()
+
+    formatted = MindRoomOpenAIResponses(id="gpt-6-astra", api_key="test-key")._format_messages([message])
+
+    assert formatted[0]["content"][1] == expected
+    assert message.model_dump() == original
 
 
 def _sdk_usage(route: _OpenAIRoute, *, include_cache_write: bool) -> CompletionUsage | ResponseUsage:
