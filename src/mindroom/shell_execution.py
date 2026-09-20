@@ -222,7 +222,7 @@ async def _run_command_after_reservation(  # noqa: C901
 
     try:
         try:
-            await _await_foreground_process_exit(process, timeout_seconds=timeout)
+            await _await_process_exit(process, timeout_seconds=timeout)
         except TimeoutError:
             return await _background_process(
                 registry,
@@ -469,27 +469,30 @@ async def _cancel_pending_tasks(*tasks: asyncio.Task[None]) -> None:
             await task
 
 
-async def _await_foreground_process_exit(
+async def _await_process_exit(
     process: asyncio.subprocess.Process,
     *,
-    timeout_seconds: float,
+    timeout_seconds: float | None = None,
 ) -> None:
-    """Wait for the foreground process to exit without depending on pipe EOF."""
+    """Wait for the process to exit without depending on inherited pipe EOF."""
     if process.returncode is not None:
         return
-    if timeout_seconds <= 0:
+    if timeout_seconds is not None and timeout_seconds <= 0:
         raise TimeoutError
 
     wait_task = asyncio.create_task(process.wait())
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    deadline = None if timeout_seconds is None else asyncio.get_running_loop().time() + timeout_seconds
     try:
         while process.returncode is None:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError
+            poll_seconds = _PROCESS_EXIT_POLL_INTERVAL_SECONDS
+            if deadline is not None:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError
+                poll_seconds = min(poll_seconds, remaining)
             done_tasks, _pending_tasks = await asyncio.wait(
                 (wait_task,),
-                timeout=min(_PROCESS_EXIT_POLL_INTERVAL_SECONDS, remaining),
+                timeout=poll_seconds,
             )
             if wait_task in done_tasks:
                 await wait_task
@@ -557,7 +560,7 @@ async def _monitor_process(
 ) -> None:
     """Wait for a backgrounded process to exit and update its record."""
     try:
-        await process.wait()
+        await _await_process_exit(process)
     finally:
         record = registry.get(handle)
         capture = record.output_capture if record is not None else None
