@@ -20,6 +20,7 @@ from mindroom.history.replay import current_summary_text, estimate_prompt_visibl
 from mindroom.history.storage import (
     compacted_run_ids_with,
     record_compaction_chunk,
+    record_summary_usage,
     remove_runs_by_id,
     seen_event_ids_for_runs,
     update_scope_seen_event_ids,
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
     from agno.db.base import BaseDb
     from agno.models.base import Model
     from agno.models.message import Message
+    from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
     from agno.run.team import TeamRunOutput
     from agno.session.agent import AgentSession
@@ -360,6 +362,13 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
     all_compacted_run_id_set: set[str] = set()
     compacted_messages: list[Message] = []
     pending_selected_run_ids = set(selected_run_ids)
+    runtime_context = get_tool_runtime_context()
+    on_response = partial(
+        record_summary_usage,
+        storage=storage,
+        session_id=session_id,
+        requester_id=runtime_context.requester_id if runtime_context is not None else None,
+    )
 
     while pending_selected_run_ids:
         working_visible_runs = scope_visible_runs(working_session, scope)
@@ -403,6 +412,7 @@ async def _rewrite_working_session_for_compaction(  # noqa: C901
             summary_prompt=summary_prompt,
             timeout_seconds=summary_timeout_seconds,
             fallback_model=fallback_summary_model,
+            on_response=on_response,
         )
         if new_summary.served_by.model is not summary_model.model:
             # A fallback serving this chunk owns sizing and identity for later chunks.
@@ -550,6 +560,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
     summary_prompt: str,
     timeout_seconds: float,
     fallback_model: SummaryModel | None = None,
+    on_response: Callable[[Model, ModelResponse], Awaitable[None]] | None = None,
 ) -> _GeneratedSummaryChunk:
     """Generate one summary chunk, retrying the same or smaller input when safe.
 
@@ -599,6 +610,7 @@ async def _generate_compaction_summary_with_retry(  # noqa: PLR0915
                 summary_input=summary_input,
                 summary_prompt=summary_prompt,
                 timeout_seconds=timeout_seconds,
+                on_response=partial(on_response, summary_model.model) if on_response is not None else None,
             )
         except Exception as exc:
             duration_ms = int((asyncio.get_running_loop().time() - started) * 1000)

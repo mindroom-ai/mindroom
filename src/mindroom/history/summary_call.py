@@ -31,6 +31,8 @@ from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from agno.models.base import Model
     from agno.models.response import ModelResponse
 
@@ -198,6 +200,7 @@ async def generate_compaction_summary(
     summary_input: str,
     summary_prompt: str,
     timeout_seconds: float,
+    on_response: Callable[[ModelResponse], Awaitable[None]] | None = None,
 ) -> SessionSummary:
     """Issue one compaction summary call with tuned provider config and one timeout."""
     timeout_seconds = effective_summary_timeout_seconds(model, timeout_seconds=timeout_seconds)
@@ -205,9 +208,12 @@ async def generate_compaction_summary(
     summary_output_limit = summary_output_token_limit(configured_model)
 
     async def _request_summary() -> ModelResponse:
-        return await model.aresponse(
+        response = await model.aresponse(
             messages=build_summary_request_messages(summary_prompt=summary_prompt, summary_input=summary_input),
         )
+        if on_response is not None:
+            await on_response(response)
+        return response
 
     response_task = asyncio.create_task(
         _request_summary(),

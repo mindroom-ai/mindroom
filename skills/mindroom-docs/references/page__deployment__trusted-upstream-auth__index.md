@@ -78,7 +78,8 @@ When no Matrix user ID claim or email-to-Matrix template is configured, strict m
 ## Usage Export Service
 
 Strict JWT deployments can expose `GET /api/usage/export` to a service client without granting that client a browser or administrator identity.
-The route prepares the same organization-wide report as the standard dashboard-authenticated `GET /api/usage` route and accepts the same optional `include_daily` query parameter.
+The route prepares the same organization-wide report as the standard dashboard-authenticated `GET /api/usage` route and accepts the same optional `include_daily` and `include_requests` query parameters, both defaulting to `false`.
+With `include_requests=true`, the report adds reconciled provider-request token facts and request coverage as described in [Token Usage](https://docs.mindroom.chat/dashboard/#token-usage); missing request detail remains unavailable.
 Both routes share background preparation and cache state while authenticating every request independently.
 It never accepts an assertion from a query parameter, and methods other than `GET` are unsupported.
 
@@ -106,9 +107,9 @@ A valid service assertion authorizes only `/api/usage/export`; it does not autho
 
 Every request, including polls and cache hits, must include the service assertion.
 When a report needs preparation, the route promptly returns `202` with `{"status":"pending"}`, `Retry-After: 5`, and `Cache-Control: no-store`.
-Poll the same URL with the same `include_daily` value after the requested delay.
+Poll the same URL with the same `include_daily` and `include_requests` values after the requested delay.
 Once preparation succeeds, an authenticated poll returns `200`, `Cache-Control: no-store`, and the existing aggregate report schema.
-The two `include_daily` variants are prepared and cached separately, successful results expire 60 seconds after completion, and only one retained-data scan runs at a time.
+The four daily/request option combinations are prepared and cached separately, successful results expire 60 seconds after completion, and only one retained-data scan runs at a time.
 Configuration or runtime changes discard earlier results.
 On either organization route, a failed scan or unavailable committed configuration returns a content-free `503` with `Cache-Control: no-store`; scan failures remain cached for five seconds before another request can start a retry.
 

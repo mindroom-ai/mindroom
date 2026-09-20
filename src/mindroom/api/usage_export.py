@@ -34,6 +34,7 @@ class UsageExportContext:
     runtime_paths: RuntimePaths
     generation: int
     include_daily: bool
+    include_requests: bool = False
 
     def _same_runtime_generation(self, other: UsageExportContext) -> bool:
         """Return whether two requests belong to one committed runtime/config scope."""
@@ -77,7 +78,7 @@ def _start_daemon_worker(target: Callable[[], None]) -> None:
 
 
 class UsageExportRunner:
-    """Own one in-flight scan and at most one cached result per daily variant."""
+    """Own one in-flight scan and at most one cached result per report variant."""
 
     def __init__(
         self,
@@ -89,7 +90,7 @@ class UsageExportRunner:
         self._start_worker = start_worker
         self._lock = threading.Lock()
         self._active: _ActiveExport | None = None
-        self._completed: dict[bool, _CompletedExport] = {}
+        self._completed: dict[tuple[bool, bool], _CompletedExport] = {}
         self._closed = False
 
     @property
@@ -110,13 +111,14 @@ class UsageExportRunner:
             if self._closed:
                 return _UsageExportPoll(UsageExportStatus.FAILED)
             self._discard_other_runtime_generations(context)
-            completed = self._completed.get(context.include_daily)
+            variant = (context.include_daily, context.include_requests)
+            completed = self._completed.get(variant)
             if completed is not None and completed.context == context:
                 ttl = _SUCCESS_TTL_SECONDS if completed.report is not None else _FAILURE_TTL_SECONDS
                 if self._clock() - completed.completed_at < ttl:
                     status = UsageExportStatus.READY if completed.report is not None else UsageExportStatus.FAILED
                     return _UsageExportPoll(status, completed.report)
-                del self._completed[context.include_daily]
+                del self._completed[variant]
             if self._active is not None:
                 return _UsageExportPoll(UsageExportStatus.PENDING)
 
@@ -193,7 +195,7 @@ class UsageExportRunner:
             self._active = None
             if self._closed or not context_is_current:
                 return
-            self._completed[active.context.include_daily] = _CompletedExport(
+            self._completed[(active.context.include_daily, active.context.include_requests)] = _CompletedExport(
                 context=active.context,
                 completed_at=self._clock(),
                 report=report,

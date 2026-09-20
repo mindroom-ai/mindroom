@@ -1821,6 +1821,7 @@ visibility = ["mindroom.claude_compat"]
 path = "mindroom.history.storage"
 depends_on = [
     "mindroom.agent_storage",
+    "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.history_run_visibility",
     "mindroom.history.types",
@@ -4658,6 +4659,7 @@ expose = [
     "replace_runs",
     "run_session_storage_operation",
     "runs_without",
+    "save_compaction_usage",
     "save_runs",
 ]
 from = ["mindroom.agent_storage"]

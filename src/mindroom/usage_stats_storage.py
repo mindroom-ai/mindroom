@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 __all__ = [
     "TOKEN_FIELDS",
     "UsageModelMetrics",
+    "UsageRequestMetrics",
     "UsageRunNode",
     "UsageSessionRow",
     "UsageStorageDiagnostic",
@@ -78,8 +79,16 @@ class UsageModelMetrics:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageRequestMetrics:
+    """Content-free counters and timestamp for one provider request."""
+
+    created_at: int | float
+    metrics: Mapping[str, _MetricValue]
+
+
+@dataclass(frozen=True, slots=True)
 class UsageRunNode:
-    """Usage fields from one top-level retained run."""
+    """Usage fields from one retained top-level run or summary request."""
 
     team_id: str | None
     requester_id: str | None
@@ -90,6 +99,14 @@ class UsageRunNode:
     created_at: int | float | None = None
     # Empty means no detailed attribution was stored; None means it was unusable.
     model_metrics: tuple[UsageModelMetrics, ...] | None = ()
+    # None means request detail was absent or unusable, without discarding run totals.
+    requests: tuple[UsageRequestMetrics, ...] | None = None
+    kind: Literal["run", "compaction_summary"] = "run"
+
+    @property
+    def run_count(self) -> int:
+        """Summary requests incur tokens but are not AI replies."""
+        return int(self.kind == "run")
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,6 +570,9 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
     if not isinstance(raw_run, dict):
         raise TypeError
     run = cast("dict[str, object]", raw_run)
+    kind = run.get("kind", "run")
+    if kind not in {"run", "compaction_summary"}:
+        raise ValueError
     parent_run_id = run.get("parent_run_id")
     if parent_run_id is not None:
         if not isinstance(parent_run_id, str) or not parent_run_id:
@@ -578,14 +598,45 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         created_at = None
     return UsageRunNode(
         team_id=_optional_string(run.get("team_id")),
-        requester_id=metadata_requester or _optional_string(run.get("user_id")) or row_requester,
+        requester_id=(
+            _optional_string(run.get("user_id"))
+            if kind == "compaction_summary"
+            else metadata_requester or _optional_string(run.get("user_id")) or row_requester
+        ),
         run_id=_optional_string(run.get("run_id")),
         model_provider=_optional_string(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
         created_at=created_at,
         model_metrics=_extract_model_metrics(run_metrics.get("details")),
+        requests=_extract_request_metrics(run.get("requests")),
+        kind=cast("Literal['run', 'compaction_summary']", kind),
     )
+
+
+def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...] | None:
+    """Reject malformed request details independently from usable aggregate counters."""
+    if not isinstance(requests, list) or not requests:
+        return None
+    selected: list[UsageRequestMetrics] = []
+    try:
+        for raw_request in requests:
+            if not isinstance(raw_request, dict):
+                return None
+            request = cast("dict[str, object]", raw_request)
+            created_at = request.get("created_at")
+            metrics = request.get("metrics")
+            if (
+                isinstance(created_at, bool)
+                or not isinstance(created_at, (int, float))
+                or (isinstance(created_at, float) and not math.isfinite(created_at))
+                or not isinstance(metrics, dict)
+            ):
+                return None
+            selected.append(UsageRequestMetrics(created_at, _select_metrics(cast("dict[str, object]", metrics))))
+    except (TypeError, ValueError):
+        return None
+    return tuple(selected)
 
 
 def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | None:

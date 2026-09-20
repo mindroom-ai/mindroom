@@ -29,6 +29,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from agno.db.base import SessionType
@@ -36,7 +37,13 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 
-from mindroom.agent_storage import replace_runs, runs_without, save_runs
+from mindroom.agent_storage import (
+    replace_runs,
+    runs_without,
+    save_compaction_usage,
+    save_runs,
+)
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import (
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
@@ -52,12 +59,38 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from agno.db.base import BaseDb
+    from agno.models.base import Model
+    from agno.models.response import ModelResponse
     from agno.run.agent import RunOutput
 
 _COMPACTION_METADATA_VERSION = 2
 _MATRIX_HISTORY_METADATA_VERSION = 1
 _PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
 _COMPACTED_RUN_ID_RETENTION_LIMIT = 1_024
+
+
+async def record_summary_usage(
+    model: Model,
+    response: ModelResponse,
+    *,
+    storage: BaseDb,
+    session_id: str,
+    requester_id: str | None,
+) -> None:
+    """Record returned counters even when the summary is rejected or later cancelled."""
+    if response.response_usage is None:
+        return
+    await run_blocking_until_complete(
+        partial(
+            save_compaction_usage,
+            storage,
+            session_id=session_id,
+            requester_id=requester_id,
+            model_provider=model.get_provider(),
+            model=model.id,
+            metrics=response.response_usage.to_dict(),
+        ),
+    )
 
 
 def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
