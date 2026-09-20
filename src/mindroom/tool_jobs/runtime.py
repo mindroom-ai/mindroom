@@ -666,8 +666,7 @@ class ToolJobRuntime:
         if task is None or failed:
             entry.cancel_ready = asyncio.Event()
             task = asyncio.create_task(self._cancel_entry(entry))
-            if entry.job.status not in _TERMINAL:
-                entry.cancel_task = task
+            entry.cancel_task = task
         return task
 
     async def _cancel_entry(self, entry: _Entry) -> BackgroundJob:
@@ -676,7 +675,9 @@ class ToolJobRuntime:
                 if entry.cancel_settlement_pending:
                     await self._persist(entry)
                     self._release_control(entry)
-                return await self._snapshot(entry)
+                snapshot = await self._snapshot(entry)
+                entry.cancel_task = None
+                return snapshot
             previous_status = entry.job.status
             previous_updated_at = entry.job.updated_at
             was_approval = previous_status == "awaiting_approval"

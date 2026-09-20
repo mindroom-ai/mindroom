@@ -944,4 +944,4 @@ The agent received the actual expiry notice, retained current session state, and
 Fault-injection tests also cover a continuation snapshot published before a durability error and cancellation during worker encoding or a saved-result read.
 Successful snapshot writes clear cancellation-settlement retries at the persistence boundary, including when result acknowledgement repairs the failed save.
 That boundary also wakes existing waiters when a save fails, so a terminal cancellation cannot leave an unbounded wait asleep; the unsaved outcome remains eligible for persistence retry.
-Cancellation shares a task while execution is active; cancelling already-terminal history returns its saved snapshot without caching the full result again.
+Cancellation tracks a terminal retry until its save and result read finish, then drops the cached snapshot; active cleanup still shares one task.

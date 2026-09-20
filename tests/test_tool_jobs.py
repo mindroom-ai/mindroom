@@ -98,6 +98,63 @@ async def test_cancelling_consumed_job_does_not_retain_the_returned_payload(tmp_
 
 
 @pytest.mark.asyncio
+async def test_shutdown_drains_a_terminal_cancellation_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shutdown must retain its storage lease until an accepted terminal retry has finished writing."""
+    runtime = ToolJobRuntime(tmp_path)
+    writer = runtime_module.write_json_file_durable
+
+    async def operation() -> BackgroundOutcome:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    def fail_terminal(path: Path, payload: dict[str, object]) -> None:
+        if payload["status"] == "cancelled":
+            message = "terminal save failed"
+            raise OSError(message)
+        writer(path, payload)
+
+    await runtime.start(JobSpec("retry", "tool", 0), owner=_owner(), operation=operation)
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime_module, "write_json_file_durable", fail_terminal)
+        with pytest.raises(OSError, match="terminal save failed"):
+            await runtime.cancel("retry", owner=_owner(), depth=0, await_completion=True)
+
+    snapshot_started, release_snapshot = asyncio.Event(), asyncio.Event()
+    retry_started, release_retry = asyncio.Event(), asyncio.Event()
+    original_snapshot, original_persist = runtime._snapshot, runtime._persist
+
+    async def snapshot(entry: runtime_module._Entry, *, include_result: bool = True) -> runtime_module.BackgroundJob:
+        if not snapshot_started.is_set():
+            snapshot_started.set()
+            await release_snapshot.wait()
+        return await original_snapshot(entry, include_result=include_result)
+
+    async def persist(entry: runtime_module._Entry, *, update_timestamp: bool = True) -> None:
+        if update_timestamp:
+            retry_started.set()
+            await release_retry.wait()
+        await original_persist(entry, update_timestamp=update_timestamp)
+
+    monkeypatch.setattr(runtime, "_snapshot", snapshot)
+    monkeypatch.setattr(runtime, "_persist", persist)
+    retrying = asyncio.create_task(runtime.cancel_owned("retry", matches=lambda job: job.job_id == "retry"))
+    await snapshot_started.wait()
+    stopping = asyncio.create_task(runtime.shutdown())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    release_snapshot.set()
+    try:
+        await retry_started.wait()
+        done, _pending = await asyncio.wait({stopping}, timeout=0.2)
+        assert not done, "shutdown released storage while a terminal cancellation retry was still running"
+    finally:
+        release_retry.set()
+        await asyncio.gather(retrying, stopping)
+    saved = runtime_module.read_job_snapshot(tmp_path / "tool_jobs" / "retry.json")
+    assert saved.status == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_cancelled_saved_result_read_releases_its_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
