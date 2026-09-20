@@ -348,11 +348,6 @@ def test_codex_responses_invoke_aggregates_streaming_deltas(monkeypatch: pytest.
     assert response.content == "mindroom-codex-live-ok"
     assert response.provider_data == {"response_id": "resp_123"}
     assert response.response_usage == usage
-    assert assistant_message.content == "mindroom-codex-live-ok"
-    assert assistant_message.provider_data == {"response_id": "resp_123"}
-    assert assistant_message.metrics.input_tokens == 7
-    assert assistant_message.metrics.cache_read_tokens == 5
-    assert assistant_message.metrics.reasoning_tokens == 2
 
 
 def test_get_model_instance_supports_codex_provider(tmp_path: Path) -> None:

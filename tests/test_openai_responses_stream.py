@@ -486,27 +486,72 @@ async def test_terminal_usage_survives_retry(tmp_path: Path, *, sync: bool) -> N
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])
-async def test_codex_blocking_usage_is_not_counted_twice(*, sync: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The blocking Codex adapter consumes the same stream without adding usage again."""
+@pytest.mark.parametrize("stream", [False, True], ids=["blocking", "streaming"])
+async def test_codex_blocking_usage_is_not_counted_twice(
+    tmp_path: Path,
+    *,
+    sync: bool,
+    stream: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent totals, assistant requests, and exports agree for Codex's stream-only endpoint."""
     completed = _response("resp_completed", "completed")
     completed["usage"] = {
         "input_tokens": 1000,
-        "input_tokens_details": {"cached_tokens": 800},
+        "input_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 40},
         "output_tokens": 100,
         "output_tokens_details": {"reasoning_tokens": 60},
         "total_tokens": 1100,
     }
-    async with _model(_created() + _text() + _event("response.completed", response=completed)) as sdk_model:
-        model = CodexResponses(id="gpt-6-astra")
-        monkeypatch.setattr(model, "get_client", lambda: sdk_model.client)
-        monkeypatch.setattr(model, "get_async_client", lambda: sdk_model.async_client)
-        assistant = Message(role="assistant")
-        messages = [Message(role="user", content="Check status")]
-        response = model.invoke(messages, assistant) if sync else await model.ainvoke(messages, assistant)
-    assert response.response_usage is not None
-    assert response.response_usage.input_tokens == 1000
-    assert assistant.metrics.input_tokens == 1000
-    assert assistant.metrics.output_tokens == 100
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = Config(agents={"status": AgentConfig(display_name="Status")})
+    storage = create_state_storage(
+        "status",
+        tmp_path / "agents/status",
+        subdir="sessions",
+        session_table="status_sessions",
+    )
+    assert isinstance(storage, SqliteDb)
+    try:
+        async with _model(_created() + _text() + _event("response.completed", response=completed)) as sdk_model:
+            model = CodexResponses(id="gpt-6-astra")
+            monkeypatch.setattr(model, "get_client", lambda: sdk_model.client)
+            monkeypatch.setattr(model, "get_async_client", lambda: sdk_model.async_client)
+            agent = Agent(id="status", model=model, db=storage, telemetry=False)
+            if sync and stream:
+                list(agent.run("Check status", session_id="status_session", stream=True))
+            elif sync:
+                agent.run("Check status", session_id="status_session")
+            elif stream:
+                async for _ in agent.arun("Check status", session_id="status_session", stream=True):
+                    pass
+            else:
+                await agent.arun("Check status", session_id="status_session")
+        session = storage.get_session("status_session", SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        run = session.runs[-1]
+        assert RunStatus(run.status) is RunStatus.completed
+        assert run.content == "Ready"
+        assert run.metrics is not None
+        assert run.metrics.input_tokens == 1000
+        assert run.messages is not None
+        assistant = next(message for message in run.messages if message.role == "assistant")
+        assert assistant.content == "Ready"
+        assert assistant.provider_data is not None
+        assert assistant.provider_data["response_id"] == "resp_completed"
+        assert assistant.metrics.input_tokens == 1000
+        assert assistant.metrics.cache_read_tokens == 800
+        assert assistant.metrics.cache_write_tokens == 40
+        assert assistant.metrics.output_tokens == 100
+        assert assistant.metrics.reasoning_tokens == 60
+        assert assistant.metrics.total_tokens == 1100
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert report.totals.total_tokens == 1100
+        assert [row["totals"]["total_tokens"] for row in report.to_dict()["request_breakdown"]] == [1100]
+        assert report.request_coverage is not None
+        assert report.request_coverage.unavailable_sources == 0
+    finally:
+        storage.close()
 
 
 @pytest.mark.parametrize("sync", [True, False], ids=["sync", "async"])

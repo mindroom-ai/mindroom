@@ -337,7 +337,6 @@ class CodexResponses(MindRoomOpenAIResponses):
         ):
             _merge_response_delta(model_response, response_delta)
 
-        self._populate_assistant_message(assistant_message, model_response)
         return model_response
 
     async def ainvoke(
@@ -365,7 +364,6 @@ class CodexResponses(MindRoomOpenAIResponses):
         ):
             _merge_response_delta(model_response, response_delta)
 
-        self._populate_assistant_message(assistant_message, model_response)
         return model_response
 
     def get_client(self) -> OpenAI:
