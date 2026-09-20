@@ -335,6 +335,12 @@ class KubernetesWorkerBackend:
         """Reproduce an exact backend digest from before optional seccomp configuration."""
         return legacy_pre_seccomp_recovery_digest(self._script_recovery_payload())
 
+    # LEGACY_COMPAT: Kubernetes recovery digests without the optional RuntimeClass name.
+    # Legacy format: v2 and unversioned backend config payloads omitted runtime_class_name entirely.
+    # Last legacy release: v2026.9.199.
+    # Replacement: Unreleased optional runtime_class_name; unset configurations retain the prior bytes.
+    # Handling: current and legacy digest writers omit only None; configured values bind worker authority.
+    # Coverage: tests/test_kubernetes_worker_backend.py::test_script_recovery_contract_omits_unset_runtime_class_but_rejects_a_configured_change.
     def _script_recovery_payload(self) -> dict[str, object]:
         config = asdict(self.config)
         config.pop("image")
@@ -343,6 +349,8 @@ class KubernetesWorkerBackend:
         config.pop("script_resource_profiles")
         config.pop("resource_requests")
         config.pop("resource_limits")
+        if config["runtime_class_name"] is None:
+            config.pop("runtime_class_name")
         return {
             "config": config,
             "owner": self.cleanup_locator,

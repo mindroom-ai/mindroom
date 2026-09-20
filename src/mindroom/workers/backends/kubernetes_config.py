@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
@@ -76,6 +77,7 @@ _IMAGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image"]
 _IMAGE_PULL_POLICY_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["image_pull_policy"]
 _PORT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["port"]
 _SERVICE_ACCOUNT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["service_account"]
+_RUNTIME_CLASS_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["runtime_class_name"]
 _STORAGE_PVC_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_pvc"]
 _STORAGE_MOUNT_PATH_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_mount_path"]
 _STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
@@ -132,6 +134,9 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
+_DNS_SUBDOMAIN_RE = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*",
+)
 
 
 def _default_script_resource_profiles() -> dict[str, dict[str, dict[str, str]]]:
@@ -395,6 +400,7 @@ class KubernetesWorkerBackendConfig:
     agent_vault: KubernetesAgentVaultConfig | None = None
     extra_containers: tuple[dict[str, object], ...] = ()
     extra_volumes: tuple[dict[str, object], ...] = ()
+    runtime_class_name: str | None = None
 
     def __post_init__(self) -> None:
         """Reject storage prefixes that are not strict relative descendants."""
@@ -412,6 +418,13 @@ class KubernetesWorkerBackendConfig:
             raise WorkerBackendError(msg)
         object.__setattr__(self, "script_resource_profiles", normalized_profiles)
         object.__setattr__(self, "seccomp_profile", _normalized_seccomp_profile(self.seccomp_profile))
+        runtime_class_name = self.runtime_class_name.strip() if self.runtime_class_name is not None else None
+        if runtime_class_name and (
+            len(runtime_class_name) > 253 or _DNS_SUBDOMAIN_RE.fullmatch(runtime_class_name) is None
+        ):
+            msg = f"{_RUNTIME_CLASS_NAME_ENV} must be a valid Kubernetes DNS subdomain."
+            raise WorkerBackendError(msg)
+        object.__setattr__(self, "runtime_class_name", runtime_class_name or None)
 
     def resources_for_profile(self, profile_name: str | None) -> tuple[dict[str, str], dict[str, str]]:
         """Return main-worker resources or one bounded script profile."""
@@ -455,6 +468,7 @@ class KubernetesWorkerBackendConfig:
             worker_port=read_int_env(env, _PORT_ENV, _DEFAULT_WORKER_PORT),
             service_account_name=read_env(env, _SERVICE_ACCOUNT_ENV, _DEFAULT_SERVICE_ACCOUNT_NAME)
             or _DEFAULT_SERVICE_ACCOUNT_NAME,
+            runtime_class_name=read_env(env, _RUNTIME_CLASS_NAME_ENV) or None,
             storage_pvc_name=storage_pvc_name,
             storage_mount_path=read_env(env, _STORAGE_MOUNT_PATH_ENV, _DEFAULT_STORAGE_MOUNT_PATH)
             or _DEFAULT_STORAGE_MOUNT_PATH,
@@ -512,7 +526,7 @@ def kubernetes_backend_config_signature(
     resource_limits_json = stable_signature_json(config.resource_limits)
     script_resource_profiles_json = stable_signature_json(config.script_resource_profiles)
     client_identity = _kubernetes_client_identity(runtime_paths)
-    return (
+    signature = (
         "kubernetes",
         runtime_paths.env_value(WORKER_COMPUTER_ENABLED_ENV, default="") or "",
         stable_signature_json(config.seccomp_profile),
@@ -551,6 +565,9 @@ def kubernetes_backend_config_signature(
         auth_token or "",
         str(storage_root.expanduser().resolve()) if storage_root is not None else "",
     )
+    if config.runtime_class_name is not None:
+        return (*signature, f"runtime-class:{config.runtime_class_name}")
+    return signature
 
 
 def kubernetes_backend_cleanup_signature(

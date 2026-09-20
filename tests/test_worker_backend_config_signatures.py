@@ -315,6 +315,69 @@ def test_kubernetes_signature_changes_with_seccomp_profile(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
+    ("raw_runtime_class_name", "expected_runtime_class_name"),
+    [
+        ("  sandboxed.example.test  ", "sandboxed.example.test"),
+        ("a" * 64, "a" * 64),
+        ("a" * 253, "a" * 253),
+    ],
+)
+def test_kubernetes_config_reads_and_normalizes_valid_worker_runtime_class(
+    tmp_path: Path,
+    raw_runtime_class_name: str,
+    expected_runtime_class_name: str,
+) -> None:
+    """The optional RuntimeClass name is trimmed before it reaches worker manifests."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_KUBERNETES_ENV,
+            "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": raw_runtime_class_name,
+        },
+    )
+
+    assert KubernetesWorkerBackendConfig.from_runtime(runtime_paths).runtime_class_name == expected_runtime_class_name
+
+
+@pytest.mark.parametrize(
+    "runtime_class_name",
+    ["UPPERCASE", "has_underscore", "-leading", "trailing-", "two..labels", f"a{'b' * 253}"],
+)
+def test_kubernetes_config_rejects_invalid_worker_runtime_class(
+    tmp_path: Path,
+    runtime_class_name: str,
+) -> None:
+    """RuntimeClass names must be valid Kubernetes DNS subdomains."""
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        {
+            **_MINIMAL_KUBERNETES_ENV,
+            "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": runtime_class_name,
+        },
+    )
+
+    with pytest.raises(WorkerBackendError, match="RUNTIME_CLASS_NAME"):
+        KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+
+def test_kubernetes_runtime_class_changes_cache_identity_only_when_configured(tmp_path: Path) -> None:
+    """Empty values keep the default identity while an effective RuntimeClass replaces the backend."""
+    base = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
+    empty = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": "  "},
+    )
+    configured = _runtime_paths(
+        tmp_path,
+        {**_MINIMAL_KUBERNETES_ENV, "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": "sandboxed"},
+    )
+
+    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
+    assert kubernetes_backend_config_signature(empty, auth_token=None) == base_signature
+    assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
+
+
+@pytest.mark.parametrize(
     ("env_name", "changed_value"),
     [
         ("MINDROOM_KUBERNETES_WORKER_NAMESPACE", "other-namespace"),

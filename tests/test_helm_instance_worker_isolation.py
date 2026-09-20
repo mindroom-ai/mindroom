@@ -223,6 +223,7 @@ def test_instance_chart_disables_service_links_for_dynamic_worker_pods_by_defaul
 
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
     assert "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON" not in env_values
+    assert "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME" not in env_values
 
 
 def test_instance_chart_passes_localhost_seccomp_profile_to_worker_manager() -> None:
@@ -241,6 +242,20 @@ def test_instance_chart_passes_localhost_seccomp_profile_to_worker_manager() -> 
         "type": "Localhost",
         "localhostProfile": "profiles/worker-computer.json",
     }
+
+
+def test_instance_chart_passes_worker_runtime_class_to_worker_manager() -> None:
+    """Hosted instances can opt the whole generated worker pool into one RuntimeClass."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "workerBackend=kubernetes",
+        "storageAccessMode=ReadWriteMany",
+        "kubernetesWorkerRuntimeClassName=sandboxed",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-demo")
+    env = _env_by_name(_container(deployment, "mindroom"))
+
+    assert env["MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME"]["value"] == "sandboxed"
 
 
 def test_instance_chart_rejects_unsupported_worker_seccomp_profile() -> None:
@@ -2687,6 +2702,7 @@ def test_runtime_chart_disables_service_links_for_dynamic_worker_pods_by_default
 
     assert env_values["MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS"] == "false"
     assert "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON" not in env_values
+    assert "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME" not in env_values
 
 
 def test_runtime_chart_passes_localhost_seccomp_profile_to_worker_manager() -> None:
@@ -2707,6 +2723,22 @@ def test_runtime_chart_passes_localhost_seccomp_profile_to_worker_manager() -> N
         "type": "Localhost",
         "localhostProfile": "profiles/worker-computer.json",
     }
+
+
+def test_runtime_chart_passes_worker_runtime_class_to_worker_manager() -> None:
+    """The runtime chart can opt the whole generated worker pool into one RuntimeClass."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        "workers.kubernetes.runtimeClassName=sandboxed",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    env = _env_by_name(_container(deployment, "mindroom"))
+
+    assert env["MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME"]["value"] == "sandboxed"
 
 
 def test_runtime_chart_rejects_unsupported_worker_seccomp_profile() -> None:

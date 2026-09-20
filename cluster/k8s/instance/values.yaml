@@ -66,6 +66,7 @@ kubernetesWorkerPort: 8766
 kubernetesWorkerReadyTimeoutSeconds: 60
 kubernetesWorkerIdleTimeoutSeconds: 1800
 kubernetesWorkerEnableServiceLinks: false
+kubernetesWorkerRuntimeClassName: ""  # Optional RuntimeClass applied to every dedicated worker pod.
 # Optional node-installed profile applied only to the main worker container.
 kubernetesWorkerSeccompProfile: {}
 
