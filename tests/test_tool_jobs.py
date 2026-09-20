@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import threading
+import weakref
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -62,6 +64,37 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(tmp
         assert restored._entries[spec.job_id].job.result_payload is None
     finally:
         await restored.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned", [False, True])
+async def test_cancelling_consumed_job_does_not_retain_the_returned_payload(tmp_path: Path, *, owned: bool) -> None:
+    """Cancelling already-settled history must not put its full result back in the runtime cache."""
+    runtime = ToolJobRuntime(tmp_path)
+    value = "large result" * 10_000
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", value)
+
+    await runtime.start(JobSpec("consumed", "tool", 0), owner=_owner(), operation=operation)
+    waited = await runtime.wait("consumed", owner=_owner(), depth=0)
+    await runtime.acknowledge_wait("consumed", waited.token)
+    try:
+        result = (
+            await runtime.cancel_owned("consumed", matches=lambda job: job.job_id == "consumed")
+            if owned
+            else await runtime.cancel("consumed", owner=_owner(), depth=0, await_completion=True)
+        )
+        assert result is not None
+        assert result.result == value
+        reference = weakref.ref(result)
+        del result
+        await asyncio.sleep(0)
+        gc.collect()
+        assert reference() is None, "runtime retained the full cancelled-history snapshot"
+        assert (await runtime.lookup("consumed", owner=_owner(), depth=0)).result == value
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

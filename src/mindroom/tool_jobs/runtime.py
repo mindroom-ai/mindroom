@@ -666,7 +666,8 @@ class ToolJobRuntime:
         if task is None or failed:
             entry.cancel_ready = asyncio.Event()
             task = asyncio.create_task(self._cancel_entry(entry))
-            entry.cancel_task = task
+            if entry.job.status not in _TERMINAL:
+                entry.cancel_task = task
         return task
 
     async def _cancel_entry(self, entry: _Entry) -> BackgroundJob:
