@@ -20,6 +20,7 @@ from agno.run.team import TeamRunOutput
 from agno.session.agent import AgentSession
 from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
+from sqlalchemy.dialects.sqlite import insert
 
 from mindroom import agno_compat_session_metrics, agno_compat_session_persistence, agno_compat_sqlite
 from mindroom.constants import prompt_roles_for_history_storage
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.usage_storage import IndependentUsageKind
 
 
 _BUSY_TIMEOUT_SECONDS = 30.0
@@ -62,6 +64,7 @@ __all__ = [
     "run_session_storage_operation",
     "runs_without",
     "save_compaction_usage",
+    "save_independent_usage",
     "save_runs",
 ]
 
@@ -76,24 +79,59 @@ def save_compaction_usage(
     metrics: Mapping[str, object],
 ) -> None:
     """Persist one incurred summary response independently of conversation changes."""
-    if not isinstance(storage, SqliteDb):
-        msg = "Compaction usage requires SQLite session storage"
-        raise TypeError(msg)
     created_at = time.time()
-    usage_id = f"compaction:{uuid4()}"
-    snapshot = project_usage(
-        {
-            "run_id": usage_id,
-            "user_id": requester_id,
+    save_independent_usage(
+        storage,
+        session_id=session_id,
+        usage_id=f"compaction:{uuid4()}",
+        kind="compaction_summary",
+        requester_id=requester_id,
+        run={
             "model_provider": model_provider,
             "model": model,
             "created_at": created_at,
             "metrics": dict(metrics),
+            "messages": [{"role": "assistant", "created_at": created_at, "metrics": dict(metrics)}],
         },
     )
-    snapshot["kind"] = "compaction_summary"
-    snapshot["requests"] = [{"created_at": created_at, "metrics": snapshot["metrics"]}]
+
+
+def save_independent_usage(
+    storage: BaseDb,
+    *,
+    session_id: str,
+    usage_id: str,
+    kind: IndependentUsageKind,
+    requester_id: str | None,
+    run: Mapping[str, object],
+    initial_session: AgentSession | TeamSession | None = None,
+) -> None:
+    """Upsert content-free helper usage with explicit conversation and requester ownership."""
+    if not isinstance(storage, SqliteDb):
+        msg = "Independent usage requires SQLite session storage"
+        raise TypeError(msg)
+    snapshot = project_usage(
+        {**run, "run_id": usage_id, "user_id": requester_id, "metadata": None, "parent_run_id": None, "team_id": None},
+    )
+    snapshot["kind"] = kind
+    session_table = (
+        storage._get_table("sessions", create_table_if_not_found=True) if initial_session is not None else None
+    )
     with storage.db_engine.begin() as connection:
+        if initial_session is not None and session_table is not None:
+            is_team = isinstance(initial_session, TeamSession)
+            values = {
+                "session_id": session_id,
+                "session_type": SessionType.TEAM.value if is_team else SessionType.AGENT.value,
+                "team_id" if is_team else "agent_id": (
+                    initial_session.team_id if isinstance(initial_session, TeamSession) else initial_session.agent_id
+                ),
+                "created_at": initial_session.created_at,
+                "updated_at": initial_session.updated_at,
+            }
+            connection.execute(
+                insert(session_table).values(**values).on_conflict_do_nothing(index_elements=["session_id"]),
+            )
         connection.exec_driver_sql(usage_table_sql(storage.session_table_name))
         connection.exec_driver_sql(
             usage_upsert_sql(storage.session_table_name),

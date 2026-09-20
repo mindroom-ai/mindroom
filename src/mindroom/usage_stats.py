@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.usage_storage import UsageKind
 
 __all__ = [
     "TokenTotals",
@@ -51,31 +52,31 @@ type _ModelUsageEntry = tuple[UsageRunNode, TokenTotals, Mapping[tuple[str, str]
 _COVERAGE_NOTE = (
     "Shared self totals use requester-attributed retained agent runs. "
     "Private self and admin totals use Agno session aggregates, including team members. "
-    "Summary requests add tokens without increasing run_count. "
+    "Compaction, memory auto-flush and embedded workflow helpers add tokens without increasing run_count. "
     "Usage snapshots survive compaction and regeneration. Deleted sessions are unavailable."
 )
 _MODEL_COVERAGE_NOTE = (
-    "Model breakdown uses retained top-level runs and summary requests with usable token metrics. "
+    "Model breakdown uses retained top-level runs and helper usage with usable token metrics. "
     "Stored per-model details take precedence over a run's primary model. "
     "Runs with unusable model details are grouped as unknown. "
     "It does not necessarily sum to report totals, which may include history lost before usage migration "
     "and nested team-member usage."
 )
 _CUMULATIVE_MODEL_COVERAGE_NOTE = (
-    "Cumulative model breakdown uses retained session model details plus recorded summary requests. "
+    "Cumulative model breakdown uses retained session model details plus independently recorded helper usage. "
     "Missing, unusable, or unreconciled attribution is grouped as unknown. "
     "Compacted history still present in retained sessions is included; deleted sessions and dates or requester "
     "attribution absent from session aggregates are unavailable."
 )
 _USER_COVERAGE_NOTE = (
-    "User breakdown uses requester-attributed retained top-level runs and summary requests, "
+    "User breakdown uses requester-attributed retained top-level runs and helper usage, "
     "grouped by canonical user identity. "
     "A null user_id means requester identity is unavailable. "
     "It does not necessarily sum to report totals, which may include history lost before usage migration "
     "and nested team-member usage. Deleted sessions are unavailable."
 )
 _DAILY_COVERAGE_NOTE = (
-    "Daily breakdown uses retained top-level runs and summary requests with usable token metrics and timestamps, "
+    "Daily breakdown uses retained top-level runs and helper usage with usable token metrics and timestamps, "
     "grouped by UTC request date when request details reconcile. Each run counts once on its first request date. "
     "Missing or unreconciled request details fall back to run creation date and may shift usage across days. "
     "Runs without usable timestamps are excluded. "
@@ -305,7 +306,7 @@ class UsageRequestBreakdownRow:
     user_id: str | None
     model_provider: str
     model: str
-    kind: Literal["run", "compaction_summary"]
+    kind: UsageKind
     created_at: int | float
     totals: TokenTotals
 
@@ -406,7 +407,7 @@ class _UsageAccumulator:
         expected_requester: str | None,
     ) -> None:
         uses_runs = scope == "self" and not row.source.requester_isolated
-        if (uses_runs and (not row.runs_available or _has_unattributed_summary(row))) or (
+        if (uses_runs and (not row.runs_available or _has_unattributed_helper(row))) or (
             not uses_runs and not row.session_metrics_available
         ):
             self.unavailable_sources.add(row.source.path_label)
@@ -619,7 +620,7 @@ class _ModelUsageAccumulator:
         expected_requester: str | None,
     ) -> list[_ModelUsageEntry]:
         if not row.runs_available or (
-            scope == "self" and not row.source.requester_isolated and _has_unattributed_summary(row)
+            scope == "self" and not row.source.requester_isolated and _has_unattributed_helper(row)
         ):
             self.unavailable_sources.add(row.source.path_label)
         try:
@@ -1058,11 +1059,11 @@ def _run_model_totals(run: UsageRunNode, totals: TokenTotals) -> dict[tuple[str,
 
 
 def _session_totals(row: UsageSessionRow) -> TokenTotals | None:
-    """Summary calls are not part of Agno's session counters; add them exactly once."""
+    """Independent helpers are not part of Agno's session counters; add them exactly once."""
     totals = _metrics_totals(row.session_metrics)
     for run in row.runs:
-        if run.kind == "compaction_summary" and (summary := _metrics_totals(run.metrics)) is not None:
-            totals = (totals or TokenTotals()).plus(summary)
+        if run.kind != "run" and (helper_totals := _metrics_totals(run.metrics)) is not None:
+            totals = (totals or TokenTotals()).plus(helper_totals)
     return totals
 
 
@@ -1070,7 +1071,7 @@ def _session_model_totals(
     row: UsageSessionRow,
     totals: TokenTotals,
 ) -> dict[tuple[str, str], TokenTotals] | None:
-    """Reconcile session model detail, then add independently recorded summaries."""
+    """Reconcile session model detail, then add independently recorded helper usage."""
     base_totals = _metrics_totals(row.session_metrics)
     models = (
         _detailed_model_totals(row.session_model_metrics, base_totals, require_usable_entries=True)
@@ -1080,10 +1081,10 @@ def _session_model_totals(
     if models is None:
         models = {("unknown", "unknown"): base_totals} if base_totals is not None else {}
     for run in row.runs:
-        if run.kind != "compaction_summary" or (summary := _metrics_totals(run.metrics)) is None:
+        if run.kind == "run" or (helper_totals := _metrics_totals(run.metrics)) is None:
             continue
-        summary_models = _run_model_totals(run, summary) or {("unknown", "unknown"): summary}
-        for key, value in summary_models.items():
+        helper_models = _run_model_totals(run, helper_totals) or {("unknown", "unknown"): helper_totals}
+        for key, value in helper_models.items():
             models[key] = models.get(key, TokenTotals()).plus(value)
     combined = TokenTotals()
     for value in models.values():
@@ -1117,12 +1118,12 @@ def _detailed_model_totals(
 
 
 def _run_requester(run: UsageRunNode, owner: str | None) -> str | None:
-    """Keep summary attribution explicit while retaining ordinary private-run fallback."""
+    """Keep helper attribution explicit while retaining ordinary private-run fallback."""
     return run.requester_id or (owner if run.kind == "run" else None)
 
 
-def _has_unattributed_summary(row: UsageSessionRow) -> bool:
-    return any(run.kind == "compaction_summary" and run.requester_id is None for run in row.runs)
+def _has_unattributed_helper(row: UsageSessionRow) -> bool:
+    return any(run.kind != "run" and run.requester_id is None for run in row.runs)
 
 
 def _model_entries_for_row(

@@ -356,11 +356,15 @@ Existing usage ledgers are not backfilled; initial migration can import request 
 Request rows are sorted by timestamp, and both request fields are omitted unless `include_requests=true`.
 Daily and request options are independent; all four combinations have separate cached reports and share one concurrent scan limit.
 
-Portable compaction summary calls with recorded provider counters contribute to token totals and model, user, and daily views, including retries and responses rejected as summaries.
-Their request rows have `kind: compaction_summary`; ordinary run requests have `kind: run`.
-Summary calls contribute zero to `run_count`, preserving its AI reply count meaning.
-Summary attribution uses the current requester and remains unknown when unavailable; timestamps record when usage was saved after the provider response.
-Historical summary costs were not retained and cannot be reconstructed.
+Portable compaction summaries, background memory auto-flush extraction, and embedded Dynamic Workflow participants contribute their returned provider counters to token totals and model, user, and daily views, including retries and rejected outputs.
+Their request rows use `kind: compaction_summary`, `kind: memory_auto_flush`, or `kind: dynamic_workflow`; ordinary run requests use `kind: run`.
+Helpers contribute zero to `run_count`, preserving its AI reply count meaning.
+Embedded workflow usage belongs to the exact caller conversation scope bound by the response runtime, including its private or team store, rather than the participant's synthetic session.
+Helpers use the current trusted requester and remain unattributed when unavailable.
+Compaction timestamps record when usage was saved after the provider response; other helpers preserve returned run and message timestamps.
+Individual helper requests are exported only when returned message counters reconcile with the full helper usage; absent or partial request detail stays aggregate-only and marks request coverage incomplete.
+Usage from exceptions or cancellation before Agno returns a helper run output remains unavailable.
+Historical helper costs were not retained and cannot be reconstructed.
 
 User and model breakdowns cover stored top-level usage snapshots.
 Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.

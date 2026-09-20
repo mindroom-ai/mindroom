@@ -57,7 +57,7 @@ from mindroom.dispatch_source import (
 )
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.history.session_context import open_bound_scope_session_context
+from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
@@ -652,10 +652,12 @@ async def test_room_mode_root_batch_consumes_all_same_target_reservations(tmp_pa
 
 @contextmanager
 def _open_scope(storage: _FakeStorage) -> object:
-    yield SimpleNamespace(
-        storage=storage,
-        storage_factory=lambda: storage,
+    yield ScopeSessionContext(
+        storage=cast("BaseDb", storage),
+        storage_factory=lambda: cast("BaseDb", storage),
         session=storage.session,
+        session_id=storage.session.session_id if storage.session is not None else "session-1",
+        session_exists=storage.session is not None,
         scope=HistoryScope("agent", "general"),
     )
 

@@ -405,6 +405,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
+    "mindroom.helper_usage",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.participation",
     "mindroom.ai_runtime",
@@ -548,6 +549,7 @@ depends_on = [
     "mindroom.usage_storage",
 ]
 visibility = [
+    "mindroom.helper_usage",
     "mindroom.agents",
     "mindroom.ai_runtime",
     "mindroom.approval_execution",
@@ -562,6 +564,11 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.delegation.recovery",
 ]
+
+[[modules]]
+path = "mindroom.helper_usage"
+depends_on = ["mindroom.agent_storage", "mindroom.history.storage"]
+visibility = ["mindroom.response_turn", "mindroom.memory.auto_flush", "mindroom.custom_tools.dynamic_workflow"]
 
 [[modules]]
 path = "mindroom.legacy_session_storage"
@@ -2435,6 +2442,7 @@ visibility = ["mindroom.memory.functions"]
 [[modules]]
 path = "mindroom.memory.auto_flush"
 depends_on = [
+    "mindroom.helper_usage",
     "mindroom.agent_storage",
     "mindroom.logging_config",
     "mindroom.memory.functions",
@@ -4660,6 +4668,7 @@ expose = [
     "run_session_storage_operation",
     "runs_without",
     "save_compaction_usage",
+    "save_independent_usage",
     "save_runs",
 ]
 from = ["mindroom.agent_storage"]
