@@ -3,11 +3,12 @@ import XCTest
 @testable import MindRoom
 
 final class BrandResourceTests: XCTestCase {
-    func testMenuLogoKeepsColorAndHasStandardAndRetinaRepresentations() {
+    func testOutlinedMenuLogoIsTemplateAndHasStandardAndRetinaRepresentations() {
         let image = MindRoomBrand.menuImage
-        XCTAssertFalse(image.isTemplate, "Template rendering flattens the glass contours into a solid M.")
-        XCTAssertEqual(image.size, NSSize(width: 20, height: 20))
-        XCTAssertEqual(image.representations.map(\.pixelsWide).sorted(), [20, 40])
+        XCTAssertTrue(image.isValid)
+        XCTAssertTrue(image.isTemplate)
+        XCTAssertEqual(image.size, NSSize(width: 18, height: 18))
+        XCTAssertEqual(image.representations.map(\.pixelsWide).sorted(), [18, 36])
         XCTAssertTrue(image.representations.allSatisfy { $0.size == image.size })
     }
 

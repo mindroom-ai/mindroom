@@ -31,7 +31,7 @@ enum MindRoomBrand {
     }
 
     static var menuImage: NSImage {
-        let image = NSImage(size: NSSize(width: 20, height: 20))
+        let image = NSImage(size: NSSize(width: 18, height: 18))
         for name in ["logo-menu", "logo-menu@2x"] {
             guard let url = imageURL(in: .main, name: name),
                   let data = try? Data(contentsOf: url),
@@ -39,8 +39,8 @@ enum MindRoomBrand {
             representation.size = image.size
             image.addRepresentation(representation)
         }
-        // Template rendering discards the interior shading and leaves a solid silhouette.
-        image.isTemplate = false
+        // Dedicated outline artwork retains the M and cube contours when AppKit tints it.
+        image.isTemplate = true
         return image
     }
 }
