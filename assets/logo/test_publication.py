@@ -11,10 +11,14 @@ from shading import pixels, render
 ROOT = Path(__file__).resolve().parent
 
 
-def test_transparent_svg_preserves_opaque_artwork_pixels() -> None:
-    """Removing the background preserves the M's opaque colors."""
-    transparent = pixels(render(etree.parse(str(ROOT / "logo-transparent.svg")).getroot()))
-    background = pixels(render(etree.parse(str(ROOT / "logo.svg")).getroot()))
+def test_transparent_png_preserves_the_full_m() -> None:
+    """Raster fallback matches the SVG and keeps every opaque artwork pixel."""
+    path = ROOT / "logo-transparent.png"
+    assert path.is_file(), "Export a transparent PNG for image viewers."
+    transparent = pixels(path.read_bytes())
+    svg = etree.parse(str(ROOT / "logo-transparent.svg")).getroot()
+    assert np.array_equal(transparent, pixels(render(svg)))
+    background = pixels((ROOT / "preview.png").read_bytes())
     opaque = transparent[:, :, 3] == 255
     assert opaque.any()
     assert (transparent[:, :, 3] == 0).any()
@@ -32,7 +36,7 @@ def test_framed_mark_only_removes_empty_canvas(name: str) -> None:
     assert 0 <= left < left + width <= 1024
     assert 0 <= top < top + height <= 1024
     framed = pixels(render(mark, width))
-    original = pixels(render(etree.parse(str(ROOT / "logo-transparent.svg")).getroot()))
+    original = pixels((ROOT / "logo-transparent.png").read_bytes())
     coverage = np.zeros((1024, 1024), dtype=np.uint8)
     coverage[top : top + height, left : left + width] = framed[:, :, 3]
     assert np.array_equal(coverage, original[:, :, 3])

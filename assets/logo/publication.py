@@ -31,7 +31,7 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
     """Return repository-relative outputs; web consumers use ordinary SVG."""
     mark = artwork["logo-mark.svg"]
     root = etree.fromstring(mark)
-    png = {size: render(root, size) for size in (64, 256)}
+    png = {size: render(root, size) for size in (64, 256, 320, 1024)}
     favicon = BytesIO()
     with Image.open(BytesIO(png[256])) as image:
         image.save(favicon, format="ICO", sizes=[(size, size) for size in (16, 32, 48, 64, 128, 256)])
@@ -41,10 +41,14 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
     menu_bar = etree.parse(str(Path(__file__).with_name("menu-bar.svg"))).getroot()
     return {
         "frontend/public/logo.svg": mark,
+        "frontend/public/logo.png": png[1024],
         "frontend/public/favicon.png": png[64],
+        "frontend/public/logo-square.png": artwork["preview.png"],
         "docs/assets/logo.svg": mark,
+        "docs/assets/logo.png": png[320],
         "docs/assets/favicon.png": png[64],
         "saas-platform/platform-frontend/public/res/branding/mindroom.svg": mark,
+        "saas-platform/platform-frontend/public/res/branding/mindroom.png": png[1024],
         "saas-platform/platform-frontend/src/app/favicon.ico": favicon.getvalue(),
         "avatars/spaces/root_space.png": png[256],
         **{
