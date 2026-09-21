@@ -6520,3 +6520,16 @@ visibility = ["mindroom.agent_storage", "mindroom.agno_compat_sqlite", "mindroom
 path = "mindroom.legacy_usage_storage"
 depends_on = ["mindroom.background_tasks", "mindroom.constants", "mindroom.legacy_session_storage", "mindroom.usage_storage"]
 visibility = ["mindroom.agent_storage", "mindroom.orchestrator", "mindroom.api.main"]
+
+# Offline judgment replay leaves; no response-pipeline dependency.
+[[modules]]
+path = "mindroom.judgment.answers"
+depends_on = []
+
+[[modules]]
+path = "mindroom.judgment.state"
+depends_on = ["mindroom.judgment.answers", "mindroom.redaction"]
+
+[[modules]]
+path = "mindroom.judgment.client"
+depends_on = ["mindroom.judgment.answers", "mindroom.judgment.state"]
