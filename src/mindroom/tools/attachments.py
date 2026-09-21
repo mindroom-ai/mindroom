@@ -35,7 +35,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.WORKER_TOOLS_OVERRIDE,
     ),
-    function_names=("get_attachment", "list_attachments", "register_attachment"),
+    function_names=("get_attachment", "list_attachments", "register_attachment", "view_file"),
 )
 def attachments_tools() -> type[AttachmentTools]:
     """Return attachments tools."""

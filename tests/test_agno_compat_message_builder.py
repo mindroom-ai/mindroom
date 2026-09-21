@@ -303,6 +303,28 @@ def test_inline_media_cleanup_strips_every_kind_only_from_history() -> None:
     assert current_message.videos
 
 
+def test_inline_media_cleanup_preserves_only_marked_viewed_images_for_replay() -> None:
+    """Bounded viewed artifacts replay while unrelated historical images remain stripped."""
+    history_message = Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        from_history=True,
+        images=[
+            Image(id="mindroom_viewed_kept", content=b"viewed-image", mime_type="image/png"),
+            Image(id="att_unmarked", content=b"ordinary-image", mime_type="image/png"),
+        ],
+    )
+    persisted_message = Message.from_dict(history_message.to_dict())
+    run_messages = RunMessages(messages=[persisted_message])
+
+    agno_compat_message_builder._strip_history_inline_media(run_messages)
+
+    assert persisted_message.images
+    assert len(persisted_message.images) == 1
+    assert persisted_message.images[0].id == "mindroom_viewed_kept"
+    assert persisted_message.images[0].content == b"viewed-image"
+
+
 def test_apply_patch_is_idempotent() -> None:
     patched_team_sync = _messages._get_run_messages
     patched_team_async = _messages._aget_run_messages

@@ -1403,6 +1403,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.computer_browser_binding"
 depends_on = [
+    "mindroom.tool_system.media_transport",
     "mindroom.custom_tools.browser_mcp",
     "mindroom.tools.browser_mcp",
     "mindroom.worker_computer.mcp_catalog",
@@ -1418,6 +1419,7 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.tool_system.media_transport",
     "mindroom.api.computer_browser_binding",
     "mindroom.worker_browser",
     "mindroom.worker_computer.runtime",
@@ -1560,6 +1562,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.tool_system.media_attachments",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.media",
     "mindroom.tool_system.output_files",
@@ -4005,6 +4008,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
+    "mindroom.tool_system.media_transport",
+    "mindroom.tool_system.media_attachments",
     "mindroom.worker_computer.mcp_results",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
@@ -4071,6 +4076,14 @@ depends_on = [
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.skills",
 ]
+
+[[modules]]
+path = "mindroom.tool_system.media_attachments"
+depends_on = ["mindroom.tool_system.runtime_context", "mindroom.provider_media_fallback"]
+
+[[modules]]
+path = "mindroom.tool_system.media_transport"
+depends_on = []
 
 [[modules]]
 path = "mindroom.tool_system"
@@ -5693,6 +5706,7 @@ expose = [
     "sandbox_proxy_config",
     "sandbox_proxy_enabled_for_tool",
     "save_attachment_to_worker",
+    "view_file_from_worker",
     "to_json_compatible",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
@@ -6317,7 +6331,8 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_results"
-depends_on = []
+depends_on = [
+    "mindroom.tool_system.media_transport",]
 
 [[modules]]
 path = "mindroom.worker_computer.browser_guard"

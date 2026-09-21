@@ -1802,6 +1802,81 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     assert '"result": 3' in str(response.result)
 
 
+@pytest.mark.asyncio
+async def test_inprocess_runner_encodes_browser_media_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Generic in-process browser execution must preserve bounded image bytes."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    expected = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        lambda **_kwargs: (SimpleNamespace(requires_connect=False), lambda: expected),
+    )
+
+    response = await sandbox_runner_module._execute_prepared_request_inprocess(
+        sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+            tool_name="browser",
+            function_name="screenshot",
+        ),
+        runtime_paths,
+        Config(agents={}, models={}),
+    )
+
+    assert response.ok is True
+    decoded = decode_media_result(response.result)
+    assert isinstance(decoded, ToolResult)
+    assert decoded.content == "screen"
+    assert decoded.images is not None
+    assert decoded.images[0].content == b"png"
+
+
+def test_subprocess_worker_encodes_browser_media_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The subprocess protocol must carry the same bounded browser image envelope."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    expected = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    monkeypatch.setattr(
+        sandbox_runner_module,
+        "_resolve_entrypoint",
+        lambda **_kwargs: (SimpleNamespace(requires_connect=False), lambda: expected),
+    )
+    prepared_request = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+        tool_name="browser",
+        function_name="screenshot",
+    )
+    envelope = sandbox_protocol_module.serialize_subprocess_envelope(
+        request=prepared_request.model_dump(mode="json"),
+        runtime_paths=serialize_runtime_paths(runtime_paths),
+        config_yaml="{}\n",
+    )
+
+    exit_code, _tool_output, marked_response = sandbox_runner_module._run_subprocess_worker_payload(envelope)
+
+    assert exit_code == 0
+    response_json = sandbox_protocol_module.extract_response_json(marked_response)
+    assert response_json is not None
+    response = sandbox_runner_module.SandboxRunnerExecuteResponse.model_validate_json(response_json)
+    decoded = decode_media_result(response.result)
+    assert isinstance(decoded, ToolResult)
+    assert decoded.images is not None
+    assert decoded.images[0].content == b"png"
+
+
 def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() -> None:
     """Built-in tools should receive required effective policy without unrelated agent definitions."""
     config = Config.model_validate(

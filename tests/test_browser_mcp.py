@@ -9,12 +9,13 @@ from pathlib import Path
 
 import pytest
 from agno.media import Image
+from agno.models.openai.chat import OpenAIChat
 from agno.tools.function import Function, ToolResult
 from mcp.types import CallToolResult, TextContent, Tool
 
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+from mindroom.tool_system import media_transport
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
-from mindroom.worker_computer import mcp_results
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
 from mindroom.worker_computer.mcp_results import decode_browser_mcp_result, encode_browser_mcp_result
@@ -32,6 +33,18 @@ def test_native_catalog_has_fixed_safe_schemas() -> None:
     assert toolkit.get_async_functions().keys() == tools.keys()
     for name, tool in tools.items():
         assert toolkit.get_async_functions()[name].parameters == tool["inputSchema"]
+
+
+def test_native_screenshot_wire_keeps_optional_fields_optional() -> None:
+    """OpenAI formatting cannot promote omitted native screenshot fields to required empty values."""
+    function = BrowserMCPTools().get_async_functions()["browser_take_screenshot"].model_copy(deep=True)
+    effective_strict = True if function.strict is None else function.strict
+    function.process_entrypoint(strict=effective_strict)
+
+    formatted = OpenAIChat(id="gpt-6-astra", api_key="sk-test")._format_tools([function])[0]["function"]
+
+    assert formatted["strict"] is False
+    assert formatted["parameters"]["required"] == ["type", "scale"]
 
 
 def test_primary_materialization_has_no_process_or_workspace_effects(
@@ -328,7 +341,7 @@ async def test_worker_recovers_profile_only_before_session_start(
 
 def test_codec_bounds_before_image_decode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Oversized payloads fail before base64 allocates decoded bytes."""
-    monkeypatch.setattr(mcp_results, "_MAX_ENCODED_BYTES", 4)
+    monkeypatch.setattr(media_transport, "_MAX_ENCODED_BYTES", 4)
     payload = {
         "mindroom_browser_mcp_result": {
             "version": 1,
@@ -344,9 +357,9 @@ def test_codec_bounds_before_image_decode(monkeypatch: pytest.MonkeyPatch) -> No
 @pytest.fixture
 def small_image_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise padding and byte limits with tiny independent image payloads."""
-    monkeypatch.setattr(mcp_results, "_MAX_IMAGE_BYTES", 4)
-    monkeypatch.setattr(mcp_results, "_MAX_TOTAL_BYTES", 8)
-    monkeypatch.setattr(mcp_results, "_MAX_ENCODED_BYTES", 8)
+    monkeypatch.setattr(media_transport, "_MAX_IMAGE_BYTES", 4)
+    monkeypatch.setattr(media_transport, "_MAX_TOTAL_BYTES", 8)
+    monkeypatch.setattr(media_transport, "_MAX_ENCODED_BYTES", 8)
 
 
 @pytest.mark.usefixtures("small_image_limits")

@@ -119,10 +119,10 @@ def _tool_context_with_thread_scope(
 
 
 def test_attachments_tool_hides_send_method_from_exposed_tools() -> None:
-    """Attachments tool should expose only list/get/register operations."""
+    """Attachments tool should expose discovery, registration, and model viewing without send operations."""
     tool = AttachmentTools()
     exposed = {method.__name__ for method in tool.tools}
-    assert exposed == {"list_attachments", "get_attachment", "register_attachment"}
+    assert exposed == {"list_attachments", "get_attachment", "register_attachment", "view_file"}
     assert not hasattr(tool, "send_attachments")
 
 

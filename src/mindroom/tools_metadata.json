@@ -7642,7 +7642,8 @@
       "function_names": [
         "get_attachment",
         "list_attachments",
-        "register_attachment"
+        "register_attachment",
+        "view_file"
       ],
       "helper_text": null,
       "icon": "Paperclip",

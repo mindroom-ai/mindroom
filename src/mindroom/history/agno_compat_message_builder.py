@@ -4,8 +4,8 @@ Agno Agent preserves ``list[Message]`` input as roleful provider messages, while
 Agno Team currently flattens that same shape through ``get_text_from_message``.
 This throwaway monkey-patch mirrors the Agent message-builder path until Agno
 Team has the same upstream behavior.
-Both builders also remove inline payloads from persisted history while keeping
-current-turn media available to the provider.
+Both builders also remove ordinary inline payloads from persisted history while
+retaining marked, bounded tool images for replay.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from agno.run.messages import RunMessages
 from agno.team import _messages as team_messages
 from agno.utils.log import log_warning
 
+from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+
 # AGNO_COMPAT: Team input loses message roles.
 # Reason: Team flattens roleful Message input into a single user message.
 # Upstream issue: https://github.com/agno-agi/agno/issues/9942
@@ -30,14 +32,16 @@ from agno.utils.log import log_warning
 # tests/test_agno_compat_message_builder.py::test_team_list_message_patch_preserves_additional_input_separately.
 
 # AGNO_COMPAT: Historical-media filtering requires private message builders.
-# Reason: MindRoom omits persisted inline media while retaining current-turn media.
+# Reason: MindRoom omits ordinary persisted inline media while retaining marked,
+# bounded viewed tool images for replay.
 # Upstream issue: No matching issue identified; this is an application replay policy
 # that currently requires wrapping Agno's private Agent/Team message builders.
 # Upstream PR: None identified; the roleful-input PR above does not cover this behavior.
 # Remove when: A supported message-preparation hook can apply the same history filter;
 # retain the filtering policy when removing private builder interception.
 # Coverage: tests/test_agno_compat_message_builder.py::test_persisted_history_media_is_not_replayed;
-# tests/test_agno_compat_message_builder.py::test_inline_media_cleanup_strips_every_kind_only_from_history.
+# tests/test_agno_compat_message_builder.py::test_inline_media_cleanup_strips_every_kind_only_from_history;
+# tests/test_agno_compat_message_builder.py::test_inline_media_cleanup_preserves_only_marked_viewed_images_for_replay.
 
 _PATCHED = False
 _PATCH_LOCK = threading.Lock()
@@ -76,12 +80,18 @@ def _append_input_messages(run_messages: RunMessages, input_messages: list[Any])
 
 
 def _strip_history_inline_media(run_messages: RunMessages) -> RunMessages:
-    """Keep inline payloads on the current turn, not persisted history."""
+    """Strip historical media except bounded viewed images marked for replay."""
     for message in run_messages.messages:
         if not message.from_history:
             continue
         message.audio = None
-        message.images = None
+        if message.images:
+            viewed_images = [
+                image
+                for image in message.images
+                if isinstance(image.id, str) and image.id.startswith(VIEWED_IMAGE_ID_PREFIX)
+            ]
+            message.images = viewed_images or None
         message.files = None
         message.videos = None
     return run_messages

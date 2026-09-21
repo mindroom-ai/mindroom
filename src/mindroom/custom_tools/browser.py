@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from agno.media import Image
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
@@ -37,7 +36,9 @@ from mindroom.desktop.playwright_mcp import browser_action_requires_control
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
+from mindroom.media_delivery import image_result
 from mindroom.server_fetch_url import validate_server_fetch_url
+from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
@@ -671,6 +672,12 @@ class BrowserTools(Toolkit):
         )
         properties["returnAttachment"] = attachment_schema
 
+        save_only_schema = dict(properties.get("saveOnly") or {})
+        save_only_schema["description"] = (
+            "For host action=screenshot, return only the saved artifact metadata instead of model-visible image bytes."
+        )
+        properties["saveOnly"] = save_only_schema
+
         parameters["properties"] = properties
         function.parameters = parameters
 
@@ -719,6 +726,7 @@ class BrowserTools(Toolkit):
         ref: str | None = None,
         element: str | None = None,
         type: str | None = None,
+        saveOnly: bool = False,
         returnAttachment: bool = False,
         level: str | None = None,
         paths: list[str] | None = None,
@@ -756,6 +764,7 @@ class BrowserTools(Toolkit):
             ref: Snapshot ref id or CSS selector.
             element: CSS selector for element-specific actions.
             type: Screenshot type (``png`` or ``jpeg``).
+            saveOnly: For host screenshots, return saved artifact metadata without model-visible image bytes.
             returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
             level: Console log level filter.
             paths: Upload file paths.
@@ -778,13 +787,22 @@ class BrowserTools(Toolkit):
         if not isinstance(returnAttachment, bool):
             msg = "returnAttachment must be a boolean."
             raise TypeError(msg)
+        if not isinstance(saveOnly, bool):
+            msg = "saveOnly must be a boolean."
+            raise TypeError(msg)
         if returnAttachment and normalized_action != "screenshot":
             msg = "returnAttachment is only supported for action=screenshot."
+            raise ValueError(msg)
+        if saveOnly and normalized_action != "screenshot":
+            msg = "saveOnly is only supported for action=screenshot."
             raise ValueError(msg)
 
         resolved_target = self._resolve_target(target=target, node=node)
         if returnAttachment and resolved_target != "desktop":
             msg = "returnAttachment requires target=desktop."
+            raise ValueError(msg)
+        if saveOnly and resolved_target == "desktop":
+            msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
             raise ValueError(msg)
         if resolved_target == "desktop":
             unsupported = {
@@ -880,17 +898,20 @@ class BrowserTools(Toolkit):
                 sort_keys=True,
             )
         if normalized_action == "screenshot":
-            return json.dumps(
-                await self._screenshot(
-                    profile_name=profile_name,
-                    target_id=_clean_str(targetId),
-                    full_page=bool(fullPage),
-                    ref=_clean_str(ref),
-                    element=_clean_str(element),
-                    image_type=_clean_str(type),
-                ),
-                sort_keys=True,
+            screenshot, image_bytes = await self._screenshot(
+                profile_name=profile_name,
+                target_id=_clean_str(targetId),
+                full_page=bool(fullPage),
+                ref=_clean_str(ref),
+                element=_clean_str(element),
+                image_type=_clean_str(type),
             )
+            if saveOnly:
+                return json.dumps(screenshot, sort_keys=True)
+            result = await asyncio.to_thread(image_result, image_bytes, metadata=screenshot)
+            finalized = await asyncio.to_thread(finalize_tool_media, result)
+            assert isinstance(finalized, ToolResult)
+            return finalized
         if normalized_action == "navigate":
             target_url = _clean_str(targetUrl)
             if target_url is None:
@@ -1074,11 +1095,6 @@ class BrowserTools(Toolkit):
         result_payload = dict(response.result)
         if response.screenshot is None:
             return json.dumps(result_payload, sort_keys=True, ensure_ascii=False)
-        image_bytes = await download_encrypted_screenshot(
-            context.client,
-            response.screenshot,
-            timeout_seconds=self._timeout_seconds,
-        )
         if return_attachment:
             attachment = register_runtime_screenshot_attachment(
                 context,
@@ -1086,10 +1102,15 @@ class BrowserTools(Toolkit):
                 filename_prefix="browser-screenshot",
             )
             result_payload.update(screenshot_attachment_result_fields(attachment))
-        return ToolResult(
-            content=json.dumps(result_payload, sort_keys=True, ensure_ascii=False),
-            images=[Image(content=image_bytes, mime_type=response.screenshot.mime_type)],
+        image_bytes = await download_encrypted_screenshot(
+            context.client,
+            response.screenshot,
+            timeout_seconds=self._timeout_seconds,
         )
+        result = await asyncio.to_thread(image_result, image_bytes, metadata=result_payload)
+        finalized = await asyncio.to_thread(finalize_tool_media, result)
+        assert isinstance(finalized, ToolResult)
+        return finalized
 
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
         async with self._lock:
@@ -1309,26 +1330,29 @@ class BrowserTools(Toolkit):
         ref: str | None,
         element: str | None,
         image_type: str | None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bytes]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
         resolved_type = "jpeg" if image_type == "jpeg" else "png"
         output_path = self._next_output_path("jpg" if resolved_type == "jpeg" else "png")
         selector = self._resolve_selector(tab, element or ref)
         if selector is None:
-            await tab.page.screenshot(path=str(output_path), type=resolved_type, full_page=full_page)
+            image_bytes = await tab.page.screenshot(path=str(output_path), type=resolved_type, full_page=full_page)
         else:
-            await tab.page.locator(selector).first.screenshot(path=str(output_path), type=resolved_type)
-        return {
-            "action": "screenshot",
-            "fullPage": full_page,
-            "path": str(output_path),
-            "profile": profile_name,
-            "selector": selector,
-            "status": "ok",
-            "targetId": resolved_target_id,
-            "type": resolved_type,
-        }
+            image_bytes = await tab.page.locator(selector).first.screenshot(path=str(output_path), type=resolved_type)
+        return (
+            {
+                "action": "screenshot",
+                "fullPage": full_page,
+                "path": str(output_path),
+                "profile": profile_name,
+                "selector": selector,
+                "status": "ok",
+                "targetId": resolved_target_id,
+                "type": resolved_type,
+            },
+            image_bytes,
+        )
 
     async def _snapshot(
         self,

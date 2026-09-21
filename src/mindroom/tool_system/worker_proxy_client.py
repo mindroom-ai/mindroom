@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 _SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
 _SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
 SANDBOX_PROXY_SAVE_ATTACHMENT_PATH = "/api/sandbox-runner/save-attachment"
+SANDBOX_PROXY_VIEW_FILE_PATH = "/api/sandbox-runner/view-file"
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 
 
@@ -179,7 +180,7 @@ def post_worker_proxy_json(
     worker_handle: WorkerHandle | None,
     worker_manager: WorkerBackend,
     proxy_path: str,
-    worker_operation: Literal["execute", "save-attachment"],
+    worker_operation: Literal["execute", "save-attachment", "view-file"],
     surface_proxy_http_detail: bool = False,
     client_factory: _WorkerProxyClientFactory = httpx.Client,
 ) -> object:

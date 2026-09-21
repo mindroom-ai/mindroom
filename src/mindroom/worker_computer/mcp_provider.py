@@ -7,12 +7,14 @@ import contextlib
 import os
 import stat
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from mcp import StdioServerParameters
 from mcp.client.stdio import get_default_environment
 
 from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.media_delivery import image_result
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.browser_bundle import (
     COMPUTER_BROWSER_EXECUTABLE,
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from agno.tools.function import ToolResult
+    from mcp.types import CallToolResult
 
 
 class WorkerBrowserMCP:
@@ -105,6 +108,7 @@ class WorkerBrowserMCP:
             msg = "Unsupported native browser MCP function."
             raise ValueError(msg)
         output = self._automatic_output_path()
+        inline_screenshot = function_name == "browser_take_screenshot" and "filename" not in arguments
         arguments = self._file_arguments(function_name, arguments)
         try:
             if not self._ready:
@@ -126,7 +130,74 @@ class WorkerBrowserMCP:
         except BaseException:
             await self.close()
             raise
+        if inline_screenshot:
+            return await asyncio.to_thread(self._inline_screenshot_result, output, result)
         return tool_result_from_call_result("browser_mcp", result)
+
+    def _inline_screenshot_result(self, output: Path, result: CallToolResult) -> ToolResult:
+        """Decode, retain, and bound one inline capture away from browser control."""
+        converted = tool_result_from_call_result("browser_mcp", result)
+        metadata: dict[str, object] = {"result": converted.content}
+        if not converted.images:
+            return image_result(b"", metadata=metadata)
+        image = converted.images[0]
+        assert isinstance(image.content, bytes)
+        path = self._persist_inline_screenshot(output, image.content, image.mime_type)
+        metadata["path"] = path.relative_to(self._workspace).as_posix()
+        return image_result(image.content, metadata=metadata)
+
+    def _persist_inline_screenshot(self, output: Path, data: bytes, mime_type: str | None) -> Path:
+        """Retain original MCP pixels once under a new confined workspace path."""
+        extension = "jpg" if mime_type == "image/jpeg" else "png" if mime_type == "image/png" else "img"
+        with contextlib.ExitStack() as descriptors:
+            directory = self._open_output_directory(output, descriptors)
+            for _attempt in range(3):
+                filename = f"page-{uuid4().hex}.{extension}"
+                try:
+                    descriptor = os.open(
+                        filename,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=directory,
+                    )
+                except FileExistsError:
+                    continue
+                try:
+                    with os.fdopen(descriptor, "wb") as screenshot:
+                        screenshot.write(data)
+                except OSError:
+                    with contextlib.suppress(OSError):
+                        os.unlink(filename, dir_fd=directory)
+                    raise
+                return output / filename
+        msg = "Native browser screenshot output could not be reserved."
+        raise OSError(msg)
+
+    def _open_output_directory(self, output: Path, descriptors: contextlib.ExitStack) -> int:
+        """Open a canonical workspace descendant without following swapped links."""
+        msg = "Native browser screenshot output directory is unsafe."
+        try:
+            parts = output.relative_to(self._workspace).parts
+        except ValueError as exc:
+            raise OSError(msg) from exc
+        if not parts:
+            raise OSError(msg)
+        try:
+            directory = os.open(self._workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            descriptors.callback(os.close, directory)
+            for index, part in enumerate(parts):
+                try:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                except FileNotFoundError:
+                    if index != len(parts) - 1:
+                        raise
+                    os.mkdir(part, mode=0o700, dir_fd=directory)
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                descriptors.callback(os.close, child)
+                directory = child
+        except OSError as exc:
+            raise OSError(msg) from exc
+        return directory
 
     def _file_arguments(self, function_name: str, arguments: dict[str, object]) -> dict[str, object]:
         """Confine native files before startup; retain cancellation and default outputs."""
