@@ -457,11 +457,16 @@ def _paired_runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("custom_client", [True, False], ids=["custom-client", "refresh-provisioned-client"])
+@pytest.mark.parametrize(
+    ("custom_client", "observed_operation"),
+    [(True, "read"), (False, "read"), (False, "manager"), (False, "save")],
+    ids=["custom-read", "provisioned-read", "provisioned-manager", "provisioned-save"],
+)
 async def test_google_bootstrap_client_storage_stays_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     custom_client: bool,
+    observed_operation: str,
 ) -> None:
     """Custom config reads and provisioned config reads/writes leave the owner loop free."""
     owner_thread = threading.get_ident()
@@ -500,23 +505,25 @@ async def test_google_bootstrap_client_storage_stays_off_event_loop(
         original_save(saved_service, credentials)
 
     with monkeypatch.context() as storage_patch:
-        storage_patch.setattr(Path, "read_bytes", observed_read)
-        storage_patch.setattr("mindroom.oauth.google.get_runtime_credentials_manager", observed_manager)
-        storage_patch.setattr(manager, "save_credentials", observed_save)
+        if observed_operation == "read":
+            storage_patch.setattr(Path, "read_bytes", observed_read)
+        elif observed_operation == "manager":
+            storage_patch.setattr("mindroom.oauth.google.get_runtime_credentials_manager", observed_manager)
+        else:
+            storage_patch.setattr(manager, "save_credentials", observed_save)
         endpoints = await google_drive_oauth_provider().runtime_endpoints(runtime_paths)
 
+    assert operations == {observed_operation}
     assert endpoints.authorization_url == GOOGLE_AUTHORIZATION_URL
     assert endpoints.token_url == GOOGLE_TOKEN_URL
     stored = manager.load_credentials(service)
     assert stored is not None
     if custom_client:
         assert stored["client_id"] == "previous-client.apps.googleusercontent.com"
-        assert operations == {"read"}
         assert requests == []
     else:
         assert stored["client_id"] == PROVISIONED_CLIENT_ID
         assert stored["client_secret"] == PROVISIONED_CLIENT_SECRET
-        assert operations == {"read", "manager", "save"}
         assert len(requests) == 1
 
 

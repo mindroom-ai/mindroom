@@ -239,10 +239,15 @@ async def _cancel_registration_publication(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_publication", [False, True], ids=["normal", "cancel-publication"])
+@pytest.mark.parametrize(
+    ("observed_operation", "cancel_publication"),
+    [("read", False), ("manager", False), ("save", False), ("save", True)],
+    ids=["read", "manager", "save", "cancel-publication"],
+)
 async def test_resource_origin_metadata_registers_public_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    observed_operation: str,
     cancel_publication: bool,
 ) -> None:
     """App-domain metadata should bootstrap a PKCE public client without a secret."""
@@ -305,9 +310,12 @@ async def test_resource_origin_metadata_registers_public_client(
         original_save(service, credentials)
 
     with monkeypatch.context() as storage_patch:
-        storage_patch.setattr(manager, "load_credentials", observed_load)
-        storage_patch.setattr("mindroom.oauth.discovery.get_runtime_credentials_manager", observed_manager)
-        storage_patch.setattr(manager, "save_credentials", observed_save)
+        if observed_operation == "read":
+            storage_patch.setattr(manager, "load_credentials", observed_load)
+        elif observed_operation == "manager":
+            storage_patch.setattr("mindroom.oauth.discovery.get_runtime_credentials_manager", observed_manager)
+        else:
+            storage_patch.setattr(manager, "save_credentials", observed_save)
         authorization = asyncio.create_task(
             provider.authorization_uri_async(runtime_paths, state="state-token", code_verifier=verifier),
         )
@@ -326,7 +334,7 @@ async def test_resource_origin_metadata_registers_public_client(
         else:
             authorization_url = await authorization
 
-    assert storage_operations == {"read", "manager", "save"}
+    assert storage_operations == {observed_operation}
 
     query = parse_qs(urlparse(authorization_url).query)
     assert query["client_id"] == ["registered-public-client"]
