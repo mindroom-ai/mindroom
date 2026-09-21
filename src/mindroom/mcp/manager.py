@@ -64,7 +64,6 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
-    OAUTH_REFRESH_FAILED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
@@ -706,22 +705,13 @@ class MCPServerManager:
         self,
         state: MCPServerState,
         provider_id: str,
-        credentials: Mapping[str, object],
         exc: OAuthProviderError,
     ) -> None:
-        refresh_token = credentials.get("refresh_token")
-        raw_expires_at = credentials.get("expires_at")
-        expires_at = (
-            float(raw_expires_at)
-            if not isinstance(raw_expires_at, bool) and isinstance(raw_expires_at, int | float)
-            else None
-        )
-        has_refresh_token = isinstance(refresh_token, str) and bool(refresh_token)
+        has_refresh_token: bool | None = None
+        expires_at: float | None = None
         if isinstance(exc, OAuthRefreshRejectedError):
-            if exc.refresh_had_token is not None:
-                has_refresh_token = exc.refresh_had_token
-            if exc.refresh_expires_at is not None:
-                expires_at = exc.refresh_expires_at
+            has_refresh_token = exc.refresh_had_token
+            expires_at = exc.refresh_expires_at
         logger.warning(
             "MCP OAuth token refresh failed",
             provider_id=provider_id,
@@ -763,19 +753,15 @@ class MCPServerManager:
                 reason=OAUTH_RESET_REQUIRED_REASON,
             ) from exc
         except OAuthProviderError as exc:
-            failed_credentials = (await load_oauth_credentials_snapshot(context)).credentials
-            self._log_oauth_refresh_failure(state, provider.id, failed_credentials or {}, exc)
+            self._log_oauth_refresh_failure(state, provider.id, exc)
             if isinstance(exc, OAuthRefreshRejectedError):
                 raise await asyncio.to_thread(
                     oauth_connection_required,
                     context,
                     reason=OAUTH_REFRESH_REJECTED_REASON,
                 ) from exc
-            raise await asyncio.to_thread(
-                oauth_connection_required,
-                context,
-                reason=OAUTH_REFRESH_FAILED_REASON,
-            ) from None
+            msg = f"MCP server '{state.server_id}' OAuth token refresh failed; retry shortly"
+            raise MCPConnectionError(state.server_id, msg) from None
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
             raise await asyncio.to_thread(oauth_connection_required, context)
         assert credentials is not None

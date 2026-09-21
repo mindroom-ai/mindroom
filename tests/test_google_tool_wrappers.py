@@ -50,7 +50,7 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
-from mindroom.oauth.providers import OAuthConnectionRequired, OAuthTokenResult
+from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
@@ -613,6 +613,57 @@ def test_google_wrapper_refresh_failure_recovery_is_terminal_only(
         assert payload.get("reason") == expected_reason
     stored = load_oauth_credentials_snapshot_sync(tool._oauth_credential_context()).credentials
     assert (stored is not None) is credential_remains
+
+
+@pytest.mark.parametrize(
+    "tool_class",
+    [GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools],
+)
+def test_google_credential_read_failure_does_not_require_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    tool_class: type[Any],
+) -> None:
+    """A temporary storage failure preserves the connection for a later tool attempt."""
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    provider = tool_class._oauth_provider
+    _save_scoped_oauth_credentials(
+        provider.credential_service,
+        {
+            "token": "valid-access-token",
+            "refresh_token": "stored-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "expires_at": 4_102_444_800.0,
+            "scopes": list(provider.scopes),
+            "_source": "oauth",
+            "_oauth_provider": provider.id,
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tool = tool_class(
+        runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    assert tool._ensure_structured_auth() is None
+    context = tool._oauth_credential_context()
+    before = load_oauth_credentials_snapshot_sync(context)
+
+    def fail_generation_read(_context: OAuthCredentialContext) -> Never:
+        message = "Temporary credential store failure with private storage detail"
+        raise OAuthProviderError(message)
+
+    with monkeypatch.context() as scoped_patch:
+        scoped_patch.setattr(oauth_client_module, "oauth_credential_generation", fail_generation_read)
+        with pytest.raises(RefreshError, match=r"^OAuth credential refresh failed$"):
+            tool._ensure_structured_auth()
+        assert tool._consume_oauth_connection_required() == (False, None)
+
+    assert load_oauth_credentials_snapshot_sync(context) == before
+    assert tool._ensure_structured_auth() is None
+    assert tool.creds.token == "valid-access-token"  # noqa: S105
 
 
 @pytest.mark.parametrize(
