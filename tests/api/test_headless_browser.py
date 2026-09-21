@@ -160,8 +160,8 @@ async def test_headless_screenshot_preserves_inline_media_and_save_only(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
     )
 
-    async def capture(*, path: str, **_kwargs: object) -> bytes:
-        (root / path).write_bytes(image_bytes)
+    async def capture(**kwargs: object) -> bytes:
+        assert "path" not in kwargs
         return image_bytes
 
     monkeypatch.setattr(browser_processes[0].pages[-1], "screenshot", capture, raising=False)
@@ -208,9 +208,11 @@ async def test_headless_downloads_survive_session_transfer_and_browser_stop(
 
         suggested_filename = "../../document.txt"
 
-        async def save_as(self, destination: Path) -> None:
-            """Persist the externally supplied download at the browser's destination."""
-            destination.write_text("download contents")
+        async def path(self) -> Path:
+            """Expose completed bytes from Playwright-owned temporary storage."""
+            source = root / "download-staging"
+            source.write_text("download contents")
+            return source
 
     await retained_page.emit("download", Download())
     await native_page.emit("download", Download())

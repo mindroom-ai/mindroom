@@ -186,7 +186,12 @@ def test_resolve_output_dir_defaults_to_runtime_storage_root(tmp_path: Path) -> 
     assert output_dir.is_dir()
 
 
-def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("root_kind", ["absolute", "relative", "alias"])
+def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_kind: str,
+) -> None:
     """Live tool context should override the runtime-root default for browser artifacts."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -195,6 +200,14 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
     )
     tool = BrowserTools(runtime_paths)
     context_storage_path = tmp_path / "context-storage"
+    context_storage_path.mkdir()
+    if root_kind == "relative":
+        monkeypatch.chdir(tmp_path)
+        context_storage_path = Path("context-storage")
+    elif root_kind == "alias":
+        alias = tmp_path / "storage-alias"
+        alias.symlink_to(context_storage_path, target_is_directory=True)
+        context_storage_path = alias
     context = make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -213,9 +226,12 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
 
     with tool_runtime_context(context):
         output_dir = tool._resolve_output_dir()
+        artifact = output_dir / "capture.png"
+        tool._publish_browser_artifact(artifact, b"capture")
 
     assert output_dir == (context_storage_path / "browser").resolve()
     assert output_dir.is_dir()
+    assert artifact.read_bytes() == b"capture"
 
 
 def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_path: Path) -> None:
@@ -840,10 +856,10 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
 def _install_upload_tab(tool: BrowserTools, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     set_input_files = AsyncMock()
     locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
-    page: Any = SimpleNamespace(locator=locator)
+    page: Any = SimpleNamespace(locator=locator, is_closed=lambda: False)
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
-
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=object()))
+    state = _BrowserProfileState(playwright=MagicMock(), context=MagicMock(), tabs={"tab-1": tab})
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
     return set_input_files
 
@@ -894,6 +910,13 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
     allowed_file.write_text("upload", encoding="utf-8")
     tool = BrowserTools(runtime_paths)
     set_input_files = _install_upload_tab(tool, monkeypatch)
+    uploaded: list[tuple[str, bytes]] = []
+
+    async def consume_upload(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
+        assert timeout == 30_000
+        uploaded.extend((Path(path).name, Path(path).read_bytes()) for path in paths)
+
+    set_input_files.side_effect = consume_upload
 
     payload = await tool._upload(
         profile_name="mindroom",
@@ -905,7 +928,7 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
         timeout_ms=None,
     )
 
-    set_input_files.assert_awaited_once_with([str(allowed_file)], timeout=30_000)
+    assert uploaded == [("upload.txt", b"upload")]
     assert payload["paths"] == [str(allowed_file)]
 
 
@@ -1720,8 +1743,8 @@ async def test_host_screenshot_returns_inline_image_and_retains_saved_path(
     tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path)
     mock_state = object()
 
-    async def capture(*, path: str, **_kwargs: object) -> bytes:
-        Path(path).write_bytes(PNG_BYTES)
+    async def capture(**kwargs: object) -> bytes:
+        assert "path" not in kwargs
         return PNG_BYTES
 
     page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
@@ -1753,8 +1776,8 @@ async def test_host_screenshot_save_only_returns_existing_metadata(
     tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path)
     mock_state = object()
 
-    async def capture(*, path: str, **_kwargs: object) -> bytes:
-        Path(path).write_bytes(PNG_BYTES)
+    async def capture(**kwargs: object) -> bytes:
+        assert "path" not in kwargs
         return PNG_BYTES
 
     page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
@@ -1825,14 +1848,17 @@ async def test_worker_download_survives_browser_stop(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     browser.bind_worker_display(":99", workspace)
 
+    staging = tmp_path / "playwright-staging"
+    staging.write_bytes(b"download bytes")
+
     class Download:
-        """Filesystem-producing download adapter."""
+        """Expose a completed file owned by Playwright until context cleanup."""
 
         suggested_filename = "../../document.txt"
 
-        async def save_as(self, path: str | Path) -> None:
-            """Persist bytes like Playwright save_as."""
-            Path(path).write_text("download bytes")
+        async def path(self) -> Path:
+            """Return Playwright's completed private download."""
+            return staging
 
     await browser._save_worker_download(cast("PlaywrightDownload", Download()))
     await browser.aclose()
@@ -1866,7 +1892,7 @@ async def test_worker_browser_launch_uses_private_display_and_persistent_profile
     assert launch["env"]["DISPLAY"] == ":99"
     assert os.environ["DISPLAY"] == ":42"
     assert Path(str(launch["user_data_dir"])) == tmp_path / "state" / "browser-profiles" / "mindroom"
-    assert launch["downloads_path"] == str(tmp_path / "workspace" / "browser")
+    assert "downloads_path" not in launch
     await browser.aclose()
 
 
@@ -2026,9 +2052,11 @@ async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_h
 
         suggested_filename = "native.txt"
 
-        async def save_as(self, destination: str | Path) -> None:
-            """Save downloaded bytes through the real persistent handler."""
-            Path(destination).write_text("native download")
+        async def path(self) -> Path:
+            """Return Playwright's private completed download."""
+            source = tmp_path / "native-download-staging"
+            source.write_text("native download")
+            return source
 
     await native.emit("download", Download())
     await adapter.pages[-1].emit("download", Download())

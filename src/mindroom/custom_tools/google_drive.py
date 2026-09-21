@@ -18,6 +18,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from mindroom.atomic_file import atomic_write_file_at
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import ScopedOAuthClientMixin
@@ -31,7 +32,7 @@ from mindroom.oauth.service import (
     OAUTH_MISSING_WRITE_SCOPE_REASON,
     oauth_connection_required,
 )
-from mindroom.path_confinement import resolve_path_within_root
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.workspaces import resolve_workspace_relative_path
@@ -86,14 +87,13 @@ def _unsafe_drive_filename_error(filename: object) -> str | None:
     return None
 
 
-def _download_target_path(download_dir: str | Path, filename: str, extension: str) -> Path | None:
-    download_root = Path(download_dir)
-    target_path = download_root / filename
+def _download_target_path(workspace_root: Path, filename: str, extension: str) -> Path | None:
+    target_path = workspace_root.absolute() / "google-drive-downloads" / filename
     if extension and not target_path.suffix:
         target_path = target_path.with_suffix(extension)
 
     try:
-        resolve_path_within_root(download_root, target_path.absolute(), symlinks="internal")
+        resolve_path_within_root(workspace_root, target_path, symlinks="reject")
     except ValueError:
         return None
     return target_path
@@ -515,6 +515,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     def download_file(self, file_id: str, export_format: str | None = None) -> str:
         """Download a Drive file and save it locally, including files in Shared Drives."""
         try:
+            if self._workspace_root is None:
+                return json.dumps({"error": "Google Drive downloads require an agent workspace"})
             service = cast("Any", self.service)
             metadata = self._get_file_metadata(file_id, "id,name,mimeType")
             mime_type = metadata.get("mimeType", "")
@@ -523,45 +525,43 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             if unsafe_filename_error:
                 return json.dumps({"error": unsafe_filename_error, "file": metadata})
 
+            target_mime, ext = self.DOWNLOAD_EXPORT_TYPES.get(mime_type, (None, ""))
             if export_format:
                 target_mime = export_format
                 ext = mimetypes.guess_extension(export_format) or ""
-            elif mime_type in self.DOWNLOAD_EXPORT_TYPES:
-                target_mime, ext = self.DOWNLOAD_EXPORT_TYPES[mime_type]
-            elif mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
+            elif target_mime is None and mime_type.startswith(WorkspaceType.WORKSPACE_PREFIX):
                 return json.dumps({"error": f"Unsupported Workspace file type for download: {mime_type}"})
-            else:
-                target_mime = None
-                ext = ""
 
-            path = _download_target_path(self.download_dir, cast("str", filename), ext)
+            path = _download_target_path(self._workspace_root, cast("str", filename), ext)
             if path is None:
                 return json.dumps(
                     {"error": "Google Drive download target escapes the download directory", "file": metadata},
                 )
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-            if target_mime:
-                request = service.files().export_media(fileId=file_id, mimeType=target_mime)
-                path.write_bytes(self._download_bytes(request))
-                result = {
-                    "fileId": file_id,
-                    "path": str(path),
-                    "status": "exported",
-                    "exportMimeType": target_mime,
-                    "originalMimeType": mime_type,
-                }
-            else:
-                request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-                with path.open("wb") as file_handle:
+            with (
+                open_directory_within_root(self._workspace_root, "google-drive-downloads", create=True) as directory_fd,
+                atomic_write_file_at(directory_fd, path.name) as file_handle,
+            ):
+                if target_mime:
+                    request = service.files().export_media(fileId=file_id, mimeType=target_mime)
+                    file_handle.write(self._download_bytes(request))
+                    result = {
+                        "fileId": file_id,
+                        "path": str(path),
+                        "status": "exported",
+                        "exportMimeType": target_mime,
+                        "originalMimeType": mime_type,
+                    }
+                else:
+                    request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
                     downloader = MediaIoBaseDownload(file_handle, request)
                     done = False
                     while not done:
                         _, done = downloader.next_chunk()
-                result = {"fileId": file_id, "path": str(path), "status": "downloaded"}
+                    result = {"fileId": file_id, "path": str(path), "status": "downloaded"}
             return json.dumps(result)
         except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
+            error = f"Google Drive API error: {exc}"
         except Exception as exc:
             log_error(f"Could not download file '{file_id}': {exc}")
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            error = f"Unexpected error: {type(exc).__name__}: {exc}"
+        return json.dumps({"error": error})

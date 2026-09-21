@@ -171,6 +171,9 @@ Do not add another `resolve()` plus containment check when implementing a file c
 
 Path resolution is a point-in-time check, not protection for a later file open.
 For local I/O requiring protection against symlink swaps, use `open_directory_within_root` or `open_regular_file_within_root` and keep operations relative to the returned descriptor.
-Publish bytes using `atomic_file.atomic_write_bytes_at`; keep cleanup relative to the same directory descriptor.
+Publish bytes using `atomic_file.atomic_write_bytes_at`, or stream through `atomic_write_file_at`; both use the same atomic transaction and descriptor-relative cleanup.
+The action-based browser publishes captures and completed downloads through these helpers and snapshots upload sources through confined descriptors.
+Upload snapshots remain private until tab or profile teardown because Playwright reads selected files lazily.
+Drive downloads stream into a confined atomic file rooted at the authorized workspace.
 Caller-owned root authorization, directory identity checks, filesystem permissions, and requester isolation remain required.
-These helpers do not prevent hard-link aliasing or arbitrary directory relocation, and do not protect subsequent pathname opens by external browser, Drive, shell, or file-tool implementations.
+These helpers do not prevent hard-link aliasing or arbitrary directory relocation, and do not protect subsequent pathname opens by native MCP browser tools, Drive uploads, shell commands, or ordinary file-tool implementations.
