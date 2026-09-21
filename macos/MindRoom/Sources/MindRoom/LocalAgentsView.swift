@@ -97,11 +97,9 @@ struct LocalAgentsView: View {
             }
             DisclosureGroup("Use your own Matrix server") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Prepare configuration for your own server, then edit config.yaml and .env in the config folder.")
-                    HStack {
-                        Button("Prepare Self-Hosted Configuration") { runner.run(.initializeSelfHostedConfig) }
-                        Button("Local Stack Setup") { runner.run(.localStackSetup) }
-                    }.disabled(runner.isRunningCommand || state == .runtimeMissing)
+                    Text("Start and manage your Matrix server separately. Prepare configuration here, then edit config.yaml and .env in the config folder to connect to it.")
+                    Button("Prepare Self-Hosted Configuration") { runner.run(.initializeSelfHostedConfig) }
+                        .disabled(runner.isRunningCommand || state == .runtimeMissing)
                 }.padding(.top, 8)
             }
         }

@@ -66,7 +66,7 @@ final class MindRoomCommandTests: XCTestCase {
         let commands: [MindRoomCommand] = [
             .installRuntime, .updateRuntime, .installService, .startService, .stopService,
             .restartService, .initializeHostedConfig, .initializeSelfHostedConfig,
-            .localStackSetup, .pairHosted(pairCode: "ABCD-EFGH"),
+            .pairHosted(pairCode: "ABCD-EFGH"),
         ]
         for command in commands {
             XCTAssertNotNil(command.successMessage, "\(command.title) has no success message")

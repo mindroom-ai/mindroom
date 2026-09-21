@@ -52,9 +52,8 @@ Signing in to `chat.mindroom.chat` creates your hosted Matrix account; it does n
 ### Your own Matrix server
 
 Under **Use your own Matrix server**, choose **Prepare Self-Hosted Configuration**, then edit `config.yaml` and `.env` for that server and your model provider.
-**Local Stack Setup** remains available for the existing local Matrix stack workflow.
+Start and manage the Matrix server separately from this app.
 The initialization actions explicitly target `~/.mindroom`.
-Local Stack Setup uses normal CLI configuration discovery.
 
 ## Computer Access
 

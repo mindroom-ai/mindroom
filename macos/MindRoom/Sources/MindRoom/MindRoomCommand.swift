@@ -10,7 +10,6 @@ enum MindRoomCommand: Equatable {
     case serviceStatus
     case initializeHostedConfig
     case initializeSelfHostedConfig
-    case localStackSetup
     case pairHosted(pairCode: String)
     case openDashboard
     case openHostedChat
@@ -37,8 +36,6 @@ enum MindRoomCommand: Equatable {
             return "Prepare Configuration"
         case .initializeSelfHostedConfig:
             return "Prepare Self-Hosted Configuration"
-        case .localStackSetup:
-            return "Run Local Stack Setup"
         case .pairHosted:
             return "Pair Chat Account"
         case .openDashboard:
@@ -70,8 +67,6 @@ enum MindRoomCommand: Equatable {
             return "Configuration is ready in ~/.mindroom. Existing files were kept. Open MindRoom Chat, sign in, and use Local MindRoom in the chat sidebar to generate a pair code."
         case .initializeSelfHostedConfig:
             return "Configuration is ready in ~/.mindroom. Edit config.yaml and .env for your Matrix server and model provider, then install and start agents."
-        case .localStackSetup:
-            return "Local stack setup finished."
         case .pairHosted:
             return "The chat account was paired. Configure an AI provider, then install and start agents."
         case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
@@ -99,8 +94,6 @@ enum MindRoomCommand: Equatable {
             return .initializeHostedConfig
         case .initializeSelfHostedConfig:
             return .initializeSelfHostedConfig
-        case .localStackSetup:
-            return .localStackSetup
         case let .pairHosted(pairCode):
             return .pairHosted(pairCode: pairCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())
         case .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
