@@ -34,6 +34,8 @@ Use these tools when you need lightweight text extraction, structured scraping A
 `browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window.
 For a visible, persistent browser inside a dedicated Docker or Kubernetes worker, see [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
 MindRoom Chat can watch or control that same browser while its downloads remain accessible to worker shell tools.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` with the opt-in [Chat UI toolkit](https://docs.mindroom.chat/tools/chat-ui/).
+That request only reveals the Computer panel in watch mode; it does not navigate, send a prompt to ChatGPT, take control, or open the user's local browser.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
 Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth.
 `crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser.
@@ -664,8 +666,10 @@ get_page_content()
 
 #### What It Does
 
-`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
-With `target="host"`, it manages named browser profiles on the MindRoom host, with `mindroom` as the default profile name.
+`browser` exposes one callable, `browser_control(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
+With `target="host"`, it manages named browser profiles on the MindRoom host or its routed worker, with `mindroom` as the default profile name.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` after any desired browser navigation.
+The Computer request accepts no URL and reports only that the UI request was sent.
 With `target="desktop"`, it routes the supported action subset over pinned Matrix encryption to the official Playwright MCP extension in the user's existing local Chrome or Brave profile.
 The desktop target operates the current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric indices that can point at a different tab after the tab list changes.
 It creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
@@ -706,11 +710,11 @@ agents:
 ```
 
 ```python
-browser(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
-browser(action="snapshot", target="desktop")
-browser(action="act", target="desktop", request={"kind": "click", "ref": "e1"})
-browser(action="screenshot", target="desktop", fullPage=True)
-browser(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
+browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
+browser_control(action="snapshot", target="desktop")
+browser_control(action="act", target="desktop", request={"kind": "click", "ref": "e1"})
+browser_control(action="screenshot", target="desktop", fullPage=True)
+browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
 #### Notes

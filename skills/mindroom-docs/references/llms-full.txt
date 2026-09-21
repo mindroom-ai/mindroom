@@ -5762,6 +5762,8 @@ Use these tools when you need lightweight text extraction, structured scraping A
 `browser` is local Playwright automation, `browserbase` is a hosted browser API that you connect to over CDP, and `web_browser_tools` simply asks the host operating system to open a browser tab or window.
 For a visible, persistent browser inside a dedicated Docker or Kubernetes worker, see [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
 MindRoom Chat can watch or control that same browser while its downloads remain accessible to worker shell tools.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` with the opt-in [Chat UI toolkit](https://docs.mindroom.chat/tools/chat-ui/).
+That request only reveals the Computer panel in watch mode; it does not navigate, send a prompt to ChatGPT, take control, or open the user's local browser.
 `src/mindroom/api/integrations.py` currently only exposes Spotify OAuth routes on this branch, so none of the tools on this page have a dedicated MindRoom OAuth flow.
 Store password fields through the dashboard or credential store instead of inline YAML, and use environment variables such as `FIRECRAWL_API_KEY`, `SPIDER_API_KEY`, `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`, `AGENTQL_API_KEY`, `SGAI_API_KEY`, `APIFY_API_TOKEN`, `BRIGHT_DATA_API_KEY`, `OXYLABS_USERNAME`, `OXYLABS_PASSWORD`, and `JINA_API_KEY` when you prefer SDK-native auth.
 `crawl4ai`, `agentql`, `browserbase`, and `browser` also depend on a working browser runtime, and `web_browser_tools` only makes sense on a host that can open a real desktop browser.
@@ -6392,8 +6394,10 @@ get_page_content()
 
 #### What It Does
 
-`browser` exposes one callable, `browser(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
-With `target="host"`, it manages named browser profiles on the MindRoom host, with `mindroom` as the default profile name.
+`browser` exposes one callable, `browser_control(action=...)`, with actions such as `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `focus`, `close`, `snapshot`, `screenshot`, `navigate`, `console`, `pdf`, `upload`, `dialog`, `act`, `help`, and `actions`.
+With `target="host"`, it manages named browser profiles on the MindRoom host or its routed worker, with `mindroom` as the default profile name.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` after any desired browser navigation.
+The Computer request accepts no URL and reports only that the UI request was sent.
 With `target="desktop"`, it routes the supported action subset over pinned Matrix encryption to the official Playwright MCP extension in the user's existing local Chrome or Brave profile.
 The desktop target operates the current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric indices that can point at a different tab after the tab list changes.
 It creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
@@ -6434,11 +6438,11 @@ agents:
 ```
 
 ```python
-browser(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
-browser(action="snapshot", target="desktop")
-browser(action="act", target="desktop", request={"kind": "click", "ref": "e1"})
-browser(action="screenshot", target="desktop", fullPage=True)
-browser(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
+browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
+browser_control(action="snapshot", target="desktop")
+browser_control(action="act", target="desktop", request={"kind": "click", "ref": "e1"})
+browser_control(action="screenshot", target="desktop", fullPage=True)
+browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
 #### Notes
@@ -6496,6 +6500,13 @@ open_page("https://matrix.org/blog/", new_window=True)
 Worker Computer shows the Chromium browser that an agent uses inside its dedicated worker.
 MindRoom Chat can watch that screen, take control, resume the agent, and stop the computer.
 Browser and shell tools share the worker's files.
+
+Agents with the opt-in [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit can request this view with `chat_ui.open_panel(panel="computer")`.
+`show_computer()` remains a backward-compatible alias.
+The request uses the current agent, requester, room, and thread from trusted runtime context and starts the view in watch mode.
+It does not navigate, send a prompt to ChatGPT, take control, or open the user's local browser.
+Use `browser_control` separately to navigate the worker browser.
+The result confirms only that the UI request was sent; Chat may leave a passive button instead of opening the panel.
 
 ## Requirements and opt-in
 
@@ -8555,7 +8566,7 @@ Direct send/edit calls reject interactive prompts; use normal agent response del
 
 # Agent Chat UI Actions
 
-The `chat_ui` tool lets an agent ask MindRoom Chat to reveal its worker computer, open a Settings section, or open the room's Members panel.
+The `chat_ui` toolkit opens MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel, open Settings, or show room members.
 It sends a normal Matrix notice with a readable fallback and bounded action metadata.
 The tool reports that the request was sent; it cannot know whether a client opened the requested interface.
 
@@ -8582,13 +8593,36 @@ Delegated transport identities and team contexts are rejected because they canno
 
 ## Actions
 
-- `show_computer()` asks Chat to reveal the requesting agent's worker computer in watch mode.
-- `open_settings(section="general")` opens `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about`.
-- `open_panel(panel="members")` opens the Members side panel. `members` is the only supported panel in this release.
+- `open_panel(panel="computer")` asks Chat to reveal the current agent's worker browser in the Computer panel in watch mode.
+- `open_panel(panel="members")` requests the room's Members side panel and remains the default when `panel` is omitted.
+  `computer` and `members` are the only supported panel values; `browser` is not a panel value.
+- `show_computer()` remains a backward-compatible alias for `open_panel(panel="computer")`.
+- `open_settings(section="general")` separately requests `general`, `account`, `notifications`, `devices`, `emojis-stickers`, `developer`, or `about` without changing account settings.
 
 Each call sends an `m.room.message` notice in the current conversation.
 Threaded calls use the runtime's canonical thread root; room-level calls remain at room level.
 The Matrix event sender must equal the metadata's agent identity, or the request is rejected before sending.
+Both Computer entry points retain the existing `action: "show_computer"` transport metadata and result action for compatibility with existing clients.
+Members retains `action: "open_panel", panel: "members"`; Settings retains `action: "open_settings"` and its `section`.
+
+## Control the browser, then show it
+
+The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
+To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')`.
+If the user asks to visit a page and show it, navigate separately before requesting the panel:
+
+```python
+browser_control(action="open", target="host", targetUrl="https://example.org")
+chat_ui.open_panel(panel="computer")
+```
+
+Opening Computer only requests display of the worker browser.
+It does not navigate, send a prompt to ChatGPT, take control, or open or control the user's local browser.
+It does not send a chat prompt or mutate an account; the Matrix notice carries only the UI request.
+The user's connected local browser uses the separately configured `browser` desktop target and [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
+`web_browser_tools` instead asks the host operating system to open a browser; it does not reveal a worker browser in Chat.
+Panel calls accept no `url` or `targetUrl`; browser navigation belongs in `browser_control`.
+Success returns `UI action request sent.`, which confirms delivery of the request without confirming that any panel opened.
 
 ## What the user sees
 
@@ -8620,7 +8654,7 @@ UI requests reveal only the bounded Chat surfaces described above; worker comput
 
 ## Worker computer requirements
 
-`show_computer()` uses the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.
+`open_panel(panel="computer")` and its `show_computer()` alias use the existing MindRoom worker computer feature; `chat_ui` does not configure or expose a computer gateway.
 The target agent still needs a dedicated Docker or Kubernetes worker, effective `worker_scope: user_agent`, worker-routed browser tools, and an operator-configured Chat computer API origin.
 See [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) for the backend, worker, proxy, and Chat configuration.
 

@@ -4,6 +4,13 @@ Worker Computer shows the Chromium browser that an agent uses inside its dedicat
 MindRoom Chat can watch that screen, take control, resume the agent, and stop the computer.
 Browser and shell tools share the worker's files.
 
+Agents with the opt-in [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit can request this view with `chat_ui.open_panel(panel="computer")`.
+`show_computer()` remains a backward-compatible alias.
+The request uses the current agent, requester, room, and thread from trusted runtime context and starts the view in watch mode.
+It does not navigate, send a prompt to ChatGPT, take control, or open the user's local browser.
+Use `browser_control` separately to navigate the worker browser.
+The result confirms only that the UI request was sent; Chat may leave a passive button instead of opening the panel.
+
 ## Requirements and opt-in
 
 Use a dedicated **Docker** or **Kubernetes** worker with the current MindRoom worker image.

@@ -14,7 +14,11 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="chat_ui",
     display_name="Chat UI",
-    description="Let an agent request bounded actions in MindRoom Chat",
+    description=(
+        "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel "
+        "with open_panel(panel='computer'), open Settings, or show room members. "
+        "Sends a UI request; does not navigate or control the user's local browser."
+    ),
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

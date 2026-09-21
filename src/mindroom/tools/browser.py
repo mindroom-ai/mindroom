@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="browser",
     display_name="Browser",
-    description="Browse websites, fill in forms, and capture screenshots",
+    description=(
+        "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. "
+        "With worker routing, this controls the agent's worker browser. "
+        "To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). "
+        "The user's local browser requires the separately configured desktop target."
+    ),
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
