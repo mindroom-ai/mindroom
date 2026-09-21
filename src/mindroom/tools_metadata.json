@@ -7252,7 +7252,20 @@
       "agent_override_fields": null,
       "auth_provider": null,
       "category": "integrations",
-      "config_fields": null,
+      "config_fields": [
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow temporary approval requests for all public hostnames using hostnames=[\"*\"]. Private-network and port restrictions still apply.",
+          "label": "Allow Full Network Access",
+          "name": "allow_full_access",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
+        }
+      ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
