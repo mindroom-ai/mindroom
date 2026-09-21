@@ -57,7 +57,7 @@ final class MindRoomCommandTests: XCTestCase {
 
     func testMenuCommandsExposeTitles() {
         XCTAssertEqual(MindRoomCommand.installRuntime.title, "Install MindRoom Runtime")
-        XCTAssertEqual(MindRoomCommand.openDashboard.title, "Open Dashboard")
+        XCTAssertEqual(MindRoomCommand.openDashboard.title, "Configure Agents")
         XCTAssertEqual(MindRoomCommand.openConfigFolder.title, "Open Config Folder")
         XCTAssertEqual(MindRoomCommand.openLogsFolder.title, "Open Logs Folder")
     }

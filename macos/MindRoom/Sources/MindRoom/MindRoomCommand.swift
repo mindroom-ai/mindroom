@@ -24,7 +24,7 @@ enum MindRoomCommand: Equatable {
         case .updateRuntime:
             return "Update MindRoom Runtime"
         case .installService:
-            return "Install/Ensure Service"
+            return "Install and Start Agents"
         case .startService:
             return "Start Service"
         case .stopService:
@@ -34,17 +34,17 @@ enum MindRoomCommand: Equatable {
         case .serviceStatus:
             return "Refresh Status"
         case .initializeHostedConfig:
-            return "Initialize Hosted Config"
+            return "Prepare Configuration"
         case .initializeSelfHostedConfig:
-            return "Initialize Self-Hosted Config"
+            return "Prepare Self-Hosted Configuration"
         case .localStackSetup:
             return "Run Local Stack Setup"
         case .pairHosted:
-            return "Pair Hosted MindRoom..."
+            return "Pair Chat Account"
         case .openDashboard:
-            return "Open Dashboard"
+            return "Configure Agents"
         case .openHostedChat:
-            return "Open chat.mindroom.chat"
+            return "Open Chat"
         case .openConfigFolder:
             return "Open Config Folder"
         case .openLogsFolder:
@@ -55,25 +55,25 @@ enum MindRoomCommand: Equatable {
     var successMessage: String? {
         switch self {
         case .installRuntime:
-            return "The MindRoom runtime is installed.\n\nNext: Initialize Hosted Config."
+            return "The MindRoom runtime is installed. Continue setup in Local agents, or pair an agent in Computer access."
         case .updateRuntime:
-            return "The MindRoom runtime is up to date."
+            return "The runtime update finished. In Settings, use Apply Runtime to Service to start or restart local agents with this version."
         case .installService:
-            return "The MindRoom background service is installed and running.\n\nNext: Open Dashboard."
+            return "The background service was installed and started. Open Chat or Configure Agents to check that your agents are ready."
         case .startService:
-            return "The MindRoom service was started.\n\nNext: Open Dashboard."
+            return "The service start command finished. Open Chat or Configure Agents to check that your agents are ready."
         case .stopService:
             return "The MindRoom service was stopped."
         case .restartService:
             return "The MindRoom service was restarted."
         case .initializeHostedConfig:
-            return "Config files are ready in ~/.mindroom.\n\nNext: use Open chat.mindroom.chat, sign in to create your hosted account, click the Local MindRoom icon in the sidebar to generate a pair code, then use Pair Hosted MindRoom..."
+            return "Configuration is ready in ~/.mindroom. Existing files were kept. Open MindRoom Chat, sign in, and use Local MindRoom in the chat sidebar to generate a pair code."
         case .initializeSelfHostedConfig:
-            return "Config files are ready in ~/.mindroom.\n\nEdit config.yaml and .env to point at your Matrix homeserver and model provider, then use Install/Ensure Service."
+            return "Configuration is ready in ~/.mindroom. Edit config.yaml and .env for your Matrix server and model provider, then install and start agents."
         case .localStackSetup:
             return "Local stack setup finished."
         case .pairHosted:
-            return "Paired with hosted MindRoom.\n\nNext: Install/Ensure Service, then Open Dashboard."
+            return "The chat account was paired. Configure an AI provider, then install and start agents."
         case .serviceStatus, .openDashboard, .openHostedChat, .openConfigFolder, .openLogsFolder:
             return nil
         }

@@ -2,7 +2,8 @@
 
 The native app and its desktop helper require macOS 14 or newer.
 
-The menu app includes a Python desktop helper at:
+The app has Overview, Local agents, Computer access, and Settings sections, with a compact menu bar companion.
+Its Python desktop helper is bundled at:
 
 ```text
 MindRoom.app/Contents/Helpers/<architecture>/MindRoom Desktop Helper.app
@@ -11,7 +12,8 @@ MindRoom.app/Contents/Helpers/<architecture>/MindRoom Desktop Helper.app
 The helper has the fixed bundle identifier `chat.mindroom.desktophelper`.
 It runs the existing Python Accessibility, screen capture, input, browser, Matrix, and desktop bridge implementations.
 The menu app launches it as a foreground child and communicates only through inherited stdin, stdout, and stderr pipes.
-Closing the app closes that channel and clears every control lease.
+Quitting the app closes that channel and clears every control lease.
+Closing only the main window keeps the helper and menu bar available.
 
 ## Build
 
@@ -38,7 +40,7 @@ Stdout is reserved for protocol-version-1 NDJSON.
 Library diagnostics are redirected to stderr.
 Requests use UUID correlation IDs; input lines are limited to 65,536 bytes and output lines to 262,144 bytes.
 
-The Desktop Control window can import the structured setup descriptor copied from a direct agent chat.
+The Computer access section can import the structured setup descriptor copied from a direct agent chat.
 Import only fills transient form state.
 The one-time pairing code is not written to the native configuration.
 The person at the Mac must confirm the exact controller fingerprint, requester, and agent after edits or configuration revision changes.
@@ -59,6 +61,6 @@ A release still requires these checks on macOS:
 2. Build the universal app, verify both nested and parent signatures, and run `smoke-desktop-helper.py` against each helper.
 3. Confirm Accessibility and Screen Recording prompts name the packaged helper.
 4. Upgrade over a prior signed build and confirm permission continuity.
-5. Exercise keyboard and VoiceOver navigation in Desktop Control.
+5. Exercise keyboard and VoiceOver navigation in Computer access.
 6. Start and stop the installed-profile browser extension and verify existing tabs remain outside control.
 7. Notarize, staple, and launch the DMG build, then test a Sparkle update.

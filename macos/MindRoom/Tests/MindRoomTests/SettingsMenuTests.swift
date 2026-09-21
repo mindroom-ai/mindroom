@@ -4,22 +4,24 @@ import XCTest
 
 @MainActor
 final class SettingsMenuTests: XCTestCase {
-    func testAppSceneRegistersSettingsActionBeforeMenuUse() {
+    func testSettingsMenuRoutesToAppSettings() {
         let controller = StatusMenuController.shared
-        let originalOpenSettings = controller.openSettingsAction
-        defer { controller.openSettingsAction = originalOpenSettings }
-        controller.openSettingsAction = nil
+        let originalShowWindow = controller.showWindow
+        defer { controller.showWindow = originalShowWindow }
+        var selected: AppSection?
+        controller.showWindow = { selected = $0 }
 
-        _ = MindRoomApp().body
-
-        XCTAssertNotNil(controller.openSettingsAction)
+        XCTAssertTrue(NSApplication.shared.sendAction(
+            NSSelectorFromString("openSettings"), to: controller, from: nil
+        ))
+        XCTAssertEqual(selected, .settings)
     }
 
-    func testDesktopControlOpensAndReopensSettingsWithRemappedShortcut() {
+    func testComputerAccessOpensAndReopensAppWithRemappedSettingsShortcut() {
         let application = NSApplication.shared
         let originalMenu = application.mainMenu
         let controller = StatusMenuController.shared
-        let originalOpenSettings = controller.openSettingsAction
+        let originalShowWindow = controller.showWindow
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
             styleMask: [.titled, .closable],
@@ -30,7 +32,7 @@ final class SettingsMenuTests: XCTestCase {
         defer {
             window.close()
             application.mainMenu = originalMenu
-            controller.openSettingsAction = originalOpenSettings
+            controller.showWindow = originalShowWindow
         }
 
         let mainMenu = NSMenu()
@@ -49,16 +51,18 @@ final class SettingsMenuTests: XCTestCase {
         settingsItem.keyEquivalentModifierMask = [.command, .option]
         applicationMenu.addItem(settingsItem)
         application.mainMenu = mainMenu
-        controller.openSettingsAction = { window.makeKeyAndOrderFront(nil) }
+        var selected: AppSection?
+        controller.showWindow = { selected = $0; window.makeKeyAndOrderFront(nil) }
 
         for _ in 0 ..< 2 {
             XCTAssertFalse(window.isVisible)
             XCTAssertTrue(application.sendAction(
-                NSSelectorFromString("openDesktopControl"),
+                NSSelectorFromString("openComputerAccess"),
                 to: controller,
                 from: nil
             ))
-            XCTAssertTrue(window.isVisible, "Desktop Control must execute the registered settings action")
+            XCTAssertEqual(selected, .computerAccess)
+            XCTAssertTrue(window.isVisible, "Computer access must open the native app window")
             window.close()
         }
     }

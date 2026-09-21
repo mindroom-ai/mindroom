@@ -12,7 +12,7 @@ usage() {
     cat <<'EOF'
 Usage: macos/build-macos-app.sh [--install] [--dmg] [--universal]
 
-Build the native macOS menu bar app for MindRoom.
+Build the native macOS app and menu bar companion for MindRoom.
 
 Options:
   --install   Copy the built app to /Applications and open it.
@@ -375,6 +375,12 @@ cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
 cp "$APP_ICON_ICNS" "$APP_DIR/Contents/Resources/MindRoom.icns"
+RESOURCE_BUNDLE="$BIN_DIR/MindRoom_MindRoom.bundle"
+if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
+    echo "MindRoom resource bundle not found: $RESOURCE_BUNDLE" >&2
+    exit 1
+fi
+ditto "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/MindRoom_MindRoom.bundle"
 for architecture in "${HELPER_ARCHITECTURES[@]}"; do
     mkdir -p "$APP_DIR/Contents/Helpers/$architecture"
     ditto "$HELPER_BUILD_DIR/$architecture/dist/MindRoom Desktop Helper.app" \
