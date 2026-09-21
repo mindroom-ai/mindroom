@@ -9,7 +9,7 @@ import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from agno.media import Audio, File, Image, Video
+from agno.media import Audio, File, Video
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
@@ -55,7 +55,6 @@ if TYPE_CHECKING:
 
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = Path | RuntimeEncryptedMediaAttachment
-_VIEW_MEDIA_MAX_BYTES = 20 * 1024 * 1024
 
 
 def _attachment_tool_payload(status: str, **kwargs: object) -> str:
@@ -174,48 +173,37 @@ def _read_attachment_bytes(
     return payload, None
 
 
-def _view_context_image(context: ToolRuntimeContext, attachment_id: str) -> ToolResult:
-    """Resolve only attachment IDs authorized for this conversation and deliver an image."""
-    metadata: dict[str, object] = {"tool": "view_file", "attachment_id": attachment_id}
-    record, error = _resolve_context_attachment_record(context, attachment_id)
-    if error is not None or record is None:
-        return media_error(error or "Attachment is unavailable.", metadata=metadata)
-    allowed, _ = filter_attachments_for_context(
-        [record],
-        room_id=context.room_id,
-        thread_id=context.resolved_thread_id,
-    )
-    if not allowed:
-        return media_error("Attachment is outside the authorized conversation context.", metadata=metadata)
-    data, error = _read_attachment_bytes(record, byte_limit=MAX_SOURCE_BYTES, limit_label="image viewing")
-    if error is not None or data is None:
-        return media_error(error or "Attachment is unavailable.", metadata=metadata)
-    return image_result(data, metadata=metadata)
-
-
-def _view_attachment(context: ToolRuntimeContext, attachment_id: str, content: str) -> str | ToolResult:  # noqa: PLR0911
-    """Read scoped attachment bytes off-loop and return native model media."""
+def _view_attachment(  # noqa: PLR0911
+    context: ToolRuntimeContext,
+    attachment_id: str,
+    *,
+    metadata: dict[str, object],
+    images_only: bool,
+) -> ToolResult:
+    """Read authorized attachment bytes and use shared preparation for every image view."""
     attachment, error = _resolve_context_attachment_record(context, attachment_id)
     if error is not None or attachment is None:
-        return _attachment_tool_payload("error", attachment_id=attachment_id, message=error)
+        return media_error(error or "Attachment is unavailable.", metadata=metadata)
     payload, error = _read_attachment_bytes(
         attachment,
-        byte_limit=_VIEW_MEDIA_MAX_BYTES,
+        byte_limit=MAX_SOURCE_BYTES,
         limit_label="media viewing",
     )
     if error is not None or payload is None:
-        return _attachment_tool_payload("error", attachment_id=attachment_id, message=error)
+        return media_error(error or "Attachment is unavailable.", metadata=metadata)
     if not payload:
-        return _attachment_tool_payload("error", attachment_id=attachment_id, message="Attachment file is empty.")
+        return media_error("Attachment file is empty.", metadata=metadata)
     mime_type = resolve_image_mime_type(payload, attachment.mime_type).detected_mime_type
-    if mime_type in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
-        return ToolResult(content=content, images=[Image(content=payload, mime_type=mime_type)])
-    if attachment.kind == "image":
-        return _attachment_tool_payload(
-            "error",
-            attachment_id=attachment_id,
-            message="view requires a PNG, JPEG, GIF, or WebP image.",
+    if images_only or attachment.kind == "image" or mime_type is not None:
+        allowed, _ = filter_attachments_for_context(
+            [attachment],
+            room_id=context.room_id,
+            thread_id=context.resolved_thread_id,
         )
+        if not allowed:
+            return media_error("Attachment is outside the authorized conversation context.", metadata=metadata)
+        return image_result(payload, metadata=metadata)
+    content = json.dumps(metadata, sort_keys=True)
     mime_type = attachment.mime_type
     filename = attachment.filename or attachment.local_path.name
     media_format = Path(filename).suffix.lstrip(".").lower()
@@ -228,10 +216,9 @@ def _view_attachment(context: ToolRuntimeContext, attachment_id: str, content: s
             content=content,
             files=[File(content=payload, mime_type=mime_type, filename=filename, format=media_format)],
         )
-    return _attachment_tool_payload(
-        "error",
-        attachment_id=attachment_id,
-        message="This file type cannot be sent as model media. Use get_attachment without view to inspect or save it.",
+    return media_error(
+        "This file type cannot be sent as model media. Use get_attachment without view to inspect or save it.",
+        metadata=metadata,
     )
 
 
@@ -469,7 +456,13 @@ class AttachmentTools(Toolkit):
         if context is None:
             return media_error("Tool runtime context is unavailable.", metadata=metadata)
         if attachment_id is not None:
-            result = await asyncio.to_thread(_view_context_image, context, attachment_id)
+            result = await asyncio.to_thread(
+                _view_attachment,
+                context,
+                attachment_id,
+                metadata={**metadata, "attachment_id": attachment_id},
+                images_only=True,
+            )
         else:
             assert path is not None
             result = await self._view_workspace_image(context, path)
@@ -530,7 +523,7 @@ class AttachmentTools(Toolkit):
             missing_attachment_ids=missing_attachment_ids,
         )
 
-    async def get_attachment(  # noqa: PLR0911
+    async def get_attachment(  # noqa: C901, PLR0911
         self,
         attachment_id: str,
         mindroom_output_path: str | None = None,
@@ -542,6 +535,7 @@ class AttachmentTools(Toolkit):
             attachment_id: Context-scoped ID from list_attachments or register_attachment.
             mindroom_output_path: Save bytes to a workspace-relative file instead of returning metadata.
             view: Send image, audio, video, or document content (including PDF) to the model; up to 20 MiB.
+                Images use the same preparation, limits, and replay behavior as view_file.
                 Requires a model that supports the media type. If inline media is unavailable, use
                 get_attachment without view to get metadata or save the file, then use other available tools.
                 Cannot be combined with mindroom_output_path.
@@ -589,14 +583,31 @@ class AttachmentTools(Toolkit):
                 output_path=output_path,
             )
 
-        content = _attachment_tool_payload(
-            "ok",
-            attachment_id=requested_attachment_ids[0],
-            attachment=attachments[0],
-        )
+        metadata: dict[str, object] = {
+            "status": "ok",
+            "tool": "attachments",
+            "attachment_id": requested_attachment_ids[0],
+            "attachment": attachments[0],
+        }
         if view:
-            return await asyncio.to_thread(_view_attachment, context, requested_attachment_ids[0], content)
-        return content
+            result = await asyncio.to_thread(
+                _view_attachment,
+                context,
+                requested_attachment_ids[0],
+                metadata=metadata,
+                images_only=False,
+            )
+            receipt = json.loads(result.content)
+            if receipt.get("view_status") == "error":
+                return _attachment_tool_payload(
+                    "error",
+                    attachment_id=requested_attachment_id,
+                    message=receipt["message"],
+                )
+            finalized = await asyncio.to_thread(finalize_tool_media, result)
+            assert isinstance(finalized, ToolResult)
+            return finalized
+        return json.dumps(metadata, sort_keys=True)
 
     def _resolve_output_path_argument(
         self,

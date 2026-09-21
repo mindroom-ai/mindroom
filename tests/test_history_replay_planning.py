@@ -103,7 +103,8 @@ def _viewed_image_message(index: int) -> Message:
     )
 
 
-def test_history_estimate_projects_bounded_viewed_images_without_mutating_session() -> None:
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_projects_bounded_viewed_images_without_mutating_session(native_route: str | None) -> None:
     """The planner and provider estimator see the same bounded newest-first media replay."""
     messages = [_viewed_image_message(index) for index in range(6)]
     session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
@@ -118,6 +119,7 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
             max_tool_calls_from_history=None,
         ),
         replay_model=replay_model,  # type: ignore[arg-type]
+        native_route=native_route,
     )
 
     replayed_ids = [image.id for message in replay_model.messages for image in message.images or []]
@@ -126,7 +128,8 @@ def test_history_estimate_projects_bounded_viewed_images_without_mutating_sessio
     assert session.to_dict() == before
 
 
-def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator() -> None:
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator(native_route: str | None) -> None:
     """Fallback planning charges visual tokens without treating image bytes as prompt text."""
     settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
@@ -148,17 +151,20 @@ def test_history_estimate_charges_conservative_visual_cost_without_provider_esti
         session=without_image,
         scope=scope,
         history_settings=settings,
+        native_route=native_route,
     )
     visual_tokens = estimate_prompt_visible_history_tokens(
         session=with_image,
         scope=scope,
         history_settings=settings,
+        native_route=native_route,
     )
 
     assert 5_000 <= visual_tokens - text_tokens < 5_100
 
 
-def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavailable() -> None:
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavailable(native_route: str | None) -> None:
     """A declared visual capability cannot erase image cost when its estimate is unavailable."""
     session = _session("with-image", runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])])
 
@@ -170,6 +176,7 @@ def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavail
             max_tool_calls_from_history=None,
         ),
         replay_model=_UnavailableVisualReplayEstimate(),  # type: ignore[arg-type]
+        native_route=native_route,
     )
 
     assert tokens >= 5_000

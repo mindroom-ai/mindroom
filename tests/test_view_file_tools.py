@@ -1,5 +1,6 @@
 """Model-visible file entrypoint enforces sources and existing attachment authority."""
 
+import io
 import json
 import stat
 from dataclasses import replace
@@ -7,6 +8,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.tools.function import ToolResult
+from PIL import Image
 
 from mindroom.attachments import load_attachment, register_local_attachment
 from mindroom.config.models import ModelConfig
@@ -36,7 +39,8 @@ async def test_view_file_path_delivers_image_in_one_call(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_view_file_attachment_delivers_authorized_image(tmp_path: Path) -> None:
+@pytest.mark.parametrize("entrypoint", ["view_file", "get_attachment"])
+async def test_view_file_attachment_delivers_authorized_image(tmp_path: Path, entrypoint: str) -> None:
     """View file attachment delivers authorized image."""
     path = tmp_path / "image.png"
     path.write_bytes(image_bytes())
@@ -51,10 +55,69 @@ async def test_view_file_attachment_delivers_authorized_image(tmp_path: Path) ->
     assert record
     context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
     with tool_runtime_context(context):
-        result = await AttachmentTools().view_file(attachment_id=record.attachment_id)
+        tools = AttachmentTools()
+        result = (
+            await tools.view_file(attachment_id=record.attachment_id)
+            if entrypoint == "view_file"
+            else await tools.get_attachment(record.attachment_id, view=True)
+        )
+    assert isinstance(result, ToolResult)
     assert result.images
     assert result.images[0].content == image_bytes()
+    assert result.images[0].id.startswith("mindroom_viewed_")
     assert json.loads(result.content)["attachment_id"] == record.attachment_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["view_file", "get_attachment"])
+@pytest.mark.parametrize("case", ["large", "animation", "corrupt", "pixels"])
+async def test_attachment_image_views_share_preparation(
+    tmp_path: Path,
+    entrypoint: str,
+    case: str,
+) -> None:
+    """Every attachment image entrypoint enforces decoding and disclosed transformations."""
+    path = tmp_path / "image.png"
+    if case == "animation":
+        frames = [Image.new("RGB", (20, 20), color) for color in ("red", "blue")]
+        with path.open("wb") as output:
+            frames[0].save(output, format="GIF", save_all=True, append_images=frames[1:], duration=100)
+    elif case == "corrupt":
+        path.write_bytes(b"\x89PNG\r\n\x1a\nnot a decodable image")
+    else:
+        path.write_bytes(image_bytes((3000, 1000) if case == "large" else (6400, 6400)))
+    original = path.read_bytes()
+    context = _tool_context(tmp_path)
+    tools = AttachmentTools(tool_output_workspace_root=tmp_path)
+    with tool_runtime_context(context):
+        attachment_id = json.loads(await tools.register_attachment("image.png"))["attachment_id"]
+        result = (
+            await tools.view_file(attachment_id=attachment_id)
+            if entrypoint == "view_file"
+            else await tools.get_attachment(attachment_id, view=True)
+        )
+
+    receipt = json.loads(result.content if isinstance(result, ToolResult) else result)
+    assert receipt["attachment_id"] == attachment_id
+    assert path.read_bytes() == original
+    if case in {"corrupt", "pixels"}:
+        if isinstance(result, ToolResult):
+            assert not result.images
+            assert receipt["view_status"] == "error"
+        else:
+            assert receipt["status"] == "error"
+        assert ("decoded" if case == "corrupt" else "pixel") in receipt["message"]
+        return
+    assert isinstance(result, ToolResult)
+    assert result.images
+    assert receipt["view_status"] == "ready"
+    with Image.open(io.BytesIO(result.images[0].content)) as image:
+        if case == "large":
+            assert image.size == (2048, 683)
+            assert receipt["resized"] is True
+        else:
+            assert image.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+            assert receipt["first_frame_only"] is True
 
 
 @pytest.mark.asyncio
@@ -77,7 +140,8 @@ async def test_view_file_attachment_denies_unknown_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_view_file_attachment_denies_wrong_room_even_when_listed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("entrypoint", ["view_file", "get_attachment"])
+async def test_view_file_attachment_denies_wrong_room_even_when_listed(tmp_path: Path, entrypoint: str) -> None:
     """View file attachment denies wrong room even when listed."""
     path = tmp_path / "image.png"
     path.write_bytes(image_bytes())
@@ -91,9 +155,17 @@ async def test_view_file_attachment_denies_wrong_room_even_when_listed(tmp_path:
     assert record
     context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
     with tool_runtime_context(context):
-        result = await AttachmentTools().view_file(attachment_id=record.attachment_id)
-    assert not result.images
-    assert json.loads(result.content)["view_status"] == "error"
+        tools = AttachmentTools()
+        result = (
+            await tools.view_file(attachment_id=record.attachment_id)
+            if entrypoint == "view_file"
+            else await tools.get_attachment(record.attachment_id, view=True)
+        )
+    if isinstance(result, ToolResult):
+        assert not result.images
+        assert json.loads(result.content)["view_status"] == "error"
+    else:
+        assert json.loads(result)["status"] == "error"
 
 
 @pytest.mark.asyncio
@@ -135,7 +207,8 @@ async def test_viewed_image_can_be_saved_and_explicitly_shared(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_unsupported_adapter_retains_artifact_and_reports_limitation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("entrypoint", ["path", "view_file", "get_attachment"])
+async def test_unsupported_adapter_retains_artifact_and_reports_limitation(tmp_path: Path, entrypoint: str) -> None:
     """An adapter that omits images must never report a successful view."""
     context = replace(
         _tool_context(tmp_path, process_env={"MINDROOM_EXECUTION_MODE": "off"}),
@@ -145,7 +218,17 @@ async def test_unsupported_adapter_retains_artifact_and_reports_limitation(tmp_p
     path = tmp_path / "image.png"
     path.write_bytes(image_bytes())
     with tool_runtime_context(context):
-        viewed = await AttachmentTools(tool_output_workspace_root=tmp_path).view_file(path="image.png")
+        tools = AttachmentTools(tool_output_workspace_root=tmp_path)
+        if entrypoint == "path":
+            viewed = await tools.view_file(path="image.png")
+        else:
+            attachment_id = json.loads(await tools.register_attachment("image.png"))["attachment_id"]
+            viewed = (
+                await tools.view_file(attachment_id=attachment_id)
+                if entrypoint == "view_file"
+                else await tools.get_attachment(attachment_id, view=True)
+            )
+    assert isinstance(viewed, ToolResult)
     receipt = json.loads(viewed.content)
     assert receipt["view_status"] == "unsupported"
     assert not viewed.images

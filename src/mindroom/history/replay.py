@@ -57,53 +57,38 @@ def estimate_prompt_visible_history_tokens(
         scope=scope,
         history_settings=history_settings,
     )
-    if native_route is None:
-        uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
-        estimation_messages = (
-            history_messages
-            if uses_visual_tokens
-            else [_without_image_transport(message, strip_content_blocks=False) for message in history_messages]
-        )
-        provider_estimate = (
-            replay_model.estimate_portable_replay_tokens(estimation_messages) if replay_model is not None else None
-        )
-        provider_accounts_for_images = uses_visual_tokens and provider_estimate is not None
-        canonical_messages = [
-            _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
-            for message in history_messages
-        ]
-        image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
-        return (
-            summary_tokens
-            + max(_estimate_history_messages_tokens(canonical_messages), provider_estimate or 0)
-            + image_fallback_tokens
-        )
-    projected = native_replay_messages(history_messages, native_route)
     checkpoint_tokens = 0
-    tail = []
-    for message in projected:
-        if items := checkpoint_items(message, native_route):
-            checkpoint_tokens += checkpoint_estimated_tokens(items)
-        else:
-            tail.append(message)
+    if native_route is not None:
+        projected = native_replay_messages(history_messages, native_route)
+        history_messages = []
+        for message in projected:
+            if items := checkpoint_items(message, native_route):
+                checkpoint_tokens += checkpoint_estimated_tokens(items)
+            else:
+                history_messages.append(message)
     uses_visual_tokens = replay_model is not None and replay_model.portable_replay_uses_visual_tokens()
-    estimation_tail = (
-        tail
+    estimation_messages = (
+        history_messages
         if uses_visual_tokens
-        else [_without_image_transport(message, strip_content_blocks=False) for message in tail]
+        else [_without_image_transport(message, strip_content_blocks=False) for message in history_messages]
     )
     provider_estimate = (
-        replay_model.estimate_portable_replay_tokens(estimation_tail)
-        if replay_model is not None and estimation_tail
+        replay_model.estimate_portable_replay_tokens(estimation_messages)
+        if replay_model is not None and (estimation_messages or native_route is None)
         else None
     )
     provider_accounts_for_images = uses_visual_tokens and provider_estimate is not None
-    canonical_tail = [
-        _without_image_transport(message, strip_content_blocks=provider_accounts_for_images) for message in tail
+    canonical_messages = [
+        _without_image_transport(message, strip_content_blocks=provider_accounts_for_images)
+        for message in history_messages
     ]
-    tail_tokens = sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_tail)
-    image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(tail)
-    return summary_tokens + checkpoint_tokens + max(tail_tokens, provider_estimate or 0) + image_fallback_tokens
+    canonical_tokens = (
+        _estimate_history_messages_tokens(canonical_messages)
+        if native_route is None
+        else sum((_estimated_message_chars(message) + 3) // 4 for message in canonical_messages)
+    )
+    image_fallback_tokens = 0 if provider_accounts_for_images else _image_fallback_tokens(history_messages)
+    return summary_tokens + checkpoint_tokens + max(canonical_tokens, provider_estimate or 0) + image_fallback_tokens
 
 
 def _without_image_transport(message: Message, *, strip_content_blocks: bool) -> Message:

@@ -219,7 +219,9 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
     assert execution.status == "success"
     result = execution.result
     assert isinstance(result, ToolResult)
-    assert result.content == metadata
+    receipt = json.loads(result.content)
+    assert receipt.items() >= json.loads(metadata).items()
+    assert receipt["view_status"] == "ready"
     assert result.images is not None
     assert len(result.images) == 1
     assert result.images[0].content == image_bytes
@@ -318,7 +320,7 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
     payload = json.loads(result)
     assert payload["status"] == "error"
     expected = {
-        "non_image": "PNG, JPEG, GIF, or WebP",
+        "non_image": "PNG, JPEG, GIF or WebP",
         "oversized": "size limit",
         "missing": "missing on disk",
         "save_and_view": "cannot be combined",
