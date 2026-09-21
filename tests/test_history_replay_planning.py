@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from agno.media import Image
 from agno.models.message import Message
 from agno.session.summary import SessionSummary
 
@@ -55,6 +56,159 @@ from tests.history_helpers import (  # noqa: F401
     _runtime_paths,
     _session,
 )
+
+
+class _RecordingVisualReplayEstimate:
+    """Record the shared history projection while supplying a visual estimate."""
+
+    def __init__(self) -> None:
+        self.messages: list[Message] = []
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        self.messages = messages
+        return 100
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return True
+
+
+class _UnavailableVisualReplayEstimate:
+    def __init__(self) -> None:
+        self.messages: list[Message] = []
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> None:
+        self.messages = messages
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return True
+
+
+class _DominantTextReplayEstimate:
+    def __init__(self) -> None:
+        self.messages: list[Message] = []
+
+    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
+        self.messages = messages
+        return 12_000
+
+    def portable_replay_uses_visual_tokens(self) -> bool:
+        return False
+
+
+def _viewed_image_message(index: int) -> Message:
+    return Message(
+        role="user",
+        content="The tool call above generated the attached media.",
+        images=[Image(id=f"mindroom_viewed_{index}", content=f"image-{index}".encode(), mime_type="image/png")],
+    )
+
+
+def test_history_estimate_projects_bounded_viewed_images_without_mutating_session() -> None:
+    """The planner and provider estimator see the same bounded newest-first media replay."""
+    messages = [_viewed_image_message(index) for index in range(6)]
+    session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
+    before = session.to_dict()
+    replay_model = _RecordingVisualReplayEstimate()
+
+    estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        replay_model=replay_model,  # type: ignore[arg-type]
+    )
+
+    replayed_ids = [image.id for message in replay_model.messages for image in message.images or []]
+    assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
+    assert sum("omitted from replay" in str(message.content) for message in replay_model.messages) == 2
+    assert session.to_dict() == before
+
+
+def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator() -> None:
+    """Fallback planning charges visual tokens without treating image bytes as prompt text."""
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    without_image = _session(
+        "without-image",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[Message(role="user", content="The tool call above generated the attached media.")],
+            ),
+        ],
+    )
+    with_image = _session(
+        "with-image",
+        runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
+    )
+
+    text_tokens = estimate_prompt_visible_history_tokens(
+        session=without_image,
+        scope=scope,
+        history_settings=settings,
+    )
+    visual_tokens = estimate_prompt_visible_history_tokens(
+        session=with_image,
+        scope=scope,
+        history_settings=settings,
+    )
+
+    assert 5_000 <= visual_tokens - text_tokens < 5_100
+
+
+def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavailable() -> None:
+    """A declared visual capability cannot erase image cost when its estimate is unavailable."""
+    session = _session("with-image", runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])])
+
+    tokens = estimate_prompt_visible_history_tokens(
+        session=session,
+        scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        history_settings=ResolvedHistorySettings(
+            policy=HistoryPolicy(mode="all"),
+            max_tool_calls_from_history=None,
+        ),
+        replay_model=_UnavailableVisualReplayEstimate(),  # type: ignore[arg-type]
+    )
+
+    assert tokens >= 5_000
+
+
+@pytest.mark.parametrize("native_route", [None, "native-route"])
+def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_estimate(
+    native_route: str | None,
+) -> None:
+    """A larger provider text estimate cannot hide the fallback image charge."""
+    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    without_image = _session(
+        "without-image",
+        runs=[_completed_run("run-1", messages=[Message(role="user", content="Viewed output")])],
+    )
+    with_image = _session(
+        "with-image",
+        runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
+    )
+    replay_model = _DominantTextReplayEstimate()
+
+    text_tokens = estimate_prompt_visible_history_tokens(
+        session=without_image,
+        scope=scope,
+        history_settings=settings,
+        native_route=native_route,
+        replay_model=replay_model,  # type: ignore[arg-type]
+    )
+    visual_tokens = estimate_prompt_visible_history_tokens(
+        session=with_image,
+        scope=scope,
+        history_settings=settings,
+        native_route=native_route,
+        replay_model=replay_model,  # type: ignore[arg-type]
+    )
+
+    assert visual_tokens - text_tokens >= 5_000
+    assert replay_model.messages[0].images is None
 
 
 @pytest.mark.asyncio

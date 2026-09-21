@@ -417,9 +417,11 @@ Supply exactly one source; keep `read_file` for ordinary text and code.
 Workspace paths resolve inside the selected worker, or inside the configured workspace in local execution mode.
 PNG, JPEG, GIF and WebP inputs are supported up to 20 MiB and 40 million pixels.
 The delivered image is bounded to 2048 pixels on its longest edge and 5 MiB; resizing, conversion, and first-frame-only animation handling are disclosed in metadata.
+Transparent images retain their transparency; images that cannot fit the payload limit return an explicit error while preserving the source artifact.
 Viewing preserves the source path and retains a reusable attachment handle when context storage is available.
 A retained handle identifies the delivered image copy and follows existing attachment authority: it is available during the current tool run, or when supplied by conversation metadata.
-For later turns, reopen the original workspace path; viewed image pixels also remain in model history.
+For later turns, reopen the original workspace path; model history replays up to four recent viewed images within a 10 MiB aggregate limit.
+Older or oversized replay images are omitted with an explicit notice; their saved artifacts remain available.
 Viewing does not publish, upload to a separate vision service, open a user-facing panel, or post into Matrix.
 Adapters that cannot deliver tool images return an explicit limitation while retaining the artifact.
 Share only when requested, using `matrix_message(attachments=["att_..."])` with the returned handle.

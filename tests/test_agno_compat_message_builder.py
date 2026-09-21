@@ -19,7 +19,7 @@ from agno.session.team import TeamSession
 from agno.team import Team, _messages
 from pydantic import BaseModel
 
-from mindroom.history import agno_compat_message_builder
+from mindroom.history import agno_compat_message_builder, message_content
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +273,31 @@ async def test_persisted_history_media_is_not_replayed() -> None:
     assert run_messages.user_message.images == [current_image]
 
 
+@pytest.mark.asyncio
+async def test_viewed_image_replay_keeps_only_newest_four_and_discloses_omissions() -> None:
+    """Historical viewed images stay bounded without changing durable or current media."""
+    history_messages = [
+        Message(
+            role="user",
+            content="The tool call above generated the attached media.",
+            images=[Image(id=f"mindroom_viewed_{index}", content=f"image-{index}".encode(), mime_type="image/png")],
+        )
+        for index in range(6)
+    ]
+    current_image = Image(id="att_current", content=b"current", mime_type="image/png")
+
+    run_messages = await _patched_history_run_messages(history_messages, [current_image])
+
+    replayed = [message for message in run_messages.messages if message.from_history]
+    replayed_ids = [image.id for message in replayed for image in message.images or []]
+    assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
+    assert sum("omitted from replay" in str(message.content) for message in replayed) == 2
+    assert sum("4-image, 10 MiB limit" in str(message.content) for message in replayed) == 2
+    assert all(message.images for message in history_messages)
+    assert run_messages.user_message is not None
+    assert run_messages.user_message.images == [current_image]
+
+
 def test_inline_media_cleanup_strips_every_kind_only_from_history() -> None:
     history_message = Message(
         role="user",
@@ -293,10 +318,15 @@ def test_inline_media_cleanup_strips_every_kind_only_from_history() -> None:
 
     agno_compat_message_builder._strip_history_inline_media(run_messages)
 
-    assert history_message.audio is None
-    assert history_message.images is None
-    assert history_message.files is None
-    assert history_message.videos is None
+    projected_history = run_messages.messages[0]
+    assert projected_history.audio is None
+    assert projected_history.images is None
+    assert projected_history.files is None
+    assert projected_history.videos is None
+    assert history_message.audio
+    assert history_message.images
+    assert history_message.files
+    assert history_message.videos
     assert current_message.audio
     assert current_message.images
     assert current_message.files
@@ -319,10 +349,37 @@ def test_inline_media_cleanup_preserves_only_marked_viewed_images_for_replay() -
 
     agno_compat_message_builder._strip_history_inline_media(run_messages)
 
+    projected_message = run_messages.messages[0]
+    assert projected_message.images
+    assert len(projected_message.images) == 1
+    assert projected_message.images[0].id == "mindroom_viewed_kept"
+    assert projected_message.images[0].content == b"viewed-image"
     assert persisted_message.images
-    assert len(persisted_message.images) == 1
-    assert persisted_message.images[0].id == "mindroom_viewed_kept"
-    assert persisted_message.images[0].content == b"viewed-image"
+    assert len(persisted_message.images) == 2
+
+
+def test_history_viewed_image_projection_enforces_aggregate_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Newest images fill the aggregate byte allowance without mutating saved messages."""
+    monkeypatch.setattr(message_content, "_MAX_HISTORY_VIEWED_IMAGE_BYTES", 5)
+    messages = [
+        Message(
+            role="user",
+            content="The tool call above generated the attached media.",
+            images=[Image(id=f"mindroom_viewed_{index}", content=b"x" * size, mime_type="image/png")],
+        )
+        for index, size in enumerate((3, 2, 3))
+    ]
+    messages[0].compressed_content = "compressed prior content"
+
+    projected = message_content.project_history_media_for_replay(messages)
+
+    replayed_ids = [image.id for message in projected for image in message.images or []]
+    assert replayed_ids == ["mindroom_viewed_1", "mindroom_viewed_2"]
+    assert "omitted from replay" in str(projected[0].content)
+    assert projected[0].compressed_content is None
+    assert all(message.images for message in messages)
 
 
 def test_apply_patch_is_idempotent() -> None:

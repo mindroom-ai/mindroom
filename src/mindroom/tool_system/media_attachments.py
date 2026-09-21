@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
-from contextlib import suppress
 from uuid import uuid4
 
 from agno.tools.function import ToolResult
 
-from mindroom.attachments import register_local_attachment
+from mindroom.attachments import register_image_bytes_attachment
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 
 
@@ -33,31 +31,17 @@ def _retain_tool_media(result: object) -> object:  # noqa: PLR0911
         return result
     attachment_id = f"att_{uuid4().hex[:16]}"
     extension = ".png" if image.mime_type == "image/png" else ".jpg"
-    destination = context.storage_path / "incoming_media" / f"{attachment_id}{extension}"
-    created = False
-    try:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        created = True
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(image.content)
-        record = register_local_attachment(
-            context.storage_path,
-            destination,
-            kind="image",
-            attachment_id=attachment_id,
-            filename=f"viewed-image{extension}",
-            mime_type=image.mime_type,
-            room_id=context.room_id,
-            thread_id=context.resolved_thread_id,
-            sender=context.requester_id,
-        )
-    except OSError:
-        record = None
+    record = register_image_bytes_attachment(
+        context.storage_path,
+        image.content,
+        attachment_id=attachment_id,
+        filename=f"viewed-image{extension}",
+        mime_type=image.mime_type,
+        room_id=context.room_id,
+        thread_id=context.resolved_thread_id,
+        sender=context.requester_id,
+    )
     if record is None:
-        if created:
-            with suppress(OSError):
-                destination.unlink(missing_ok=True)
         metadata["attachment_warning"] = "Image is viewable, but a reusable attachment could not be retained."
     else:
         append_tool_runtime_attachment_id(record.attachment_id)

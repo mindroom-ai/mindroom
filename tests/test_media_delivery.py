@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import random
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,44 @@ def test_large_image_is_resized_with_disclosure() -> None:
     assert max(receipt["width"], receipt["height"]) <= 2048
     with Image.open(io.BytesIO(result.images[0].content)) as decoded:
         assert decoded.size == (receipt["width"], receipt["height"])
+
+
+@pytest.mark.parametrize(("size", "orientation"), [((3000, 1000), 1), ((80, 60), 6)])
+def test_cmyk_jpeg_can_be_resized_and_oriented(size: tuple[int, int], orientation: int) -> None:
+    """JPEG color modes must remain viewable when preparation re-encodes pixels."""
+    buffer = io.BytesIO()
+    exif = Image.Exif()
+    exif[274] = orientation
+    Image.new("CMYK", size, (255, 0, 0, 0)).save(buffer, format="JPEG", exif=exif)
+
+    result = media_delivery.image_result(buffer.getvalue(), metadata={})
+
+    assert result.images
+    receipt = json.loads(result.content)
+    assert receipt["view_status"] == "ready"
+    assert receipt["converted"] is True
+    with Image.open(io.BytesIO(result.images[0].content)) as decoded:
+        assert decoded.mode == "RGB"
+        assert decoded.size == (receipt["width"], receipt["height"])
+        assert decoded.getpixel((0, 0)) == (0, 255, 255)
+
+
+def test_oversized_transparent_image_does_not_reveal_hidden_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Payload reduction must not expose RGB values hidden by an alpha channel."""
+    pixels = random.Random(0).randbytes(128 * 128 * 3)  # noqa: S311 - deterministic visual fixture
+    source = Image.frombytes("RGB", (128, 128), pixels).convert("RGBA")
+    source.putalpha(0)
+    buffer = io.BytesIO()
+    source.save(buffer, format="PNG")
+    monkeypatch.setattr(media_delivery, "_MAX_IMAGE_BYTES", 20_000)
+
+    result = media_delivery.image_result(buffer.getvalue(), metadata={"path": "transparent.png"})
+
+    assert not result.images
+    receipt = json.loads(result.content)
+    assert receipt["view_status"] == "error"
+    assert "payload limit" in receipt["message"]
+    assert receipt["path"] == "transparent.png"
 
 
 @pytest.mark.parametrize("data", [b"", b"not an image", b"\x89PNG\r\n\x1a\n"])

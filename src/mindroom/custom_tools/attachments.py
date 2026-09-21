@@ -44,6 +44,7 @@ from mindroom.tool_system.sandbox_proxy import (
     attachment_save_uses_worker,
     inline_attachment_byte_limit,
     save_attachment_to_worker,
+    view_file_from_worker,
 )
 from mindroom.workspaces import resolve_workspace_relative_path
 
@@ -480,8 +481,6 @@ class AttachmentTools(Toolkit):
         runtime_paths = self._runtime_paths or context.runtime_paths
         metadata: dict[str, object] = {"tool": "view_file", "path": path}
         if attachment_save_uses_worker(runtime_paths=runtime_paths, worker_tools_override=self._worker_tools_override):
-            from mindroom.tool_system.sandbox_proxy import view_file_from_worker  # noqa: PLC0415
-
             try:
                 result = await asyncio.to_thread(
                     view_file_from_worker,
@@ -490,7 +489,7 @@ class AttachmentTools(Toolkit):
                     worker_tools_override=self._worker_tools_override,
                     path=path,
                 )
-            except (OSError, RuntimeError, ValueError) as exc:
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 return media_error(str(exc), metadata=metadata)
             return result or media_error("Worker workspace is unavailable.", metadata=metadata)
         if self._tool_output_workspace_root is None:

@@ -1849,7 +1849,7 @@ async def _execute_worker_browser(
                     (browser_config_key, tuple(sorted(process_env.items()))),
                     execute_current,
                 )
-                return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
+                return SandboxRunnerExecuteResponse(ok=True, result=provider.encode_result(result))
 
             async def invoke(
                 retained_toolkit: Toolkit,

@@ -1407,7 +1407,6 @@ depends_on = [
     "mindroom.custom_tools.browser_mcp",
     "mindroom.tools.browser_mcp",
     "mindroom.worker_computer.mcp_catalog",
-    "mindroom.worker_computer.mcp_results",
     "mindroom.worker_computer.protocol",
 ]
 visibility = ["mindroom.api.sandbox_runner"]
@@ -1760,7 +1759,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.agno_compat_message_builder"
-depends_on = []
+depends_on = ["mindroom.history.message_content"]
 visibility = ["mindroom.agents", "mindroom.teams"]
 
 [[modules]]
@@ -4010,7 +4009,6 @@ path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.media_attachments",
-    "mindroom.worker_computer.mcp_results",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registry_state",
@@ -5981,7 +5979,7 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 [[modules]]
 path = "mindroom.history.message_content"
 depends_on = ["mindroom.token_budget"]
-visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
+visibility = ["mindroom.history.agno_compat_message_builder", "mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
 
 [[modules]]
 path = "mindroom.agno_compat_provider_errors"
@@ -6328,11 +6326,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.worker_computer.mcp_catalog"
 depends_on = []
-
-[[modules]]
-path = "mindroom.worker_computer.mcp_results"
-depends_on = [
-    "mindroom.tool_system.media_transport",]
 
 [[modules]]
 path = "mindroom.worker_computer.browser_guard"

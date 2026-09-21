@@ -156,11 +156,11 @@ async def test_unsupported_adapter_retains_artifact_and_reports_limitation(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_retention_failure_removes_unregistered_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failed registration does not leave untracked copies in storage."""
+async def test_retention_failure_preserves_viewable_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed retention reports its limitation without discarding model-visible pixels."""
     context = _tool_context(tmp_path, process_env={"MINDROOM_EXECUTION_MODE": "off"})
     (tmp_path / "image.png").write_bytes(image_bytes())
-    monkeypatch.setattr(media_attachments, "register_local_attachment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(media_attachments, "register_image_bytes_attachment", lambda *_args, **_kwargs: None)
     with tool_runtime_context(context):
         result = await AttachmentTools(tool_output_workspace_root=tmp_path).view_file(path="image.png")
     assert result.images

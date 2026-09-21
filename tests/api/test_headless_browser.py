@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 import pytest_asyncio
+from agno.tools.function import ToolResult
 from fastapi import FastAPI
 
 from mindroom.api import sandbox_runner, sandbox_runner_app, sandbox_worker_prep
@@ -17,6 +19,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import browser as browser_module
+from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
@@ -140,6 +143,51 @@ async def test_concurrent_headless_calls_share_profile_and_keep_tabs(
     tabs = await _call(client, payload, action="tabs")
     ids = {tab["targetId"] for tab in tabs["tabs"]}
     assert {result["targetId"] for result in opened} <= ids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("save_only", [False, True])
+async def test_headless_screenshot_preserves_inline_media_and_save_only(
+    headless_client: tuple[httpx.AsyncClient, dict[str, object], Path, Config],
+    browser_processes: list[BrowserProcess],
+    monkeypatch: pytest.MonkeyPatch,
+    save_only: bool,
+) -> None:
+    """Headless screenshots transport image bytes while save-only keeps its JSON receipt."""
+    client, payload, root, _config = headless_client
+    opened = await _call(client, payload, action="open", targetUrl="https://1.1.1.1/screenshot")
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    )
+
+    async def capture(*, path: str, **_kwargs: object) -> bytes:
+        (root / path).write_bytes(image_bytes)
+        return image_bytes
+
+    monkeypatch.setattr(browser_processes[0].pages[-1], "screenshot", capture, raising=False)
+
+    response = await client.post(
+        "/api/sandbox-runner/execute",
+        json={
+            **payload,
+            "kwargs": {"action": "screenshot", "targetId": opened["targetId"], "saveOnly": save_only},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"], body
+    if save_only:
+        receipt = json.loads(body["result"])
+        assert "view_status" not in receipt
+    else:
+        result = decode_media_result(body["result"])
+        assert isinstance(result, ToolResult)
+        assert result.images
+        assert result.images[0].content == image_bytes
+        receipt = json.loads(result.content)
+        assert receipt["view_status"] == "ready"
+    assert (root / receipt["path"]).read_bytes() == image_bytes
 
 
 @pytest.mark.asyncio

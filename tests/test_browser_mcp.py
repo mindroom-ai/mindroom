@@ -15,10 +15,10 @@ from mcp.types import CallToolResult, TextContent, Tool
 
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.tool_system import media_transport
+from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
-from mindroom.worker_computer.mcp_results import decode_browser_mcp_result, encode_browser_mcp_result
 
 
 def test_native_catalog_has_fixed_safe_schemas() -> None:
@@ -148,7 +148,7 @@ def test_catalog_drift_fails_closed() -> None:
 def test_image_result_roundtrip() -> None:
     """JSON transport preserves real Agno inline image bytes."""
     result = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
-    decoded = decode_browser_mcp_result(json.loads(json.dumps(encode_browser_mcp_result(result))))
+    decoded = decode_media_result(json.loads(json.dumps(encode_media_result(result))))
     assert isinstance(decoded, ToolResult)
     assert decoded.content == "screen"
     assert decoded.images[0].content == b"png"
@@ -158,7 +158,7 @@ def test_image_result_roundtrip() -> None:
 def test_json_receipt_is_opaque() -> None:
     """Nested marker-shaped ordinary results are never recursively interpreted."""
     value = {"mindroom_browser_mcp_result": {"version": 777}}
-    assert decode_browser_mcp_result(encode_browser_mcp_result(value)) == value
+    assert decode_media_result(encode_media_result(value)) == value
 
 
 @pytest.mark.parametrize(
@@ -168,7 +168,7 @@ def test_json_receipt_is_opaque() -> None:
 def test_malformed_envelopes_fail(payload: object) -> None:
     """Missing and malformed wire envelopes produce bounded protocol errors."""
     with pytest.raises(ValueError, match="browser MCP result"):
-        decode_browser_mcp_result(payload)
+        decode_media_result(payload)
 
 
 @pytest.mark.parametrize(
@@ -186,7 +186,7 @@ def test_invalid_images_fail(mime: str, data: str) -> None:
         },
     }
     with pytest.raises(ValueError, match="browser MCP result"):
-        decode_browser_mcp_result(payload)
+        decode_media_result(payload)
 
 
 @pytest.mark.asyncio
@@ -203,7 +203,7 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
     function = Function(name="browser_snapshot", entrypoint=result)
     wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5))
     output = await function.entrypoint(mindroom_output_path=path)
-    decoded = decode_browser_mcp_result(encode_browser_mcp_result(output))
+    decoded = decode_media_result(encode_media_result(output))
     if media and path is None:
         assert isinstance(decoded, ToolResult)
         assert decoded.images[0].content == b"image"
@@ -351,7 +351,7 @@ def test_codec_bounds_before_image_decode(monkeypatch: pytest.MonkeyPatch) -> No
         },
     }
     with pytest.raises(ValueError, match="browser MCP result"):
-        decode_browser_mcp_result(payload)
+        decode_media_result(payload)
 
 
 @pytest.fixture
@@ -367,7 +367,7 @@ def small_image_limits(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_independently_padded_images_roundtrip_at_aggregate_limit(contents: list[bytes]) -> None:
     """All eight allowed raw bytes survive transport despite independent padding."""
     result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
-    decoded = decode_browser_mcp_result(json.loads(json.dumps(encode_browser_mcp_result(result))))
+    decoded = decode_media_result(json.loads(json.dumps(encode_media_result(result))))
     assert isinstance(decoded, ToolResult)
     assert decoded.content == "screens"
     assert [image.content for image in decoded.images] == contents
@@ -382,7 +382,7 @@ def test_image_limits_reject_oversized_or_empty_images(contents: list[bytes], op
     result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
     if operation == "encode":
         with pytest.raises(ValueError, match="browser MCP result"):
-            encode_browser_mcp_result(result)
+            encode_media_result(result)
     else:
         payload = {
             "mindroom_browser_mcp_result": {
@@ -396,4 +396,4 @@ def test_image_limits_reject_oversized_or_empty_images(contents: list[bytes], op
             },
         }
         with pytest.raises(ValueError, match="browser MCP result"):
-            decode_browser_mcp_result(payload)
+            decode_media_result(payload)
