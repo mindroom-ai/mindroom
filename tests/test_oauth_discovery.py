@@ -31,6 +31,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
+
 
 class _Response:
     def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
@@ -214,10 +217,38 @@ async def test_cross_loop_lock_waiter_does_not_saturate_default_executor() -> No
     assert waiter_entered.is_set()
 
 
+async def _cancel_registration_publication(
+    authorization: asyncio.Task[str],
+    publication_entered: threading.Event,
+    release_publication: threading.Event,
+    provider_id: str,
+) -> None:
+    """Cancel an accepted publication twice and require its registration lock to stay held."""
+    try:
+        assert await asyncio.to_thread(publication_entered.wait, 5)
+        authorization.cancel()
+        await asyncio.sleep(0)
+        authorization.cancel()
+        await asyncio.sleep(0)
+        assert not authorization.done()
+        assert _DYNAMIC_CLIENT_REGISTRATION_LOCKS[provider_id].locked()
+    finally:
+        release_publication.set()
+        with pytest.raises(asyncio.CancelledError):
+            await authorization
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("observed_operation", "cancel_publication"),
+    [("read", False), ("manager", False), ("save", False), ("save", True)],
+    ids=["read", "manager", "save", "cancel-publication"],
+)
 async def test_resource_origin_metadata_registers_public_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    observed_operation: str,
+    cancel_publication: bool,
 ) -> None:
     """App-domain metadata should bootstrap a PKCE public client without a secret."""
     runtime_paths = resolve_runtime_paths(
@@ -252,11 +283,58 @@ async def test_resource_origin_metadata_registers_public_client(
     verifier = provider.issue_pkce_code_verifier()
     assert verifier is not None
 
-    authorization_url = await provider.authorization_uri_async(
-        runtime_paths,
-        state="state-token",
-        code_verifier=verifier,
-    )
+    owner_thread = threading.get_ident()
+    manager = get_runtime_credentials_manager(runtime_paths)
+    original_load = manager.load_credentials
+    original_save = manager.save_credentials
+    storage_operations: set[str] = set()
+    publication_entered = threading.Event()
+    release_publication = threading.Event()
+
+    def observed_load(service: str) -> dict[str, Any] | None:
+        assert threading.get_ident() != owner_thread, "Registration config read blocked the event loop"
+        storage_operations.add("read")
+        return original_load(service)
+
+    def observed_manager(paths: RuntimePaths) -> CredentialsManager:
+        assert threading.get_ident() != owner_thread, "Registration path resolution blocked the event loop"
+        storage_operations.add("manager")
+        return get_runtime_credentials_manager(paths)
+
+    def observed_save(service: str, credentials: dict[str, Any]) -> None:
+        assert threading.get_ident() != owner_thread, "Registration config write blocked the event loop"
+        storage_operations.add("save")
+        if cancel_publication:
+            publication_entered.set()
+            assert release_publication.wait(5), "Registration publication gate was not released"
+        original_save(service, credentials)
+
+    with monkeypatch.context() as storage_patch:
+        if observed_operation == "read":
+            storage_patch.setattr(manager, "load_credentials", observed_load)
+        elif observed_operation == "manager":
+            storage_patch.setattr("mindroom.oauth.discovery.get_runtime_credentials_manager", observed_manager)
+        else:
+            storage_patch.setattr(manager, "save_credentials", observed_save)
+        authorization = asyncio.create_task(
+            provider.authorization_uri_async(runtime_paths, state="state-token", code_verifier=verifier),
+        )
+        if cancel_publication:
+            await _cancel_registration_publication(
+                authorization,
+                publication_entered,
+                release_publication,
+                provider.id,
+            )
+            authorization_url = await provider.authorization_uri_async(
+                runtime_paths,
+                state="state-token",
+                code_verifier=verifier,
+            )
+        else:
+            authorization_url = await authorization
+
+    assert storage_operations == {observed_operation}
 
     query = parse_qs(urlparse(authorization_url).query)
     assert query["client_id"] == ["registered-public-client"]

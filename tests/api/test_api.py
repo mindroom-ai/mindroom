@@ -1940,7 +1940,7 @@ def test_get_tools_requires_oauth_token_for_generic_auth_provider(test_client: T
 
     async def publish_oauth_credentials() -> None:
         async with oauth_credential_transaction(credential_context) as transaction:
-            transaction.publish(
+            await transaction.publish(
                 {
                     "token": "drive-token",
                     "refresh_token": "drive-refresh-token",
