@@ -275,6 +275,9 @@ class _ApprovedEgressTools(Toolkit):
     """Request temporary hostname egress access for MindRoom workers."""
 
     def __init__(self, *, allow_full_access: bool = False) -> None:
+        if not isinstance(allow_full_access, bool):
+            msg = "allow_full_access must be a boolean"
+            raise TypeError(msg)
         self._allow_full_access = allow_full_access
         request_description = _request_network_access_description(allow_full_access=allow_full_access)
         super().__init__(

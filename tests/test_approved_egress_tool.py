@@ -35,6 +35,19 @@ def test_full_access_requires_opt_in() -> None:
         asyncio.run(_approved_egress_tool().request_network_access(["*"], 5, "Install dependencies"))
 
 
+@pytest.mark.parametrize("value", ["false", "true", 0, 1])
+def test_full_access_rejects_non_boolean_credentials(tmp_path: Path, value: object) -> None:
+    """Stored credential values must not enable broad access through Python truthiness."""
+    with pytest.raises(TypeError, match="allow_full_access must be a boolean"):
+        get_tool_by_name(
+            "approved_egress",
+            resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+            credential_overrides={"allow_full_access": value},
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        )
+
+
 def test_full_access_posts_one_scoped_timed_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     """Opted-in full access uses the existing scoped grant API and deployment TTL cap."""
     payloads: list[dict[str, object]] = []
