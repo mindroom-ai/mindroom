@@ -14,7 +14,10 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import httpx
 import pytest
+from google.auth.exceptions import TransportError as GoogleTransportError
+from requests import exceptions as requests_exceptions
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials import (
@@ -1316,6 +1319,159 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
     assert logger.warning_calls[0][1]["reason"] == "provider_refresh_failed"
     assert logger.warning_calls[0][1]["oauth_error"] == "unrecognized"
     assert provider_error not in repr(logger.warning_calls)
+    _assert_no_token_values_logged(logger)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport_error", "expected_diagnostics"),
+    [
+        pytest.param(
+            httpx.ConnectTimeout("secret-transport-detail"),
+            {"transport_error_category": "timeout", "transport_error_type": "ConnectTimeout"},
+            id="connect-timeout",
+        ),
+        pytest.param(
+            httpx.ReadTimeout("secret-transport-detail"),
+            {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
+            id="read-timeout",
+        ),
+        pytest.param(
+            type("secret-provider-class", (httpx.ReadTimeout,), {})("secret-transport-detail"),
+            {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
+            id="provider-subclass-name-is-not-logged",
+        ),
+        pytest.param(
+            httpx.ConnectError("secret-transport-detail"),
+            {"transport_error_category": "network", "transport_error_type": "NetworkError"},
+            id="connect-error",
+        ),
+        pytest.param(
+            requests_exceptions.ReadTimeout("secret-transport-detail"),
+            {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
+            id="google-requests-timeout",
+        ),
+    ],
+)
+async def test_refresh_failure_logs_safe_transport_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    transport_error: Exception,
+    expected_diagnostics: dict[str, object],
+) -> None:
+    """Provider wrappers retain bounded transport diagnostics without leaking their details."""
+    logger = _CapturingLogger()
+    monkeypatch.setattr(credential_lifecycle, "logger", logger)
+    cause = transport_error
+    if isinstance(cause, requests_exceptions.RequestException):
+        cause = GoogleTransportError("secret-google-detail")
+        cause.__cause__ = transport_error
+
+    async def refresh(_credentials: Mapping[str, Any]) -> dict[str, Any]:
+        message = f"secret-provider-detail {CHAIN_0}"
+        raise OAuthProviderError(message) from cause
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    original = _credentials(ACCESS_0, CHAIN_0, expires_at=1.0)
+    _save(context, original)
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        await refresh_oauth_credentials_with_result(context)
+
+    assert type(exc_info.value) is OAuthProviderError
+    assert _load(context) == original
+    diagnostics = logger.warning_calls[0][1]
+    assert expected_diagnostics.items() <= diagnostics.items()
+    assert "secret-" not in repr(logger.warning_calls)
+    _assert_no_token_values_logged(logger)
+
+
+def test_refresh_failure_diagnostics_ignore_unrecognized_cyclic_causes() -> None:
+    """An unknown exception cannot spoof a known transport name or cause an endless traversal."""
+    error = type("ReadTimeout", (RuntimeError,), {})("secret-provider-detail")
+    error.__cause__ = error
+
+    assert credential_lifecycle._oauth_refresh_failure_diagnostics(error) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status_code", "oauth_error"), [(429, None), (503, None), (400, "invalid_grant")])
+async def test_refresh_failure_logs_http_status_without_provider_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status_code: int,
+    oauth_error: str | None,
+) -> None:
+    """HTTP status remains visible without request/response contents or changed invalidation."""
+    logger = _CapturingLogger()
+    monkeypatch.setattr(credential_lifecycle, "logger", logger)
+    request = httpx.Request("POST", "https://provider.example/token?secret=query", content=b"secret-request")
+    response = httpx.Response(status_code, request=request, content=b"secret-response")
+    transport_error = httpx.HTTPStatusError("secret-transport-detail", request=request, response=response)
+
+    async def refresh(_credentials: Mapping[str, Any]) -> dict[str, Any]:
+        message = "secret-provider-detail"
+        raise OAuthProviderError(message, oauth_error=oauth_error) from transport_error
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    original = _credentials(ACCESS_0, CHAIN_0, expires_at=1.0)
+    _save(context, original)
+
+    with pytest.raises(OAuthProviderError) as exc_info:
+        await refresh_oauth_credentials_with_result(context)
+
+    assert isinstance(exc_info.value, OAuthRefreshRejectedError) is (oauth_error is not None)
+    assert _load(context) == (None if oauth_error is not None else original)
+    diagnostics = logger.warning_calls[0][1]
+    assert diagnostics["transport_error_category"] == "http_status"
+    assert diagnostics["transport_error_type"] == "HTTPStatusError"
+    assert diagnostics["http_status_code"] == status_code
+    assert "secret" not in repr(logger.warning_calls)
+    assert "provider.example" not in repr(logger.warning_calls)
+    _assert_no_token_values_logged(logger)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attribute", ["response", "status_code"])
+@pytest.mark.parametrize("oauth_error", [None, "invalid_grant"], ids=["transient", "terminal"])
+async def test_refresh_failure_preserves_oauth_error_when_status_metadata_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    attribute: str,
+    oauth_error: str | None,
+) -> None:
+    """Broken diagnostic properties cannot replace the refresh error or change invalidation."""
+    logger = _CapturingLogger()
+    monkeypatch.setattr(credential_lifecycle, "logger", logger)
+    request = httpx.Request("POST", "https://provider.example/token?secret=query")
+    response = httpx.Response(503, request=request)
+    transport_error = httpx.HTTPStatusError("secret-transport-detail", request=request, response=response)
+
+    def unreadable_metadata(_self: object) -> None:
+        message = "secret-metadata-detail"
+        raise RuntimeError(message)
+
+    metadata_owner = type(transport_error) if attribute == "response" else type(response)
+    monkeypatch.setattr(metadata_owner, attribute, property(unreadable_metadata), raising=False)
+
+    async def refresh(_credentials: Mapping[str, Any]) -> dict[str, Any]:
+        message = "secret-provider-detail"
+        raise OAuthProviderError(message, oauth_error=oauth_error) from transport_error
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    original = _credentials(ACCESS_0, CHAIN_0, expires_at=1.0)
+    _save(context, original)
+
+    with pytest.raises(OAuthProviderError, match="OAuth credential refresh failed") as exc_info:
+        await refresh_oauth_credentials_with_result(context)
+
+    assert isinstance(exc_info.value, OAuthRefreshRejectedError) is (oauth_error is not None)
+    assert _load(context) == (None if oauth_error is not None else original)
+    diagnostics = logger.warning_calls[0][1]
+    assert diagnostics["transport_error_category"] == "http_status"
+    assert diagnostics["transport_error_type"] == "HTTPStatusError"
+    assert "http_status_code" not in diagnostics
+    assert "secret" not in repr(logger.warning_calls)
     _assert_no_token_values_logged(logger)
 
 
