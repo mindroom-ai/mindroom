@@ -19,7 +19,7 @@ struct MindRoomRootView: View {
                             case .localAgents:
                                 LocalAgentsView(runner: runner)
                             case .computerAccess:
-                                DesktopControlView(store: desktop)
+                                DesktopControlView(store: desktop).id(AppSection.computerAccess)
                             case .settings:
                                 AppSettingsView(runner: runner)
                             }
@@ -30,7 +30,19 @@ struct MindRoomRootView: View {
                         .padding(28)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
-                    if navigation.section != .computerAccess {
+                    if navigation.section == .computerAccess {
+                        if let message = desktop.errorMessage {
+                            Divider()
+                            HStack(spacing: 10) {
+                                Image(systemName: "exclamationmark.triangle")
+                                Text(message).lineLimit(2)
+                                Spacer()
+                                Button("View Details") {
+                                    withAnimation { proxy.scrollTo(AppSection.computerAccess, anchor: .top) }
+                                }
+                            }.padding(14)
+                        }
+                    } else {
                         commandActivity {
                             withAnimation { proxy.scrollTo("command-feedback", anchor: .top) }
                         }
