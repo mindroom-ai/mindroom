@@ -25,7 +25,7 @@ from mindroom.egress.policy import (
     resolve_worker_egress_policy,
 )
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
-from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolStatus
+from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -77,11 +77,18 @@ def _static_allowlist_description() -> str:
     )
 
 
-def _request_network_access_description() -> str:
+def _request_network_access_description(*, allow_full_access: bool) -> str:
+    full_access = (
+        ' Alternatively, use hostnames=["*"] to request temporary access to all public hostnames. '
+        "This requires approval and still enforces the proxy's private-network and port restrictions."
+        if allow_full_access
+        else ""
+    )
     return (
         "Request temporary worker egress to one or more exact external hostnames. "
         "Batch every hostname the task needs into a single call so one approval covers all of them. "
-        "Use this only when the worker needs hostnames that are not already allowed.\n\n"
+        "Use this only when the worker needs hostnames that are not already allowed."
+        f"{full_access}\n\n"
         f"{_static_allowlist_description()}"
     )
 
@@ -267,8 +274,12 @@ def _post_grant(payload: dict[str, object]) -> dict[str, object]:
 class _ApprovedEgressTools(Toolkit):
     """Request temporary hostname egress access for MindRoom workers."""
 
-    def __init__(self) -> None:
-        request_description = _request_network_access_description()
+    def __init__(self, *, allow_full_access: bool = False) -> None:
+        if not isinstance(allow_full_access, bool):
+            msg = "allow_full_access must be a boolean"
+            raise TypeError(msg)
+        self._allow_full_access = allow_full_access
+        request_description = _request_network_access_description(allow_full_access=allow_full_access)
         super().__init__(
             name="approved_egress",
             instructions=(
@@ -290,10 +301,18 @@ class _ApprovedEgressTools(Toolkit):
         reason: str,
     ) -> str:
         """Request temporary worker egress to one or more exact external hostnames."""
-        hosts = _canonical_hostnames(hostnames)
-        policy = resolve_worker_egress_policy()
-        already_allowed = [host for host in hosts if is_hostname_allowed(host, policy)]
-        blocked = [host for host in hosts if host not in already_allowed]
+        full_access = hostnames == ["*"]
+        if full_access:
+            if not self._allow_full_access:
+                msg = "full network access requires the allow_full_access tool option"
+                raise ValueError(msg)
+            already_allowed: list[str] = []
+            blocked = ["*"]
+        else:
+            hosts = _canonical_hostnames(hostnames)
+            policy = resolve_worker_egress_policy()
+            already_allowed = [host for host in hosts if is_hostname_allowed(host, policy)]
+            blocked = [host for host in hosts if host not in already_allowed]
         if not blocked:
             return (
                 f"Already allowed by the static egress allowlist: {', '.join(already_allowed)}. "
@@ -345,8 +364,9 @@ class _ApprovedEgressTools(Toolkit):
             if already_allowed
             else ""
         )
+        destinations = "all public hostnames" if full_access else ", ".join(granted)
         return (
-            f"Approved temporary network access to {', '.join(granted)} for {effective_ttl_seconds // 60} minutes. "
+            f"Approved temporary network access to {destinations} for {effective_ttl_seconds // 60} minutes. "
             f"{expiry_note}{capped}{skipped}"
         )
 
@@ -362,6 +382,19 @@ class _ApprovedEgressTools(Toolkit):
     requires_room_context=True,
     icon="FiShield",
     icon_color="text-emerald-600",
+    config_fields=[
+        ConfigField(
+            name="allow_full_access",
+            label="Allow Full Network Access",
+            type="boolean",
+            required=False,
+            default=False,
+            description=(
+                'Allow temporary approval requests for all public hostnames using hostnames=["*"]. '
+                "Private-network and port restrictions still apply."
+            ),
+        ),
+    ],
     function_names=("request_network_access",),
 )
 def approved_egress_tools() -> type[Toolkit]:
