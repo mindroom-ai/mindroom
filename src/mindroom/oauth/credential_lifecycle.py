@@ -12,6 +12,9 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
+import httpx
+from requests import exceptions as requests_exceptions
+
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_store import (
@@ -43,6 +46,22 @@ _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 _OAUTH_REFRESH_FAILED_MESSAGE = "OAuth credential refresh failed"
 _OAUTH_TRANSACTION_REENTRY_MESSAGE = "OAuth provider adapters cannot re-enter the credential lifecycle"
 _UNRECOGNIZED_OAUTH_ERROR_CODE = "unrecognized"
+_OAUTH_REFRESH_TRANSPORT_ERRORS = (
+    (httpx.ConnectTimeout, "timeout"),
+    (httpx.ReadTimeout, "timeout"),
+    (httpx.WriteTimeout, "timeout"),
+    (httpx.PoolTimeout, "timeout"),
+    (httpx.TimeoutException, "timeout"),
+    (httpx.NetworkError, "network"),
+    (httpx.HTTPStatusError, "http_status"),
+    (httpx.HTTPError, "transport"),
+    (requests_exceptions.ConnectTimeout, "timeout"),
+    (requests_exceptions.ReadTimeout, "timeout"),
+    (requests_exceptions.Timeout, "timeout"),
+    (requests_exceptions.ConnectionError, "network"),
+    (requests_exceptions.HTTPError, "http_status"),
+    (requests_exceptions.RequestException, "transport"),
+)
 _LOGGABLE_OAUTH_ERROR_CODES = frozenset(
     {
         "access_denied",
@@ -682,6 +701,7 @@ async def _raise_normalized_refresh_error(
     transaction: OAuthCredentialTransaction,
 ) -> NoReturn:
     normalized_error = _normalized_refresh_error(exc)
+    normalized_error.__cause__ = exc
     if isinstance(normalized_error, OAuthRefreshRejectedError):
         await _invalidate_rejected_credentials(
             context,
@@ -736,7 +756,31 @@ def _log_oauth_refresh_failed(
         reason=reason,
         error_type=type(exc).__name__,
         oauth_error=_safe_oauth_error_code_for_logging(exc.oauth_error),
+        **_oauth_refresh_failure_diagnostics(exc),
     )
+
+
+def _oauth_refresh_failure_diagnostics(exc: BaseException) -> dict[str, str | int]:
+    """Extract allowlisted transport facts without logging provider-controlled text."""
+    cause: BaseException | None = exc
+    for _ in range(8):
+        if cause is None:
+            break
+        for error_type, category in _OAUTH_REFRESH_TRANSPORT_ERRORS:
+            if not isinstance(cause, error_type):
+                continue
+            diagnostics: dict[str, str | int] = {
+                "transport_error_category": category,
+                "transport_error_type": error_type.__name__,
+            }
+            if isinstance(cause, httpx.HTTPStatusError | requests_exceptions.HTTPError):
+                response = cause.response
+                status_code = response.status_code if response is not None else None
+                if isinstance(status_code, int) and not isinstance(status_code, bool) and 100 <= status_code <= 599:
+                    diagnostics["http_status_code"] = status_code
+            return diagnostics
+        cause = cause.__cause__
+    return {}
 
 
 def _oauth_refresh_log_context(
