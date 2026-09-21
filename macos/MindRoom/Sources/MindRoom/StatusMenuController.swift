@@ -5,6 +5,8 @@ import Foundation
 final class StatusMenuController: NSObject, NSMenuDelegate {
     static let shared = StatusMenuController()
 
+    var openSettingsAction: (() -> Void)?
+
     private let runner = MindRoomCommandRunner.shared
     private let appUpdater = AppUpdater.shared
     private let loginItemController = LoginItemController.shared
@@ -249,7 +251,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     @objc private func openDesktopControl() {
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        openSettingsAction?()
     }
 
     @objc private func revokeDesktopControl() {
