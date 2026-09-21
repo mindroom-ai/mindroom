@@ -1334,6 +1334,50 @@ async def test_refresh_failure_logs_http_status_without_provider_response(
     _assert_no_token_values_logged(logger)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attribute", ["response", "status_code"])
+@pytest.mark.parametrize("oauth_error", [None, "invalid_grant"], ids=["transient", "terminal"])
+async def test_refresh_failure_preserves_oauth_error_when_status_metadata_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    attribute: str,
+    oauth_error: str | None,
+) -> None:
+    """Broken diagnostic properties cannot replace the refresh error or change invalidation."""
+    logger = _CapturingLogger()
+    monkeypatch.setattr(credential_lifecycle, "logger", logger)
+    request = httpx.Request("POST", "https://provider.example/token?secret=query")
+    response = httpx.Response(503, request=request)
+    transport_error = httpx.HTTPStatusError("secret-transport-detail", request=request, response=response)
+
+    def unreadable_metadata(_self: object) -> None:
+        message = "secret-metadata-detail"
+        raise RuntimeError(message)
+
+    metadata_owner = type(transport_error) if attribute == "response" else type(response)
+    monkeypatch.setattr(metadata_owner, attribute, property(unreadable_metadata), raising=False)
+
+    async def refresh(_credentials: Mapping[str, Any]) -> dict[str, Any]:
+        message = "secret-provider-detail"
+        raise OAuthProviderError(message, oauth_error=oauth_error) from transport_error
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    original = _credentials(ACCESS_0, CHAIN_0, expires_at=1.0)
+    _save(context, original)
+
+    with pytest.raises(OAuthProviderError, match="OAuth credential refresh failed") as exc_info:
+        await refresh_oauth_credentials_with_result(context)
+
+    assert isinstance(exc_info.value, OAuthRefreshRejectedError) is (oauth_error is not None)
+    assert _load(context) == (None if oauth_error is not None else original)
+    diagnostics = logger.warning_calls[0][1]
+    assert diagnostics["transport_error_category"] == "http_status"
+    assert diagnostics["transport_error_type"] == "HTTPStatusError"
+    assert "http_status_code" not in diagnostics
+    assert "secret" not in repr(logger.warning_calls)
+    _assert_no_token_values_logged(logger)
+
+
 def test_sync_refresh_uses_same_scope_transaction(tmp_path: Path) -> None:
     """The synchronous provider adapter delegates persistence to the lifecycle."""
     caller_thread = threading.get_ident()

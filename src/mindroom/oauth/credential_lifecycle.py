@@ -774,10 +774,14 @@ def _oauth_refresh_failure_diagnostics(exc: BaseException) -> dict[str, str | in
                 "transport_error_type": error_type.__name__,
             }
             if isinstance(cause, httpx.HTTPStatusError | requests_exceptions.HTTPError):
-                response = cause.response
-                status_code = response.status_code if response is not None else None
-                if isinstance(status_code, int) and not isinstance(status_code, bool) and 100 <= status_code <= 599:
-                    diagnostics["http_status_code"] = status_code
+                try:
+                    response = cause.response
+                    status_code = response.status_code if response is not None else None
+                    if isinstance(status_code, int) and not isinstance(status_code, bool) and 100 <= status_code <= 599:
+                        diagnostics["http_status_code"] = status_code
+                except Exception:
+                    # Optional provider metadata must not replace the original refresh error.
+                    return diagnostics
             return diagnostics
         cause = cause.__cause__
     return {}
