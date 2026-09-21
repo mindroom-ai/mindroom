@@ -115,7 +115,7 @@ async def _publish_oauth_credentials(
 ) -> None:
     """Publish test credentials through the SQLite transaction owner."""
     async with oauth_credential_transaction(context) as transaction:
-        transaction.publish(credentials, advance_connection_generation=True)
+        await transaction.publish(credentials, advance_connection_generation=True)
         await transaction.commit()
 
 
@@ -1320,7 +1320,7 @@ async def test_oauth_change_during_dispatch_callback_never_uses_stale_session(
             await asyncio.wait_for(entered.wait(), timeout=10)
             if reset:
                 async with oauth_credential_transaction(credential_context) as transaction:
-                    transaction.reset(operation_id=None)
+                    await transaction.reset(operation_id=None)
                     await transaction.commit()
             else:
                 _save_mcp_oauth_credentials(runtime_paths, worker_target, "new-token")

@@ -12,6 +12,7 @@ from urllib.parse import ParseResult, urlparse, urlunparse
 
 import httpx
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credential_policy import (
     OAUTH_DYNAMIC_CLIENT_REGISTERED_REDIRECT_URI_KEY,
     OAUTH_DYNAMIC_CLIENT_REGISTRATION_SOURCE,
@@ -389,12 +390,12 @@ async def _register_client(
     with _DYNAMIC_CLIENT_REGISTRATION_LOCKS_GUARD:
         lock = _DYNAMIC_CLIENT_REGISTRATION_LOCKS.setdefault(provider.id, threading.Lock())
     async with _cross_loop_lock(lock):
-        if provider.client_config_resolution(runtime_paths) is not None:
+        if await asyncio.to_thread(provider.client_config_resolution, runtime_paths) is not None:
             return
         if not provider.client_config_services:
             msg = f"{config.error_label} dynamic client registration requires a provider-specific client config service"
             raise OAuthProviderError(msg)
-        credentials_manager = get_runtime_credentials_manager(runtime_paths)
+        credentials_manager = await asyncio.to_thread(get_runtime_credentials_manager, runtime_paths)
         if credentials_manager.current_worker_key is not None:
             msg = f"{config.error_label} dynamic client registration must run in the primary runtime"
             raise OAuthProviderError(msg)
@@ -415,7 +416,8 @@ async def _register_client(
             msg = f"{config.error_label} dynamic client registration response is not a JSON object"
             raise OAuthProviderError(msg)
         service = provider.client_config_services[0]
-        credentials_manager.save_credentials(
+        await run_blocking_until_complete(
+            credentials_manager.save_credentials,
             service,
             _stored_registration(provider, runtime_paths, registration),
         )

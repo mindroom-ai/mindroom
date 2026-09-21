@@ -10,6 +10,7 @@ import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -836,7 +837,7 @@ async def test_direct_resets_do_not_retain_replay_tombstones(tmp_path: Path) -> 
     assert await credential_lifecycle.reset_oauth_credentials(context) is True
     assert await credential_lifecycle.reset_oauth_credentials(context) is False
     async with credential_store.oauth_credential_transaction(context) as transaction:
-        assert transaction.reset_operation_result("direct:unknown") is None
+        assert (await transaction.reset_operation_result("direct:unknown")) is None
         await transaction.commit()
 
 
@@ -1014,6 +1015,102 @@ async def test_snapshot_cancellation_while_waiting_for_lock_returns_promptly(
             await asyncio.wait_for(snapshot_task, timeout=1)
     finally:
         release_lock.set()
+
+
+@pytest.mark.asyncio
+async def test_blocked_storage_does_not_block_another_credential_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A blocked disk operation must leave the OAuth owner free for another scope."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    async def unused_refresh(_credentials: Mapping[str, Any]) -> None:
+        return None
+
+    first = _context(tmp_path / "first", _FakeOAuthProvider(unused_refresh))
+    second = _context(tmp_path / "second", _FakeOAuthProvider(unused_refresh))
+    _save(first, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    _save(second, _credentials(ACCESS_0, CHAIN_0, expires_at=FUTURE_EXPIRES_AT))
+    first_path = credential_store._oauth_credential_database_path(first)
+    original_prepare = credential_store._prepare_database_path
+
+    def blocked_prepare(path: Path) -> None:
+        if path == first_path:
+            entered.set()
+            assert release.wait(5), "Storage gate was not released"
+        original_prepare(path)
+
+    monkeypatch.setattr(credential_store, "_prepare_database_path", blocked_prepare)
+    blocked = asyncio.create_task(credential_lifecycle.load_oauth_credentials_snapshot(first))
+    unrelated: asyncio.Task | None = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        unrelated = asyncio.create_task(credential_lifecycle.load_oauth_credentials_snapshot(second))
+        completed, _ = await asyncio.wait({unrelated}, timeout=1)
+        assert unrelated in completed, "Unrelated credential scope waited behind blocked storage"
+        assert unrelated.result().credentials is not None
+        assert not blocked.done()
+    finally:
+        release.set()
+        await blocked
+        if unrelated is not None:
+            await unrelated
+
+
+@pytest.mark.asyncio
+async def test_refresh_cancellation_during_sqlite_commit_preserves_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An admitted token rotation must finish COMMIT before repeated cancellation escapes."""
+    entered = threading.Event()
+    release = threading.Event()
+    rotations: list[str] = []
+    committed: list[bool] = []
+
+    async def refresh(credentials: Mapping[str, Any]) -> dict[str, Any]:
+        rotations.append(credentials["refresh_token"])
+        return _credentials(f"access-{CHAIN_1}", CHAIN_1, expires_at=FUTURE_EXPIRES_AT)
+
+    context = _context(tmp_path, _FakeOAuthProvider(refresh))
+    _save(context, _credentials(ACCESS_0, CHAIN_0, expires_at=1.0))
+    original_connect = sqlite3.connect
+
+    class ObservedConnection(sqlite3.Connection):
+        published = False
+
+        def execute(self, sql: str, parameters: object = ()) -> sqlite3.Cursor:
+            if sql.lstrip().startswith("UPDATE oauth_credential_state"):
+                self.published = True
+            publishing_commit = sql == "COMMIT" and self.published
+            if publishing_commit:
+                entered.set()
+                assert release.wait(5), "Commit gate was not released"
+            result = super().execute(sql, parameters)
+            if publishing_commit:
+                committed.append(True)
+            return result
+
+    monkeypatch.setattr(sqlite3, "connect", partial(original_connect, factory=ObservedConnection))
+    refreshing = asyncio.create_task(refresh_oauth_credentials_with_result(context))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        refreshing.cancel()
+        await asyncio.sleep(0)
+        refreshing.cancel()
+        await asyncio.sleep(0)
+        assert not refreshing.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await refreshing
+    assert rotations == [CHAIN_0]
+    assert committed == [True]
+    stored = _load(context)
+    assert stored is not None
+    assert stored["refresh_token"] == CHAIN_1
 
 
 @pytest.mark.asyncio

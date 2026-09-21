@@ -2563,7 +2563,7 @@ def test_shared_browser_reset_consumes_stale_link_without_deleting_replacement(t
 
     async def replace_credentials() -> None:
         async with oauth_credential_store.oauth_credential_transaction(target.credential_context) as transaction:
-            transaction.publish(
+            await transaction.publish(
                 {
                     "token": "replacement-access-token",
                     "refresh_token": "replacement-refresh-token",
@@ -2682,7 +2682,7 @@ def test_browser_reset_rejects_stale_connection_generation(tmp_path: Path) -> No
 
     async def replace_credentials() -> None:
         async with oauth_credential_store.oauth_credential_transaction(target.credential_context) as transaction:
-            transaction.publish(
+            await transaction.publish(
                 {
                     "token": "new-access-token",
                     "refresh_token": "new-refresh-token",
