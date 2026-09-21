@@ -66,7 +66,6 @@ class UsageStorageSource:
     expected_session_table: str
     source_agent_id: str | None
     allowed_agent_ids: frozenset[str]
-    allowed_team_ids: frozenset[str]
     requester_isolated: bool
     owner_id: str | None = None
 
@@ -90,7 +89,7 @@ class UsageRequestMetrics:
 
 @dataclass(frozen=True, slots=True)
 class UsageRunNode:
-    """Usage fields from one retained top-level run or independent helper."""
+    """Usage fields from one retained run, team member, or independent helper."""
 
     team_id: str | None
     requester_id: str | None
@@ -98,6 +97,7 @@ class UsageRunNode:
     model_provider: str | None
     model: str | None
     metrics: Mapping[str, _MetricValue]
+    parent_run_id: str | None = None
     created_at: int | float | None = None
     # Empty means no detailed attribution was stored; None means it was unusable.
     model_metrics: tuple[UsageModelMetrics, ...] | None = ()
@@ -109,13 +109,13 @@ class UsageRunNode:
 
     @property
     def run_count(self) -> int:
-        """Helper requests incur tokens but are not AI replies."""
-        return int(self.kind == "run")
+        """Members and helpers incur tokens without adding top-level AI replies."""
+        return int(self.kind == "run" and self.parent_run_id is None)
 
 
 @dataclass(frozen=True, slots=True)
 class UsageSessionRow:
-    """Top-level usage runs from one retained Agno session."""
+    """Usage runs from one retained Agno session."""
 
     source: UsageStorageSource
     entity_id: str
@@ -431,7 +431,6 @@ def _source(
         expected_session_table=table,
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset(config.agents),
-        allowed_team_ids=frozenset(config.teams),
         requester_isolated=requester_isolated,
         owner_id=owner_id,
     )
@@ -525,7 +524,11 @@ def _extract_row(
         )
         for (payload,) in connection.execute(query, (row_key,)):
             try:
-                run = _extract_run(json.loads(payload), row_requester=row_requester)
+                run = _extract_run(
+                    json.loads(payload),
+                    row_requester=row_requester,
+                    include_team_members=source.scope == "team" and entity_kind == "team",
+                )
                 if run is not None:
                     runs.append(run)
             except (RecursionError, TypeError, ValueError):
@@ -570,7 +573,12 @@ def _decode_session_usage(
     return _select_metrics(session_metrics), _extract_model_metrics(session_metrics.get("details"))
 
 
-def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode | None:
+def _extract_run(
+    raw_run: object,
+    *,
+    row_requester: str | None,
+    include_team_members: bool,
+) -> UsageRunNode | None:
     if not isinstance(raw_run, dict):
         raise TypeError
     run = cast("dict[str, object]", raw_run)
@@ -581,7 +589,9 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
     if parent_run_id is not None:
         if not isinstance(parent_run_id, str) or not parent_run_id:
             raise TypeError
-        return None
+        parent_run_id = _bounded_string(parent_run_id)
+        if not include_team_members:
+            return None
     metadata = run.get("metadata")
     metadata_requester = (
         _optional_string(cast("dict[str, object]", metadata).get("requester_id"))
@@ -614,9 +624,12 @@ def _extract_run(raw_run: object, *, row_requester: str | None) -> UsageRunNode 
         requester_id=(
             _optional_string(run.get("user_id"))
             if kind != "run"
-            else metadata_requester or _optional_string(run.get("user_id")) or row_requester
+            else metadata_requester
+            or _optional_string(run.get("user_id"))
+            or (row_requester if parent_run_id is None else None)
         ),
         run_id=_optional_string(run.get("run_id")),
+        parent_run_id=parent_run_id,
         model_provider=_optional_string(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,

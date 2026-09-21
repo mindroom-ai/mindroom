@@ -64,8 +64,9 @@ def upsert_run_at_end(
     *,
     session_id: str,
     user_id: str | None,
+    record_usage: bool = True,
 ) -> None:
-    """Save the run and its usage in one transaction, preserving Agno's row/index semantics."""
+    """Save the run and optional usage in one transaction, preserving Agno's row/index semantics."""
     runs = db._get_table(table_type="runs", create_table_if_not_found=True)
     if runs is None:
         msg = "Run table unavailable"
@@ -90,13 +91,14 @@ def upsert_run_at_end(
                 },
             ).returning(runs.c.session_id, runs.c.run_id, runs.c.run_data, runs.c.created_at),
         ).one()
-        payload = project_usage({**stored.run_data, "created_at": stored.created_at})
-        connection = transaction.connection()
-        connection.exec_driver_sql(usage_table_sql(db.session_table_name))
-        connection.exec_driver_sql(
-            usage_upsert_sql(db.session_table_name),
-            (stored.session_id, stored.run_id, json.dumps(payload)),
-        )
+        if record_usage:
+            payload = project_usage({**stored.run_data, "created_at": stored.created_at})
+            connection = transaction.connection()
+            connection.exec_driver_sql(usage_table_sql(db.session_table_name))
+            connection.exec_driver_sql(
+                usage_upsert_sql(db.session_table_name),
+                (stored.session_id, stored.run_id, json.dumps(payload)),
+            )
 
 
 # AGNO_COMPAT: Run deletion and legacy-blob cleanup are not atomic.

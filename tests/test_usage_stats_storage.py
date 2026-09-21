@@ -59,7 +59,6 @@ def _source(path: Path, *, table: str = "code_sessions") -> UsageStorageSource:
         expected_session_table=table,
         source_agent_id="code",
         allowed_agent_ids=frozenset({"code"}),
-        allowed_team_ids=frozenset({"engineering"}),
         requester_isolated=False,
     )
 

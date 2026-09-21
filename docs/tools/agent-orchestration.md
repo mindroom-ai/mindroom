@@ -145,14 +145,14 @@ agents:
 
 All three functions accept an optional `include_daily` boolean, which defaults to `false`.
 `get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
-`get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
+`get_all_usage()` reports retained Agno session aggregates across configured agents and all stored teams, including ad hoc teams and teams removed from configuration.
 
 ### Daily Token Usage
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
 Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
-Each run counts once on its first request date, so tokens on later days do not add extra replies.
+Each top-level run counts once on its first request date, so tokens on later days or from saved team members do not add extra replies.
 Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
@@ -164,7 +164,7 @@ Requester aliases share one user's daily history, and `user_id: null` contains u
 Usage with neither valid request timestamps nor a usable run creation timestamp is excluded from daily rows and marks its source as partially unavailable, while its tokens remain eligible for the other totals.
 The run-date fallback cannot provide exact provider billing dates for historical or incomplete request detail.
 This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
-Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
+Daily rows include saved team member usage, but may differ from session totals when historical usage lacks retained counters or dates.
 Both daily fields are omitted unless `include_daily=True`.
 
 ### Response And Coverage
@@ -173,21 +173,22 @@ All three functions return a JSON custom-tool envelope with `status` and `tool` 
 A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
-The admin response groups session aggregates by configured agent or team ID.
+The admin response groups session aggregates by configured agent or stored team ID.
 Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
-Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
-Each entity also includes `retained_run_totals`, `run_count`, and `user_breakdown`, grouping retained top-level usage by canonical requester and model.
+Admin breakdown rows include every configured agent and stored team with retained usage and are sorted by total tokens.
+Each entity also includes `retained_run_totals`, `run_count`, and `user_breakdown`, grouping retained usage by canonical requester and model.
 With `include_daily=True`, these requester rows include daily detail too; the report's model, user, and daily coverage applies to them.
 Shared and private instances of the same entity are combined; `private_agent_breakdown` separately identifies the private contribution.
-Run counts describe retained runs with usable metrics, not message counts, and requester totals sum to `retained_run_totals` rather than cumulative session `totals`.
-Both responses group stored top-level usage snapshots by provider and model in `model_breakdown`.
+Run counts describe retained top-level runs with usable metrics, not message counts, and requester totals sum to `retained_run_totals` rather than cumulative session `totals`.
+Both responses group stored usage snapshots by provider and model in `model_breakdown`.
+Organization detail includes each saved team member's own counters once, without adding replies to `run_count` or adding its tokens again to cumulative team session totals.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
 Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.
 Malformed model details or details that do not account for the run's token totals put the run's tokens under `unknown` and mark model and daily coverage as partially unavailable.
 Model rows include token totals and run counts and are sorted by total tokens.
-Each model counts a run once, while daily and user run counts count that run once across all its models.
+Each model counts a top-level run once, while daily and user run counts count that run once across all its models.
 Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
-Model coverage is reported separately because history lost before usage migration and nested team-member usage can contribute to report totals without model attribution.
+Model coverage is reported separately because history lost before usage migration and unrecorded member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
 The HTTP usage routes add `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp when a scan finishes; cached responses retain that scan timestamp.
