@@ -46,7 +46,7 @@ To let the user watch this worker browser, use `chat_ui.open_panel(panel='comput
 If the user asks to visit a page and show it, navigate separately before requesting the panel:
 
 ```python
-browser.browser_control(action="open", target="host", targetUrl="https://example.org")
+browser_control(action="open", target="host", targetUrl="https://example.org")
 chat_ui.open_panel(panel="computer")
 ```
 
@@ -55,7 +55,7 @@ It does not navigate, send a prompt to ChatGPT, take control, or open or control
 It does not send a chat prompt or mutate an account; the Matrix notice carries only the UI request.
 The user's connected local browser uses the separately configured `browser` desktop target and [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/).
 `web_browser_tools` instead asks the host operating system to open a browser; it does not reveal a worker browser in Chat.
-Panel calls accept no `url` or `targetUrl`; browser navigation belongs in `browser.browser_control`.
+Panel calls accept no `url` or `targetUrl`; browser navigation belongs in `browser_control`.
 Success returns `UI action request sent.`, which confirms delivery of the request without confirming that any panel opened.
 
 ## What the user sees

@@ -12,7 +12,7 @@ Agents with the opt-in [`chat_ui`](chat-ui.md) toolkit can request this view wit
 `show_computer()` remains a backward-compatible alias.
 The request uses the current agent, requester, room, and thread from trusted runtime context and starts the view in watch mode.
 It does not navigate, send a prompt to ChatGPT, take control, or open the user's local browser.
-Use `browser.browser_control` separately to navigate the worker browser.
+Use `browser_control` separately to navigate the worker browser.
 The result confirms only that the UI request was sent; Chat may leave a passive button instead of opening the panel.
 
 ## Requirements and opt-in

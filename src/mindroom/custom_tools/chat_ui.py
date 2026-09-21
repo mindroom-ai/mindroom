@@ -229,7 +229,7 @@ class ChatUITools(Toolkit):
         Use panel='computer' to let the user watch this agent's worker browser in
         the Computer panel. It does not navigate to a URL, send a prompt to
         ChatGPT, take control, or open or control the user's local browser.
-        Navigate the worker browser separately with browser.browser_control.
+        Navigate the worker browser separately with browser_control.
         Success means the UI request was sent, not that the client opened a panel.
 
         Args:
