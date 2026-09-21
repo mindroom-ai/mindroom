@@ -31,10 +31,16 @@ def test_export_size_and_lossless_compression(name: str) -> None:
     assert gzip.decompress(compressed) == svg
 
 
-@pytest.mark.parametrize(("name", "size"), [("social-preview", (1280, 640)), ("github-avatar", (1024, 1024))])
+@pytest.mark.parametrize(
+    ("name", "size"),
+    [
+        ("assets/logo/social-preview.png", (1280, 640)),
+        ("macos/MindRoom/Resources/MindRoom.icon/Assets/dark.png", (1024, 1024)),
+    ],
+)
 def test_github_upload_images(name: str, size: tuple[int, int]) -> None:
     """GitHub uploads fit the image size limit and remain legible on any page background."""
-    path = Path(__file__).resolve().parent / f"{name}.png"
+    path = Path(__file__).resolve().parents[2] / name
     assert path.stat().st_size < 1_000_000
     with Image.open(path) as image:
         assert image.size == size

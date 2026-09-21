@@ -170,7 +170,7 @@ def serialize(root: etree._Element) -> bytes:
 
 
 def generate() -> dict[str, bytes]:
-    """Produce static/animated SVGs, lossless SVGZ copies, and a canvas PNG."""
+    """Produce static and animated SVGs with lossless SVGZ copies."""
     with Image.open(ROOT / "reference.png") as image:
         if image.size != (1024, 1024):
             msg = "reference.png must be 1024 by 1024 pixels"
@@ -190,12 +190,11 @@ def generate() -> dict[str, bytes]:
         etree.Comment(" Generated paint definitions. Edit artwork.py for geometry and shading.py for lighting. "),
     )
     root.append(defs)
-    outputs = {"logo.svg": serialize(root), "preview.png": render(root)}
+    outputs = {"logo.svg": serialize(root)}
     transparent = deepcopy(root)
     background = transparent.find(f"{SVG}g[@id='background']")
     transparent.remove(background)
     outputs["logo-transparent.svg"] = serialize(transparent)
-    outputs["logo-transparent.png"] = render(transparent)
     outputs["logo-mark.svg"] = framed_mark(outputs["logo-transparent.svg"])
     for appearance in ("light", "dark"):
         outputs[f"app-icon-{appearance}.svg"] = serialize(app_icon_document(transparent, dark=appearance == "dark"))

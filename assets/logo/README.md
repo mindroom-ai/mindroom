@@ -18,9 +18,8 @@ The PNG files use Git LFS.
 If your checkout contains pointer files, fetch the images with `git lfs pull` first.
 
 The script declares its own pinned rendering dependencies; they are separate from the application dependencies.
-It writes the static `logo.svg`, `logo-transparent.svg`, and `preview.png`, plus `logo-animated.svg` and `logo-animated-transparent.svg`.
+It writes the static `logo.svg` and `logo-transparent.svg`, plus `logo-animated.svg` and `logo-animated-transparent.svg`.
 Each SVG also has a losslessly compressed `.svgz` copy.
-It also writes `logo-transparent.png` as a raster preview of the complete M with a transparent background.
 The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the static and animated M for small icons and the README.
 
 | File | Purpose |
@@ -42,7 +41,7 @@ The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the stati
 | `test_geometry.py` | Regression checks for closed junctions and angled terminal cuts. |
 | `test_exports.py` | File-size budgets and exact SVGZ decompression checks. |
 | `test_optimize.py` | Preservation of repeated stops through shared gradient templates. |
-| `test_publication.py` | Complete M coverage, exact transparent PNG pixels, and unchanged artwork after reframing. |
+| `test_publication.py` | Complete M coverage, unchanged opaque colors after removing the background, and unchanged artwork after reframing. |
 
 Faces and highlights refer to the same named corner coordinates.
 At a junction, adjacent offset edges intersect to form a shared miter, and each filled edge polygon reaches the corner center.
@@ -95,19 +94,23 @@ GitHub's raw `.svgz` response was compressed a second time and failed to display
 ## Transparent artwork and application assets
 
 The transparent variants remove only the canvas background; the complete M, its navy frame, glass, and illumination remain opaque.
-The transparent PNG matches the SVG render, and every opaque pixel matches the background preview.
+Tests render both SVGs in memory and verify that removing the background preserves every opaque artwork pixel.
 The compact `logo-mark.svg` and `logo-mark-animated.svg` change only the viewport, keeping the original vector geometry and paint definitions intact.
 Both use the same 720-pixel square viewport with a small border, so the M fills more of its displayed area without jumping when the motion preference changes.
 Their regression tests check that the crop removes no painted pixels and that restoring the original viewport reproduces the exact RGBA image.
 
-Regeneration also updates the dashboard and documentation SVGs, portal branding, PNG fallbacks, both web favicons, the macOS app icon source, and the bundled Matrix root-space avatar.
+Regeneration also updates the dashboard and documentation SVGs, portal branding, both web favicons, the macOS app icon source, and the bundled Matrix root-space avatar.
+Raster exports are kept only for consumers that use them: PNG favicons for the dashboard and docs, the portal's ICO favicon, the Matrix root-space avatar, and the macOS app and menu bar images.
+The macOS PNGs are checked in so Xcode and direct SwiftPM builds need no Python artwork-rendering dependencies.
+`reference.png` is a source for the SVG lighting, and the AI-rendered social card is also an original raster asset.
+Unused PNG logo copies and raster previews are not generated or checked in.
 The macOS appearance variants use `app-icon-light.svg` and `app-icon-dark.svg`, rendered to `macos/MindRoom/Resources/MindRoom.icon/Assets/` as 1024-pixel PNGs.
 These full-bleed images receive their final system mask from Icon Composer, which supplies appearance variants on macOS 26 or newer and a static light icon on older systems.
 The material treatments were inspired by AI-generated concepts; their geometry, backgrounds, edge lighting, and shadows are rendered deterministically from SVG.
 The dark icon takes inspiration from [Kube's liquid-glass article](https://kube.io/blog/liquid-glass-css-svg/): a blurred pane silhouette approximates a rounded surface, whose horizontal and vertical derivatives drive an SVG displacement filter.
 Directional specular highlights and broad cyan glows give the panes depth, while an inset illuminated rim defines the dark glass tile.
 This is a static approximation baked into the exported PNG, with no browser backdrop filter, embedded bitmap, or runtime effect.
-The portal's public logo aliases resolve within its own public directory so container builds retain them.
+The portal's public SVG logo alias resolves within its own public directory so container builds retain it.
 Application assets use the static version except for the connections page, which imports the existing `assets/logo/logo-mark-animated.svgz` directly.
 The frontend build bundles that compressed asset, and the backend and Vite servers send it with SVG and gzip response headers.
 The generated root-space avatar is a default asset; existing uploaded or custom Matrix avatars follow the existing avatar management behavior.
@@ -119,13 +122,13 @@ These PNGs are ready to upload:
 | File | Size | Use |
 | --- | --- | --- |
 | [social-preview.png](social-preview.png) | 1280 × 640 | Repository Settings → Social preview → Upload an image. |
-| [github-avatar.png](github-avatar.png) | 1024 × 1024 | Organization profile picture, using the dark glass M. |
+| [Dark app icon](../../macos/MindRoom/Resources/MindRoom.icon/Assets/dark.png) | 1024 × 1024 | Organization profile picture, reusing the dark glass M. |
 
 Both PNGs have opaque backgrounds and stay below GitHub's 1 MB social preview limit.
 The social card follows [GitHub's recommended dimensions](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/customizing-your-repositorys-social-media-preview).
 The social card is AI-rendered artwork created with `gpt-image-2.5-sunburst`; its model, prompts, and export details are recorded in [social-preview.prompt.md](social-preview.prompt.md).
 It is a committed raster asset, and `generate.py` leaves it unchanged.
-The app icons remain editable SVG, and the generated square avatar shares the exact macOS dark PNG.
+The app icons remain editable SVG, and the organization avatar reuses the macOS dark PNG without a duplicate export.
 
 ## Animated version
 
@@ -151,7 +154,7 @@ The animated SVGs can also be embedded as ordinary SVG images.
 ## Checks
 
 ```sh
-# Verify that the committed SVGs and PNG match their source.
+# Verify that committed generated artwork matches its source.
 uv run assets/logo/generate.py --check
 
 # Exercise geometry and export budgets without application dependencies.
