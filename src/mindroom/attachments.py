@@ -39,6 +39,7 @@ from .matrix.media import (
     parse_matrix_media_dispatch_event_source,
     resolve_image_mime_type,
 )
+from .path_confinement import open_directory_within_root
 from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
@@ -707,19 +708,15 @@ def register_image_bytes_attachment(
     try:
         root = storage_path.resolve()
         root.mkdir(parents=True, exist_ok=True)
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         with contextlib.ExitStack() as descriptors:
-            root_fd = os.open(root, flags)
-            descriptors.callback(os.close, root_fd)
+            root_fd = descriptors.enter_context(open_directory_within_root(root))
             directories: dict[str, int] = {}
             media_directory = _incoming_media_dir(root).name
             metadata_directory = _attachments_dir(root).name
             for name in (media_directory, metadata_directory):
-                with contextlib.suppress(FileExistsError):
-                    os.mkdir(name, mode=0o700, dir_fd=root_fd)
-                descriptor = os.open(name, flags, dir_fd=root_fd)
-                descriptors.callback(os.close, descriptor)
-                directories[name] = descriptor
+                directories[name] = descriptors.enter_context(
+                    open_directory_within_root(root_fd, name, create=True, mode=0o700),
+                )
             media_fd, metadata_fd = directories[media_directory], directories[metadata_directory]
             local_path = _incoming_media_dir(root) / f"{normalized_id}{extension}"
             record_path = _attachment_record_path(root, normalized_id)

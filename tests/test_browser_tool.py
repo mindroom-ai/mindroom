@@ -2307,3 +2307,17 @@ async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replaceme
         await browser.aclose()
     assert not old.live_resources
     assert not new.live_resources
+
+
+def test_worker_default_output_rejects_symlink_escape(tmp_path: Path) -> None:
+    """Default screenshot directory has the same containment policy as configured outputs."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "browser").symlink_to(outside, target_is_directory=True)
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    with pytest.raises(ValueError, match="output_dir must stay inside"):
+        browser.bind_worker_display(":99", workspace)
+    assert not list(outside.iterdir())

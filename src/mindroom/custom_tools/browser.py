@@ -37,6 +37,7 @@ from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.media_delivery import image_result
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.server_fetch_url import validate_server_fetch_url
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -583,9 +584,11 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         workspace = workspace.resolve()
         output_dir = self._configured_output_dir or workspace / "browser"
-        if not output_dir.is_relative_to(workspace):
+        try:
+            output_dir = resolve_path_within_root(workspace, output_dir, symlinks="internal")
+        except ValueError:
             msg = "Worker browser output_dir must stay inside the prepared workspace."
-            raise ValueError(msg)
+            raise ValueError(msg) from None
         self._worker_display = display
         self._worker_workspace = workspace
         self._configured_output_dir = output_dir
@@ -1861,8 +1864,11 @@ class BrowserTools(Toolkit):
             msg = f"upload path must be an existing file: {path}"
             raise ValueError(msg)
         roots = self._browser_upload_roots()
-        if any(resolved.is_relative_to(root) for root in roots):
-            return resolved
+        for root in roots:
+            try:
+                return resolve_path_within_root(root, resolved, symlinks="internal")
+            except ValueError:
+                continue
         root_list = ", ".join(str(root) for root in roots)
         msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
         raise ValueError(msg)

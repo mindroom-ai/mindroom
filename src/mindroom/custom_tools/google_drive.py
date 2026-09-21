@@ -31,6 +31,7 @@ from mindroom.oauth.service import (
     OAUTH_MISSING_WRITE_SCOPE_REASON,
     oauth_connection_required,
 )
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.workspaces import resolve_workspace_relative_path
@@ -91,10 +92,8 @@ def _download_target_path(download_dir: str | Path, filename: str, extension: st
     if extension and not target_path.suffix:
         target_path = target_path.with_suffix(extension)
 
-    resolved_root = download_root.resolve()
-    resolved_target = target_path.resolve()
     try:
-        resolved_target.relative_to(resolved_root)
+        resolve_path_within_root(download_root, target_path.absolute(), symlinks="internal")
     except ValueError:
         return None
     return target_path
@@ -263,11 +262,11 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
             raise ValueError(msg)
         requested_path = Path(local_path).expanduser()
         if requested_path.is_absolute():
-            resolved_path = requested_path.resolve()
-            if not resolved_path.is_relative_to(self._workspace_root.resolve()):
+            try:
+                return resolve_path_within_root(self._workspace_root, requested_path, symlinks="internal")
+            except ValueError:
                 msg = f"Google Drive local_path must stay within the workspace root: {self._workspace_root.resolve()}"
-                raise ValueError(msg)
-            return resolved_path
+                raise ValueError(msg) from None
         return resolve_workspace_relative_path(
             self._workspace_root,
             requested_path,

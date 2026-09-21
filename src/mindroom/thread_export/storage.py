@@ -19,6 +19,7 @@ import yaml
 from mindroom import yaml_io
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -133,15 +134,9 @@ def _open_directory_at(
     create: bool,
 ) -> int | None:
     """Open one directory relative to a pinned parent without following symlinks."""
-    if create:
-        try:
-            os.mkdir(name, dir_fd=parent_fd)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise _unsafe_directory(path, label) from exc
     try:
-        return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+        with open_directory_within_root(parent_fd, name, create=create) as descriptor:
+            return os.dup(descriptor)
     except FileNotFoundError:
         if not create:
             return None
@@ -158,29 +153,21 @@ def _open_anchored_directory(
     final_label: str,
 ) -> int | None:
     """Open one descendant by descriptor-relative traversal without symlinks."""
-    descriptors: list[int] = []
     try:
-        descriptors.append(os.open(trusted_root, _DIRECTORY_OPEN_FLAGS))
-        for index, part in enumerate(relative_parts):
-            descriptor = _open_directory_at(
-                descriptors[-1],
-                part,
-                path=trusted_root.joinpath(*relative_parts[: index + 1]),
-                label=final_label if index == len(relative_parts) - 1 else "root parent",
+        with open_directory_within_root(trusted_root, Path(*relative_parts[:-1]), create=create) as parent_fd:
+            return _open_directory_at(
+                parent_fd,
+                relative_parts[-1],
+                path=trusted_root.joinpath(*relative_parts),
+                label=final_label,
                 create=create,
             )
-            if descriptor is None:
-                return None
-            descriptors.append(descriptor)
     except FileNotFoundError:
         if not create:
             return None
         raise
-    else:
-        return descriptors.pop()
-    finally:
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
+    except OSError as exc:
+        raise _unsafe_directory(trusted_root.joinpath(*relative_parts[:-1]), "root parent") from exc
 
 
 def _open_export_root(

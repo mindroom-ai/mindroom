@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.constants import RuntimePaths, config_relative_path
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 
 if TYPE_CHECKING:
@@ -107,20 +108,11 @@ def resolve_relative_path_within_root(
     root_label: str = "canonical root",
 ) -> Path:
     """Resolve one relative path under a canonical root and reject symlink escapes."""
-    lexical_root = root.expanduser()
-    resolved_root = lexical_root.resolve()
-    candidate_path = lexical_root / relative_path
-    current = lexical_root
-    for part in Path(relative_path).parts:
-        current = current / part
-        if current.is_symlink():
-            msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
-            raise ValueError(msg)
-    candidate = candidate_path.resolve()
-    if not candidate.is_relative_to(resolved_root):
-        msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
-        raise ValueError(msg)
-    return candidate
+    try:
+        return resolve_path_within_root(root.expanduser(), relative_path, symlinks="reject")
+    except ValueError:
+        msg = f"{field_name} must stay within the {root_label}: {root.expanduser().resolve()}"
+        raise ValueError(msg) from None
 
 
 def resolve_relative_path_within_root_preserving_leaf(
@@ -132,30 +124,12 @@ def resolve_relative_path_within_root_preserving_leaf(
 ) -> Path:
     """Resolve one relative path under a canonical root without following the final component."""
     lexical_root = root.expanduser()
-    resolved_root = lexical_root.resolve()
-    candidate_path = lexical_root / relative_path
-    relative = Path(relative_path)
-    if relative.is_absolute():
-        msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
-        raise ValueError(msg)
-    if relative == Path():
-        return resolved_root
-
-    current = lexical_root
-    for index, part in enumerate(relative.parts):
-        if part == "..":
-            msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
-            raise ValueError(msg)
-        current = current / part
-        if index < len(relative.parts) - 1 and current.is_symlink():
-            msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
-            raise ValueError(msg)
-
-    candidate_parent = candidate_path.parent.resolve()
-    if not candidate_parent.is_relative_to(resolved_root):
-        msg = f"{field_name} must stay within the {root_label}: {resolved_root}"
-        raise ValueError(msg)
-    return candidate_path
+    try:
+        resolved = resolve_path_within_root(lexical_root, relative_path, symlinks="preserve_leaf")
+    except ValueError:
+        msg = f"{field_name} must stay within the {root_label}: {lexical_root.resolve()}"
+        raise ValueError(msg) from None
+    return resolved if Path(relative_path) == Path() else lexical_root / relative_path
 
 
 def resolve_workspace_relative_path(

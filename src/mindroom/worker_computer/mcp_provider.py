@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import stat
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from mcp.client.stdio import get_default_environment
 from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.mcp.results import tool_result_from_call_result
 from mindroom.media_delivery import image_result
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.browser_bundle import (
     COMPUTER_BROWSER_EXECUTABLE,
@@ -26,8 +28,6 @@ from mindroom.worker_computer.browser_proxy import COMPUTER_PROXY_BYPASS, Browse
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agno.tools.function import ToolResult
     from mcp.types import CallToolResult
 
@@ -183,18 +183,10 @@ class WorkerBrowserMCP:
         if not parts:
             raise OSError(msg)
         try:
-            directory = os.open(self._workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            descriptors.callback(os.close, directory)
-            for index, part in enumerate(parts):
-                try:
-                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-                except FileNotFoundError:
-                    if index != len(parts) - 1:
-                        raise
-                    os.mkdir(part, mode=0o700, dir_fd=directory)
-                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-                descriptors.callback(os.close, child)
-                directory = child
+            parent = descriptors.enter_context(open_directory_within_root(self._workspace, Path(*parts[:-1])))
+            directory = descriptors.enter_context(
+                open_directory_within_root(parent, parts[-1], create=True, mode=0o700),
+            )
         except OSError as exc:
             raise OSError(msg) from exc
         return directory
@@ -221,8 +213,8 @@ class WorkerBrowserMCP:
                 raise ValueError(msg)
             msg = "Native browser files must be existing regular files within the worker workspace."
             try:
-                path = (self._workspace / value).resolve(strict=True)
-                allowed = path.is_relative_to(self._workspace) and path.is_file()
+                path = resolve_path_within_root(self._workspace, value, symlinks="internal", strict=True)
+                allowed = path.is_file()
             except (OSError, RuntimeError, ValueError) as exc:
                 raise ValueError(msg) from exc
             if not allowed:
@@ -248,7 +240,7 @@ class WorkerBrowserMCP:
         """Resolve existing links and missing descendants within the workspace."""
         msg = "Native browser output must stay within the worker workspace and have the expected file type."
         try:
-            canonical = path.resolve()
+            canonical = resolve_path_within_root(self._workspace, path, symlinks="internal")
             # stat still reports symlink loops and invalid parents on Python
             # versions where non-strict resolve suppresses those errors.
             try:
@@ -257,8 +249,6 @@ class WorkerBrowserMCP:
                 mode = None
         except (OSError, RuntimeError, ValueError) as exc:
             raise ValueError(msg) from exc
-        if not canonical.is_relative_to(self._workspace):
-            raise ValueError(msg)
         if mode is not None and not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
             raise ValueError(msg)
         return canonical

@@ -9,13 +9,13 @@ from __future__ import annotations
 import io
 import json
 import os
-import stat
 import warnings
-from contextlib import ExitStack
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from agno.media import Image
+
+from mindroom.path_confinement import open_regular_file_within_root, resolve_path_within_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -123,22 +123,14 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
 
 def _read_workspace_image(root: Path, relative: Path) -> bytes:
     """Read through directory descriptors so path swaps cannot escape the workspace."""
-    with ExitStack() as descriptors:
-        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        descriptors.callback(os.close, directory)
-        for part in relative.parts[:-1]:
-            directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            descriptors.callback(os.close, directory)
-        descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        with os.fdopen(descriptor, "rb") as file:
-            info = os.fstat(file.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                message = "Image path must name a regular file."
-                raise ValueError(message)
-            if info.st_size > MAX_SOURCE_BYTES:
-                message = f"Image exceeds the {MAX_SOURCE_BYTES}-byte source limit."
-                raise ValueError(message)
-            return file.read(MAX_SOURCE_BYTES + 1)
+    with (
+        open_regular_file_within_root(root, relative) as descriptor,
+        os.fdopen(descriptor, "rb", closefd=False) as file,
+    ):
+        if os.fstat(descriptor).st_size > MAX_SOURCE_BYTES:
+            message = f"Image exceeds the {MAX_SOURCE_BYTES}-byte source limit."
+            raise ValueError(message)
+        return file.read(MAX_SOURCE_BYTES + 1)
 
 
 def view_image_path(path: str, *, workspace: Path) -> ToolResult:
@@ -148,9 +140,7 @@ def view_image_path(path: str, *, workspace: Path) -> ToolResult:
         return media_error("path must be a non-empty string.", metadata=metadata)
     try:
         root = workspace.resolve(strict=True)
-        resolved = (root / path).resolve(strict=True)
-        if not resolved.is_relative_to(root):
-            return media_error("Image path is outside the authorized workspace.", metadata=metadata)
+        resolved = resolve_path_within_root(root, path, symlinks="internal", strict=True)
         relative = resolved.relative_to(root)
         if not relative.parts:
             return media_error("Image path must name a regular file.", metadata=metadata)

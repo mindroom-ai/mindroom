@@ -18447,6 +18447,19 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
 
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the module boundaries and the ongoing simplification roadmap.
 
+## Confined filesystem paths
+
+`mindroom.path_confinement.resolve_path_within_root` is the shared implementation for workspace and artifact path containment.
+Callers supply an authorized root and explicitly choose `internal` (allow links targeting that root), `reject` (reject descendant links), or `preserve_leaf` (reject linked parents while preserving the final entry for unlink or atomic replacement).
+Existing workspace and tool wrappers retain their input rules and error messages.
+Do not add another `resolve()` plus containment check when implementing a file consumer.
+
+Path resolution is a point-in-time check, not protection for a later file open.
+For local I/O requiring protection against symlink swaps, use `open_directory_within_root` or `open_regular_file_within_root` and keep operations relative to the returned descriptor.
+Publish bytes using `atomic_file.atomic_write_bytes_at`; keep cleanup relative to the same directory descriptor.
+Caller-owned root authorization, directory identity checks, filesystem permissions, and requester isolation remain required.
+These helpers do not prevent hard-link aliasing or arbitrary directory relocation, and do not protect subsequent pathname opens by external browser, Drive, shell, or file-tool implementations.
+
 # Matrix Integration
 
 MindRoom uses the Matrix protocol for all agent communication. The integration is implemented in `src/mindroom/matrix/`.

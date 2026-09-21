@@ -37,6 +37,7 @@ from mindroom.credentials import CredentialsManager, get_runtime_credentials_man
 from mindroom.logging_config import get_logger
 from mindroom.media_delivery import view_image_path
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -625,10 +626,15 @@ def resolve_script_state_workspace(
         state_storage_path=state_root,
         use_state_storage_path=is_private,
     )
-    workspace = (resolved_workspace.root if resolved_workspace is not None else state_root / "workspace").resolve()
-    if not workspace.is_relative_to(state_root):
+    try:
+        workspace = resolve_path_within_root(
+            state_root,
+            resolved_workspace.root if resolved_workspace is not None else state_root / "workspace",
+            symlinks="internal",
+        )
+    except ValueError as exc:
         msg = "Script workspace escapes its mounted state scope."
-        raise ValueError(msg)
+        raise ValueError(msg) from exc
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
 
