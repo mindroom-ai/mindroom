@@ -81,7 +81,6 @@ def _source(
         expected_session_table="sessions",
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset({"code", "other"}),
-        allowed_team_ids=frozenset({"engineering"}),
         requester_isolated=requester_isolated,
     )
 
@@ -1126,7 +1125,11 @@ def test_self_usage_marks_missing_shared_requester_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source()
-    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(requester_id=None)),)})
+    _wire(
+        monkeypatch,
+        (source,),
+        {source.path_label: (_row(source, _run(run_id="valid"), _run(requester_id=None)),)},
+    )
 
     report = collect_self_usage(
         agent_name="code",
@@ -1138,6 +1141,46 @@ def test_self_usage_marks_missing_shared_requester_incomplete(
 
     assert report.totals.total_tokens == 0
     assert report.coverage.unavailable_sources == 1
+    assert report.model_breakdown == ()
+
+
+def test_self_usage_rejects_row_with_invalid_own_run_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared self totals, models, and days must agree when an own-run counter is malformed."""
+    source = _source()
+    _wire(
+        monkeypatch,
+        (source,),
+        {
+            source.path_label: (
+                _row(
+                    source,
+                    _run(run_id="valid", total_tokens=10, created_at=1_700_000_000),
+                    _run(run_id="invalid", total_tokens=-1, created_at=1_700_000_001),
+                ),
+            ),
+        },
+    )
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+        include_daily=True,
+    )
+
+    assert report.totals.total_tokens == 0
+    assert report.session_count == 0
+    assert report.model_breakdown == ()
+    assert report.daily_breakdown == ()
+    assert report.coverage.unavailable_sources == 1
+    assert report.model_coverage.unavailable_sources == 1
+    assert report.daily_coverage is not None
+    assert report.daily_coverage.unavailable_sources == 1
 
 
 def test_admin_usage_uses_member_inclusive_session_metrics(
