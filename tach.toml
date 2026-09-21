@@ -1418,6 +1418,7 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.media_delivery",
     "mindroom.tool_system.media_transport",
     "mindroom.api.computer_browser_binding",
     "mindroom.worker_browser",
@@ -1561,6 +1562,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.media_delivery",
     "mindroom.tool_system.media_attachments",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.media",
@@ -3860,6 +3862,7 @@ visibility = [
 [[modules]]
 path = "mindroom.provider_media_fallback"
 depends_on = [
+    "mindroom.media_delivery",
     "mindroom.agno_compat_provider_errors",
     "mindroom.agno_compat_model_hooks",
     "mindroom.error_handling",
@@ -4082,6 +4085,18 @@ depends_on = ["mindroom.tool_system.runtime_context", "mindroom.provider_media_f
 [[modules]]
 path = "mindroom.tool_system.media_transport"
 depends_on = []
+
+[[modules]]
+path = "mindroom.media_delivery"
+depends_on = []
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.browser",
+    "mindroom.history.message_content",
+    "mindroom.provider_media_fallback",
+    "mindroom.worker_computer.mcp_provider",
+]
 
 [[modules]]
 path = "mindroom.tool_system"
@@ -5978,7 +5993,7 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.history.message_content"
-depends_on = ["mindroom.token_budget"]
+depends_on = ["mindroom.media_delivery", "mindroom.token_budget"]
 visibility = ["mindroom.history.agno_compat_message_builder", "mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
 
 [[modules]]
@@ -6338,7 +6353,7 @@ visibility = ["mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mc
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
-depends_on = ["mindroom.browser_profile", "mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
+depends_on = ["mindroom.media_delivery", "mindroom.browser_profile", "mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
 
 [[modules]]
 path = "mindroom.custom_tools.browser_mcp"
