@@ -8813,7 +8813,7 @@ Chrome and Brave are supported by the local command through an explicit browser 
 
 ## Native macOS setup
 
-Open **Desktop Control** from the MindRoom menu app.
+Open MindRoom and select **Computer access**, or use **Computer Access…** in the menu bar.
 In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
 Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
 Save the setup, confirm that exact identity locally, and claim pairing.

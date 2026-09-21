@@ -3,6 +3,12 @@ import Foundation
 
 typealias MindRoomProcessRunner = (MindRoomCommandInvocation) -> CommandResult
 
+struct CommandFeedback {
+    let title: String
+    let successMessage: String?
+    let result: CommandResult
+}
+
 @MainActor
 final class MindRoomCommandRunner: ObservableObject {
     static let shared = MindRoomCommandRunner()
@@ -13,6 +19,7 @@ final class MindRoomCommandRunner: ObservableObject {
     )
     @Published private(set) var runningCommandTitle: String?
     @Published private(set) var lastOutput = ""
+    @Published private(set) var feedback: CommandFeedback?
 
     /// Called on the main actor when a user-initiated command finishes.
     var onCommandFinished: ((MindRoomCommand, CommandResult) -> Void)?
@@ -69,6 +76,7 @@ final class MindRoomCommandRunner: ObservableObject {
 
     private func runUserCommand(_ command: MindRoomCommand, action: MindRoomRuntimeAction) {
         guard runningCommandTitle == nil else { return }
+        feedback = nil
         runningCommandTitle = command.title
         let invocation = runtime.command(for: action)
         let processRunner = processRunner
@@ -77,6 +85,9 @@ final class MindRoomCommandRunner: ObservableObject {
             DispatchQueue.main.async {
                 self.runningCommandTitle = nil
                 self.lastOutput = result.output
+                self.feedback = CommandFeedback(
+                    title: command.title, successMessage: command.successMessage, result: result
+                )
                 self.onCommandFinished?(command, result)
                 self.refreshStatus()
             }

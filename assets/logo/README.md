@@ -96,6 +96,8 @@ Both use the same 720-pixel square viewport with a small border, so the M fills 
 Their regression tests check that the crop removes no painted pixels and that restoring the original viewport reproduces the exact RGBA image.
 
 Regeneration also updates the dashboard and documentation SVGs, portal branding, PNG fallbacks, both web favicons, the macOS app icon source, and the bundled Matrix root-space avatar.
+The native macOS app bundles the mark SVG and its matching PNG; AppKit uses the PNG to preserve the SVG's masked shading.
+Its menu bar icon uses full-color 20- and 40-pixel renders for standard and Retina displays, preserving the internal contours that template rendering discards.
 The portal's public logo aliases resolve within its own public directory so container builds retain them.
 Application assets use the static version except for the connections page, which imports the existing `assets/logo/logo-mark-animated.svgz` directly.
 The frontend build bundles that compressed asset, and the backend and Vite servers send it with SVG and gzip response headers.
