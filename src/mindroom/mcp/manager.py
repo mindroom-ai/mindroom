@@ -64,7 +64,6 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
-    OAUTH_REFRESH_FAILED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
@@ -771,11 +770,8 @@ class MCPServerManager:
                     context,
                     reason=OAUTH_REFRESH_REJECTED_REASON,
                 ) from exc
-            raise await asyncio.to_thread(
-                oauth_connection_required,
-                context,
-                reason=OAUTH_REFRESH_FAILED_REASON,
-            ) from None
+            msg = f"MCP server '{state.server_id}' OAuth token refresh failed; retry shortly"
+            raise MCPConnectionError(state.server_id, msg) from None
         if not oauth_credentials_usable(provider, self.runtime_paths, credentials):
             raise await asyncio.to_thread(oauth_connection_required, context)
         assert credentials is not None
