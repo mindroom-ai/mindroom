@@ -4,6 +4,17 @@ import XCTest
 
 @MainActor
 final class SettingsMenuTests: XCTestCase {
+    func testAppSceneRegistersSettingsActionBeforeMenuUse() {
+        let controller = StatusMenuController.shared
+        let originalOpenSettings = controller.openSettingsAction
+        defer { controller.openSettingsAction = originalOpenSettings }
+        controller.openSettingsAction = nil
+
+        _ = MindRoomApp().body
+
+        XCTAssertNotNil(controller.openSettingsAction)
+    }
+
     func testDesktopControlOpensAndReopensSettingsWithRemappedShortcut() {
         let application = NSApplication.shared
         let originalMenu = application.mainMenu
