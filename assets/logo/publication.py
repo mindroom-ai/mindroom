@@ -2,7 +2,9 @@
 """Derive app, documentation, and platform icons from the approved artwork."""
 
 from io import BytesIO
+from pathlib import Path
 
+from artwork import SVG
 from lxml import etree
 from PIL import Image
 from shading import render
@@ -34,6 +36,9 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
     favicon = BytesIO()
     with Image.open(BytesIO(png[256])) as image:
         image.save(favicon, format="ICO", sizes=[(size, size) for size in (16, 32, 48, 64, 128, 256)])
+    app_icons = {
+        appearance: render(etree.fromstring(artwork[f"app-icon-{appearance}.svg"])) for appearance in ("light", "dark")
+    }
     return {
         "frontend/public/logo.svg": mark,
         "frontend/public/logo.png": png[1024],
@@ -46,4 +51,16 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
         "saas-platform/platform-frontend/public/res/branding/mindroom.png": png[1024],
         "saas-platform/platform-frontend/src/app/favicon.ico": favicon.getvalue(),
         "avatars/spaces/root_space.png": png[256],
+        "assets/logo/github-avatar.png": app_icons["dark"],
+        **{
+            f"macos/MindRoom/Resources/MindRoom.icon/Assets/{appearance}.png": content
+            for appearance, content in app_icons.items()
+        },
     }
+
+
+def social_document(dark_icon: bytes) -> etree._Element:
+    """Compose the GitHub social card with the same glass artwork and outlined type."""
+    root = etree.parse(str(Path(__file__).with_name("social-layout.svg"))).getroot()
+    root.find(f"{SVG}g[@id='social-icon']").append(etree.fromstring(dark_icon))
+    return root

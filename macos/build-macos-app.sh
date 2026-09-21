@@ -77,9 +77,10 @@ DMG_STAGING_DIR="$DIST_DIR/dmg-staging"
 DMG_RW_PATH="$DIST_DIR/$APP_NAME-rw.dmg"
 INFO_PLIST="$PACKAGE_DIR/Resources/Info.plist"
 ENTITLEMENTS_PLIST="$PACKAGE_DIR/Resources/MindRoom.entitlements"
-ICON_SOURCE_PNG="$ROOT_DIR/frontend/public/logo-square.png"
-ICONSET_DIR="$DIST_DIR/MindRoom.iconset"
-APP_ICON_ICNS="$DIST_DIR/MindRoom.icns"
+ICON_SOURCE="$PACKAGE_DIR/Resources/MindRoom.icon"
+ASSET_CATALOG="$PACKAGE_DIR/Resources/Assets.xcassets"
+ICON_BUILD_DIR="$DIST_DIR/icon-assets"
+ICON_INFO_PLIST="$DIST_DIR/icon-info.plist"
 CODESIGN_IDENTITY=${CODESIGN_IDENTITY:--}
 APP_VERSION=${APP_VERSION:-}
 BUILD_VERSION=${BUILD_VERSION:-${GITHUB_RUN_NUMBER:-}}
@@ -93,7 +94,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
-REQUIRED_TOOLS=(swift sips iconutil)
+REQUIRED_TOOLS=(swift xcrun xcodebuild)
 if [[ "$UNIVERSAL" == true ]]; then
     REQUIRED_TOOLS+=(lipo)
 fi
@@ -103,6 +104,12 @@ for required_tool in "${REQUIRED_TOOLS[@]}"; do
         exit 1
     fi
 done
+
+XCODE_VERSION=$(xcodebuild -version | awk '/^Xcode / { print $2 }')
+if [[ "${XCODE_VERSION%%.*}" -lt 26 ]] || ! xcrun --find actool >/dev/null 2>&1; then
+    echo "Xcode 26 or newer is required to compile the light and dark app icons." >&2
+    exit 1
+fi
 
 if [[ -z "$UV_BINARY" || ! -x "$UV_BINARY" ]]; then
     echo "uv is required so it can be bundled into the app. Set UV_BINARY or install uv." >&2
@@ -119,8 +126,8 @@ if [[ ! -f "$ENTITLEMENTS_PLIST" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$ICON_SOURCE_PNG" ]]; then
-    echo "MindRoom icon source is missing: $ICON_SOURCE_PNG" >&2
+if [[ ! -f "$ICON_SOURCE/icon.json" || ! -f "$ASSET_CATALOG/Contents.json" ]]; then
+    echo "MindRoom icon sources are missing from $PACKAGE_DIR/Resources." >&2
     exit 1
 fi
 
@@ -237,20 +244,18 @@ stamp_info_plist() {
 }
 
 build_app_icon() {
-    rm -rf "$ICONSET_DIR" "$APP_ICON_ICNS"
-    mkdir -p "$ICONSET_DIR"
-    sips -z 16 16 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null
-    sips -z 32 32 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null
-    sips -z 32 32 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_32x32.png" >/dev/null
-    sips -z 64 64 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_32x32@2x.png" >/dev/null
-    sips -z 128 128 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_128x128.png" >/dev/null
-    sips -z 256 256 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_128x128@2x.png" >/dev/null
-    sips -z 256 256 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_256x256.png" >/dev/null
-    sips -z 512 512 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_256x256@2x.png" >/dev/null
-    sips -z 512 512 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null
-    sips -z 1024 1024 "$ICON_SOURCE_PNG" --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null
-    iconutil -c icns "$ICONSET_DIR" -o "$APP_ICON_ICNS"
-    rm -rf "$ICONSET_DIR"
+    rm -rf "$ICON_BUILD_DIR"
+    mkdir -p "$ICON_BUILD_DIR"
+    xcrun actool "$ICON_SOURCE" "$ASSET_CATALOG" \
+        --compile "$ICON_BUILD_DIR" \
+        --app-icon MindRoom \
+        --platform macosx \
+        --target-device mac \
+        --minimum-deployment-target 14.0 \
+        --enable-on-demand-resources NO \
+        --development-region en \
+        --output-partial-info-plist "$ICON_INFO_PLIST" \
+        --output-format human-readable-text --errors --warnings
 }
 
 require_notarization_env() {
@@ -372,9 +377,10 @@ fi
 
 cp "$BINARY" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Merge '$ICON_INFO_PLIST'" "$APP_DIR/Contents/Info.plist"
 ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
-cp "$APP_ICON_ICNS" "$APP_DIR/Contents/Resources/MindRoom.icns"
+ditto "$ICON_BUILD_DIR" "$APP_DIR/Contents/Resources"
 for architecture in "${HELPER_ARCHITECTURES[@]}"; do
     mkdir -p "$APP_DIR/Contents/Helpers/$architecture"
     ditto "$HELPER_BUILD_DIR/$architecture/dist/MindRoom Desktop Helper.app" \

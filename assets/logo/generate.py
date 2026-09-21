@@ -20,12 +20,13 @@ from pathlib import Path
 
 import numpy as np
 from animation import animated_document
+from app_icons import app_icon_document
 from artwork import SVG, XLINK, Network, build_document, group, polygon
 from geometry import joined_polygons, subtract
 from lxml import etree
 from optimize import compact_xml, optimize_document
 from PIL import Image
-from publication import application_outputs, framed_mark
+from publication import application_outputs, framed_mark, social_document
 from shading import Colors, color_hex, edge_paint, pixels, render, sample, shade_surfaces
 
 ROOT = Path(__file__).resolve().parent
@@ -196,6 +197,11 @@ def generate() -> dict[str, bytes]:
     outputs["logo-transparent.svg"] = serialize(transparent)
     outputs["logo-transparent.png"] = render(transparent)
     outputs["logo-mark.svg"] = framed_mark(outputs["logo-transparent.svg"])
+    for appearance in ("light", "dark"):
+        outputs[f"app-icon-{appearance}.svg"] = serialize(app_icon_document(transparent, dark=appearance == "dark"))
+    social = social_document(outputs["app-icon-dark.svg"])
+    outputs["social-preview.svg"] = serialize(social)
+    outputs["social-preview.png"] = render(social, 1280, height=640)
     animated = animated_document(root)
     outputs["logo-animated.svg"] = serialize(animated)
     background = animated.find(f"{SVG}g[@id='background']")

@@ -5,11 +5,22 @@ import gzip
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 
 @pytest.mark.parametrize(
     "name",
-    ["logo", "logo-transparent", "logo-mark", "logo-mark-animated", "logo-animated", "logo-animated-transparent"],
+    [
+        "logo",
+        "logo-transparent",
+        "logo-mark",
+        "logo-mark-animated",
+        "logo-animated",
+        "logo-animated-transparent",
+        "app-icon-light",
+        "app-icon-dark",
+        "social-preview",
+    ],
 )
 def test_export_size_and_lossless_compression(name: str) -> None:
     """Export budgets prevent accidental bulk; SVGZ must decode to the exact SVG."""
@@ -19,3 +30,13 @@ def test_export_size_and_lossless_compression(name: str) -> None:
     compressed = (directory / f"{name}.svgz").read_bytes()
     assert len(compressed) < 150_000
     assert gzip.decompress(compressed) == svg
+
+
+@pytest.mark.parametrize(("name", "size"), [("social-preview", (1280, 640)), ("github-avatar", (1024, 1024))])
+def test_github_upload_images(name: str, size: tuple[int, int]) -> None:
+    """GitHub uploads fit the image size limit and remain legible on any page background."""
+    path = Path(__file__).resolve().parent / f"{name}.png"
+    assert path.stat().st_size < 1_000_000
+    with Image.open(path) as image:
+        assert image.size == size
+        assert image.convert("RGBA").getchannel("A").getextrema() == (255, 255)

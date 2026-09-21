@@ -185,22 +185,13 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     private func refreshStatusIcon() {
         guard let button = statusItem?.button else { return }
-        button.image = NSImage(systemSymbolName: iconName, accessibilityDescription: "MindRoom")
+        let image = NSImage(named: "MindRoomMenuBar")
+        image?.size = NSSize(width: 18, height: 18)
+        image?.isTemplate = true
+        button.image = image
         button.imagePosition = .imageOnly
+        button.setAccessibilityLabel("MindRoom")
         button.toolTip = runner.serviceStatus.message
-    }
-
-    private var iconName: String {
-        switch runner.serviceStatus.state {
-        case .running:
-            return "brain.head.profile"
-        case .stopped, .notInstalled:
-            return "brain"
-        case .runtimeMissing:
-            return "exclamationmark.triangle"
-        case .unknown:
-            return "questionmark.circle"
-        }
     }
 
     private func actionItem(_ title: String, symbolName: String, action: Selector, toolTip: String? = nil) -> NSMenuItem {
