@@ -40,6 +40,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval_tools import toolkit_owners_for_agents
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.claude_prompt_cache import aclose_anthropic_async_client
+from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.delegation.execution import drive_delegation_stream, drive_delegations
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -107,7 +108,7 @@ from mindroom.response_turn import (
     skip_unapproved_attempt,
     stream_response_turn,
 )
-from mindroom.streaming import StreamingPresentation
+from mindroom.streaming import StreamingPresentation, strip_matching_visible_tool_markers
 from mindroom.timing import DispatchPipelineTiming, emit_timing_event, timed, timed_block, timing_scope
 from mindroom.tool_jobs.completion import report_background_wait
 from mindroom.tool_jobs.resources import defer_execution_cleanup
@@ -118,6 +119,7 @@ from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
     StructuredStreamChunk,
+    append_stream_text,
     complete_pending_tool_block,
     format_tool_combined,
 )
@@ -1490,7 +1492,9 @@ async def ai_response(  # noqa: C901, PLR0915
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.initial_presentation is not None:
-        return await _collect_response_body_with_trace(
+        if ctx.allow_no_report_response and turn_recorder is None:
+            turn_recorder = TurnRecorder(user_message=prompt)
+        response_text = await _collect_response_body_with_trace(
             stream_agent_response(
                 ctx,
                 prompt=prompt,
@@ -1522,6 +1526,19 @@ async def ai_response(  # noqa: C901, PLR0915
             show_tool_calls=show_tool_calls,
             tool_trace_collector=tool_trace_collector,
         )
+        if ctx.allow_no_report_response and turn_recorder is not None and turn_recorder.outcome == "completed":
+            # The turn owner removes no-report control tokens at continuation boundaries.
+            # Collected deltas have already emitted them; retain the canonical report and trace.
+            report = turn_recorder.assistant_text
+            initial = ctx.initial_presentation
+            if initial is not None:
+                prefix = strip_matching_visible_tool_markers(initial.response_text, initial.tool_trace)
+                if not is_silent_schedule_no_report_response(prefix):
+                    if is_silent_schedule_no_report_response(report):
+                        report = ""
+                    report = append_stream_text(prefix, report, separate=True)
+            return report
+        return response_text
 
     session_id = _require_turn_session_id(ctx)
     # Bind the timing scope for this turn; asyncio task contexts isolate it and

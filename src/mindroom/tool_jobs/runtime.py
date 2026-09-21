@@ -109,12 +109,14 @@ def read_job_snapshot(path: Path) -> BackgroundJob:
         raise JobAccessError(_UNAVAILABLE)
     payload = json.loads(path.read_text())
     if payload.pop("schema_version") != 1 or payload["job_id"] != path.stem:
-        msg = "Invalid background subagent snapshot."
+        msg = "Invalid tool job snapshot."
         raise ValueError(msg)
     payload["owner"] = parse_tool_execution_identity_payload(payload["owner"], strict=True)
-    # Retired schema-1 fields carry no execution or consumption authority.
+    # Retired schema-1 fields and duplicate native output carry no execution authority.
     payload.pop("human_paused", None)
     payload.pop("deliveries", None)
+    if payload.get("kind") == "delegation":
+        payload["adapter"]["child"]["result"] = None
     return BackgroundJob(**payload)
 
 
@@ -296,13 +298,14 @@ class ToolJobRuntime:
                     continue
                 if path != self._path(path.stem):
                     raise ValueError(_UNAVAILABLE)
-                # LEGACY_COMPAT: Discard retired pause and Matrix receipt fields in job snapshots.
-                # Legacy format: Schema 1 included human_paused and deliveries before internal completion handling.
+                # LEGACY_COMPAT: Discard retired metadata and duplicate native results in job snapshots.
+                # Legacy format: Schema 1 included human_paused, deliveries, and a redundant adapter.child.result.
                 # Last legacy release: Unreleased; neither the original nor restored writer is in a release tag.
-                # Replacement: Current schema 1 stores outcomes and durable wait acknowledgement only.
+                # Replacement: Current schema 1 stores outcome text once and durable wait acknowledgement.
                 # Handling: Drop obsolete metadata; retain result, approval, generation, and consumption evidence.
                 # Coverage: tests/test_tool_jobs.py::test_legacy_job_snapshot_preserves_outcome_and_consumption
                 # Coverage: tests/test_tool_jobs.py::test_legacy_paused_execution_is_interrupted_without_replay
+                # Coverage: tests/test_background_subagents.py::test_native_result_expires_to_a_compact_receipt_after_restart
                 job = await asyncio.to_thread(read_job_snapshot, path)
                 entry = _Entry(job, saved=True)
                 interrupted = job.status not in _READY
@@ -370,6 +373,7 @@ class ToolJobRuntime:
                 msg = "Tool job already exists."
                 raise ValueError(msg)
             job = BackgroundJob(owner=self._owner(owner), **asdict(spec))
+            # Native adapters mutate this exact mapping; owns_execution verifies its identity.
             job.adapter = spec.adapter
             if not owner.session_id or spec.depth < 0 or not self._allowed(job):
                 raise JobAccessError(_UNAVAILABLE)

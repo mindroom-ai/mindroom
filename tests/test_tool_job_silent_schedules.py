@@ -4,30 +4,173 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from agno.agent import Agent
+from agno.db.sqlite import SqliteDb
+from agno.models.message import Message
 from agno.models.response import ModelResponse
 
+from mindroom.ai import _AgentRunContext, _PreparedAgentRun, ai_response
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.constants import is_silent_schedule_no_report_response
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import HistoryScope, PreparedHistoryState
 from mindroom.response_runner import _is_silent_schedule_response, _with_silent_schedule_delivery
 from mindroom.scheduled_run_records import record_silent_schedule_result_if_needed
+from mindroom.streaming import StreamingPresentation, strip_matching_visible_tool_markers
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import completion_envelope, join_conversation_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.turn_origin import TurnIntent
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _plain_request, _target
+from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_execution import DelegationModel, _call
 from tests.test_subagent_runtime import _job
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.response_turn import ResponseTurnContext
+    from mindroom.tool_system.events import ToolTraceEntry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collect_stream", [False, True])
+@pytest.mark.parametrize("record_turn", [False, True])
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("NO_REPLY", "NO_REPLY", "NO_REPLY"),
+        ("NO_REPLY", "New finding", "New finding"),
+        ("First finding", "NO_REPLY", "First finding"),
+        ("The report mentions NO_REPLY", "More findings", "The report mentions NO_REPLY\n\nMore findings"),
+    ],
+)
+async def test_silent_join_preserves_the_deliverable_report(
+    tmp_path: Path,
+    *,
+    collect_stream: bool,
+    record_turn: bool,
+    recovered: bool,
+    first: str,
+    second: str,
+    expected: str,
+) -> None:
+    """Real SDK joins suppress control tokens while retaining findings and tool evidence."""
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    paths = _runtime_paths(tmp_path)
+    context = replace(_delegate_runtime_context(config, paths), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(paths.storage_root)
+    register_background_runtime(paths, runtime)
+    database = str(tmp_path / "silent.db")
+    storage = SqliteDb(db_file=database)
+    model = DelegationModel(
+        id="test",
+        responses=[
+            ModelResponse(content=first),
+            ModelResponse(tool_calls=[_call("job", "read", action="wait", job_id="quiet", wait_timeout=0)]),
+            ModelResponse(content=second),
+        ],
+    )
+    install_tool_job_execution(model)
+    actor = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage, telemetry=False)
+    scope = ScopeSessionContext(
+        HistoryScope(kind="agent", scope_id="leader"),
+        storage,
+        None,
+        session_id=context.session_id,
+        storage_factory=lambda: SqliteDb(db_file=database),
+    )
+    ctx = replace(
+        make_turn_context(
+            entity_label="leader",
+            session_id=context.session_id,
+            room_id=owner.room_id,
+            thread_id=owner.resolved_thread_id,
+            requester_id=owner.requester_id,
+        ),
+        allow_no_report_response=True,
+        initial_presentation=StreamingPresentation(response_text="Earlier finding") if recovered else None,
+    )
+    trace: list[ToolTraceEntry] = []
+    recorder = TurnRecorder(user_message="Silent check") if record_turn else None
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "Job evidence")
+
+    async def prepare(turn: ResponseTurnContext, **kwargs: object) -> _AgentRunContext:
+        prompt = str(kwargs["prompt"])
+        prepared = _PreparedAgentRun(
+            agent=actor,
+            messages=(Message(role="user", content=prompt),),
+            unseen_event_ids=[],
+            prepared_history=PreparedHistoryState(),
+            runtime_model_name="default",
+        )
+        return _AgentRunContext(
+            turn=turn,
+            session_id=context.session_id,
+            prompt=prompt,
+            model_prompt=None,
+            prepared_run=prepared,
+            run_input=prepared.run_input,
+            metadata=turn.matrix_run_metadata,
+        )
+
+    try:
+        await runtime.start(
+            JobSpec("quiet", "probe", 0, adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND}),
+            owner=owner,
+            operation=operation,
+        )
+        ready = await runtime.wait("quiet", owner=owner, depth=0)
+        await runtime.release_wait("quiet", ready.token)
+        with (
+            tool_runtime_context(context),
+            patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
+            patch("mindroom.ai._prepare_agent_run_context", new=prepare),
+        ):
+            answer = await ai_response(
+                ctx,
+                prompt="Silent check",
+                runtime_paths=paths,
+                config=config,
+                execution_identity=owner,
+                collect_streamed_response=collect_stream,
+                show_tool_calls=True,
+                tool_trace_collector=trace,
+                turn_recorder=recorder,
+            )
+        clean = strip_matching_visible_tool_markers(answer, trace).strip()
+        if recovered:
+            expected = "Earlier finding" + ("\n\n" + expected if expected != "NO_REPLY" else "")
+        assert clean == expected
+        assert is_silent_schedule_no_report_response(clean) is (expected == "NO_REPLY")
+        assert [(tool.tool_name, tool.result_preview) for tool in trace] == [("job", "Job evidence")]
+        assert await runtime.pending_outcomes() == []
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+        storage.close()
 
 
 @pytest.mark.asyncio

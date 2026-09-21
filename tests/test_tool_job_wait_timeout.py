@@ -36,6 +36,45 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("depth", [0, 1])
+async def test_application_wait_timeout_collision_fails_before_execution(tmp_path: Path, depth: int) -> None:
+    """An application argument cannot silently become runtime metadata, including in nested calls."""
+    invoked = []
+
+    async def application(wait_timeout: int = 7) -> str:
+        invoked.append(wait_timeout)
+        return str(wait_timeout)
+
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model, depth=depth)
+    function = Function.from_callable(application)
+    function._agent = Agent(id="leader", model=model)
+    function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                with pytest.raises(ValueError, match="exclude_toolkits"):
+                    model._format_tools([function])
+                success, _, call, result = await model.arun_function_call(
+                    FunctionCall(function=function, call_id="collision", arguments={"wait_timeout": None}),
+                )
+        assert success is False
+        assert result.status == "failure"
+        assert "exclude_toolkits" in call.error
+        assert invoked == []
+        assert await runtime.list_jobs(owner=owner, depth=depth) == []
+        assert function.parameters["properties"]["wait_timeout"]["type"] == "integer"
+    finally:
+        register_background_runtime(paths, None)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("fallback", [False, True])
 async def test_shared_schema_adds_optional_wait_without_changing_application_schema(
     tmp_path: Path,

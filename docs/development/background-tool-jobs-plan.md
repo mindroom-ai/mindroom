@@ -945,3 +945,25 @@ Fault-injection tests also cover a continuation snapshot published before a dura
 Successful snapshot writes clear cancellation-settlement retries at the persistence boundary, including when result acknowledgement repairs the failed save.
 That boundary also wakes existing waiters when a save fails, so a terminal cancellation cannot leave an unbounded wait asleep; the unsaved outcome remains eligible for persistence retry.
 Cancellation tracks a terminal retry until its save and result read finish, then drops the cached snapshot; active cleanup still shares one task.
+
+### Final independent review corrections (2026-09-21)
+
+Fresh Fable 5.1 and Astra reviews inspected the same frozen revision independently.
+Both found that native delegation metadata and its live-child cache retained duplicate result text outside the generic retention policy.
+Native snapshots now keep execution metadata without that redundant text, and the cache weakly references children already owned by active execution or cancellation cleanup.
+The shared job outcome remains the source for returned results, on-demand rereads, and compact expiry receipts.
+If cancellation interrupts a recovered child between native and generic settlement, reconciliation reads the durable native outcome before accepting its terminal metadata.
+The existing snapshot reader discards redundant native result copies from earlier versions of this PR, without startup rewrites or a separate migration pass.
+
+Astra also reproduced quiet schedule control tokens accumulating across collected streaming attempts.
+Completed quiet collection now uses the turn owner's canonical report while retaining structured tool evidence and recovered visible prose.
+Regression cases cover quiet and substantive reports in either order, literal mentions of the control token, and recovered prefixes.
+
+Managed schema preparation and execution reject an application-declared `wait_timeout` parameter instead of silently consuming it.
+Such toolkits must use the existing exclusion configuration or rename their application parameter.
+Accepted native wait modes still survive approval reconstruction; fresh calls follow the current toolkit policy.
+Team run state is seeded only inside a managed execution scope, preserving ordinary SDK output when the feature is disabled.
+The Agno boundary is documented alongside the existing compatibility inventory.
+
+The correction batch also removes redundant cleanup deduplication keys and explains native adapter identity sharing.
+Regression tests, repository hooks, and both reviewers' verification of the correction commit must pass before this review round is complete.

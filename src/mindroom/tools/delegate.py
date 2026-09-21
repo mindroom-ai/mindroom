@@ -26,9 +26,6 @@ register_builtin_tool_metadata(
         icon_color="text-blue-500",
         config_fields=[],
         dependencies=[],
-        function_names=(
-            "run_subagent",
-            "continue_subagent",
-        ),
+        function_names=("run_subagent", "continue_subagent"),
     ),
 )

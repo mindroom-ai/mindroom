@@ -22,6 +22,7 @@ from mindroom.tool_jobs.agno_execution import (
     execute_owned_tool_call,
     is_background_job_excluded,
     is_framework_function,
+    validate_wait_timeout_parameter,
     wrap_tool_execution,
 )
 from mindroom.tool_jobs.control import job_owns_execution
@@ -114,15 +115,11 @@ def _wrap_tool_schemas(
             return original(tools)
         projected: list[Function | dict[str, Any]] = []
         for tool in tools or []:
-            if (
-                not isinstance(tool, Function)
-                or is_framework_function(tool)
-                or tool.stop_after_tool_call
-                or is_background_job_excluded(tool)
-            ):
+            if not isinstance(tool, Function) or is_framework_function(tool) or is_background_job_excluded(tool):
                 projected.append(tool)
                 continue
-            if (job_owns_execution() or depth > 0) and not is_job_function(tool):
+            validate_wait_timeout_parameter(tool)
+            if tool.stop_after_tool_call or ((job_owns_execution() or depth > 0) and not is_job_function(tool)):
                 projected.append(tool)
                 continue
             function = tool.model_copy()

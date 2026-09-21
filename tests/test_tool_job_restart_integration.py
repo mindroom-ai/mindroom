@@ -321,8 +321,8 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
     register_background_runtime(paths, runtime)
     side_effects: list[str] = []
 
-    async def write_report(wait_timeout: int | None = None) -> str:
-        side_effects.append(f"executed:{wait_timeout}")
+    async def write_report(**options: int | None) -> str:
+        side_effects.append(f"executed:{options.get('wait_timeout')}")
         return "approved report"
 
     function = Function.from_callable(write_report)

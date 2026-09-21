@@ -295,6 +295,8 @@ Previously accepted job sources and related approvals stay parked while disabled
 Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
 Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
 This waiting budget is separate from a tool's own execution or network timeout.
+The name `wait_timeout` is reserved on managed tools.
+If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; tool preparation rejects the collision before execution.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
 

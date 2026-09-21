@@ -114,10 +114,7 @@ class DelegateTools(Toolkit):
         super().__init__(
             name="delegate",
             instructions=self._build_instructions(),
-            tools=[
-                self.run_subagent,
-                self.continue_subagent,
-            ],
+            tools=[self.run_subagent, self.continue_subagent],
         )
         delegate_function = self.async_functions["run_subagent"]
         delegate_function.description = self._build_run_subagent_description()

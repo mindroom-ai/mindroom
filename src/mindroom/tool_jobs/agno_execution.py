@@ -95,6 +95,16 @@ def is_framework_function(function: Function) -> bool:
     )
 
 
+def validate_wait_timeout_parameter(function: Function) -> None:
+    """Reject application parameters that would be consumed as framework metadata."""
+    if not is_job_function(function) and "wait_timeout" in function.parameters.get("properties", {}):
+        msg = (
+            f"Tool {function.name!r} declares its own wait_timeout parameter. "
+            "Rename it or add its toolkit to background_tool_jobs.exclude_toolkits."
+        )
+        raise ValueError(msg)
+
+
 def call_wait_mode(call: FunctionCall, *, depth: int) -> ToolWaitMode:
     """Freeze a call's argument/owner policy before the SDK can pause for approval."""
     run = call.function._run_context
@@ -334,7 +344,7 @@ def _failed_call(call: FunctionCall, error: ValueError) -> ToolCallResult:
 def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa: C901, PLR0915 - Keep admission and cleanup together.
     """Wrap one approved SDK executor with admission and exact consumption."""
 
-    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901, PLR0911, PLR0915 - Keep admission and cleanup together.
+    async def execute(call: FunctionCall) -> ToolCallResult:  # noqa: C901, PLR0911, PLR0912, PLR0915 - Keep admission and cleanup together.
         context = get_tool_runtime_context()
         runtime = get_background_runtime(context.runtime_paths) if context is not None else None
         resources = current_execution_resources()
@@ -346,6 +356,8 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
             return await original(call)
         mode = call_wait_mode(call, depth=depth)
         try:
+            if mode != "native":
+                validate_wait_timeout_parameter(call.function)
             wait_timeout = (
                 None
                 if mode == "native"

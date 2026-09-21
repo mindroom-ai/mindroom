@@ -11665,6 +11665,8 @@ Previously accepted job sources and related approvals stay parked while disabled
 Managed foreground application tools share one execution owner per accepted call and expose an optional `wait_timeout` argument.
 Tool names and application arguments remain unchanged; the runtime consumes `wait_timeout` before invoking the application callable.
 This waiting budget is separate from a tool's own execution or network timeout.
+The name `wait_timeout` is reserved on managed tools.
+If a custom or plugin tool already declares that application parameter, exclude its toolkit as shown below or rename the parameter; tool preparation rejects the collision before execution.
 Tools that stop the current model step, including model switching and dynamic tool loading, stay inline so the continuation receives their actual control result.
 Their schemas omit `wait_timeout`, and numeric waiting budgets are rejected before execution.
 
@@ -20134,7 +20136,7 @@ When no stable tag contained an old native writer, the block uses an honest unre
 
 | Boundary owners | Behavioral evidence |
 | --- | --- |
-| `tool_jobs/runtime.py` | `tests/test_tool_jobs.py` preserves exact outcomes, native approval state, and consumption evidence while discarding retired pause and Matrix-notification fields from unreleased job snapshots. |
+| `tool_jobs/runtime.py` | `tests/test_tool_jobs.py` preserves exact outcomes, native approval state, and consumption evidence while discarding retired pause and Matrix-notification fields from unreleased job snapshots. `tests/test_background_subagents.py` also covers removal of redundant native result copies through the same reader. |
 | [`mcp_gateway/legacy_schema.py`][mcp-legacy-schema] | [Gateway OAuth][gateway-oauth-tests], [capacity][gateway-capacity-tests], [lifecycle][gateway-lifecycle-tests], and [account][gateway-account-tests] tests exercise the staged schema upgrades and released token cutoff. |
 | `legacy_usage_storage.py` | `tests/test_legacy_usage_storage.py` covers mixed schemas, current-row precedence, unknown dates, interruption rollback and retry, dormant stores, symlink isolation, and both startup entry points. |
 | [`legacy_session_storage.py`][legacy-session] | [Run-storage tests][agent-runs-tests] use a frozen Agno 2 fixture for merge, deletion, descendant, malformed-data, and transaction behavior; [usage tests][usage-tests] cover import precedence and available usage. |
@@ -20480,6 +20482,9 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | --- | --- | --- |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py`; `tests/test_modelslabs_tool.py`. |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
+| Application tools lack a public accepted-execution owner, framework waiting metadata, and per-call native wait projection. | Add ownership around approved FunctionCalls, provider-schema metadata hooks, and argument-sensitive external requirements. | `tool_jobs/agno_compat_execution.py`; ordinary calls preserve SDK hooks, caches and rich results. |
+| Agent and Team cleanup closes connectable resources when detached work still owns them. | Add shared resource leases with task-affine async teardown. | `tool_jobs/agno_compat_resources.py`; physical connections close after the final execution owner releases them. |
+| Team run outputs omit tool-mutated session state without an explicit input seed. | Persist the initialized run context in team outputs without requiring callers to seed it. | `teams.py` seeds state only inside managed execution scopes; `tests/test_tool_job_turn_integration.py` covers stored receipts and ordinary SDK output. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |

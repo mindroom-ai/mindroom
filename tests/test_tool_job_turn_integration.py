@@ -12,7 +12,10 @@ from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ModelResponse
+from agno.run import RunContext  # noqa: TC002 - Agno resolves tool annotations at runtime.
 from agno.run.agent import RunContentEvent, RunOutput
+from agno.run.team import TeamRunOutput
+from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -27,10 +30,13 @@ from mindroom.response_turn import (
     TurnSinks,
     stream_response_turn,
 )
+from mindroom.team_exact_members import ResolvedExactTeamMembers
+from mindroom.teams import _team_response_stream_raw
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -44,6 +50,48 @@ if TYPE_CHECKING:
 
     from mindroom.response_turn import DynamicContinuationRunState
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
+async def test_team_session_state_is_seeded_only_for_managed_execution(tmp_path: Path, managed: bool) -> None:
+    """Managed team receipts persist while ordinary runs keep the SDK's default output shape."""
+
+    def mark(run_context: RunContext) -> str:
+        assert run_context.session_state is not None
+        run_context.session_state["receipt"] = "exact"
+        return "recorded"
+
+    member = Agent(id="member", name="Member", telemetry=False)
+    members = ResolvedExactTeamMembers(["member"], [member], ["Member"], {"member"}, [])
+    storage = SqliteDb(db_file=str(tmp_path / "team.db"))
+    model = DelegationModel(
+        id="test",
+        responses=[ModelResponse(tool_calls=[_call("mark", "receipt")]), ModelResponse(content="done")],
+    )
+    team = Team(id="team", members=[member], model=model, tools=[mark], db=storage, telemetry=False)
+    try:
+        async with execution_resources() if managed else nullcontext():
+            stream = await _team_response_stream_raw(
+                team,
+                members,
+                "Record a receipt",
+                session_id="session",
+                user_id="requester",
+            )
+            outputs = [item async for item in stream if isinstance(item, TeamRunOutput)]
+        assert len(outputs) == 1
+        output = outputs[0]
+        stored = storage.get_run(output.run_id)
+        assert isinstance(stored, TeamRunOutput)
+        if managed:
+            assert stored.session_state["receipt"] == "exact"
+            assert output.session_state["receipt"] == "exact"
+        else:
+            assert stored.session_state is None
+            assert output.session_state is None
+    finally:
+        storage.close()
 
 
 async def _wait_until_ready(

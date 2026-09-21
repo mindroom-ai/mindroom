@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, ref
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import DelegationChild
@@ -13,6 +13,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from weakref import ReferenceType
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.control import HumanMessageSignal
@@ -21,12 +22,17 @@ if TYPE_CHECKING:
 
 @dataclass
 class _RetainedDelegation:
-    child: DelegationChild
+    child: ReferenceType[DelegationChild]
     adapter: dict[str, Any]
 
 
 # Native live objects remain adapter-owned; durable generic records contain only JSON snapshots.
 _retained: WeakKeyDictionary[ToolJobRuntime, dict[str, _RetainedDelegation]] = WeakKeyDictionary()
+
+
+def _child_snapshot(child: DelegationChild) -> dict[str, Any]:
+    """Keep execution identity in metadata; the job outcome owns retained result text."""
+    return asdict(replace(child, result=None))
 
 
 def delegation_child(job: BackgroundJob) -> DelegationChild:
@@ -37,20 +43,27 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     return DelegationChild(**job.adapter["child"])
 
 
-def _retained_delegation(runtime: ToolJobRuntime, job: BackgroundJob) -> _RetainedDelegation:
+def _retained_delegation(runtime: ToolJobRuntime, job: BackgroundJob) -> tuple[DelegationChild, dict[str, Any]]:
     """Recover or reuse the exact live child and adapter owned by one operation."""
     retained = _retained.setdefault(runtime, {})
-    if job.job_id not in retained:
-        retained[job.job_id] = _RetainedDelegation(delegation_child(job), job.adapter)
-    return retained[job.job_id]
+    binding = retained.get(job.job_id)
+    child = binding.child() if binding is not None else None
+    if child is None:
+        child = delegation_child(job)
+        binding = retained[job.job_id] = _RetainedDelegation(ref(child), job.adapter)
+    assert binding is not None
+    return child, binding.adapter
 
 
 def retained_child(runtime: ToolJobRuntime, job: BackgroundJob) -> DelegationChild:
     """Recover or reuse the exact mutable native object retained by an active operation."""
-    return _retained_delegation(runtime, job).child
+    return _retained_delegation(runtime, job)[0]
 
 
 def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
+    # Metadata-only reconstruction still needs the durable native outcome.
+    if child.result is None:
+        return None
     match child.status:
         case "completed" | "failed" | "cancelled" | "denied" as status:
             return BackgroundOutcome(status, child.result)
@@ -78,7 +91,7 @@ async def reconcile_delegation(
                 await cleanup(child)
         else:
             await cleanup(child)
-    job.adapter["child"] = asdict(child)
+    job.adapter["child"] = _child_snapshot(child)
     return _terminal(child)
 
 
@@ -99,7 +112,7 @@ async def start_delegation(
         raise SubagentSessionError(msg)
     context = get_tool_runtime_context()
     adapter = {
-        "child": asdict(child),
+        "child": _child_snapshot(child),
         "source_event_id": context.membership_turn_id if context is not None else None,
         "source_kind": context.source_kind if context is not None else None,
         "output_path": output_path,
@@ -109,12 +122,12 @@ async def start_delegation(
         try:
             return await operation()
         finally:
-            adapter["child"] = asdict(child)
+            adapter["child"] = _child_snapshot(child)
 
     async def cleanup(job: BackgroundJob) -> BackgroundOutcome | None:
         if cancel is not None:
             return await reconcile_delegation(job, cleanup=cancel, child=child)
-        job.adapter["child"] = asdict(child)
+        job.adapter["child"] = _child_snapshot(child)
         return _terminal(child)
 
     try:
@@ -128,7 +141,7 @@ async def start_delegation(
         )
     finally:
         if runtime.owns_execution(child.delegation_id, adapter):
-            _retained.setdefault(runtime, {})[child.delegation_id] = _RetainedDelegation(child, adapter)
+            _retained.setdefault(runtime, {})[child.delegation_id] = _RetainedDelegation(ref(child), adapter)
 
 
 async def continue_delegation(
@@ -141,16 +154,14 @@ async def continue_delegation(
 ) -> BackgroundJob:
     """Continue native approval work under the existing generic job."""
     job = await runtime.lookup(job_id, owner=owner, depth=depth)
-    retained = _retained_delegation(runtime, job)
-    child = retained.child
-    adapter = retained.adapter
+    child, adapter = _retained_delegation(runtime, job)
 
     async def run() -> BackgroundOutcome:
         try:
             return await operation()
         finally:
             # Continuation metadata is applied atomically with its outcome by the runtime.
-            adapter["child"] = asdict(child)
+            adapter["child"] = _child_snapshot(child)
 
     return await runtime.continue_job(job_id, owner=owner, depth=depth, operation=run, adapter=adapter)
 
@@ -160,7 +171,7 @@ def owns_delegation(runtime: ToolJobRuntime, child: DelegationChild) -> bool:
     retained = _retained.get(runtime, {}).get(child.delegation_id)
     return (
         retained is not None
-        and retained.child is child
+        and retained.child() is child
         and runtime.owns_execution(child.delegation_id, retained.adapter)
     )
 
@@ -193,7 +204,7 @@ async def cancel_retained_delegation(runtime: ToolJobRuntime, child: DelegationC
         return False
     retained = delegation_child(job)
     child.status = retained.status
-    child.result = retained.result
+    child.result = job.result
     child.run_id = retained.run_id
     child.model_name = retained.model_name
     return True

@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 from agno.agent import Agent
 from agno.models.response import ModelResponse
+from agno.run.base import RunStatus
 from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
@@ -263,7 +264,7 @@ async def test_same_named_unrelated_function_still_backgrounds(shell_runtime: _S
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("excluded_name", [None, "native_plugin", "different_runtime_name"])
-async def test_registered_plugin_exclusion_is_pinned_for_every_function(
+async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa: PLR0915 - Real plugin construction and restart policy.
     tmp_path: Path,
     team: bool,
     excluded_name: str | None,
@@ -323,32 +324,37 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(
                 else Agent(id="leader", model=model, tools=[toolkit])
             )
             async with execution_resources():
+                if not excluded:
+                    rejected = await actor.arun("Execute the tool", session_id="session")
+                    assert rejected.status is RunStatus.error
+                    assert "exclude_toolkits" in rejected.content
+                    assert not (plugin / "executions").exists()
+                    assert await runtime.list_jobs(owner=owner, depth=0) == []
+                    return
                 # Editing the authored list must not mutate the startup snapshot.
-                if excluded:
-                    config.background_tool_jobs.exclude_toolkits.clear()
-                    lifecycle = _make_lifecycle(tmp_path, current_config=config)
-                    lifecycle.record_applied(config)
-                    assert lifecycle.status.status == "restart_required"
-                step = await _invoke(actor, model, "native_step", **({"wait_timeout": 3} if excluded else {}))
+                config.background_tool_jobs.exclude_toolkits.clear()
+                lifecycle = _make_lifecycle(tmp_path, current_config=config)
+                lifecycle.record_applied(config)
+                assert lifecycle.status.status == "restart_required"
+                step = await _invoke(actor, model, "native_step", wait_timeout=3)
                 assert not step.tool_call_error
-                assert step.result == ("step:3" if excluded else "step:7")
+                assert step.result == "step:3"
                 status = await _invoke(actor, model, "native_status")
                 assert not status.tool_call_error
                 for name in toolkit.get_async_functions():
                     properties = model.schemas[name]["properties"]
-                    if excluded and name == "native_step":
+                    if name == "native_step":
                         assert properties["wait_timeout"]["type"] == "integer"
-                    elif excluded:
-                        assert "wait_timeout" not in properties
                     else:
-                        assert "anyOf" in properties["wait_timeout"]
+                        assert "wait_timeout" not in properties
                 assert (plugin / "executions").read_text().splitlines() == [step.result, "status"]
-                assert len(await runtime.list_jobs(owner=owner, depth=0)) == (0 if excluded else 2)
-                if excluded:
-                    release_background_tool_jobs(paths)
-                    pin_background_tool_jobs(config, paths)
-                    await _invoke(actor, model, "native_status")
-                    assert len(await runtime.list_jobs(owner=owner, depth=0)) == 1
+                assert await runtime.list_jobs(owner=owner, depth=0) == []
+                release_background_tool_jobs(paths)
+                pin_background_tool_jobs(config, paths)
+                rejected = await actor.arun("Execute the tool", session_id="session")
+                assert rejected.status is RunStatus.error
+                assert "exclude_toolkits" in rejected.content
+                assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         release_background_tool_jobs(paths)
         register_background_runtime(paths, None)

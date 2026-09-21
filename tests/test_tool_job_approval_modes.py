@@ -55,8 +55,9 @@ class _NativeTools(Toolkit):
         bind_toolkit_authority(self, authored_name="native_plugin")
         self.get_async_functions()["native_step"].requires_confirmation = True
 
-    async def native_step(self, wait_timeout: int = 7) -> str:
-        """Execute with a toolkit-owned timeout."""
+    async def native_step(self, **options: int) -> str:
+        """Observe native keywords without declaring a reserved managed parameter."""
+        wait_timeout = options.get("wait_timeout", 7)
         self.observed.append(wait_timeout)
         return f"native:{wait_timeout}"
 

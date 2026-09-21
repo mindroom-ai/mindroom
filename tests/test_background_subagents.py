@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import threading
-from dataclasses import replace
+import weakref
+from dataclasses import asdict, replace
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -18,6 +21,7 @@ from mindroom.delegation.background import (
     continue_delegation,
     delegation_child,
     reconcile_delegation,
+    retained_child,
     start_delegation,
 )
 from mindroom.delegation.sessions import SubagentSessionError, subagent_liveness
@@ -32,7 +36,7 @@ from mindroom.tool_jobs.control import (
     job_checkpoint,
     job_control_context,
 )
-from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, read_job_snapshot
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
@@ -68,6 +72,134 @@ def _child(job_id: str = "a" * 32) -> DelegationChild:
         execution_identity={},
         subagent_id="b" * 32,
     )
+
+
+@pytest.mark.asyncio
+async def test_consumed_native_result_releases_live_child_and_discovery_payload(tmp_path: Path) -> None:
+    """Consumption releases native objects while the exact formatted result remains readable."""
+    runtime = ToolJobRuntime(tmp_path)
+    raw = "native output " * 65536
+    delivered = raw + "\n\nSaved native receipt"
+
+    async def start() -> weakref.ReferenceType[DelegationChild]:
+        child = _child()
+
+        async def operation() -> BackgroundOutcome:
+            child.status = "completed"
+            child.result = raw
+            return BackgroundOutcome("completed", delivered)
+
+        await start_delegation(runtime, child, owner=_owner(), operation=operation)
+        return weakref.ref(child)
+
+    try:
+        child_ref = await start()
+        job_id = _child().delegation_id
+        waited = await runtime.wait(job_id, owner=_owner(), depth=0)
+        assert waited.job.result == delivered
+        await runtime.acknowledge_wait(job_id, waited.token)
+        gc.collect()
+        assert child_ref() is None
+        discovered = await runtime.list_jobs(owner=_owner(), depth=0)
+        assert len(json.dumps([asdict(job) for job in discovered])) < 8192
+        reread = await runtime.wait(job_id, owner=_owner(), depth=0)
+        assert reread.job.result == delivered
+        await runtime.acknowledge_wait(job_id, reread.token)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_result_copy", [False, True])
+async def test_native_result_expires_to_a_compact_receipt_after_restart(
+    tmp_path: Path,
+    legacy_result_copy: bool,
+) -> None:
+    """Native metadata cannot bypass the retention boundary or re-enable an expired execution."""
+    runtime = ToolJobRuntime(tmp_path)
+    child = _child()
+    raw = "native output " * 65536
+    delivered = raw + "\n\nSaved native receipt"
+
+    async def operation() -> BackgroundOutcome:
+        child.status = "completed"
+        child.result = raw
+        return BackgroundOutcome("completed", delivered)
+
+    await start_delegation(runtime, child, owner=_owner(), operation=operation)
+    waited = await runtime.wait(child.delegation_id, owner=_owner(), depth=0)
+    await runtime.acknowledge_wait(child.delegation_id, waited.token)
+    await runtime.shutdown()
+    path = tmp_path / "tool_jobs" / f"{child.delegation_id}.json"
+    if legacy_result_copy:
+        legacy = json.loads(path.read_text())
+        legacy["adapter"]["child"]["result"] = raw
+        path.write_text(json.dumps(legacy))
+    restored = ToolJobRuntime(tmp_path)
+
+    async def source_finished(_job: background.BackgroundJob) -> bool:
+        return True
+
+    try:
+        await restored.recover()
+        assert (await restored.lookup(child.delegation_id, owner=_owner(), depth=0)).result == delivered
+        discovered = await restored.list_jobs(owner=_owner(), depth=0)
+        assert len(json.dumps([asdict(job) for job in discovered])) < 8192
+        await restored.expire_consumed(
+            before=datetime.now(UTC) + timedelta(days=31),
+            source_finished=source_finished,
+        )
+        receipt = read_job_snapshot(path)
+        assert receipt.result_expired
+        assert path.stat().st_size < 8192
+        assert raw not in path.read_text()
+        with pytest.raises(ValueError, match="already exists"):
+            await start_delegation(restored, child, owner=_owner(), operation=operation)
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_recovered_delegation_reads_terminal_native_evidence(tmp_path: Path) -> None:
+    """Cancellation after native settlement preserves an outcome absent from the generic snapshot."""
+    runtime = ToolJobRuntime(tmp_path)
+    child = _child()
+
+    async def approval() -> BackgroundOutcome:
+        child.status = "paused"
+        return BackgroundOutcome("awaiting_approval")
+
+    await start_delegation(runtime, child, owner=_owner(), operation=approval)
+    paused = await runtime.wait(child.delegation_id, owner=_owner(), depth=0)
+    await runtime.release_wait(child.delegation_id, paused.token)
+    await runtime.shutdown()
+    native_result = tmp_path / "native-result.txt"
+    settled = asyncio.Event()
+
+    async def reconcile(recovered: DelegationChild) -> None:
+        recovered.status = "completed"
+        recovered.result = native_result.read_text()
+
+    restored = ToolJobRuntime(tmp_path, cancel=partial(reconcile_delegation, cleanup=reconcile))
+    try:
+        await restored.recover()
+        child = retained_child(restored, await restored.lookup(child.delegation_id, owner=_owner(), depth=0))
+
+        async def continuation() -> BackgroundOutcome:
+            child.status = "completed"
+            child.result = "Native completion before generic settlement"
+            native_result.write_text(child.result)
+            settled.set()
+            await asyncio.Event().wait()
+            pytest.fail("Cancellation should interrupt generic settlement")
+
+        await continue_delegation(restored, child.delegation_id, owner=_owner(), depth=0, operation=continuation)
+        await settled.wait()
+        result = await restored.cancel(child.delegation_id, owner=_owner(), depth=0, await_completion=True)
+        assert result.status == "completed"
+        assert result.result == native_result.read_text()
+    finally:
+        await restored.shutdown()
 
 
 @pytest.mark.asyncio

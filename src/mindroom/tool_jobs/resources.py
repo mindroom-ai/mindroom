@@ -169,7 +169,7 @@ def disconnect_execution_resource(resource: object) -> None:
         close()
 
     # Each actor acquisition needs a release, even when one parent owns them all.
-    if not defer_execution_cleanup(deferred, resource=deferred):
+    if not defer_execution_cleanup(deferred):
         close()
 
 
@@ -227,7 +227,7 @@ async def disconnect_async_execution_resource(resource: object) -> None:
             if connection.task is not None:
                 await run_coroutine_until_complete(_join_connection(connection.task))
 
-    if not defer_execution_cleanup(close, resource=close):
+    if not defer_execution_cleanup(close):
         await close()
 
 
