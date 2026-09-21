@@ -34,7 +34,8 @@ The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the stati
 | `publication.py` | Frames the unchanged M and derives the app, documentation, favicon, desktop, and Matrix avatar exports. |
 | `app_icons.py` | Composes dark-glass and light-porcelain app icon treatments around the shared vector M. |
 | `app-glass-material.svg` | Editable refraction filter, glowing panes, and glass tile lighting for the dark app icon. |
-| `social-layout.svg` | Social card background, icon placement, and outlined typography; no installed fonts required. |
+| `social-preview.png` | AI-rendered ivory social card with a centered glass M and lowercase wordmark. |
+| `social-preview.prompt.md` | Sunburst model and prompts used for the social artwork. |
 | `menu-bar.svg` | Monochrome M source for the macOS menu bar's 18- and 36-pixel template images. |
 | `preview.html` | Browser preview with a pause/play control. |
 | `reference.png` | Cleaned raster design used as the lighting reference. |
@@ -113,7 +114,7 @@ The generated root-space avatar is a default asset; existing uploaded or custom 
 
 ## GitHub social images
 
-Regeneration also produces these ready-to-upload PNGs:
+These PNGs are ready to upload:
 
 | File | Size | Use |
 | --- | --- | --- |
@@ -122,9 +123,9 @@ Regeneration also produces these ready-to-upload PNGs:
 
 Both PNGs have opaque backgrounds and stay below GitHub's 1 MB social preview limit.
 The social card follows [GitHub's recommended dimensions](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/customizing-your-repositorys-social-media-preview).
-Its complete vector export is `social-preview.svg`, with a lossless `social-preview.svgz` copy.
-Edit `social-layout.svg` for layout and typography; its lettering is outlined from DejaVu Sans for reproducible rendering without a font installation.
-The card automatically incorporates the current dark app icon, and the square avatar shares the exact macOS dark PNG.
+The social card is AI-rendered artwork created with `gpt-image-2.5-sunburst`; its model, prompts, and export details are recorded in [social-preview.prompt.md](social-preview.prompt.md).
+It is a committed raster asset, and `generate.py` leaves it unchanged.
+The app icons remain editable SVG, and the generated square avatar shares the exact macOS dark PNG.
 
 ## Animated version
 

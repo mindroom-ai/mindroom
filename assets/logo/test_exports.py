@@ -19,7 +19,6 @@ from PIL import Image
         "logo-animated-transparent",
         "app-icon-light",
         "app-icon-dark",
-        "social-preview",
     ],
 )
 def test_export_size_and_lossless_compression(name: str) -> None:

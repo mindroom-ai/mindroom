@@ -4,7 +4,6 @@
 from io import BytesIO
 from pathlib import Path
 
-from artwork import SVG
 from lxml import etree
 from PIL import Image
 from shading import render
@@ -62,10 +61,3 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
             for appearance, content in app_icons.items()
         },
     }
-
-
-def social_document(dark_icon: bytes) -> etree._Element:
-    """Compose the GitHub social card with the same glass artwork and outlined type."""
-    root = etree.parse(str(Path(__file__).with_name("social-layout.svg"))).getroot()
-    root.find(f"{SVG}g[@id='social-icon']").append(etree.fromstring(dark_icon))
-    return root
