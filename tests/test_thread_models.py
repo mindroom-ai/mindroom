@@ -683,9 +683,12 @@ async def test_thread_model_tool_reports_stale_override_as_inactive() -> None:
     )
 
 
-def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path) -> None:
+@pytest.mark.parametrize("display_name", [None, "Default Model"])
+def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path, display_name: str | None) -> None:
     """Run metadata must describe the model that produced the response, not the next override."""
     config = _config_with_models(tmp_path)
+    config.models["default"].display_name = display_name
+    config.models["large"].display_name = "Large Model"
     runtime_paths = runtime_paths_for(config)
     prepared_model_name = config.resolve_runtime_model(
         entity_name="test_agent",
@@ -718,4 +721,43 @@ def test_ai_run_metadata_uses_preparation_time_model(tmp_path: Path) -> None:
         "config": "default",
         "id": "default-model",
         "provider": "openai",
+        **({"display_name": display_name} if display_name else {}),
     }
+
+
+@pytest.mark.parametrize(
+    ("model_name", "display_name", "expected_name"),
+    [
+        ("default", "  Friendly Model  ", "Friendly Model"),
+        ("default", None, None),
+        ("default", "", None),
+        ("default", "  ", None),
+        ("removed-model", "Friendly Model", None),
+    ],
+)
+def test_ai_run_metadata_optional_model_display_name(
+    tmp_path: Path,
+    model_name: str,
+    display_name: str | None,
+    expected_name: str | None,
+) -> None:
+    """Publish the configured display name when set while retaining the model alias."""
+    config = _config_with_models(tmp_path)
+    config.models["default"] = ModelConfig(provider="openai", id="default-model", display_name=display_name)
+
+    metadata = build_ai_run_metadata_content(
+        config=config,
+        model_name=model_name,
+        run_id="run-1",
+        session_id="session-1",
+        status="completed",
+        model="default-model",
+        model_provider="openai",
+    )
+
+    model = metadata[AI_RUN_METADATA_KEY]["model"]
+    assert model["config"] == model_name
+    if expected_name is None:
+        assert "display_name" not in model
+    else:
+        assert model["display_name"] == expected_name
