@@ -13,6 +13,7 @@ on:
       - saas-platform/platform-frontend/src/app/favicon.ico
       - avatars/spaces/root_space.png
       - macos/MindRoom/Resources/MindRoom.icon/Assets/*.png
+      - macos/MindRoom/Sources/MindRoom/Resources/*.png
       - .github/workflows/logo.yml
   pull_request:
     paths:
@@ -25,6 +26,7 @@ on:
       - saas-platform/platform-frontend/src/app/favicon.ico
       - avatars/spaces/root_space.png
       - macos/MindRoom/Resources/MindRoom.icon/Assets/*.png
+      - macos/MindRoom/Sources/MindRoom/Resources/*.png
       - .github/workflows/logo.yml
 
 permissions:

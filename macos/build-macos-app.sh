@@ -78,7 +78,6 @@ DMG_RW_PATH="$DIST_DIR/$APP_NAME-rw.dmg"
 INFO_PLIST="$PACKAGE_DIR/Resources/Info.plist"
 ENTITLEMENTS_PLIST="$PACKAGE_DIR/Resources/MindRoom.entitlements"
 ICON_SOURCE="$PACKAGE_DIR/Resources/MindRoom.icon"
-ASSET_CATALOG="$PACKAGE_DIR/Resources/Assets.xcassets"
 ICON_BUILD_DIR="$DIST_DIR/icon-assets"
 ICON_INFO_PLIST="$DIST_DIR/icon-info.plist"
 CODESIGN_IDENTITY=${CODESIGN_IDENTITY:--}
@@ -126,7 +125,7 @@ if [[ ! -f "$ENTITLEMENTS_PLIST" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$ICON_SOURCE/icon.json" || ! -f "$ASSET_CATALOG/Contents.json" ]]; then
+if [[ ! -f "$ICON_SOURCE/icon.json" ]]; then
     echo "MindRoom icon sources are missing from $PACKAGE_DIR/Resources." >&2
     exit 1
 fi
@@ -246,7 +245,7 @@ stamp_info_plist() {
 build_app_icon() {
     rm -rf "$ICON_BUILD_DIR"
     mkdir -p "$ICON_BUILD_DIR"
-    xcrun actool "$ICON_SOURCE" "$ASSET_CATALOG" \
+    xcrun actool "$ICON_SOURCE" \
         --compile "$ICON_BUILD_DIR" \
         --app-icon MindRoom \
         --platform macosx \
@@ -331,6 +330,7 @@ fi
 echo "Building $DISPLAY_NAME..."
 swift build "${SWIFT_BUILD_ARGS[@]}"
 BIN_DIR=$(swift build "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)
+MENU_RESOURCES="$BIN_DIR/${APP_NAME}_${APP_NAME}.bundle"
 EXPECTED_BINARY="$BIN_DIR/$APP_NAME"
 BINARY="$EXPECTED_BINARY"
 
@@ -343,6 +343,11 @@ fi
 
 if [[ ! -x "$BINARY" ]]; then
     echo "Built binary not found. Expected $EXPECTED_BINARY and found no fallback under $PACKAGE_DIR/.build." >&2
+    exit 1
+fi
+
+if [[ ! -d "$MENU_RESOURCES" ]]; then
+    echo "Built menu bar resources not found: $MENU_RESOURCES" >&2
     exit 1
 fi
 
@@ -381,6 +386,7 @@ cp "$INFO_PLIST" "$APP_DIR/Contents/Info.plist"
 ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 cp "$UV_BINARY" "$APP_DIR/Contents/Resources/bin/uv"
 ditto "$ICON_BUILD_DIR" "$APP_DIR/Contents/Resources"
+ditto "$MENU_RESOURCES" "$APP_DIR/Contents/Resources/${APP_NAME}_${APP_NAME}.bundle"
 for architecture in "${HELPER_ARCHITECTURES[@]}"; do
     mkdir -p "$APP_DIR/Contents/Helpers/$architecture"
     ditto "$HELPER_BUILD_DIR/$architecture/dist/MindRoom Desktop Helper.app" \

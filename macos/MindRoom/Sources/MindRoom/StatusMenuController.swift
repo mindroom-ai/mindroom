@@ -2,6 +2,17 @@ import AppKit
 import Foundation
 
 @MainActor
+func menuBarImage() -> NSImage? {
+    // The installer relocates the SwiftPM bundle into the app's Resources directory.
+    let resources = Bundle.main.url(forResource: "MindRoom_MindRoom", withExtension: "bundle")
+        .flatMap { Bundle(url: $0) } ?? Bundle.module
+    let image = resources.image(forResource: "MindRoomMenuBar")
+    image?.size = NSSize(width: 18, height: 18)
+    image?.isTemplate = true
+    return image
+}
+
+@MainActor
 final class StatusMenuController: NSObject, NSMenuDelegate {
     static let shared = StatusMenuController()
 
@@ -185,10 +196,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     private func refreshStatusIcon() {
         guard let button = statusItem?.button else { return }
-        let image = NSImage(named: "MindRoomMenuBar")
-        image?.size = NSSize(width: 18, height: 18)
-        image?.isTemplate = true
-        button.image = image
+        button.image = menuBarImage()
         button.imagePosition = .imageOnly
         button.setAccessibilityLabel("MindRoom")
         button.toolTip = runner.serviceStatus.message

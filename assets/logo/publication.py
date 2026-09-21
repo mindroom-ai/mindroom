@@ -39,6 +39,7 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
     app_icons = {
         appearance: render(etree.fromstring(artwork[f"app-icon-{appearance}.svg"])) for appearance in ("light", "dark")
     }
+    menu_bar = etree.parse(str(Path(__file__).with_name("menu-bar.svg"))).getroot()
     return {
         "frontend/public/logo.svg": mark,
         "frontend/public/logo.png": png[1024],
@@ -52,6 +53,10 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
         "saas-platform/platform-frontend/src/app/favicon.ico": favicon.getvalue(),
         "avatars/spaces/root_space.png": png[256],
         "assets/logo/github-avatar.png": app_icons["dark"],
+        **{
+            f"macos/MindRoom/Sources/MindRoom/Resources/MindRoomMenuBar{suffix}.png": render(menu_bar, size)
+            for suffix, size in (("", 18), ("@2x", 36))
+        },
         **{
             f"macos/MindRoom/Resources/MindRoom.icon/Assets/{appearance}.png": content
             for appearance, content in app_icons.items()

@@ -34,6 +34,8 @@ jobs:
         architecture: [arm64, x86_64]
     steps:
       - uses: actions/checkout@v5
+        with:
+          lfs: true
       - name: Build and test native app
         run: /usr/bin/arch -${{ matrix.architecture }} swift test --package-path macos/MindRoom --arch ${{ matrix.architecture }}
 
@@ -57,6 +59,13 @@ jobs:
         run: |
           codesign --verify --deep --strict dist/macos/MindRoom.app
           hdiutil verify dist/macos/MindRoom.dmg
+          swift - "dist/macos/MindRoom.app/Contents/Resources/MindRoom_MindRoom.bundle" <<'SWIFT'
+          import AppKit
+          let resources = Bundle(path: CommandLine.arguments[1])!
+          guard let image = resources.image(forResource: "MindRoomMenuBar"), image.isValid else {
+              fatalError("Packaged menu bar artwork is missing or invalid")
+          }
+          SWIFT
           for architecture in arm64 x86_64; do
             uv run --no-project python macos/smoke-desktop-helper.py \
               "dist/macos/MindRoom.app/Contents/Helpers/$architecture/MindRoom Desktop Helper.app" "$architecture"

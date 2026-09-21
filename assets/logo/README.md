@@ -35,6 +35,7 @@ The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the stati
 | `app_icons.py` | Composes dark-glass and light-porcelain app icon treatments around the shared vector M. |
 | `app-glass-material.svg` | Editable refraction filter, glowing panes, and glass tile lighting for the dark app icon. |
 | `social-layout.svg` | Social card background, icon placement, and outlined typography; no installed fonts required. |
+| `menu-bar.svg` | Monochrome M source for the macOS menu bar's 18- and 36-pixel template images. |
 | `preview.html` | Browser preview with a pause/play control. |
 | `reference.png` | Cleaned raster design used as the lighting reference. |
 | `test_geometry.py` | Regression checks for closed junctions and angled terminal cuts. |
