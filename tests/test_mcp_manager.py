@@ -1021,7 +1021,7 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Rejected MCP OAuth refresh grants should be observable without leaking token material."""
+    """Rejected refreshes retain safe diagnostics and reconnect without rereading credentials."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _worker_target("@alice:example.test")
     _save_expiring_mcp_oauth_credentials(
@@ -1050,8 +1050,12 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
             description = "refresh grant rejected: provider-token-value"
             raise OAuthError(error, description)
 
+    async def fail_diagnostic_load(_context: OAuthCredentialContext) -> object:
+        message = "diagnostic credential storage is unavailable"
+        raise OAuthProviderError(message)
+
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", RejectingOAuth2Client)
-    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials_snapshot", fail_diagnostic_load)
 
     with patch("mindroom.mcp.manager.logger") as mock_logger, pytest.raises(OAuthConnectionRequired) as exc_info:
         await manager.get_request_catalog(
@@ -1077,11 +1081,11 @@ async def test_mcp_manager_logs_rejected_oauth_refresh_and_requires_reconnect(
 
 
 @pytest.mark.asyncio
-async def test_mcp_manager_raises_connection_error_for_transient_refresh_failure(
+async def test_mcp_manager_does_not_reread_credentials_after_transient_refresh_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A transient refresh failure must remain recoverable without discarding credentials."""
+    """Diagnostic storage reads must not mask the sanitized retry error or discard credentials."""
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _worker_target("@alice:example.test")
     _save_mcp_oauth_credentials(runtime_paths, worker_target, "retained-token")
@@ -1099,7 +1103,14 @@ async def test_mcp_manager_raises_connection_error_for_transient_refresh_failure
     async def fail_refresh(_context: OAuthCredentialContext) -> object:
         raise OAuthProviderError(leaked_detail, oauth_error="temporarily_unavailable")
 
+    async def fail_diagnostic_load(_context: OAuthCredentialContext) -> object:
+        message = "diagnostic credential storage is unavailable"
+        raise OAuthProviderError(message)
+
+    logger = _CapturingLogger()
     monkeypatch.setattr("mindroom.mcp.manager.refresh_oauth_credentials_with_result", fail_refresh)
+    monkeypatch.setattr("mindroom.mcp.manager.load_oauth_credentials_snapshot", fail_diagnostic_load)
+    monkeypatch.setattr("mindroom.mcp.manager.logger", logger)
 
     with pytest.raises(MCPConnectionError, match=r"OAuth token refresh failed.*retry shortly") as exc_info:
         await manager._oauth_authorization_material(state, credential_context=credential_context)
@@ -1109,6 +1120,19 @@ async def test_mcp_manager_raises_connection_error_for_transient_refresh_failure
     assert "http" not in str(exc_info.value)
     assert leaked_detail not in str(exc_info.value)
     assert (await load_oauth_credentials_snapshot(credential_context)).credentials is not None
+    assert logger.warning_calls == [
+        (
+            "MCP OAuth token refresh failed",
+            {
+                "provider_id": "mcp_demo",
+                "server_id": "demo",
+                "has_refresh_token": None,
+                "expires_at": None,
+                "error_type": "OAuthProviderError",
+                "refresh_rejected": False,
+            },
+        ),
+    ]
 
 
 @pytest.mark.asyncio
