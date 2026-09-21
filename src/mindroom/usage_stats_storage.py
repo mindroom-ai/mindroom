@@ -365,10 +365,14 @@ def _team_sources(
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for directory in entries:
         storage_name = directory.name
-        if directory.is_symlink() or not directory.is_dir() or _IDENTIFIER.fullmatch(storage_name) is None:
+        if _IDENTIFIER.fullmatch(storage_name) is None:
             continue
-        candidate = _safe_candidate(root, Path("teams") / storage_name / "sessions" / f"{storage_name}.db")
-        if candidate is None or not candidate.is_file():
+        relative = Path("teams") / storage_name / "sessions" / f"{storage_name}.db"
+        candidate = _safe_candidate(root, relative)
+        if candidate is None:
+            sources.append(_diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="team"))
+            continue
+        if not directory.is_dir() or not candidate.is_file():
             continue
         sources.append(
             _source(
