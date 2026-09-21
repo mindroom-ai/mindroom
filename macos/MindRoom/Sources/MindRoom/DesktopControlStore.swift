@@ -90,6 +90,7 @@ final class DesktopControlStore: ObservableObject {
     func saveConfiguration() {
         guard identityConfirmed else {
             errorMessage = "Confirm the displayed controller, requester, and agent before saving."
+            recovery = nil
             return
         }
         let config: [String: Any] = [
