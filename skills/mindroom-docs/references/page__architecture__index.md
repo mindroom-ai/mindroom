@@ -78,6 +78,7 @@ MindRoom's architecture consists of several key components working together.
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
+| `judgment/` | Minimized participation requests and strict TypeSafe responses with bounded transport and concurrency |
 | `typesafe_participation.py` | Opt-in TypeSafe participation decider: bounded text judgments, threshold decisions, and in-model fallback |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |

@@ -397,8 +397,3 @@ session_status  # FastAPI Computer endpoint
 stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
-
-# Offline replay is outside Vulture's runtime-only paths; no production wiring in Phase 1.
-_.judge  # scripts/judgment_replay/commands.py calls SystemOneClient.judge.
-_.latency_ms  # scripts/judgment_replay/commands.py records JudgmentResult.latency_ms.
-_.incomplete_reason  # Offline state diagnostics; exercised by tests/test_judgment_state.py.

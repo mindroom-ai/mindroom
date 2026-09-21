@@ -1,4 +1,4 @@
-"""The TypeSafe leaf adapter is bounded and validates the exact Choice contract."""
+"""The TypeSafe leaf adapter is bounded and validates the exact participation contract."""
 
 from __future__ import annotations
 
@@ -15,58 +15,43 @@ import mindroom.judgment.client as client_module
 from mindroom.judgment.client import (
     _MAX_RESPONSE_BYTES,
     _TYPE_SAFE_ENDPOINT,
-    InvalidJudgmentResponseError,
-    JudgmentCapacity,
     SystemOneClient,
-    decode_response,
+    _decode_response,
+    _InvalidJudgmentResponseError,
+    _JudgmentCapacity,
 )
 from mindroom.judgment.state import (
     PINNED_MODEL,
-    QUEUED_MESSAGE_QUESTION,
     JudgmentMessage,
     JudgmentRequest,
-    QueuedJudgmentInput,
     build_participation_judgment_request,
-    build_queued_judgment_request,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
-    from mindroom.judgment.answers import ChoiceAnswer, JudgmentResponse
+    from mindroom.judgment.answers import JudgmentResponse
 
 
 pytestmark = pytest.mark.asyncio
 
 
 def _request() -> JudgmentRequest:
-    return build_queued_judgment_request(
-        QueuedJudgmentInput(
-            active=JudgmentMessage(sender="alice", text="Install the package."),
-            queued=(JudgmentMessage(sender="alice", text="Thanks."),),
-        ),
+    return build_participation_judgment_request(
+        (JudgmentMessage("user", "How do I install the package?"),),
+        instructions="Offer technical help.",
     )
 
 
 def _response_body(
     *,
-    choice: str = "finish",
-    finish: object = 0.8,
-    wrap_up: object = 0.2,
-    confidence: object = 0.6,
+    probability: object = 0.8,
     model: str = PINNED_MODEL,
 ) -> bytes:
     return json.dumps(
         {
             "model": model,
-            "answers": {
-                QUEUED_MESSAGE_QUESTION.question_id: {
-                    "type": "choice",
-                    "choice": choice,
-                    "probabilities": {"finish": finish, "wrap_up": wrap_up},
-                    "confidence": confidence,
-                },
-            },
+            "answers": {"participation": {"type": "noul", "noul": probability}},
             "usage": {"input_tokens": 123, "output_tokens": 7},
         },
         allow_nan=True,
@@ -74,13 +59,13 @@ def _response_body(
     ).encode()
 
 
-async def test_client_posts_exact_contract_and_retains_api_confidence() -> None:
-    """Changing the endpoint, auth, request schema, or confidence source must fail."""
+async def test_client_posts_exact_contract_and_retains_probability() -> None:
+    """Changing the endpoint, auth, request schema, or probability must fail."""
     seen: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, content=_response_body(confidence=0.731234))
+        return httpx.Response(200, content=_response_body(probability=0.731234))
 
     client = SystemOneClient(
         api_key="test-secret",
@@ -91,9 +76,7 @@ async def test_client_posts_exact_contract_and_retains_api_confidence() -> None:
 
     assert result.failure is None
     assert result.answer is not None
-    assert result.answer.choice == "finish"
-    assert result.answer.probabilities == (("finish", 0.8), ("wrap_up", 0.2))
-    assert result.answer.confidence == 0.731234
+    assert result.answer.probability == 0.731234
     assert result.model_id == PINNED_MODEL
     assert result.input_tokens == 123
     assert result.output_tokens == 7
@@ -124,10 +107,10 @@ async def test_participation_client_validates_noul_and_network_opt_in(probabilit
 
     client = SystemOneClient(api_key="test-secret", model=PINNED_MODEL, transport=httpx.MockTransport(respond))
     request = build_participation_judgment_request((JudgmentMessage("user", "Any thoughts?"),), instructions="")
-    refused = await client.judge_participation(request, owner="agent")
+    refused = await client.judge(request, owner="agent")
     assert refused.failure == "network_disabled"
     assert not requests
-    result = await client.judge_participation(request, owner="agent", allow_network=True)
+    result = await client.judge(request, owner="agent", allow_network=True)
     assert len(requests) == 1
     assert requests[0].content == request.body
     assert requests[0].headers["authorization"] == "Bearer test-secret"
@@ -159,12 +142,10 @@ async def test_client_requires_explicit_network_opt_in() -> None:
 
 
 async def test_incomplete_state_never_reaches_transport() -> None:
-    """Incomplete state must fail closed even when the harness enables its mock transport."""
-    incomplete = build_queued_judgment_request(
-        QueuedJudgmentInput(
-            active=JudgmentMessage(sender="alice", text="Do it."),
-            queued=(JudgmentMessage(sender="alice", text="token=sk-secret"),),
-        ),
+    """Incomplete state must fail closed even when the caller enables transport."""
+    incomplete = build_participation_judgment_request(
+        (JudgmentMessage("user", "token=sk-secret"),),
+        instructions="",
     )
     client = SystemOneClient(
         api_key="secret",
@@ -201,30 +182,28 @@ async def test_client_rejects_requests_not_issued_by_the_bounded_builder(body: b
             b'{"model":"jev-1.13.0","model":"jev-1.13.0","answers":{},"usage":{}}',
             "duplicate",
         ),
-        (_response_body(finish=True, wrap_up=0.0), "probability"),
-        (_response_body(finish=float("nan"), wrap_up=0.0), "number"),
-        (_response_body(finish=1.1, wrap_up=-0.1), "range"),
-        (_response_body(finish=0.7, wrap_up=0.2), "sum"),
-        (_response_body(choice="finish", finish=0.2, wrap_up=0.8), "highest"),
-        (_response_body(confidence=False), "confidence"),
-        (_response_body(confidence=1.1), "range"),
+        (_response_body(probability=True), "probability"),
+        (_response_body(probability=float("nan")), "number"),
+        (_response_body(probability=1.1), "range"),
+        (_response_body(probability=-0.1), "range"),
         (_response_body(model="jev-9.0.0"), "model"),
         (b"not-json", "JSON"),
     ],
 )
 async def test_decode_response_rejects_malformed_numbers_and_model_drift(body: bytes, match: str) -> None:
     """Malformed provider output must never be normalized into an accepted decision."""
-    with pytest.raises(InvalidJudgmentResponseError, match=match):
-        decode_response(body, expected_model=PINNED_MODEL)
+    with pytest.raises(_InvalidJudgmentResponseError, match=match):
+        _decode_response(body, expected_model=PINNED_MODEL)
 
 
 @pytest.mark.parametrize(
     "mutate",
     [
         lambda payload: payload.update({"extra": None}),
-        lambda payload: payload["answers"].update({"other_question": payload["answers"].pop("queued_message_effect")}),
-        lambda payload: payload["answers"]["queued_message_effect"]["probabilities"].update({"other": 0.0}),
-        lambda payload: payload["answers"]["queued_message_effect"].update({"extra": None}),
+        lambda payload: payload["answers"].update({"other_question": payload["answers"].pop("participation")}),
+        lambda payload: payload["answers"]["participation"].update({"type": "choice"}),
+        lambda payload: payload["answers"]["participation"].pop("noul"),
+        lambda payload: payload["answers"]["participation"].update({"extra": None}),
         lambda payload: payload["usage"].update({"input_tokens": -1}),
         lambda payload: payload["usage"].update({"output_tokens": True}),
     ],
@@ -234,18 +213,8 @@ async def test_decode_response_rejects_schema_drift(mutate: Callable[[dict[str, 
     payload = json.loads(_response_body())
     mutate(payload)
 
-    with pytest.raises(InvalidJudgmentResponseError):
-        decode_response(json.dumps(payload).encode(), expected_model=PINNED_MODEL)
-
-
-async def test_decode_response_accepts_small_probability_sum_rounding() -> None:
-    """Decimal serialization noise inside the documented distribution must remain usable."""
-    decoded = decode_response(
-        _response_body(finish=0.7000003, wrap_up=0.3),
-        expected_model=PINNED_MODEL,
-    )
-
-    assert decoded.answer.probabilities == (("finish", 0.7000003), ("wrap_up", 0.3))
+    with pytest.raises(_InvalidJudgmentResponseError):
+        _decode_response(json.dumps(payload).encode(), expected_model=PINNED_MODEL)
 
 
 async def test_http_failures_are_not_retried_or_leaked_to_logs(caplog: pytest.LogCaptureFixture) -> None:
@@ -337,7 +306,7 @@ async def test_decoded_response_body_is_bounded_while_streaming() -> None:
 
 async def test_shared_capacity_rejects_globally_and_per_owner_without_waiting() -> None:
     """Separate clients must not create separate global or owner wait queues."""
-    capacity = JudgmentCapacity(max_concurrent=2, max_per_owner=1)
+    capacity = _JudgmentCapacity(max_concurrent=2, max_per_owner=1)
     first_entered = asyncio.Event()
     globally_full = asyncio.Event()
     release = asyncio.Event()
@@ -372,7 +341,7 @@ async def test_shared_capacity_rejects_globally_and_per_owner_without_waiting() 
 
 async def test_cancellation_propagates_and_releases_capacity() -> None:
     """Cancelling one request must not fabricate a result or strand its shared slot."""
-    capacity = JudgmentCapacity(max_concurrent=1, max_per_owner=1)
+    capacity = _JudgmentCapacity(max_concurrent=1, max_per_owner=1)
     entered = asyncio.Event()
     calls = 0
 
@@ -405,7 +374,7 @@ async def test_cancellation_propagates_and_releases_capacity() -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        _response_body(finish=10**400),
+        _response_body(probability=10**400),
         b'{"n":' + b"1" * 5_000 + b"}",
         b"[" * 20_000 + b"0" + b"]" * 20_000,
     ],
@@ -426,15 +395,15 @@ async def test_adversarial_json_returns_invalid_response(body: bytes) -> None:
 async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-yielding decoder still has to satisfy the total wall-time budget."""
     clock = [0.0]
-    original = client_module.decode_response
+    original = client_module._decode_response
 
-    def slow_decode(body: bytes, *, expected_model: str) -> JudgmentResponse[ChoiceAnswer]:
+    def slow_decode(body: bytes, *, expected_model: str) -> JudgmentResponse:
         response = original(body, expected_model=expected_model)
         clock[0] = 2.0
         return response
 
     monkeypatch.setattr(client_module, "perf_counter", lambda: clock[0])
-    monkeypatch.setattr(client_module, "decode_response", slow_decode)
+    monkeypatch.setattr(client_module, "_decode_response", slow_decode)
     client = SystemOneClient(
         api_key="synthetic",
         model=PINNED_MODEL,

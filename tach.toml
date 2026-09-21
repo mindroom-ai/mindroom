@@ -6529,7 +6529,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.judgment.state"
-depends_on = ["mindroom.judgment.answers", "mindroom.redaction"]
+depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.judgment.client"

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-type QueuedChoice = Literal["finish", "wrap_up"]
 type JudgmentFailure = Literal[
     "capacity_exhausted",
     "http_error",
@@ -19,24 +18,6 @@ type JudgmentFailure = Literal[
     "timeout",
     "transport_error",
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class ChoiceQuestion:
-    """One fixed Choice question and its ordered candidate rubric."""
-
-    question_id: str
-    instructions: str
-    criteria: tuple[tuple[QueuedChoice, str], ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ChoiceAnswer:
-    """A strictly validated finish-versus-wrap-up answer."""
-
-    choice: QueuedChoice
-    probabilities: tuple[tuple[QueuedChoice, float], ...]
-    confidence: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,19 +36,19 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class JudgmentResponse[AnswerT]:
+class JudgmentResponse:
     """One complete response from the pinned evaluated model."""
 
     model: str
-    answer: AnswerT
+    answer: NoulAnswer
     usage: TokenUsage
 
 
 @dataclass(frozen=True, slots=True)
-class JudgmentResult[AnswerT]:
+class JudgmentResult:
     """A successful answer or one closed failure category."""
 
-    answer: AnswerT | None
+    answer: NoulAnswer | None
     failure: JudgmentFailure | None
     model_id: str | None
     latency_ms: int

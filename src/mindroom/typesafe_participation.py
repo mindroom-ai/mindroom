@@ -24,8 +24,8 @@ def create_participation_decider(
     settings = room.typesafe
     if settings is None:
         return None
-    key = runtime_paths.env_value("TYPESAFE_API_KEY")
-    if not key or not key.strip():
+    key = (runtime_paths.env_value("TYPESAFE_API_KEY") or "").strip()
+    if not key:
         logger.info("TypeSafe participation fallback", failure="missing_credential")
         return None
     client = SystemOneClient(api_key=key, model=PINNED_MODEL, timeout_seconds=settings.timeout_seconds)
@@ -34,7 +34,7 @@ def create_participation_decider(
 
     async def decide(messages: tuple[JudgmentMessage, ...]) -> ParticipationDecision | None:
         request = build_participation_judgment_request(messages, instructions=instructions)
-        result = await client.judge_participation(request, owner=owner, allow_network=True)
+        result = await client.judge(request, owner=owner, allow_network=True)
         probability = result.answer.probability if result.answer is not None else None
         logger.info(
             "TypeSafe participation judgment",

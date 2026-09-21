@@ -75,12 +75,13 @@ async def test_typesafe_controls_real_gate_without_model_check(
     posted: list[dict[str, Any]] = []
 
     async def post(_self: SystemOneClient, body: bytes) -> bytes:
+        assert _self._api_key == "test-secret"
         posted.append(json.loads(body))
         return _response(score)
 
     monkeypatch.setattr(SystemOneClient, "_post", post)
     model = ParticipationModel(ModelResponse(content="Useful answer"))
-    gate = _gate(tmp_path)
+    gate = _gate(tmp_path, key=" \ttest-secret\n")
     messages = [
         Message(role="system", content="Private workspace instructions"),
         Message(
@@ -121,6 +122,7 @@ async def test_typesafe_controls_real_gate_without_model_check(
         "drift",
         "redacted",
         "oversized",
+        "unicode",
         "media",
         "attachment",
         "history_attachment",
@@ -154,6 +156,7 @@ async def test_typesafe_failure_uses_existing_model_check(
     content = {
         "redacted": "api_key=secret-value",
         "oversized": "x" * 20_000,
+        "unicode": "\ud800",
         "attachment": "Attachments sent with the current message (use tool calls to inspect or process them by ID):\nprivate.txt",
         "history_attachment": "Can you inspect this? [attachments: att_123 (private.txt)]",
     }.get(failure, "Any ideas?")
