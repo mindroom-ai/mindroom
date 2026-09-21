@@ -5967,9 +5967,15 @@ class TestWorkerToolsOverride:
             is False
         )
 
+    @pytest.mark.parametrize(
+        ("method_name", "arguments"),
+        [("show_computer", {}), ("open_panel", {"panel": "computer"}), ("open_panel", {"panel": "members"})],
+    )
     def test_get_tool_by_name_keeps_chat_ui_local_when_explicitly_worker_routed(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        method_name: str,
+        arguments: dict[str, str],
     ) -> None:
         """A configured worker_tools entry must retain the live primary-runtime context boundary."""
 
@@ -6002,10 +6008,10 @@ class TestWorkerToolsOverride:
             worker_tools_override=["chat_ui"],
             worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
         )
-        entrypoint = tool.async_functions["show_computer"].entrypoint
+        entrypoint = tool.async_functions[method_name].entrypoint
         assert entrypoint is not None
 
-        result = json.loads(asyncio.run(entrypoint()))
+        result = json.loads(asyncio.run(entrypoint(**arguments)))
         assert result["status"] == "error"
         assert "runtime context" in result["message"]
 

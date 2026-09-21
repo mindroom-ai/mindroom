@@ -10,7 +10,7 @@
       "dependencies": [
         "agno"
       ],
-      "description": "Let an agent request bounded actions in MindRoom Chat",
+      "description": "Open MindRoom Chat UI for the user: show the agent's worker browser in the Computer panel with open_panel(panel='computer'), open Settings, or show room members. Sends a UI request; does not navigate or control the user's local browser.",
       "display_name": "Chat UI",
       "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
       "function_names": [
@@ -10126,7 +10126,7 @@
       "dependencies": [
         "playwright"
       ],
-      "description": "Browse websites, fill in forms, and capture screenshots",
+      "description": "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. With worker routing, this controls the agent's worker browser. To let the user watch this worker browser, use chat_ui.open_panel(panel='computer'). The user's local browser requires the separately configured desktop target.",
       "display_name": "Browser",
       "docs_url": "https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
       "function_names": [

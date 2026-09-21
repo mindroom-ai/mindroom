@@ -22,7 +22,7 @@ _SettingsSection = Literal[
     "developer",
     "about",
 ]
-_SidePanel = Literal["members"]
+_SidePanel = Literal["members", "computer"]
 
 _SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
 _SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
@@ -195,14 +195,22 @@ class ChatUITools(Toolkit):
         )
 
     async def show_computer(self) -> str:
-        """Ask MindRoom Chat to show this agent's worker computer."""
+        """Backward-compatible alias for open_panel(panel='computer').
+
+        Request this agent's Computer panel in watch mode. Does not navigate, send
+        a prompt to ChatGPT, or take control. Success means the request was sent,
+        not that the client opened the panel.
+        """
         return await self._send_action(
             "show_computer",
             "Open this agent's worker computer in MindRoom Chat.",
         )
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
-        """Ask MindRoom Chat to open one supported Settings section."""
+        """Request a MindRoom Chat Settings section without changing account settings.
+
+        Success means the UI request was sent, not that the client opened Settings.
+        """
         if section not in _SETTINGS_SECTIONS:
             return self._payload(
                 "error",
@@ -216,13 +224,27 @@ class ChatUITools(Toolkit):
         )
 
     async def open_panel(self, panel: _SidePanel = "members") -> str:
-        """Ask MindRoom Chat to open one supported conversation side panel."""
+        """Request a MindRoom Chat panel for the user: members or computer.
+
+        Use panel='computer' to let the user watch this agent's worker browser in
+        the Computer panel. It does not navigate to a URL, send a prompt to
+        ChatGPT, take control, or open or control the user's local browser.
+        Navigate the worker browser separately with browser.browser_control.
+        Success means the UI request was sent, not that the client opened a panel.
+
+        Args:
+            panel: 'members' for room members, or 'computer' for this agent's worker browser in watch mode.
+
+        """
         if panel not in _SIDE_PANELS:
             return self._payload(
                 "error",
                 action="open_panel",
                 message=f"Unsupported side panel: {panel!r}.",
             )
+        if panel == "computer":
+            # Keep the existing wire action and runtime checks for older clients.
+            return await self.show_computer()
         return await self._send_action(
             "open_panel",
             "Open the Members panel in MindRoom Chat.",

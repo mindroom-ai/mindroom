@@ -728,7 +728,11 @@ class BrowserTools(Toolkit):
         promptText: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> str | ToolResult:
-        """Control browser state and actions.
+        """Control MindRoom's browser state and actions, including worker browser navigation.
+
+        To let the user watch this worker browser, use chat_ui.open_panel(panel='computer').
+        That UI request does not navigate, send a prompt to ChatGPT, or take control.
+        The user's local browser is separate and requires the configured desktop target.
 
         Args:
             action: Browser action (status/start/stop/profiles/tabs/open/focus/close/snapshot/screenshot/navigate/console/pdf/upload/dialog/act/help/actions)
