@@ -956,8 +956,10 @@ If cancellation interrupts a recovered child between native and generic settleme
 The existing snapshot reader discards redundant native result copies from earlier versions of this PR, without startup rewrites or a separate migration pass.
 
 Astra also reproduced quiet schedule control tokens accumulating across collected streaming attempts.
-Completed quiet collection now uses the turn owner's canonical report while retaining structured tool evidence and recovered visible prose.
-Regression cases cover quiet and substantive reports in either order, literal mentions of the control token, and recovered prefixes.
+Enabled quiet collection suppresses only completed quiet-attempt text while preserving ordered tool markers, structured evidence, and recovered visible prose.
+It retains unfinished presentation for errors, cancellation, and approval handoffs, and leaves the disabled collection path unchanged.
+Blocking quiet continuations retain their tool markers and keep numbering continuous across preserved attempts.
+Regression cases cover quiet and substantive reports in either order, split control tokens, terminal-only content, literal mentions of the token, and recovered prefixes with tool traces.
 
 Managed schema preparation and execution reject an application-declared `wait_timeout` parameter instead of silently consuming it.
 Such toolkits must use the existing exclusion configuration or rename their application parameter.

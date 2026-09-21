@@ -33,6 +33,7 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import completion_envelope, join_conversation_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.events import ToolTraceEntry, tool_markers_match_trace
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.turn_origin import TurnIntent
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
@@ -45,10 +46,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.tool_system.events import ToolTraceEntry
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("collect_stream", [False, True])
 @pytest.mark.parametrize("record_turn", [False, True])
 @pytest.mark.parametrize("recovered", [False, True])
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
 async def test_silent_join_preserves_the_deliverable_report(
     tmp_path: Path,
     *,
+    enabled: bool,
     collect_stream: bool,
     record_turn: bool,
     recovered: bool,
@@ -71,9 +73,9 @@ async def test_silent_join_preserves_the_deliverable_report(
     second: str,
     expected: str,
 ) -> None:
-    """Real SDK joins suppress control tokens while retaining findings and tool evidence."""
+    """Quiet SDK replies preserve tool placement with managed joins enabled or disabled."""
     config = Config(
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
         agents={"leader": AgentConfig(display_name="Leader")},
     )
     paths = _runtime_paths(tmp_path)
@@ -83,16 +85,32 @@ async def test_silent_join_preserves_the_deliverable_report(
     register_background_runtime(paths, runtime)
     database = str(tmp_path / "silent.db")
     storage = SqliteDb(db_file=database)
+
+    async def probe_tool() -> str:
+        """Read evidence using the ordinary disabled execution path."""
+        return "Job evidence"
+
     model = DelegationModel(
         id="test",
-        responses=[
-            ModelResponse(content=first),
-            ModelResponse(tool_calls=[_call("job", "read", action="wait", job_id="quiet", wait_timeout=0)]),
-            ModelResponse(content=second),
-        ],
+        responses=(
+            [
+                ModelResponse(tool_calls=[_call("probe_tool", "first-read")]),
+                ModelResponse(content=first),
+                ModelResponse(tool_calls=[_call("job", "read", action="wait", job_id="quiet", wait_timeout=0)]),
+                ModelResponse(content=second),
+            ]
+            if enabled
+            else [ModelResponse(tool_calls=[_call("probe_tool", "read")]), ModelResponse(content=expected)]
+        ),
     )
     install_tool_job_execution(model)
-    actor = Agent(id="leader", model=model, tools=[JobTools(paths, owner)], db=storage, telemetry=False)
+    actor = Agent(
+        id="leader",
+        model=model,
+        tools=[probe_tool, JobTools(paths, owner)] if enabled else [probe_tool],
+        db=storage,
+        telemetry=False,
+    )
     scope = ScopeSessionContext(
         HistoryScope(kind="agent", scope_id="leader"),
         storage,
@@ -109,7 +127,14 @@ async def test_silent_join_preserves_the_deliverable_report(
             requester_id=owner.requester_id,
         ),
         allow_no_report_response=True,
-        initial_presentation=StreamingPresentation(response_text="Earlier finding") if recovered else None,
+        initial_presentation=(
+            StreamingPresentation(
+                response_text="Earlier finding\n\n🔧 `earlier_check` [1]",
+                tool_trace=(ToolTraceEntry(type="tool_call_completed", tool_name="earlier_check"),),
+            )
+            if recovered
+            else None
+        ),
     )
     trace: list[ToolTraceEntry] = []
     recorder = TurnRecorder(user_message="Silent check") if record_turn else None
@@ -137,13 +162,14 @@ async def test_silent_join_preserves_the_deliverable_report(
         )
 
     try:
-        await runtime.start(
-            JobSpec("quiet", "probe", 0, adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND}),
-            owner=owner,
-            operation=operation,
-        )
-        ready = await runtime.wait("quiet", owner=owner, depth=0)
-        await runtime.release_wait("quiet", ready.token)
+        if enabled:
+            await runtime.start(
+                JobSpec("quiet", "probe", 0, adapter={"source_kind": SILENT_SCHEDULE_SOURCE_KIND}),
+                owner=owner,
+                operation=operation,
+            )
+            ready = await runtime.wait("quiet", owner=owner, depth=0)
+            await runtime.release_wait("quiet", ready.token)
         with (
             tool_runtime_context(context),
             patch("mindroom.ai.open_resolved_scope_session_context", return_value=nullcontext(scope)),
@@ -160,12 +186,26 @@ async def test_silent_join_preserves_the_deliverable_report(
                 tool_trace_collector=trace,
                 turn_recorder=recorder,
             )
+        assert tool_markers_match_trace(answer, trace)
         clean = strip_matching_visible_tool_markers(answer, trace).strip()
         if recovered:
-            expected = "Earlier finding" + ("\n\n" + expected if expected != "NO_REPLY" else "")
-        assert clean == expected
-        assert is_silent_schedule_no_report_response(clean) is (expected == "NO_REPLY")
-        assert [(tool.tool_name, tool.result_preview) for tool in trace] == [("job", "Job evidence")]
+            expected = "Earlier finding" + ("\n\n" + expected if expected != "NO_REPLY" or not enabled else "")
+        if expected == "NO_REPLY":
+            assert is_silent_schedule_no_report_response(clean)
+        else:
+            assert [line for line in clean.splitlines() if line.strip()] == [
+                line for line in expected.splitlines() if line.strip()
+            ]
+            assert not is_silent_schedule_no_report_response(clean)
+        assert [(tool.tool_name, tool.result_preview) for tool in trace] == (
+            ([("earlier_check", None)] if recovered else [])
+            + [("probe_tool", "Job evidence")]
+            + ([("job", "Job evidence")] if enabled else [])
+        )
+        if enabled and first == "First finding":
+            assert answer.index(first) < answer.index("`job`")
+        if enabled and (collect_stream or recovered) and second == "New finding":
+            assert answer.index("`job`") < answer.index(second)
         assert await runtime.pending_outcomes() == []
     finally:
         register_background_runtime(paths, None)

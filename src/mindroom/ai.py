@@ -119,9 +119,9 @@ from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StreamingToolTracker,
     StructuredStreamChunk,
-    append_stream_text,
     complete_pending_tool_block,
     format_tool_combined,
+    tool_marker_text,
 )
 from mindroom.tool_system.runtime_context import ToolRuntimeModelBinding, get_tool_runtime_context, tool_runtime_context
 
@@ -529,12 +529,65 @@ class _NonStreamingAttemptResult:
     user_error: Exception | None = None
 
 
+async def _quiet_collected_chunks(  # noqa: C901, PLR0912 - Keep ordered partials and terminal-only echoes together.
+    response_stream: AsyncIterator[AIStreamChunk],
+) -> AsyncIterator[AIStreamChunk]:
+    """Suppress only completed quiet attempts, retaining tool order and unfinished presentation."""
+    pending: list[AIStreamChunk] = []
+    terminal_echo: str | None = None
+    try:
+        async for incoming in response_stream:
+            chunk = incoming
+            expected, terminal_echo = terminal_echo, None
+            if isinstance(chunk, RunContentEvent) and expected is not None and chunk.content == expected:
+                continue
+            if isinstance(chunk, StructuredStreamChunk):
+                prose = strip_matching_visible_tool_markers(chunk.content, chunk.tool_trace or ())
+                if is_silent_schedule_no_report_response(prose):
+                    chunk = replace(chunk, content=tool_marker_text(chunk.content))
+            if isinstance(chunk, (StructuredStreamChunk, BackgroundWaitChunk)):
+                for item in pending:
+                    yield item
+                pending.clear()
+                yield chunk
+                continue
+            if not isinstance(chunk, RunCompletedEvent):
+                pending.append(chunk)
+                continue
+            prose = "".join(
+                item if isinstance(item, str) else str(item.content or "")
+                for item in pending
+                if isinstance(item, (str, RunContentEvent))
+            )
+            if not prose and chunk.content:
+                # The agent adapter emits terminal-only content after this event.
+                terminal_echo = str(chunk.content)
+                pending.append(RunContentEvent(content=terminal_echo))
+                prose = terminal_echo
+            quiet = is_silent_schedule_no_report_response(prose)
+            for item in pending:
+                if not quiet or not isinstance(item, (str, RunContentEvent)):
+                    yield item
+            pending.clear()
+            yield replace(chunk, content=None) if quiet else chunk
+    except (Exception, asyncio.CancelledError):
+        # Approval and interruption still need the exact partial presentation.
+        for item in pending:
+            yield item
+        raise
+    for item in pending:
+        yield item
+
+
 async def collect_streamed_response_content(  # noqa: C901 - Explicit stream event variants.
     response_stream: AsyncIterator[AIStreamChunk],
     *,
     presentation: CollectedStreamPresentation,
+    suppress_quiet_attempts: bool = False,
 ) -> tuple[str, list[ToolTraceEntry]]:
     """Collect a stream into its presentation owner, retaining pending text and tool state."""
+    if suppress_quiet_attempts:
+        response_stream = _quiet_collected_chunks(response_stream)
     try:
         async for chunk in response_stream:
             if isinstance(chunk, str):
@@ -554,6 +607,8 @@ async def collect_streamed_response_content(  # noqa: C901 - Explicit stream eve
             elif isinstance(chunk, RunCompletedEvent):
                 if chunk.content is not None:
                     presentation.canonical_final_body_candidate = str(chunk.content)
+                if suppress_quiet_attempts:
+                    presentation.separate_next_text = bool(presentation.response_text)
             elif isinstance(chunk, ToolCallStartedEvent):
                 presentation.start_tool(chunk.tool)
             elif isinstance(chunk, ToolCallCompletedEvent):
@@ -573,18 +628,20 @@ async def _collect_response_body_with_trace(
     *,
     show_tool_calls: bool,
     tool_trace_collector: list[ToolTraceEntry] | None,
+    suppress_quiet_attempts: bool = False,
 ) -> str:
     """Collect a stream to one body, bridging the trace to an optional collector."""
     body, tool_trace = await collect_streamed_response_content(
         response_stream,
         presentation=CollectedStreamPresentation(show_tool_calls=show_tool_calls),
+        suppress_quiet_attempts=suppress_quiet_attempts,
     )
     if tool_trace_collector is not None:
         tool_trace_collector.extend(tool_trace)
     return body
 
 
-def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True) -> str:
+def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = True, tool_index_offset: int = 0) -> str:
     response_parts = []
 
     # Add main content if present
@@ -594,7 +651,7 @@ def _extract_response_content(response: RunOutput, *, show_tool_calls: bool = Tr
     # Add formatted tool call sections when present (and enabled).
     if show_tool_calls and response.tools:
         tool_sections: list[str] = []
-        for tool_index, tool in enumerate(response.tools, start=1):
+        for tool_index, tool in enumerate(response.tools, start=tool_index_offset + 1):
             tool_name = tool.tool_name or "tool"
             tool_args = tool.tool_args or {}
             combined, _ = format_tool_combined(tool_name, tool_args, tool.result, tool_index=tool_index)
@@ -1492,9 +1549,7 @@ async def ai_response(  # noqa: C901, PLR0915
     agent_name = ctx.entity_label
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     if collect_streamed_response or ctx.initial_presentation is not None:
-        if ctx.allow_no_report_response and turn_recorder is None:
-            turn_recorder = TurnRecorder(user_message=prompt)
-        response_text = await _collect_response_body_with_trace(
+        return await _collect_response_body_with_trace(
             stream_agent_response(
                 ctx,
                 prompt=prompt,
@@ -1525,20 +1580,10 @@ async def ai_response(  # noqa: C901, PLR0915
             ),
             show_tool_calls=show_tool_calls,
             tool_trace_collector=tool_trace_collector,
+            suppress_quiet_attempts=(
+                ctx.allow_no_report_response and background_tool_jobs_enabled(config, runtime_paths)
+            ),
         )
-        if ctx.allow_no_report_response and turn_recorder is not None and turn_recorder.outcome == "completed":
-            # The turn owner removes no-report control tokens at continuation boundaries.
-            # Collected deltas have already emitted them; retain the canonical report and trace.
-            report = turn_recorder.assistant_text
-            initial = ctx.initial_presentation
-            if initial is not None:
-                prefix = strip_matching_visible_tool_markers(initial.response_text, initial.tool_trace)
-                if not is_silent_schedule_no_report_response(prefix):
-                    if is_silent_schedule_no_report_response(report):
-                        report = ""
-                    report = append_stream_text(prefix, report, separate=True)
-            return report
-        return response_text
 
     session_id = _require_turn_session_id(ctx)
     # Bind the timing scope for this turn; asyncio task contexts isolate it and
@@ -1736,7 +1781,11 @@ async def ai_response(  # noqa: C901, PLR0915
             )
         return CompletedAttempt(
             status=response.status,
-            response_text=_extract_response_content(response, show_tool_calls=show_tool_calls),
+            response_text=_extract_response_content(
+                response,
+                show_tool_calls=show_tool_calls,
+                tool_index_offset=len(run.turn_state.prior_completed_tools) if run.prior_response_text else 0,
+            ),
             replayable_text=_extract_replayable_response_text(response),
             has_visible_content=bool(response.content),
             is_empty=ai_runtime.is_empty_completed_run(response),

@@ -5673,6 +5673,7 @@ expose = [
     "remap_visible_tool_marker_indices",
     "render_tool_trace_for_context",
     "serialize_tool_trace",
+    "tool_marker_text",
     "tool_markers_match_trace",
     "BackgroundWaitChunk",
 ]

@@ -54,7 +54,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.wait_timeout import run_uses_managed_waits
 from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
-from mindroom.tool_system.events import BackgroundWaitChunk, append_stream_text
+from mindroom.tool_system.events import BackgroundWaitChunk, append_stream_text, tool_marker_text
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -905,6 +905,8 @@ def _advance_job_continuation(
     prompt: str,
 ) -> DynamicContinuationRunState:
     """Retain model selection and substantive prose while retrieving ready job results."""
+    if ctx.allow_no_report_response and is_silent_schedule_no_report_response(resolution.replayable_text):
+        resolution = replace(resolution, replayable_text="", response_text=tool_marker_text(resolution.response_text))
     return _advance_turn_continuation(
         sinks,
         adapter.release_attempt_entity,
@@ -914,9 +916,7 @@ def _advance_job_continuation(
         next_prompt=prompt,
         active_model_name=continuation.active_model_name,
         apply_model_to_team_members=continuation.apply_model_to_team_members,
-        preserve_response=not (
-            ctx.allow_no_report_response and is_silent_schedule_no_report_response(resolution.replayable_text)
-        ),
+        preserve_response=True,
     )
 
 
@@ -1323,7 +1323,7 @@ def _settle_completed_attempt(
         # Tool presentation and team fallback chrome are not semantic prose.
         # The tool records remain part of the completed turn, but quiet
         # delivery has no final assistant body to publish.
-        response_text = ""
+        response_text = tool_marker_text(response_text) if ctx.background_tool_jobs else ""
         recorded_text = ""
     return _CompletionSettle(
         keep_going=False,

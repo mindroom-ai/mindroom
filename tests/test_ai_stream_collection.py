@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
+from agno.run.agent import RunCompletedEvent, RunContentEvent, ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom.ai import ai_response, collect_streamed_response_content
 from mindroom.config.main import Config
+from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_jobs.completion import background_wait_notice
-from mindroom.tool_system.events import BackgroundWaitChunk, CollectedStreamPresentation, ToolTraceEntry
+from mindroom.tool_system.events import (
+    BackgroundWaitChunk,
+    CollectedStreamPresentation,
+    ToolTraceEntry,
+    tool_markers_match_trace,
+)
 from tests.conftest import make_turn_context
 
 if TYPE_CHECKING:
@@ -205,7 +212,8 @@ async def test_ai_response_honors_hidden_tool_marker_collection_opt_in(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_collected_wait_updates_owner_before_requesting_next_chunk() -> None:
+@pytest.mark.parametrize("quiet", [False, True])
+async def test_collected_wait_updates_owner_before_requesting_next_chunk(*, quiet: bool) -> None:
     """A nonstream Matrix response must expose wait progress before its generator parks."""
     notices: list[str] = []
 
@@ -222,5 +230,86 @@ async def test_collected_wait_updates_owner_before_requesting_next_chunk() -> No
         body, _trace = await collect_streamed_response_content(
             stream(),
             presentation=CollectedStreamPresentation(show_tool_calls=True),
+            suppress_quiet_attempts=quiet,
         )
     assert body == "Independent work done. Result received."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_only", [False, True])
+@pytest.mark.parametrize("show_tools", [False, True])
+@pytest.mark.parametrize("first", ["NO_REPLY", "First finding"])
+async def test_quiet_collection_preserves_attempt_tool_order(
+    *,
+    terminal_only: bool,
+    show_tools: bool,
+    first: str,
+) -> None:
+    """Exact quiet attempts vanish without moving tools or removing literal control-token prose."""
+    first_tool = ToolExecution(tool_call_id="one", tool_name="first_tool", tool_args={}, result="first")
+    second_tool = ToolExecution(tool_call_id="two", tool_name="second_tool", tool_args={}, result="second")
+
+    async def stream() -> AsyncGenerator[object, None]:
+        if not terminal_only:
+            yield RunContentEvent(content=first[:3])
+        yield ToolCallStartedEvent(tool=first_tool)
+        if not terminal_only:
+            yield RunContentEvent(content=first[3:])
+        yield ToolCallCompletedEvent(tool=first_tool)
+        yield RunCompletedEvent(content=first)
+        if terminal_only:
+            yield RunContentEvent(content=first)
+        yield RunContentEvent(content="The literal NO_REPLY stays.")
+        yield ToolCallStartedEvent(tool=second_tool)
+        yield RunContentEvent(content="Final finding.")
+        yield ToolCallCompletedEvent(tool=second_tool)
+        yield RunCompletedEvent(content="The literal NO_REPLY stays.Final finding.")
+
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=show_tools),
+        suppress_quiet_attempts=True,
+    )
+    assert body.count("NO_REPLY") == 1
+    assert body.count("The literal NO_REPLY stays.") == 1
+    assert body.count("Final finding.") == 1
+    if first != "NO_REPLY":
+        assert body.count("Fir") == body.count("st finding") == 1
+    if show_tools:
+        assert tool_markers_match_trace(body, trace)
+        assert body.index("`first_tool`") < body.index("The literal NO_REPLY stays.")
+        assert body.index("The literal NO_REPLY stays.") < body.index("`second_tool`") < body.index("Final finding.")
+        assert [entry.result_preview for entry in trace] == ["first", "second"]
+    else:
+        assert trace == []
+        assert "🔧" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["error", "cancel", "approval"])
+async def test_quiet_collection_preserves_unfinished_presentation(interruption: str) -> None:
+    """A partial attempt remains available to cancellation and approval presentation owners."""
+    tool = ToolExecution(tool_call_id="pending", tool_name="pending_tool", tool_args={})
+    failures = {
+        "error": RuntimeError("Interrupted"),
+        "cancel": asyncio.CancelledError(),
+        "approval": ResponsePausedForApproval(
+            PausedAttempt(session_id="session", run_id="run", tools=(tool,), toolkit_owners={}),
+        ),
+    }
+    failure = failures[interruption]
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield RunContentEvent(content="Partial finding.")
+        yield ToolCallStartedEvent(tool=tool)
+        raise failure
+
+    presentation = CollectedStreamPresentation(show_tool_calls=True)
+    with pytest.raises(type(failure)):
+        await collect_streamed_response_content(stream(), presentation=presentation, suppress_quiet_attempts=True)
+    assert presentation.response_text.startswith("Partial finding.")
+    assert tool_markers_match_trace(presentation.response_text, presentation.tool_trace)
+    assert presentation.tool_trace[0].type == "tool_call_started"
+    if isinstance(failure, ResponsePausedForApproval):
+        assert failure.presentation.response_text == presentation.response_text.rstrip()
+        assert failure.presentation.tool_trace == tuple(presentation.tool_trace)

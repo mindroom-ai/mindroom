@@ -528,6 +528,11 @@ def is_visible_tool_marker_line(line: str) -> bool:
     return _VISIBLE_TOOL_MARKER_LINE_PATTERN.fullmatch(line) is not None
 
 
+def tool_marker_text(text: str) -> str:
+    """Retain ordered display anchors when an attempt's quiet prose is suppressed."""
+    return "\n\n".join(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
+
+
 def _line_ending(line: str) -> str:
     if line.endswith("\r\n"):
         return "\r\n"
