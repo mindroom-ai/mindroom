@@ -398,14 +398,17 @@ class _ConversationSqliteDb(SqliteDb):
         session_id: str,
         user_id: str | None = None,
         run_index: int | None = None,
+        *,
+        record_usage: bool = True,
     ) -> None:
-        """Sanitize prompt messages before Agno's monotonic run insertion."""
+        """Save a sanitized run, capturing provider usage unless this is a conversation rewrite."""
         del run_index
         agno_compat_sqlite.upsert_run_at_end(
             self,
             _run_without_prompt_messages(run, self._prompt_roles),
             session_id=session_id,
             user_id=user_id,
+            record_usage=record_usage,
         )
 
     def delete_runs(self, run_ids: list[str]) -> None:
@@ -460,7 +463,10 @@ def save_runs(
     session: AgentSession | TeamSession,
     runs: Iterable[RunOutput | TeamRunOutput],
 ) -> None:
-    """Write ``runs`` as rows of ``session`` and make them the session's copies of those runs.
+    """Write conversation-only changes and make them the session's copies of those runs.
+
+    Conversation rewrites leave the owned usage ledger untouched. Provider
+    execution must persist through ``storage.upsert_run`` to capture usage.
 
     The session row must already exist (the runs table references it). A run
     already in ``session.runs`` under the same ``run_id`` is replaced by the
@@ -477,7 +483,10 @@ def save_runs(
         msg = "save_runs received a run object loaded from the session; edit a copy instead"
         raise ValueError(msg)
     for run in runs:
-        storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
+        if isinstance(storage, _ConversationSqliteDb):
+            storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id, record_usage=False)
+        else:
+            storage.upsert_run(run=run, session_id=session.session_id, user_id=run.user_id)
     replacements: dict[str, RunOutput | TeamRunOutput] = {run.run_id: run for run in runs if run.run_id}
     merged: list[Any] = []
     for existing in session.runs or []:

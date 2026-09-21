@@ -290,6 +290,8 @@ def build_ai_run_metadata_content(  # noqa: C901, PLR0912, PLR0915
         raw_status = status.value if isinstance(status, RunStatus) else str(status)
         payload["status"] = raw_status.lower()
     model_payload: dict[str, Any] = {"config": model_name}
+    if model_config is not None and model_config.display_name:
+        model_payload["display_name"] = model_config.display_name
     if model_id is not None:
         model_payload["id"] = model_id
     if provider is not None:

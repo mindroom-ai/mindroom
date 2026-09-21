@@ -107,6 +107,8 @@ The material treatments were inspired by AI-generated concepts; their geometry, 
 The dark icon takes inspiration from [Kube's liquid-glass article](https://kube.io/blog/liquid-glass-css-svg/): a blurred pane silhouette approximates a rounded surface, whose horizontal and vertical derivatives drive an SVG displacement filter.
 Directional specular highlights and broad cyan glows give the panes depth, while an inset illuminated rim defines the dark glass tile.
 This is a static approximation baked into the exported PNG, with no browser backdrop filter, embedded bitmap, or runtime effect.
+The native macOS app bundles the mark SVG and its matching PNG; AppKit uses the PNG to preserve the SVG's masked shading.
+Its menu bar icon uses dedicated 18- and 36-pixel renders of the outlined M and cube, with transparent interiors and automatic AppKit template tinting.
 The portal's public logo aliases resolve within its own public directory so container builds retain them.
 Application assets use the static version except for the connections page, which imports the existing `assets/logo/logo-mark-animated.svgz` directly.
 The frontend build bundles that compressed asset, and the backend and Vite servers send it with SVG and gzip response headers.

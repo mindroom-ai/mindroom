@@ -57,11 +57,12 @@ _COVERAGE_NOTE = (
     "Usage snapshots survive compaction and regeneration. Deleted sessions are unavailable."
 )
 _MODEL_COVERAGE_NOTE = (
-    "Model breakdown uses retained top-level runs and helper usage with usable token metrics. "
+    "Model breakdown uses retained top-level runs, team members, and helper usage with usable token metrics. "
+    "Only top-level runs increase run_count. "
     "Stored per-model details take precedence over a run's primary model. "
     "Runs with unusable model details are grouped as unknown. "
     "It does not necessarily sum to report totals, which may include history lost before usage migration "
-    "and nested team-member usage."
+    "and unavailable member detail."
 )
 _CUMULATIVE_MODEL_COVERAGE_NOTE = (
     "Cumulative model breakdown uses retained session model details plus independently recorded helper usage. "
@@ -70,20 +71,20 @@ _CUMULATIVE_MODEL_COVERAGE_NOTE = (
     "attribution absent from session aggregates are unavailable."
 )
 _USER_COVERAGE_NOTE = (
-    "User breakdown uses requester-attributed retained top-level runs and helper usage, "
+    "User breakdown uses requester-attributed retained top-level runs, team members, and helper usage, "
     "grouped by canonical user identity. "
     "A null user_id means requester identity is unavailable. "
     "It does not necessarily sum to report totals, which may include history lost before usage migration "
-    "and nested team-member usage. Deleted sessions are unavailable."
+    "and unavailable member detail. Deleted sessions are unavailable."
 )
 _DAILY_COVERAGE_NOTE = (
-    "Daily breakdown uses retained top-level runs and helper usage with usable token metrics and timestamps, "
-    "grouped by UTC request date when request details reconcile. Each run counts once on its first request date. "
+    "Daily breakdown uses retained top-level runs, team members, and helper usage with usable token metrics and timestamps, "
+    "grouped by UTC request date when request details reconcile. Each top-level run counts once on its first request date. "
     "Missing or unreconciled request details fall back to run creation date and may shift usage across days. "
     "Runs without usable timestamps are excluded. "
     "Runs with unusable model details retain their totals under the unknown model. "
     "It does not necessarily sum to report totals, which may include history lost before usage migration "
-    "and nested team-member usage. Deleted sessions are unavailable."
+    "and unavailable member detail. Deleted sessions are unavailable."
 )
 _PRIVATE_COVERAGE_NOTE = (
     "Private-agent totals use session aggregates, attributed to a validated private-instance owner "
@@ -96,7 +97,8 @@ _REQUEST_COVERAGE_NOTE = (
     "Request breakdown contains stored provider requests with usable timestamps and token counters. "
     "Every request counter must reconcile to one known run-model bucket before attribution is inherited. "
     "Missing, unreadable, mixed-model, or mismatched details are excluded without changing aggregate totals. "
-    "Usage lost before request capture, nested team-member requests, and deleted sessions cannot be reconstructed. "
+    "Stored team-member requests are included without adding top-level runs. "
+    "Usage lost before request capture and deleted sessions cannot be reconstructed. "
     "Unavailable sources include retained session usage without matching request detail."
 )
 _VOICE_COVERAGE_NOTE = (
@@ -153,7 +155,7 @@ class TokenTotals:
 
 @dataclass(frozen=True, slots=True)
 class UsageBreakdownRow:
-    """One configured entity in an admin report."""
+    """One retained entity in an admin report."""
 
     key: str
     totals: TokenTotals
@@ -196,7 +198,7 @@ class UsageCoverage:
 
 @dataclass(frozen=True, slots=True)
 class UsageModelBreakdownRow:
-    """Retained top-level usage for one provider and model."""
+    """Retained usage for one provider and model."""
 
     model_provider: str
     model: str
@@ -234,7 +236,7 @@ class UsageCumulativeModelBreakdownRow:
 
 @dataclass(frozen=True, slots=True)
 class UsageUserBreakdownRow:
-    """Retained top-level usage for one canonical requester and their models."""
+    """Retained usage for one canonical requester and their models."""
 
     user_id: str | None
     totals: TokenTotals
@@ -257,7 +259,7 @@ class UsageUserBreakdownRow:
 
 @dataclass(frozen=True, slots=True)
 class UsageDailyBreakdownRow:
-    """Retained top-level usage for one UTC calendar date."""
+    """Retained usage for one UTC calendar date."""
 
     date: str
     totals: TokenTotals
@@ -667,6 +669,7 @@ class _ModelUsageAccumulator:
                 scope=scope,
                 expected_agent=expected_agent,
                 expected_requester=expected_requester,
+                unavailable_sources=self.unavailable_sources,
             )
         except ValueError:
             self.unavailable_sources.add(row.source.path_label)
@@ -849,7 +852,7 @@ def collect_admin_usage(
     include_daily: bool = False,
     include_requests: bool = False,
 ) -> UsageReport:
-    """Collect all retained session aggregates across configured entities."""
+    """Collect retained session aggregates across configured agents and stored teams."""
     return _collect_usage(
         sources=discover_admin_usage_sources(config=config, runtime_paths=runtime_paths),
         config=config,
@@ -1206,11 +1209,11 @@ def _model_entries_for_row(
     scope: _Scope,
     expected_agent: str | None,
     expected_requester: str | None,
+    unavailable_sources: set[str],
 ) -> list[tuple[UsageRunNode, TokenTotals]]:
-    if scope == "admin":
-        if _admin_entity_id(row) is None:
-            return []
-    elif not _self_source_allowed(row.source, expected_agent):
+    if scope == "admin" and _admin_entity_id(row) is None:
+        return []
+    if scope == "self" and not _self_source_allowed(row.source, expected_agent):
         return []
 
     entries: list[tuple[UsageRunNode, TokenTotals]] = []
@@ -1220,7 +1223,13 @@ def _model_entries_for_row(
                 raise ValueError
             if run.requester_id != expected_requester:
                 continue
-        totals = _metrics_totals(run.metrics)
+        try:
+            totals = _metrics_totals(run.metrics)
+        except ValueError:
+            if scope == "self" and not row.source.requester_isolated:
+                raise
+            unavailable_sources.add(row.source.path_label)
+            continue
         if totals is not None:
             entries.append((run, totals))
     return entries
@@ -1269,7 +1278,7 @@ def _admin_entity_id(row: UsageSessionRow) -> str | None:
     if row.source.scope in {"shared_agent", "private_agent"}:
         entity_id = row.source.source_agent_id
         return entity_id if entity_id in row.source.allowed_agent_ids else None
-    return row.entity_id if row.entity_kind == "team" and row.entity_id in row.source.allowed_team_ids else None
+    return row.entity_id if row.entity_kind == "team" else None
 
 
 def _metrics_totals(metrics: Mapping[str, object]) -> TokenTotals | None:

@@ -44,6 +44,8 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
         "frontend/public/logo.png": png[1024],
         "frontend/public/favicon.png": png[64],
         "frontend/public/logo-square.png": artwork["preview.png"],
+        "macos/MindRoom/Sources/MindRoom/Resources/logo.svg": mark,
+        "macos/MindRoom/Sources/MindRoom/Resources/logo.png": png[1024],
         "docs/assets/logo.svg": mark,
         "docs/assets/logo.png": png[320],
         "docs/assets/favicon.png": png[64],
@@ -52,7 +54,7 @@ def application_outputs(artwork: dict[str, bytes]) -> dict[str, bytes]:
         "saas-platform/platform-frontend/src/app/favicon.ico": favicon.getvalue(),
         "avatars/spaces/root_space.png": png[256],
         **{
-            f"macos/MindRoom/Sources/MindRoom/Resources/MindRoomMenuBar{suffix}.png": render(menu_bar, size)
+            f"macos/MindRoom/Sources/MindRoom/Resources/logo-menu{suffix}.png": render(menu_bar, size)
             for suffix, size in (("", 18), ("@2x", 36))
         },
         **{

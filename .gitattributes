@@ -4,5 +4,6 @@ assets/logo/app-glass-material.svg linguist-generated=false
 assets/logo/menu-bar.svg linguist-generated=false
 assets/logo/*.svgz binary linguist-generated=true
 frontend/public/logo.svg linguist-generated=true
+macos/MindRoom/Sources/MindRoom/Resources/logo.svg linguist-generated=true
 docs/assets/logo.svg linguist-generated=true
 saas-platform/platform-frontend/public/res/branding/mindroom.svg linguist-generated=true

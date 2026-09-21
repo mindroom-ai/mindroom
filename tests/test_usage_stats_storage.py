@@ -59,7 +59,6 @@ def _source(path: Path, *, table: str = "code_sessions") -> UsageStorageSource:
         expected_session_table=table,
         source_agent_id="code",
         allowed_agent_ids=frozenset({"code"}),
-        allowed_team_ids=frozenset({"engineering"}),
         requester_isolated=False,
     )
 
@@ -611,6 +610,37 @@ def test_admin_discovery_finds_shared_private_and_team_databases(tmp_path: Path)
     assert "agents/shared/sessions/shared.db" in labels
     assert private_database.resolve().relative_to(root.resolve()).as_posix() in labels
     assert team_database.resolve().relative_to(root.resolve()).as_posix() in labels
+
+
+@pytest.mark.parametrize("link_level", [0, 1, 2], ids=["database", "sessions", "team"])
+def test_admin_discovery_reports_rejected_team_symlinks(tmp_path: Path, link_level: int) -> None:
+    """Rejected team paths remain visible in coverage without hiding valid neighbors."""
+    runtime_paths = _paths(tmp_path)
+    root = runtime_paths.config_dir / "sessions"
+    rejected_database = root / "teams" / "team_rejected" / "sessions" / "team_rejected.db"
+    valid_database = root / "teams" / "team_valid" / "sessions" / "team_valid.db"
+    for database in (rejected_database, valid_database):
+        database.parent.mkdir(parents=True)
+        database.touch()
+    rejected_path = (rejected_database, rejected_database.parent, rejected_database.parent.parent)[link_level]
+    target = rejected_path.rename(tmp_path / "outside-team-source")
+    rejected_path.symlink_to(target, target_is_directory=link_level != 0)
+
+    sources = discover_admin_usage_sources(config=_config(), runtime_paths=runtime_paths)
+
+    assert (
+        UsageStorageDiagnostic(
+            path_label=rejected_database.relative_to(root).as_posix(),
+            status="partial",
+            detail="source discovery unavailable",
+            scope="team",
+        )
+        in sources
+    )
+    team_paths = {
+        source.path for source in sources if isinstance(source, UsageStorageSource) and source.scope == "team"
+    }
+    assert team_paths == {valid_database.resolve()}
 
 
 def test_admin_discovery_reports_directory_read_failure(

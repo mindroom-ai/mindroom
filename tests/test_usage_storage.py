@@ -250,7 +250,6 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Sqlite
         expected_session_table="code_sessions",
         source_agent_id="code",
         allowed_agent_ids=frozenset({"code"}),
-        allowed_team_ids=frozenset(),
         requester_isolated=False,
     )
     before = list(iter_usage_storage_rows(source))

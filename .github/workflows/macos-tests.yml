@@ -62,7 +62,7 @@ jobs:
           swift - "dist/macos/MindRoom.app/Contents/Resources/MindRoom_MindRoom.bundle" <<'SWIFT'
           import AppKit
           let resources = Bundle(path: CommandLine.arguments[1])!
-          guard let image = resources.image(forResource: "MindRoomMenuBar"), image.isValid else {
+          guard let image = resources.image(forResource: "logo-menu"), image.isValid else {
               fatalError("Packaged menu bar artwork is missing or invalid")
           }
           SWIFT
