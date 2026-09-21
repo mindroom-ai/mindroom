@@ -2133,6 +2133,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.typesafe_participation",
     "mindroom.config.participation",
     "mindroom.participation",
     "mindroom.response_activity",
@@ -5966,7 +5967,7 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 [[modules]]
 path = "mindroom.history.message_content"
 depends_on = ["mindroom.token_budget"]
-visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models"]
+visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models", "mindroom.agno_participation"]
 
 [[modules]]
 path = "mindroom.agno_compat_provider_errors"
@@ -6039,11 +6040,11 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
 [[modules]]
 path = "mindroom.participation"
 depends_on = ["mindroom.logging_config"]
-visibility = ["mindroom.agno_participation", "mindroom.response_runner", "mindroom.response_turn"]
+visibility = ["mindroom.agno_participation", "mindroom.response_runner", "mindroom.response_turn", "mindroom.typesafe_participation"]
 
 [[modules]]
 path = "mindroom.agno_participation"
-depends_on = ["mindroom.agno_compat_model_hooks", "mindroom.participation", "mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy", "mindroom.json_utils"]
+depends_on = ["mindroom.history.message_content", "mindroom.judgment.state", "mindroom.agno_compat_model_hooks", "mindroom.participation", "mindroom.logging_config", "mindroom.hooks.enrichment", "mindroom.provider_tool_policy", "mindroom.json_utils"]
 visibility = ["mindroom.ai"]
 
 [[modules]]
@@ -6521,7 +6522,7 @@ path = "mindroom.legacy_usage_storage"
 depends_on = ["mindroom.background_tasks", "mindroom.constants", "mindroom.legacy_session_storage", "mindroom.usage_storage"]
 visibility = ["mindroom.agent_storage", "mindroom.orchestrator", "mindroom.api.main"]
 
-# Offline judgment replay leaves; no response-pipeline dependency.
+# Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]
 path = "mindroom.judgment.answers"
 depends_on = []
@@ -6533,3 +6534,8 @@ depends_on = ["mindroom.judgment.answers", "mindroom.redaction"]
 [[modules]]
 path = "mindroom.judgment.client"
 depends_on = ["mindroom.judgment.answers", "mindroom.judgment.state"]
+
+[[modules]]
+path = "mindroom.typesafe_participation"
+depends_on = ["mindroom.judgment.client", "mindroom.judgment.state", "mindroom.logging_config", "mindroom.participation"]
+visibility = ["mindroom.response_runner"]

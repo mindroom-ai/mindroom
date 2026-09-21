@@ -1089,6 +1089,37 @@ If an interrupted turn already owns a visible response, recovery retains its app
 Commands and scheduled work do not opt into adaptive participation.
 Omit `room_participation` to keep the default behavior.
 
+### TypeSafe participation
+
+To use TypeSafe for the participation decision, add `typesafe` to an opted-in room and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env` file.
+Omitting `typesafe` (or setting it to `null`) keeps the existing in-model check, even when a key is present.
+
+```yaml
+room_participation:
+  lobby:
+    agent: assistant
+    instructions: "Join when you can help; leave human conversation uninterrupted."
+    typesafe:
+      threshold: 0.8
+      timeout_seconds: 1.5
+```
+
+This setting authorizes sending room guidance and up to eight recent prepared user/assistant messages to `https://api.typesafe.ai/v1/systemone`.
+System prompts, tool definitions/results, and media are excluded; Matrix message metadata is replaced with request-local speaker aliases.
+Message bodies can still contain identifying or private text.
+If the selected context contains media, non-text content, detected secrets, or exceeds the 16 KB request limit, the check falls back without sending that context to TypeSafe.
+The client pins `jev-1.13.0` and accepts only the documented [Noul probability response](https://docs.typesafe.ai/api).
+A probability at or above `threshold` approves participation; a lower value stays quiet.
+The threshold accepts finite values from zero to one and defaults to `0.8`; this default has not been calibrated against a representative participation corpus.
+`timeout_seconds` accepts finite positive values up to thirty seconds and defaults to `1.5`.
+This is an additional request deadline after the normal participation debounce, not a deadline for the fallback model call.
+Missing credentials, exhausted concurrency, timeout, HTTP/transport failure, malformed output, or model drift use the existing in-model decision and its quiet-on-failure behavior.
+Cancellation propagates without starting a fallback call.
+Valid TypeSafe decisions bypass the reply provider's tool-free decision restrictions, so providers with automatic native tools can answer after approval.
+The fallback retains the provider restrictions described above.
+Only one decision runs per turn, including retries; recovery of an already-visible response retains its approval.
+Logs record probability, threshold, model, latency, token usage, and failure category without logging request text or credentials.
+
 ## Splitting the Configuration Into Multiple Files
 
 Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.
@@ -18346,6 +18377,7 @@ MindRoom's architecture consists of several key components working together.
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
+| `typesafe_participation.py` | Opt-in TypeSafe participation decider: bounded text judgments, threshold decisions, and in-model fallback |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |

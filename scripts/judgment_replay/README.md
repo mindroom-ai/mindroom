@@ -1,7 +1,8 @@
 # Offline judgment replay
 
-Phase 1 only: freeze evidence, collect independent labels, replay saved TypeSafe responses and report coverage.
-No runtime imports this harness; no participation, notice, configuration or response-pipeline behavior changes.
+This offline harness freezes evidence, collects independent labels, replays saved TypeSafe responses and reports coverage.
+No runtime imports this harness.
+The shared client also supports an explicitly opted-in [runtime participation gate](../../docs/configuration/index.md#typesafe-participation); queued-message notices remain unchanged.
 The candidate contract pins `jev-1.13.0`; this is not a claim that its real-world quality has been evaluated.
 
 ## Privacy and network boundary
@@ -17,7 +18,7 @@ Failed copies are removed and reported.
 
 Live `evaluate` requires explicit `--allow-network`, a reviewed input file and its exact SHA-256, complete verified case provenance, a credential, a dated tariff, and explicit request and dollar caps.
 This flag was **never used against an external transport in Phase 1**.
-Bas has not authorized redacted conversation text to leave the host.
+The historical Phase 1 experiment did not authorize conversation text to leave the host.
 Best-effort credential redaction does not establish permission to send other private text.
 The current historical corpus has no verified pending membership, so its cases cannot pass live input validation.
 

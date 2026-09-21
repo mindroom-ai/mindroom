@@ -26,13 +26,14 @@ from mindroom.judgment.state import (
     JudgmentMessage,
     JudgmentRequest,
     QueuedJudgmentInput,
+    build_participation_judgment_request,
     build_queued_judgment_request,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
-    from mindroom.judgment.answers import ChoiceResponse
+    from mindroom.judgment.answers import ChoiceAnswer, JudgmentResponse
 
 
 pytestmark = pytest.mark.asyncio
@@ -101,6 +102,42 @@ async def test_client_posts_exact_contract_and_retains_api_confidence() -> None:
     assert str(seen[0].url) == _TYPE_SAFE_ENDPOINT
     assert seen[0].headers["authorization"] == "Bearer test-secret"
     assert json.loads(seen[0].content) == json.loads(_request().body or b"")
+
+
+@pytest.mark.parametrize("probability", [0.0, 0.8, 1.0, True, -0.1, 1.1, "0.9", None, float("nan"), float("inf")])
+async def test_participation_client_validates_noul_and_network_opt_in(probability: object) -> None:
+    """A malformed Noul must not approve participation or bypass network opt-in."""
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "model": PINNED_MODEL,
+                    "answers": {"participation": {"type": "noul", "noul": probability}},
+                    "usage": {"input_tokens": 100, "output_tokens": 1},
+                },
+            ).encode(),
+        )
+
+    client = SystemOneClient(api_key="test-secret", model=PINNED_MODEL, transport=httpx.MockTransport(respond))
+    request = build_participation_judgment_request((JudgmentMessage("user", "Any thoughts?"),), instructions="")
+    refused = await client.judge_participation(request, owner="agent")
+    assert refused.failure == "network_disabled"
+    assert not requests
+    result = await client.judge_participation(request, owner="agent", allow_network=True)
+    assert len(requests) == 1
+    assert requests[0].content == request.body
+    assert requests[0].headers["authorization"] == "Bearer test-secret"
+    if type(probability) is float and 0 <= probability <= 1:
+        assert result.answer is not None
+        assert result.answer.probability == probability
+        assert result.failure is None
+    else:
+        assert result.answer is None
+        assert result.failure == "invalid_response"
 
 
 async def test_client_requires_explicit_network_opt_in() -> None:
@@ -391,7 +428,7 @@ async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pyt
     clock = [0.0]
     original = client_module.decode_response
 
-    def slow_decode(body: bytes, *, expected_model: str) -> ChoiceResponse:
+    def slow_decode(body: bytes, *, expected_model: str) -> JudgmentResponse[ChoiceAnswer]:
         response = original(body, expected_model=expected_model)
         clock[0] = 2.0
         return response

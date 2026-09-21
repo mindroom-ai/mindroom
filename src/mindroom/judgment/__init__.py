@@ -1,6 +1,6 @@
 """Leaf types for bounded external judgment evaluation."""
 
-from mindroom.judgment.answers import ChoiceAnswer, ChoiceQuestion, ChoiceResponse, JudgmentResult, TokenUsage
+from mindroom.judgment.answers import ChoiceAnswer, ChoiceQuestion, JudgmentResponse, JudgmentResult, TokenUsage
 from mindroom.judgment.client import (
     InvalidJudgmentResponseError,
     JudgmentCapacity,
@@ -22,12 +22,12 @@ __all__ = [
     "QUEUED_MESSAGE_QUESTION",
     "ChoiceAnswer",
     "ChoiceQuestion",
-    "ChoiceResponse",
     "InvalidJudgmentResponseError",
     "JudgmentCapacity",
     "JudgmentMessage",
     "JudgmentModelDriftError",
     "JudgmentRequest",
+    "JudgmentResponse",
     "JudgmentResult",
     "QueuedJudgmentInput",
     "SystemOneClient",

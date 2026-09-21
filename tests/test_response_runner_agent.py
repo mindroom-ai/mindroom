@@ -58,6 +58,8 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.judgment.client import SystemOneClient
+from mindroom.judgment.state import PINNED_MODEL
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -3426,17 +3428,20 @@ class TestAdaptiveResponse(AgentBotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.parametrize("action", ["respond", "stay_silent", "compression_failure", "sync_restart"])
-    async def test_participation_precedes_every_visible_effect(
+    @pytest.mark.parametrize("backend", ["model", "typesafe"])
+    async def test_participation_precedes_every_visible_effect(  # noqa: PLR0915 - full delivery lifecycle assertions
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         streaming: bool,
         action: str,
+        backend: str,
     ) -> None:
         """A silent decision must not send placeholders, typing, or retry notices."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        paths = replace(runtime_paths_for(config), process_env={"TYPESAFE_API_KEY": "test-key"})
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
         bot.client.room_send.return_value = _room_send_response("$response")
@@ -3446,6 +3451,23 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action == "sync_restart"
             else ModelResponse(content=json.dumps({"action": action, "reason": "Conversation context."})),
         )
+        typesafe_calls: list[bytes] = []
+
+        async def post(_self: SystemOneClient, body: bytes) -> bytes:
+            typesafe_calls.append(body)
+            if action == "sync_restart":
+                raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+            return json.dumps(
+                {
+                    "model": PINNED_MODEL,
+                    "answers": {"participation": {"type": "noul", "noul": 0.95 if action == "respond" else 0.05}},
+                    "usage": {"input_tokens": 100, "output_tokens": 1},
+                },
+            ).encode()
+
+        monkeypatch.setattr(SystemOneClient, "_post", post)
+        if backend == "typesafe":
+            model.decision = ModelResponse(content="Useful answer")
         model.cache_response = True
         monkeypatch.setattr(
             model,
@@ -3494,7 +3516,12 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 user_id="@alice:localhost",
                 agent_name=bot.agent_name,
             ),
-            participation=RoomParticipationConfig(agent=bot.agent_name),
+            participation=RoomParticipationConfig.model_validate(
+                {
+                    "agent": bot.agent_name,
+                    "typesafe": {} if backend == "typesafe" else None,
+                },
+            ),
             on_no_response_handled=settled,
         )
         try:
@@ -3512,12 +3539,13 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 assert source_settled == ["quiet"]
             assert memory_queued == []
-            assert len(model.requests) == (0 if action == "compression_failure" else 1)
+            assert len(model.requests) == (0 if action == "compression_failure" or backend == "typesafe" else 1)
         else:
             assert result == "$response"
             assert any("Useful answer" in body for body in bodies)
             assert source_settled == []
-            assert len(model.requests) == 2
+            assert len(model.requests) == (1 if backend == "typesafe" else 2)
+        assert len(typesafe_calls) == (1 if backend == "typesafe" and action != "compression_failure" else 0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["history", "payload", "runtime", "knowledge"])

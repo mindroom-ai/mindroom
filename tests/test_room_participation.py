@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
+from mindroom.config.participation import RoomParticipationConfig
 from mindroom.matrix.state import MatrixState
 from tests.conftest import test_runtime_paths
 
@@ -75,3 +76,29 @@ def test_room_participation_rejects_unknown_settings() -> None:
                 "room_participation": {"lobby": {"agent": "helper", "debounce_second": 10}},
             },
         )
+
+
+def test_typesafe_requires_room_opt_in() -> None:
+    """Ordinary adaptive rooms must not send conversation text to another provider."""
+    assert RoomParticipationConfig(agent="helper").typesafe is None
+    room = RoomParticipationConfig.model_validate({"agent": "helper", "typesafe": {"threshold": 0.9}})
+    assert room.typesafe is not None
+    assert room.typesafe.threshold == 0.9
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"threshold": -0.1},
+        {"threshold": 1.1},
+        {"threshold": float("nan")},
+        {"timeout_seconds": 0},
+        {"timeout_seconds": 31},
+        {"timeout_seconds": float("inf")},
+        {"threshhold": 0.9},
+    ],
+)
+def test_typesafe_rejects_invalid_settings(settings: dict[str, object]) -> None:
+    """Invalid thresholds, unbounded waits, and typos must fail config loading."""
+    with pytest.raises(ValidationError):
+        RoomParticipationConfig.model_validate({"agent": "helper", "typesafe": settings})

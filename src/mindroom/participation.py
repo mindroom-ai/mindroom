@@ -13,6 +13,8 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from mindroom.judgment.state import JudgmentMessage
+
 logger = get_logger(__name__)
 
 
@@ -24,11 +26,15 @@ class ParticipationDecision(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+type ParticipationDecider = Callable[[tuple[JudgmentMessage, ...]], Awaitable[ParticipationDecision | None]]
+
+
 @dataclass
 class ParticipationGate:
     """One decision shared by retries and continuations of a response turn."""
 
     instructions: str = ""
+    decider: ParticipationDecider | None = field(default=None, repr=False)
     _decision: ParticipationDecision | None = field(default=None, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     decided: asyncio.Event = field(default_factory=asyncio.Event)

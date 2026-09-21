@@ -40,6 +40,13 @@ class ChoiceAnswer:
 
 
 @dataclass(frozen=True, slots=True)
+class NoulAnswer:
+    """A strictly validated probability that participation would be useful."""
+
+    probability: float
+
+
+@dataclass(frozen=True, slots=True)
 class TokenUsage:
     """The provider's nonnegative token counters."""
 
@@ -48,19 +55,19 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class ChoiceResponse:
+class JudgmentResponse[AnswerT]:
     """One complete response from the pinned evaluated model."""
 
     model: str
-    answer: ChoiceAnswer
+    answer: AnswerT
     usage: TokenUsage
 
 
 @dataclass(frozen=True, slots=True)
-class JudgmentResult:
+class JudgmentResult[AnswerT]:
     """A successful answer or one closed failure category."""
 
-    answer: ChoiceAnswer | None
+    answer: AnswerT | None
     failure: JudgmentFailure | None
     model_id: str | None
     latency_ms: int

@@ -7,21 +7,26 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from functools import partial
 from threading import Lock
 from time import perf_counter
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import httpx
 
 from mindroom.judgment.answers import (
     ChoiceAnswer,
-    ChoiceResponse,
     JudgmentFailure,
+    JudgmentResponse,
     JudgmentResult,
+    NoulAnswer,
     QueuedChoice,
     TokenUsage,
 )
 from mindroom.judgment.state import MAX_REQUEST_BYTES, PINNED_MODEL, QUEUED_MESSAGE_QUESTION, JudgmentRequest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _TYPE_SAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 _MAX_RESPONSE_BYTES = 64 * 1024
@@ -130,8 +135,8 @@ def _token_count(value: object, label: str) -> int:
     return value
 
 
-def decode_response(body: bytes, *, expected_model: str) -> ChoiceResponse:
-    """Strictly decode one live or recorded System One response."""
+def _decode_envelope(body: bytes, *, expected_model: str) -> tuple[dict[str, object], TokenUsage]:
+    """Validate shared JSON, model pin, and usage for either fixed question."""
     if len(body) > _MAX_RESPONSE_BYTES:
         msg = "response exceeds the byte limit"
         raise InvalidJudgmentResponseError(msg)
@@ -149,6 +154,17 @@ def decode_response(body: bytes, *, expected_model: str) -> ChoiceResponse:
         msg = "response model does not match the pinned evaluated model"
         raise JudgmentModelDriftError(msg)
 
+    usage = _exact_keys(root["usage"], {"input_tokens", "output_tokens"}, "usage")
+    token_usage = TokenUsage(
+        input_tokens=_token_count(usage["input_tokens"], "input_tokens"),
+        output_tokens=_token_count(usage["output_tokens"], "output_tokens"),
+    )
+    return root, token_usage
+
+
+def decode_response(body: bytes, *, expected_model: str) -> JudgmentResponse[ChoiceAnswer]:
+    """Strictly decode one live or recorded queued-message Choice response."""
+    root, token_usage = _decode_envelope(body, expected_model=expected_model)
     answers = _exact_keys(root["answers"], {QUEUED_MESSAGE_QUESTION.question_id}, "question map")
     answer = _exact_keys(
         answers[QUEUED_MESSAGE_QUESTION.question_id],
@@ -177,19 +193,29 @@ def decode_response(body: bytes, *, expected_model: str) -> ChoiceResponse:
         raise InvalidJudgmentResponseError(msg)
     confidence = _number(answer["confidence"], "confidence")
 
-    usage = _exact_keys(root["usage"], {"input_tokens", "output_tokens"}, "usage")
-    token_usage = TokenUsage(
-        input_tokens=_token_count(usage["input_tokens"], "input_tokens"),
-        output_tokens=_token_count(usage["output_tokens"], "output_tokens"),
-    )
-    return ChoiceResponse(
-        model=model,
+    return JudgmentResponse(
+        model=expected_model,
         answer=ChoiceAnswer(
             choice=cast("QueuedChoice", choice),
             probabilities=(("finish", finish), ("wrap_up", wrap_up)),
             confidence=confidence,
         ),
         usage=token_usage,
+    )
+
+
+def _decode_participation_response(body: bytes, *, expected_model: str) -> JudgmentResponse[NoulAnswer]:
+    """Accept only the requested participation probability, never a generated decision."""
+    root, usage = _decode_envelope(body, expected_model=expected_model)
+    answers = _exact_keys(root["answers"], {"participation"}, "question map")
+    answer = _exact_keys(answers["participation"], {"type", "noul"}, "participation answer")
+    if answer["type"] != "noul":
+        msg = "response answer type is not noul"
+        raise InvalidJudgmentResponseError(msg)
+    return JudgmentResponse(
+        model=expected_model,
+        answer=NoulAnswer(probability=_number(answer["noul"], "participation probability")),
+        usage=usage,
     )
 
 
@@ -221,13 +247,13 @@ class SystemOneClient:
         self._capacity = capacity
 
     @staticmethod
-    def _result(
+    def _result[AnswerT](
         request: JudgmentRequest,
         started: float,
         *,
         failure: JudgmentFailure | None,
-        response: ChoiceResponse | None = None,
-    ) -> JudgmentResult:
+        response: JudgmentResponse[AnswerT] | None = None,
+    ) -> JudgmentResult[AnswerT]:
         return JudgmentResult(
             answer=None if response is None else response.answer,
             failure=failure,
@@ -265,13 +291,17 @@ class SystemOneClient:
             finally:
                 await response.aclose()
 
-    async def _evaluate(self, body: bytes) -> tuple[ChoiceResponse | None, JudgmentFailure | None]:
-        response: ChoiceResponse | None = None
+    async def _evaluate[AnswerT](
+        self,
+        body: bytes,
+        decode: Callable[[bytes], JudgmentResponse[AnswerT]],
+    ) -> tuple[JudgmentResponse[AnswerT] | None, JudgmentFailure | None]:
+        response: JudgmentResponse[AnswerT] | None = None
         failure: JudgmentFailure | None = None
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 response_body = await self._post(body)
-                response = decode_response(response_body, expected_model=self._model)
+                response = decode(response_body)
         except (TimeoutError, httpx.TimeoutException):
             failure = "timeout"
         except _ResponseTooLargeError:
@@ -292,7 +322,38 @@ class SystemOneClient:
         *,
         owner: str,
         allow_network: bool = False,
-    ) -> JudgmentResult:
+    ) -> JudgmentResult[ChoiceAnswer]:
+        """Evaluate the fixed queued-message Choice contract."""
+        return await self._judge(
+            request,
+            owner=owner,
+            allow_network=allow_network,
+            decode=partial(decode_response, expected_model=self._model),
+        )
+
+    async def judge_participation(
+        self,
+        request: JudgmentRequest,
+        *,
+        owner: str,
+        allow_network: bool = False,
+    ) -> JudgmentResult[NoulAnswer]:
+        """Evaluate the fixed participation Noul contract with the same transport budgets."""
+        return await self._judge(
+            request,
+            owner=owner,
+            allow_network=allow_network,
+            decode=partial(_decode_participation_response, expected_model=self._model),
+        )
+
+    async def _judge[AnswerT](
+        self,
+        request: JudgmentRequest,
+        *,
+        owner: str,
+        allow_network: bool,
+        decode: Callable[[bytes], JudgmentResponse[AnswerT]],
+    ) -> JudgmentResult[AnswerT]:
         """Evaluate one complete request; failures return categories and cancellation propagates."""
         started = perf_counter()
         if not request.complete or request.body is None:
@@ -312,7 +373,7 @@ class SystemOneClient:
         if lease is None:
             return self._result(request, started, failure="capacity_exhausted")
         try:
-            response, failure = await self._evaluate(request.body)
+            response, failure = await self._evaluate(request.body, decode)
             if perf_counter() - started > self._timeout_seconds:
                 response, failure = None, "timeout"
             return self._result(request, started, failure=failure, response=response)
