@@ -1136,7 +1136,7 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
         worker_target,
         token="expired-access-token",  # noqa: S106
         refresh_token="retained-refresh-token",  # noqa: S106
-        expires_at=900.0,
+        expires_at=time.time() - 60,
     )
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
@@ -1167,7 +1167,6 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
             }
 
     monkeypatch.setattr("mindroom.oauth.providers.AsyncOAuth2Client", RecoveringOAuth2Client)
-    monkeypatch.setattr("mindroom.oauth.providers.time.time", lambda: 1000.0)
     toolkit = MindRoomMCPToolkit(
         server_id="demo",
         manager=manager,
