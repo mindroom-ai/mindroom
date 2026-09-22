@@ -11,6 +11,7 @@ from mindroom.hooks.sender import send_matrix_message
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
     import nio
@@ -99,13 +100,17 @@ async def execute_external_trigger(
 async def is_external_trigger_owner_joined_target_room(
     client: nio.AsyncClient,
     snapshot: TriggerDeliverySnapshot,
+    config: Config,
+    runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether the trigger owner is currently joined to the delivery room.
 
     A failed membership fetch counts as not joined so delivery stays fail-closed.
     """
     member_ids = await get_room_members(client, snapshot.resolved_room_id)
-    return member_ids is not None and snapshot.owner_user_id in member_ids
+    return member_ids is not None and not member_ids.isdisjoint(
+        equivalent_requester_ids(snapshot.owner_user_id, config, runtime_paths),
+    )
 
 
 def _external_trigger_content_metadata(

@@ -76,11 +76,15 @@ MindRoom resolves skills for each agent from these locations, in this order:
 1. Bundled skills: `skills/` at the repository root (if present)
 2. Plugin-provided skill directories (see [Plugins](https://docs.mindroom.chat/plugins/))
 3. User skills: `~/.mindroom/skills/`
-4. Agent workspace skills: `<storage>/agents/<agent>/workspace/skills/`
+4. Agent workspace skills: `<resolved workspace>/skills/`
+
+For agents without `private`, this is `<storage>/agents/<agent>/workspace/skills/`.
+Private instances use `<storage>/private_instances/<scope-directory>/<agent>/<private.root>/skills/`; see [Private Instances](https://docs.mindroom.chat/configuration/agents/#private-instances).
 
 If multiple skills share the same name, the last one wins (agent workspace > user > plugin > bundled).
 
-Agent workspace skills are only available to the owning agent at runtime. They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
+Agent workspace skills are only available to the owning agent or private instance at runtime.
+They do not appear in the global skills API or dashboard listing because those views are not agent-scoped.
 
 ## Authoring skills as an agent
 
@@ -108,7 +112,7 @@ agents:
 
 The `skills:` list is an allowlist for bundled, plugin, and user skills.
 If `skills` is empty or unset, the agent gets no bundled, plugin, or user skills.
-Workspace skills under `<storage>/agents/<agent>/workspace/skills/` are still auto-loaded for that agent.
+Workspace skills under `<resolved workspace>/skills/` are still auto-loaded for that agent or private instance.
 This lets an agent create or receive skills in its own workspace without editing `config.yaml`.
 
 Workspace auto-loading is a runtime capability, not a proactive behavior policy.

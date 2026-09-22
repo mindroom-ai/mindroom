@@ -1565,11 +1565,11 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Bitbucket username",
+          "description": "Atlassian account email for Bitbucket Cloud; Basic-auth username for other deployments",
           "label": "Username",
           "name": "username",
           "options": null,
-          "placeholder": "Bitbucket username",
+          "placeholder": "you@example.com",
           "required": true,
           "type": "text",
           "validation": null
@@ -1577,8 +1577,8 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "App password. Use either this or token.",
-          "label": "App Password",
+          "description": "Basic-auth password for deployments that support it; use token for Bitbucket Cloud.",
+          "label": "Password",
           "name": "password",
           "options": null,
           "placeholder": null,
@@ -1589,7 +1589,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Access token. Use either this or password.",
+          "description": "Scoped Bitbucket Cloud API token; takes precedence over password.",
           "label": "Token",
           "name": "token",
           "options": null,
@@ -1677,7 +1677,7 @@
         "list_repositories",
         "list_repository_commits"
       ],
-      "helper_text": "Create an app password at [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/)",
+      "helper_text": "For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in Token, with your Atlassian account email in Username. Other deployments must accept the supplied credentials through Basic authentication.",
       "icon": "SiBitbucket",
       "icon_color": "text-blue-600",
       "name": "bitbucket",
@@ -6782,10 +6782,8 @@
       "docs_url": "https://docs.agno.com/tools/toolkits/social/gmail",
       "function_names": [
         "apply_label",
-        "archive_email",
         "create_draft_email",
         "delete_custom_label",
-        "download_attachment",
         "get_draft",
         "get_emails_by_context",
         "get_emails_by_date",
@@ -6798,21 +6796,15 @@
         "get_unread_emails",
         "list_custom_labels",
         "list_drafts",
-        "list_labels",
         "mark_email_as_read",
         "mark_email_as_unread",
-        "modify_message_labels",
-        "modify_thread_labels",
         "remove_label",
         "search_emails",
         "search_threads",
-        "send_draft",
         "send_email",
         "send_email_reply",
         "send_email_to_self",
         "star_email",
-        "trash_message",
-        "trash_thread",
         "unstar_email",
         "update_draft"
       ],
@@ -7292,6 +7284,18 @@
         {
           "authored_override": true,
           "default": null,
+          "description": "Nonempty list of Composio action IDs to expose to the agent",
+          "label": "Actions",
+          "name": "actions",
+          "options": null,
+          "placeholder": "GITHUB_GET_THE_AUTHENTICATED_USER",
+          "required": true,
+          "type": "string[]",
+          "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": null,
           "description": "Composio API key",
           "label": "API Key",
           "name": "api_key",
@@ -7490,38 +7494,7 @@
       "description": "Access 1000+ integrations including Gmail, Salesforce, GitHub, and more",
       "display_name": "Composio",
       "docs_url": "https://docs.agno.com/tools/toolkits/others/composio",
-      "function_names": [
-        "check_connected_account",
-        "create_integration",
-        "create_trigger_listener",
-        "delete_trigger",
-        "execute_action",
-        "execute_request",
-        "fetch_expected_integration_params",
-        "find_actions_by_tags",
-        "find_actions_by_use_case",
-        "get_action",
-        "get_action_schemas",
-        "get_active_triggers",
-        "get_agent_instructions",
-        "get_app",
-        "get_apps",
-        "get_auth_params",
-        "get_auth_scheme_for_app",
-        "get_auth_schemes",
-        "get_connected_account",
-        "get_connected_accounts",
-        "get_entity",
-        "get_expected_params_for_user",
-        "get_integration",
-        "get_integrations",
-        "get_tools",
-        "get_trigger",
-        "get_trigger_config_scheme",
-        "initiate_connection",
-        "set_workspace_id",
-        "validate_tools"
-      ],
+      "function_names": [],
       "helper_text": null,
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
@@ -7633,7 +7606,7 @@
         "get_shop_info",
         "get_top_selling_products"
       ],
-      "helper_text": "Create a custom app in your [Shopify Admin](https://admin.shopify.com/) to get an access token",
+      "helper_text": "Create and install new apps through the [Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard), then follow its authentication steps and store the Admin API access token here. Existing legacy custom apps can keep their token setup. This tool does not issue or refresh tokens.",
       "icon": "SiShopify",
       "icon_color": "text-green-600",
       "name": "shopify",
@@ -8082,7 +8055,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Tool names workflow participants may call without per-call user approval. Use \"*\" to pre-approve every granted tool. System-mutating tools (claude_agent, config_manager, scheduler) always require per-call approval and cannot be pre-approved.",
+          "description": "Toolkit names receiving automatic approval grants after operator rules. Use \"*\" for all eligible granted toolkits. claude_agent, config_manager, and scheduler receive no generated grant; explicit operator rules can authorize otherwise eligible functions. Functions requiring approval or native confirmation remain unavailable.",
           "label": "Pre-approved participant tools",
           "name": "allowed_tools",
           "options": null,
@@ -10462,18 +10435,6 @@
         },
         {
           "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Proxy Config",
-          "name": "proxy_config",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Crawl",
@@ -10892,7 +10853,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -10904,7 +10865,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -11065,7 +11026,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -11090,18 +11051,6 @@
           "placeholder": null,
           "required": false,
           "type": "number",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Search Params",
-          "name": "search_params",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -11295,7 +11244,7 @@
       "dependencies": [
         "ddgs"
       ],
-      "description": "Search Google for web results using the WebSearch backend",
+      "description": "Search web and news through DDGS with a requested Google backend and automatic fallback",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/websearch",
       "function_names": [
@@ -12015,7 +11964,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -12328,18 +12277,6 @@
           "placeholder": null,
           "required": false,
           "type": "url",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Optional Params",
-          "name": "optional_params",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -13371,7 +13308,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Restrict tool calls to these subreddits (case-insensitive)",
+          "description": "Restrict posts and replies to these subreddits (case-insensitive); reads are unaffected",
           "label": "Allowed Subreddits",
           "name": "allowed_subreddits",
           "options": null,

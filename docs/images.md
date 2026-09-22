@@ -73,22 +73,26 @@ Both unencrypted and E2E encrypted images are supported. Encrypted images are de
 
 ## Media Fallback
 
-If a model rejects inline media (images, audio, video, or documents), MindRoom automatically retries the request without the inline media.
+Eligible failures of requests containing inline media (images, audio, video, or documents) trigger one automatic retry without that media.
 The retried prompt includes `[Inline media unavailable for this model]` to inform the agent that attachments were dropped.
 Agents can still reference the files via attachment IDs and tools.
 
-This fallback is transparent — no user action is required.
-Any ordinary failure of a media-bearing request triggers one retry without media — no error wording decides whether to retry, so unknown provider prose degrades gracefully instead of surfacing a raw provider error.
-Provider safeguard refusals are returned as refusals and are not retried without media.
+For streaming requests, fallback is eligible only before meaningful provider output reaches the caller; generated content, tool calls, and reasoning prevent replay.
+Recognized transient streaming failures instead use up to four retries of the same request with media preserved, provided no meaningful output has been delivered.
+If that budget is exhausted, the error is surfaced without a new media-free retry budget.
+Errors requesting a guided retry, incomplete Responses streams, and provider safeguard refusals do not trigger the media-free fallback.
+Non-streaming calls have separate eligibility rules: an eligible transient failure may receive the one media-free retry.
+
 When the retry succeeds after exactly one previously unknown media kind was present, the model route learns that kind is unsupported, and later requests omit it up front instead of paying a failed API call.
-Failures involving multiple previously unknown media kinds still retry once, but do not teach the capability cache because one stripped attempt cannot identify which kind caused the failure.
-Fallback retries are eligible only before provider output reaches the caller; streams are never replayed after partial output.
+Eligible failures involving multiple previously unknown media kinds still retry once, but do not teach the capability cache because one stripped attempt cannot identify which kind caused the failure.
 This learned capability state is process-local and resets on restart.
 Payload-size and context-overflow rejections never teach the capability state, since dropping media can shrink an oversized request for reasons unrelated to media support.
 Transient failures (HTTP 5xx and 429 status codes on the provider exception) also never teach, since their retry can succeed simply because the outage or rate limit passed.
 
 ## Limitations
 
+- **Incoming image size** -- the downloaded payload and, for encrypted images, the decrypted payload must each be at most 64 MiB (67,108,864 bytes).
+  These checks run after download returns; send a smaller image if rejected, and account for any stricter homeserver or provider limits.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the image caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Bridge mention detection** uses `m.mentions` in the event, falling back to parsing HTML pills from `formatted_body` when `m.mentions` is absent (e.g., mautrix-telegram). Bridges that set neither may not trigger agent responses.
 - **Model support** -- vision input requires a model that supports it. Text-only models reject inline images, and the [media fallback](#media-fallback) retries without them so the agent still answers with a note that it cannot view the attachment.

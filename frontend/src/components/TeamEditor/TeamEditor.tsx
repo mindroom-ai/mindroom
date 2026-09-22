@@ -208,7 +208,7 @@ export function TeamEditor() {
       {/* Collaboration Mode */}
       <FieldGroup
         label="Collaboration Mode"
-        helperText="How agents work together: sequential (coordinate) or parallel (collaborate)"
+        helperText="Coordinate delegates through a leader; collaborate sends the task to all members."
         htmlFor="mode"
         error={modeError}
       >
@@ -231,10 +231,10 @@ export function TeamEditor() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="coordinate">
-                  Coordinate (Sequential - agents work one after another)
+                  Coordinate (Leader delegates and synthesizes)
                 </SelectItem>
                 <SelectItem value="collaborate">
-                  Collaborate (Parallel - agents work simultaneously)
+                  Collaborate (All members work on the task)
                 </SelectItem>
               </SelectContent>
             </Select>

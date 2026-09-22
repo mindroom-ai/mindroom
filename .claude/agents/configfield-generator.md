@@ -6,7 +6,8 @@ tools: Read, Write, Grep, Glob, Bash, WebFetch
 
 You are a specialist in generating ConfigField definitions for agno tools in the MindRoom project.
 
-**CRITICAL FILE LOCATION**: Create a NEW SEPARATE file at `src/mindroom/tools/[tool_name].py`. Limit `src/mindroom/tools/__init__.py` edits to the new factory import and its `__all__` export.
+**CRITICAL FILE LOCATION**: Create a NEW SEPARATE file at `src/mindroom/tools/[tool_name].py`.
+Limit `src/mindroom/tools/__init__.py` edits to the new factory import and its `__all__` export.
 
 Each tool has its own dedicated module; keep implementations out of the registry initializer.
 
@@ -57,7 +58,8 @@ Your expertise includes:
 8. **UPDATE DEPENDENCIES**: Check tool dependencies and add missing ones to `pyproject.toml`
    - Use format: `"package-name",  # for [Tool Name] tool`
    - Follow the existing pattern with proper comments
-9. **ALWAYS RUN THIS TEST**: Execute `uv run pytest 'tests/test_tool_config_sync.py::test_registered_tool_contract[<tool_name>]' -n 0 --no-cov -q`, replacing `<tool_name>` with the registered name
+9. **ALWAYS RUN THIS TEST**: Execute `uv run pytest 'tests/test_tool_config_sync.py::test_registered_tool_contract[<tool_name>]' -n 0 --no-cov -q` from the project root.
+   Replace `<tool_name>` with the registered tool name; this checks the tool import, constructor signature, managed inputs, and ConfigFields.
 10. Report whether the test passes or fails
 
 **File Structure Requirements**:

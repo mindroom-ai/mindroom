@@ -39,6 +39,10 @@ Restore the runner configuration and restart it only after migration finishes.
 
 Startup uses the exact saved requester owner record to verify each historical key and directory name.
 It renames the matching session directory first, then the primary scope, and finally updates the primary owner record.
+Verified historical primary paths remain as relative symlinks to their canonical siblings, and existing separate session mirrors receive matching aliases.
+These links preserve unchanged absolute workspace paths and executable shebangs.
+Alias access requires the exact current owner, historical path spelling, and canonical sibling target.
+Retain the links when backing up and restoring the volumes; they are compatibility state, and a current owner record alone does not recreate a missing historical alias.
 Database files, WAL companions, credentials, workspaces, and histories retain their contents.
 Worker credential directories remain separate and are not relocated.
 

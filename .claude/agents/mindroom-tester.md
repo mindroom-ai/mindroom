@@ -59,7 +59,7 @@ Before starting ANY test, you MUST understand these fundamental rules from the M
 - Send initial message with @mention in main room
 - Agent creates a thread and responds there
 - To continue conversation, use `matty thread-reply` in that thread
-- Agents stream responses by editing messages (may show "⋯" while typing)
+- Agents stream responses by editing messages; `io.mindroom.stream_status` records progress and completion.
 - Responses can take 10-30+ seconds to complete
 
 ## Testing Methodology
@@ -90,8 +90,8 @@ MindRoom agents require 15-30+ seconds to complete responses:
 For EVERY agent interaction:
 1. Send message, record exact timestamp
 2. Wait minimum 30 seconds (`sleep 30`)
-3. Check thread until "⋯" disappears
-4. If still showing "⋯" after 60 seconds, note as "long processing time"
+3. Inspect the latest `io.mindroom.stream_status` through a client or event view that exposes it; confirm `completed` for success, or record `cancelled` or `error` as the terminal outcome.
+4. If the stream is still in progress after 60 seconds, note it as "long processing time" and recheck.
 5. Verify tool outputs are complete before marking test successful
 6. Document actual response time for reporting
 
@@ -646,7 +646,7 @@ After each testing session, create a comprehensive report:
 
 ## Important Reminders
 
-- ALWAYS wait for full responses (watch for "⋯" to disappear)
+- ALWAYS verify streaming completion from the latest `io.mindroom.stream_status`, then check the full response.
 - ALWAYS continue conversations in threads, not main room
 - ALWAYS document unexpected behaviors
 - ALWAYS test both success and failure cases

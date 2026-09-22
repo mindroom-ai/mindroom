@@ -18,6 +18,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import show_tool_calls_for_agent
 from mindroom.ai import ResponseTurnContext, ai_response, build_matrix_run_metadata, stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
+from mindroom.ai_runtime import bind_mid_turn_conversation_context
 from mindroom.approval_execution import AgentApprovalExecution
 from mindroom.approval_receipt import approval_receipt_context, build_approval_receipt
 from mindroom.approval_response import (
@@ -70,7 +71,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
-from mindroom.mid_turn_judgment import create_mid_turn_gate
+from mindroom.mid_turn_judgment import conversation_context_for_mid_turn, create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -565,6 +566,9 @@ def _mid_turn_for_request(
         has_media=has_media,
         on_defer=on_defer,
     )
+    if gate is not None:
+        # The ingress history may be stale until this response acquires the lock.
+        gate.bind_conversation_context(None)
     if gate is not None and request.existing_event_id and not request.existing_event_is_placeholder:
         gate.visible_response_text = None
     return gate
@@ -1532,6 +1536,7 @@ class ResponseRunner:
     ) -> FinalDeliveryOutcome:
         """Run one claimed pause through the normal stoppable response lifecycle."""
         request = self._approval_response_request(claimed, target=target)
+        await self._refresh_mid_turn_context_for_approval(request)
         progress = _DeliveryProgress(tracked_event_id=claimed.response_event_id)
         progress.note_delivery_started(claimed.response_event_id)
         lifecycle = self._build_lifecycle(
@@ -3009,7 +3014,7 @@ class ResponseRunner:
                 thread_id=request.thread_id,
                 error=str(exc),
             )
-            return request
+            return replace(request, requires_model_history_refresh=True)
         if exclude_event_id is not None:
             filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
             if len(filtered_history) != len(refreshed_history):
@@ -3018,6 +3023,30 @@ class ResponseRunner:
             request,
             thread_history=refreshed_history,
             requires_model_history_refresh=False,
+        )
+
+    async def _refresh_mid_turn_context_for_approval(self, request: ResponseRequest) -> None:
+        """Approval resumptions bypass ordinary payload preparation."""
+        agent = self.deps.runtime.config.agents.get(request.response_envelope.agent_name)
+        if agent is not None and agent.mid_turn is not None:
+            # Refresh only the judge's public context; native continuation input stays unchanged.
+            refreshed = await self._refresh_model_history_after_lock(request)
+            self._bind_mid_turn_context(refreshed)
+
+    def _bind_mid_turn_context(self, request: ResponseRequest) -> None:
+        """Only successfully refreshed public history may authorize continuing tools."""
+        bind_mid_turn_conversation_context(
+            lambda: (
+                None
+                if request.requires_model_history_refresh
+                else conversation_context_for_mid_turn(
+                    request.thread_history,
+                    source_event_ids=request.sources.logical_source_event_ids,
+                    thread_id=request.thread_id,
+                    config=self.deps.runtime.config,
+                    runtime_paths=self.deps.runtime_paths,
+                )
+            ),
         )
 
     async def _prepare_request_after_lock(
@@ -3034,6 +3063,7 @@ class ResponseRunner:
                 request,
                 exclude_event_id=exclude_history_event_id,
             )
+            self._bind_mid_turn_context(request)
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
             request = replace(
