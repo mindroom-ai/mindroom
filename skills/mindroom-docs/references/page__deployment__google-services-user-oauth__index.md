@@ -51,9 +51,10 @@ The software running on your machine stores the connection, while the Google API
 The installation operator and anyone with administrative or filesystem access to its storage may be able to access locally stored credentials and data.
 
 The example above uses `worker_scope: user_agent`, which keeps each authenticated Matrix requester's connection separate for that agent.
-With `worker_scope: user`, one requester can reuse the connection across that requester's user-scoped agents.
-With `worker_scope: shared`, any user authorized to invoke the selected shared agent can cause it to use the connected Google Account and may receive Google data in its response.
-With no worker scope configured, the connection is stored at the installation level and is not isolated by requester.
+In general, the saved effective execution scope comes from `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope.
+With effective scope `user`, one requester can reuse the connection across that requester's user-scoped agents.
+With effective scope `shared`, any user authorized to invoke the selected agent can cause it to use the connected Google Account and may receive Google data in its response.
+Only with no private, per-agent, or inherited scope is the connection stored at the installation level without requester isolation.
 
 Being signed in to the computer does not itself determine access.
 MindRoom uses authenticated Matrix requester identity, agent authorization, and the configured credential scope, while operating-system and storage permissions remain the installation operator's responsibility.

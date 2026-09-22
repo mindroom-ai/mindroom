@@ -69,10 +69,13 @@ Use this when you want everything local: the bundled MindRoom dashboard, Matrix 
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 cp .env.example .env
-$EDITOR .env  # add at least one AI provider key
+$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
 
 docker compose up -d
 ```
+
+The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
+To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
 
 Open:
 
@@ -142,10 +145,10 @@ OPENAI_API_KEY=your_api_key
 mindroom run
 ```
 
-For local development with a host-installed backend plus Dockerized Synapse + MindRoom Chat (Linux/macOS), you can bootstrap the local stack with:
+For local development with a host-installed backend plus Dockerized Synapse + MindRoom Chat (Linux/macOS), use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 mindroom run
 ```
 

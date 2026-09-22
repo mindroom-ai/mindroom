@@ -58,7 +58,6 @@ export function TeamList() {
       icon={Users}
       items={teams as TeamListItem[]}
       selectedId={selectedTeamId || undefined}
-      onItemSelect={selectTeam}
       onCreateItem={handleCreateTeam}
       renderItem={renderTeam}
       showSearch={true}

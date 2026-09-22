@@ -531,17 +531,24 @@ Design migrations around that assumption rather than adding machinery to coordin
 Use this when you want a full local Matrix stack with the Python backend running on the host (not in Docker).
 
 1) Start/refresh Matrix (Synapse + Postgres + Redis)
+Stop the host backend before resetting.
+The optional reset deletes this Compose project's containers, networks, and volumes, including local accounts, rooms, messages, and media; it also removes the selected runtime's `matrix_state.yaml` and repository `tmp/`.
 ```bash
-# Optional if switching between remote and local homeservers
+# Optional destructive reset of the local development homeserver
 just local-matrix-reset
 just local-matrix-up
 curl -s http://localhost:8008/_matrix/client/versions | head -c 200
 ```
 
-2) If you see login errors (M_FORBIDDEN) or changed homeserver, clear local Matrix state
+Reset uses the same config discovery and storage resolver as `mindroom run`, including `MINDROOM_CONFIG_PATH`, `MINDROOM_STORAGE_PATH`, and the selected config's `.env`.
+If the backend uses `--config` or `--storage-path`, supply the matching `MINDROOM_CONFIG_PATH` or `MINDROOM_STORAGE_PATH` when resetting.
+Run these commands from the repository root; relative environment paths use that directory, while a relative storage path in `.env` uses the selected config directory.
+
+2) If you see login errors (M_FORBIDDEN) or changed homeserver, stop the backend and clear the selected runtime's Matrix state
 ```bash
-rm -f mindroom_data/matrix_state.yaml
+uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
 ```
+This uses the same environment selection as the reset; a hardcoded `mindroom_data/matrix_state.yaml` only covers default storage beside the repository's config.
 
 3) Ensure local OpenAI-compatible server is running on port 9292
 ```bash
@@ -696,6 +703,7 @@ just local-matrix-up              # Boot Synapse + Postgres dev stack
 just local-platform-compose-up    # Full SaaS sandbox
 
 # Testing (IMPORTANT: enter the Node.js 24 `nix-shell shell.nix` first on NixOS hosts)
+# Recipe regression tests require just; shell.nix and CI install it.
 # If `uv run pytest` fails with 'module mindroom has no attribute bot',
 # use the repo dev shell so `libstdc++.so.6` is available:
 nix-shell shell.nix

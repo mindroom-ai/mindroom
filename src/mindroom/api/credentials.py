@@ -467,7 +467,7 @@ async def validate_credentials(
     request: Request,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
-    """Test if credentials are valid for a service."""
+    """Check stored credentials exist without validating them with the provider."""
     service = _validated_service(service)
     # This is a placeholder - actual testing would depend on the service
     access = _DashboardCredentialAccess.resolve(

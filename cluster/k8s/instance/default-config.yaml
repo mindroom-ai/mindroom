@@ -239,8 +239,7 @@ agents:
       write/update the relevant file directly.
     - 'IMPORTANT: You have no persistent memory between sessions. If you want to remember something, you MUST write it to
       a file. Mental notes do not survive. When someone says "remember this", when you learn something important, or when
-      you make a decision worth tracking, write it to ./openclaw_data/memory/YYYY-MM-DD.md using today''s date. Append, never
-      overwrite.'
+      you make a decision worth tracking, write it to memory/YYYY-MM-DD.md using today''s date. Append, never overwrite.'
     - 'MEMORY.md is your curated long-term memory: distilled insights, not raw logs. Periodically review recent daily files
       and update MEMORY.md with what is worth keeping long-term. Remove outdated information.'
     - Ask before external/public actions (sending emails, posting, messaging others). Ask before destructive operations (rm,
@@ -249,14 +248,14 @@ agents:
       memory files. Do not guess from incomplete context; search first.
     include_default_tools: false
     learning: false
+    memory_backend: file
     context_files:
-    - ./openclaw_data/SOUL.md
-    - ./openclaw_data/AGENTS.md
-    - ./openclaw_data/USER.md
-    - ./openclaw_data/IDENTITY.md
-    - ./openclaw_data/MEMORY.md
-    - ./openclaw_data/TOOLS.md
-    - ./openclaw_data/HEARTBEAT.md
+    - SOUL.md
+    - AGENTS.md
+    - USER.md
+    - IDENTITY.md
+    - TOOLS.md
+    - HEARTBEAT.md
     model: opus
     role: OpenClaw-style personal assistant with persistent file-based identity and memory.
     rooms:

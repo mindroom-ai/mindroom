@@ -42,15 +42,11 @@ export interface ListPanelProps<T extends ListItem> {
    */
   selectedId?: string;
   /**
-   * Function to handle item selection
-   */
-  onItemSelect?: (id: string) => void;
-  /**
    * Function to handle item creation
    */
   onCreateItem?: (data?: string) => void | boolean | Promise<void | boolean>;
   /**
-   * Function to render each item
+   * Function to render each item, including accessible selection controls
    */
   renderItem: (item: T, isSelected: boolean) => ReactNode;
   /**
@@ -127,7 +123,6 @@ export function ListPanel<T extends ListItem>({
   icon: Icon,
   items,
   selectedId,
-  onItemSelect: _onItemSelect,
   onCreateItem,
   renderItem,
   showSearch = false,

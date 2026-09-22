@@ -202,6 +202,46 @@ Second question:
         )
         assert mock_warning.call_args.kwargs["block_count"] == 2
 
+    @pytest.mark.parametrize("invalid_payload", ['{"options": []}', '{"options": "invalid"}', "{invalid}"])
+    @pytest.mark.parametrize("extract_mapping", [False, True])
+    def test_first_valid_block_after_invalid_payload(
+        self,
+        invalid_payload: str,
+        extract_mapping: bool,
+    ) -> None:
+        """An invalid matched payload must not hide the next valid question."""
+        response_text = (
+            f"Before\n\n```interactive\n{invalid_payload}\n```\n\nBetween\n\n"
+            '```interactive\n{"question":"Choose one","options":[{"emoji":"✅","label":"Yes","value":"yes"}]}\n```'
+            "\n\nAfter active\n\n"
+            '```interactive\n{"question":"Later question","options":[{"emoji":"🔎","label":"Look","value":"look"}]}\n```'
+            "\n\nEnd"
+        )
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=extract_mapping)
+
+        assert "```" not in response.formatted_text
+        assert invalid_payload not in response.formatted_text
+        assert response.formatted_text.count("React with an emoji or type the number to respond.") == 1
+        expected_parts = [
+            "Before",
+            "Between",
+            "Choose one",
+            "1. ✅ Yes",
+            "After active",
+            "Later question",
+            "1. 🔎 Look",
+            "End",
+        ]
+        positions = [response.formatted_text.index(part) for part in expected_parts]
+        assert positions == sorted(positions)
+        if extract_mapping:
+            assert response.interactive_metadata is not None
+            assert response.interactive_metadata.question_text == "Choose one"
+            assert response.interactive_metadata.option_map == {"✅": "yes", "1": "yes"}
+        else:
+            assert response.interactive_metadata is None
+
     def test_parse_and_format_interactive_ignores_invalid_options_shape(self) -> None:
         """Malformed option containers should not crash the interactive parser."""
         response_text = """```interactive

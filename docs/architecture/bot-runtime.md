@@ -124,9 +124,11 @@ The router retains its source when initial echo publication fails; responders ca
 Router delivery failure raises back into that same retry path instead of completing without terminal truth.
 Recovery parses and invokes pending work without depending on a later Classic Sync token or Sliding Sync position.
 Recovery callbacks may rely on the room ID, while cached membership and state are best-effort because recovery does not wait for a new sync.
-Recovery logs and skips a corrupt pending row so other valid rows can continue, while retaining the corrupt row for repair.
-To repair corruption, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
-Deleting an unrecoverable pending row is a last resort that accepts losing that callback unless Matrix redelivers it.
+Recovery logs and skips rows that cannot be decoded as `JournalEvent` values, retaining those rows pending for repair so other valid rows can continue.
+If a decoded event raises `JournalCorruptionError` during replay or its payload type does not match its stored kind, recovery logs the corruption and settles it, clearing its replay payload.
+To repair a retained unreadable pending row, stop MindRoom, back up the affected database, and restore a known-good copy before restarting.
+Deleting one of those unrecoverable retained rows is a last resort that accepts losing that callback.
+Pending-row repair cannot recover payloads already cleared by settlement.
 Message and media obligations remain unsettled only while their callback, gate, competing turn claim, retry, or a pending `TurnStore` response owns them, then yield only to an explicit settlement.
 Recovery intent travels with queued ingress so pre-existing lane and coalescing workers cannot turn a temporarily unavailable recovered router target into a terminal fallback response.
 Nio 1.0 owns receive cursors, prepared source batches, provenance, and recognition of local membership echoes.

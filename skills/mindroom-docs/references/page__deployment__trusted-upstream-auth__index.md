@@ -228,6 +228,11 @@ The platform chart also fails rendering when `provisioner.trustedUpstreamAuth.re
 
 ## Security Boundary
 
+Dashboard configuration is an operator capability.
+Without `MINDROOM_CONNECTIONS_AGENT`, every user authenticated by the trusted upstream can read and change dashboard configuration, regardless of the Matrix `administrators` list.
+Restrict gateway admission to trusted operators in that mode.
+With Connections enabled, ordinary dashboard pages and configuration APIs additionally require a Matrix identity authorized by `administrators`; the portal and state-bound OAuth completion routes keep their separate access checks.
+
 Trusted upstream auth is provider-neutral.
 A reverse proxy, ingress controller, OAuth2 proxy, or another gateway can provide the headers as long as MindRoom only receives gateway-verified values.
 Never expose a MindRoom instance with this mode enabled directly to browsers or the public internet.
