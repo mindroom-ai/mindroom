@@ -35,6 +35,8 @@ Set `new_thread=True` to start a separate conversation, an explicit `thread_id` 
 Cross-room calls never inherit the origin room's thread.
 `edit` and `react` require the target message's `event_id`.
 `read` returns recent messages and edit options, with `limit` clamped to 1–50 and defaulting to 20.
+Room-timeline reads decrypt encrypted messages with the agent's available keys and omit messages they cannot decrypt.
+The room read limit counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
 
 ### Configuration
 
