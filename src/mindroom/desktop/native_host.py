@@ -640,12 +640,23 @@ async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> 
     replace_existing = parameters.get("replace", False)
     if not isinstance(replace_existing, bool):
         raise NativeProtocolError("invalid_request", "Login replace must be a boolean.")
-    if session_path.exists() and not replace_existing:
-        raise NativeProtocolError(
-            "login_failed",
-            "A desktop Matrix session already exists.",
-            recovery="Choose Replace session only when creating a new device.",
-        )
+    try:
+        session_mode = session_path.lstat().st_mode
+    except FileNotFoundError:
+        session_mode = None
+    if session_mode is not None:
+        if not replace_existing:
+            raise NativeProtocolError(
+                "login_failed",
+                "A desktop Matrix session already exists.",
+                recovery="Choose Replace session only when creating a new device.",
+            )
+        if not stat.S_ISREG(session_mode):
+            raise NativeProtocolError(
+                "login_failed",
+                "The saved Matrix session path is not a regular file.",
+                recovery="Move the directory, link, or special file aside before signing in again.",
+            )
     method = await resolve_desktop_login_method(requested, homeserver=homeserver, runtime_paths=runtime_paths)
     password, login_token = _optional_text(parameters, "password"), _optional_text(parameters, "login_token")
     if method is DesktopLoginMethod.PASSWORD:
@@ -907,19 +918,18 @@ def _required_int(parameters: dict[str, object], key: str, *, minimum: int, maxi
 
 def _saved_session_identity(runtime_paths: RuntimePaths) -> tuple[str, dict[str, str]]:
     """Read only the saved device identity, without opening a Matrix connection."""
-    from mindroom.desktop.session import DesktopSessionError, desktop_session_path, load_desktop_session
+    # Keep the Matrix/crypto imports in session out of native protocol startup.
+    from mindroom.desktop.session import (
+        DesktopSessionError,
+        DesktopSessionNotFoundError,
+        desktop_session_path,
+        load_desktop_session,
+    )
 
-    path = desktop_session_path(runtime_paths)
     try:
-        file_stat = path.stat()
-    except FileNotFoundError:
+        session = load_desktop_session(desktop_session_path(runtime_paths))
+    except DesktopSessionNotFoundError:
         return "missing", {}
-    except OSError:
-        return "invalid", {}
-    if not stat.S_ISREG(file_stat.st_mode):
-        return "invalid", {}
-    try:
-        session = load_desktop_session(path)
     except (DesktopSessionError, OSError):
         return "invalid", {}
     return "ready", {

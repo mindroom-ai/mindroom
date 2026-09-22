@@ -9,9 +9,8 @@ import asyncio
 import io
 import json
 import os
-from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
@@ -27,6 +26,9 @@ from mindroom.desktop.native_host import (
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest
 from mindroom.desktop.protocol import DesktopCommand
 from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _config_payload() -> dict[str, object]:
@@ -157,16 +159,38 @@ def test_status_does_not_open_a_fifo_session(tmp_path: Path, monkeypatch: pytest
     path = tmp_path / "desktop_bridge" / "matrix_session.json"
     path.parent.mkdir()
     os.mkfifo(path, 0o600)
-    read_text = Path.read_text
+    open_file = os.open
 
-    def guarded_read_text(self: Path, encoding: str | None = None, errors: str | None = None) -> str:
-        assert self != path, "Opening the session FIFO would block all helper requests"
-        return read_text(self, encoding=encoding, errors=errors)
+    def guarded_open(file: Path, flags: int) -> int:
+        if file == path:
+            assert flags & os.O_NONBLOCK, "Opening the session FIFO would block all helper requests"
+        return open_file(file, flags)
 
-    monkeypatch.setattr(Path, "read_text", guarded_read_text)
+    monkeypatch.setattr(os, "open", guarded_open)
     host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
 
     assert host.status()["pairing"]["session_state"] == "invalid"
+
+
+def test_replacing_directory_session_rejects_before_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    path.mkdir(parents=True)
+    sentinel = path / "keep.txt"
+    sentinel.write_text("keep")
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    async def unexpected_authentication(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Authentication must not start for an unreplaceable session path")
+
+    monkeypatch.setattr("mindroom.desktop.session.resolve_desktop_login_method", unexpected_authentication)
+
+    with pytest.raises(NativeProtocolError, match="regular file"):
+        asyncio.run(host.handle(_request("login", homeserver="https://example.org", replace=True)))
+
+    assert sentinel.read_text() == "keep"
 
 
 def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:

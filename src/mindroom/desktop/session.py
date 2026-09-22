@@ -41,6 +41,10 @@ class DesktopSessionError(RuntimeError):
     """Desktop Matrix session state is missing, exposed, or invalid."""
 
 
+class DesktopSessionNotFoundError(DesktopSessionError):
+    """No saved desktop Matrix session exists at the configured path."""
+
+
 @dataclass
 class DesktopOwnedSession:
     """Own the exact crypto store, durable source, and HTTP client together."""
@@ -113,6 +117,7 @@ def save_desktop_session(path: Path, session: DesktopMatrixSession) -> None:
     write_json_file_durable(
         path,
         session.to_payload(),
+        strict_atomic_replace=True,
         indent=2,
         sort_keys=True,
         trailing_newline=True,
@@ -121,20 +126,31 @@ def save_desktop_session(path: Path, session: DesktopMatrixSession) -> None:
 
 
 def load_desktop_session(path: Path) -> DesktopMatrixSession:
-    """Load one private Matrix session, refusing permissive Unix modes."""
+    """Validate and read one private regular file, refusing links on Unix."""
+    flags = os.O_RDONLY
+    if os.name != "nt":
+        flags |= os.O_NONBLOCK | os.O_NOFOLLOW
     try:
-        file_stat = path.stat()
+        descriptor = os.open(path, flags)
     except FileNotFoundError as exc:
         msg = f"Desktop Matrix session not found at {path}. Run 'mindroom desktop login' first."
-        raise DesktopSessionError(msg) from exc
-    if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
-        msg = f"Desktop Matrix session {path} must not be readable by group or other users."
-        raise DesktopSessionError(msg)
+        raise DesktopSessionNotFoundError(msg) from exc
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        msg = f"Desktop Matrix session {path} is unreadable or malformed."
-        raise DesktopSessionError(msg) from exc
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            msg = f"Desktop Matrix session {path} must be a regular file."
+            raise DesktopSessionError(msg)
+        if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) & 0o077:
+            msg = f"Desktop Matrix session {path} must not be readable by group or other users."
+            raise DesktopSessionError(msg)
+        try:
+            with os.fdopen(descriptor, encoding="utf-8", closefd=False) as stream:
+                raw = json.load(stream)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            msg = f"Desktop Matrix session {path} is unreadable or malformed."
+            raise DesktopSessionError(msg) from exc
+    finally:
+        os.close(descriptor)
     return DesktopMatrixSession.from_payload(raw)
 
 
@@ -423,6 +439,7 @@ __all__ = [
     "DesktopMatrixSession",
     "DesktopOwnedSession",
     "DesktopSessionError",
+    "DesktopSessionNotFoundError",
     "client_ed25519_fingerprint",
     "desktop_session_path",
     "desktop_transport_binding_path",
