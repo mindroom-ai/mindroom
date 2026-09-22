@@ -6515,6 +6515,19 @@ expose = ["strip_vertex_claude_tool_strict", "format_tools_for_vertex_claude"]
 
 
 [[modules]]
+path = "mindroom.tools.agentql"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.custom_tools.agno_compat_agentql"]
+
+[[modules]]
+path = "mindroom.custom_tools.agno_compat_agentql"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.tools.agentql"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_agentql"]
+expose = ["MindRoomAgentQLTools"]
+
+[[modules]]
 path = "mindroom.custom_tools.agno_compat_website_reader"
 depends_on = []
 visibility = ["mindroom.custom_tools.website"]
