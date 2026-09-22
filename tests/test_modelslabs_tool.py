@@ -5,18 +5,34 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
 
+from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tools.agno_compat_modelslabs import ModelsLabCompletionTools
 from mindroom.tools.modelslabs import modelslabs_tools
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@dataclass
+class _ModelsLabReply:
+    status_code: int
+    body: dict[str, object] | bytes
 
 
 @dataclass
 class _ModelsLabTransport:
-    payloads: list[dict[str, object] | requests.exceptions.RequestException] = field(default_factory=list)
+    payloads: list[dict[str, object] | _ModelsLabReply | requests.exceptions.RequestException] = field(
+        default_factory=list,
+    )
     requests: list[requests.PreparedRequest] = field(default_factory=list)
     timeouts: list[object] = field(default_factory=list)
+    sleeps: list[float] = field(default_factory=list)
 
     def send(self, request: requests.PreparedRequest) -> requests.Response:
         """Return scripted provider responses without opening a connection."""
@@ -26,8 +42,9 @@ class _ModelsLabTransport:
         if isinstance(payload, requests.exceptions.RequestException):
             raise payload
         response = requests.Response()
-        response.status_code = 200
-        response._content = json.dumps(payload).encode()
+        reply = payload if isinstance(payload, _ModelsLabReply) else _ModelsLabReply(200, payload)
+        response.status_code = reply.status_code
+        response._content = reply.body if isinstance(reply.body, bytes) else json.dumps(reply.body).encode()
         response.request = request
         response.url = request.url
         return response
@@ -47,7 +64,7 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> _ModelsLabTransport:
         return transport.send(request)
 
     monkeypatch.setattr(requests.Session, "send", send)
-    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(time, "sleep", transport.sleeps.append)
     return transport
 
 
@@ -126,15 +143,29 @@ def test_queued_media_wait_timeout_does_not_claim_generation_success(provider: _
     assert [item.url for item in result.images] == [media_url]
 
 
-def test_queued_media_reports_provider_failure(provider: _ModelsLabTransport) -> None:
-    """A terminal fetch error must reach the caller instead of a success claim."""
-    provider.payloads = [
-        {"status": "processing", "id": 74123, "eta": 1, "future_links": ["https://media.example.test/result.gif"]},
+@pytest.mark.parametrize("file_type", ["gif", "mp4", "mp3"])
+@pytest.mark.parametrize(
+    "error_response",
+    [
         {"status": "error", "id": 74123, "message": "Generation rejected"},
+        {"id": 74123, "error": "Generation rejected"},
+    ],
+    ids=["error-status", "error-field"],
+)
+def test_queued_media_reports_provider_failure(
+    provider: _ModelsLabTransport,
+    file_type: str,
+    error_response: dict[str, object],
+) -> None:
+    """Terminal rejection returns its message without unavailable media artifacts."""
+    media_url = f"https://media.example.test/result.{file_type}"
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 1, "future_links": [media_url]},
+        error_response,
     ]
     tool = modelslabs_tools()(
         api_key="test-api-key",
-        file_type="gif",
+        file_type=file_type,
         wait_for_completion=True,
         add_to_eta=0,
         max_wait_time=1,
@@ -144,6 +175,9 @@ def test_queued_media_reports_provider_failure(provider: _ModelsLabTransport) ->
 
     assert "Generation rejected" in result.content
     assert "success" not in result.content.lower()
+    assert not result.images
+    assert not result.videos
+    assert not result.audios
 
 
 @pytest.mark.parametrize("status", ["success", "processing"])
@@ -204,3 +238,221 @@ def test_transport_timeout_returns_an_honest_outcome(provider: _ModelsLabTranspo
     for timeout in provider.timeouts:
         assert isinstance(timeout, (int, float))
         assert 0 < timeout <= 60
+
+
+@pytest.mark.parametrize("stage", ["generation", "fetch"])
+@pytest.mark.parametrize("http_status", [200, 400, 401, 404, 500])
+@pytest.mark.parametrize(
+    ("body", "explanation"),
+    [
+        ({"status": "error", "message": "Generation rejected"}, "Generation rejected"),
+        ({"status": "error", "error": "Generation rejected"}, "Generation rejected"),
+        ({"status": "error", "message": "", "error": "Generation rejected"}, "Generation rejected"),
+        ({"error": "Generation rejected"}, "Generation rejected"),
+        ({"status": "error"}, "Media generation failed"),
+    ],
+)
+def test_http_provider_rejection_preserves_explanation(
+    provider: _ModelsLabTransport,
+    stage: str,
+    http_status: int,
+    body: dict[str, object],
+    explanation: str,
+) -> None:
+    """Structured rejections remain terminal regardless of the HTTP status."""
+    media_url = "https://media.example.test/result.gif"
+    if stage == "fetch":
+        provider.payloads.append({"status": "processing", "id": 74123, "eta": 2, "future_links": [media_url]})
+    provider.payloads.append(_ModelsLabReply(http_status, body))
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert result.content == f"Error: {explanation}"
+    assert len(provider.requests) == (2 if stage == "fetch" else 1)
+    assert provider.sleeps == []
+    assert not result.images
+    assert not result.videos
+    assert not result.audios
+
+
+@pytest.mark.parametrize("stage", ["generation", "fetch"])
+@pytest.mark.parametrize("body", [b"<html>Unavailable</html>", b"", b"[]", b"null", {}, {"status": "success"}])
+def test_unknown_http_failure_does_not_claim_success(
+    provider: _ModelsLabTransport,
+    stage: str,
+    body: dict[str, object] | bytes,
+) -> None:
+    """HTTP failures without structured rejection cannot establish completion."""
+    media_url = "https://media.example.test/result.gif"
+    if stage == "fetch":
+        provider.payloads.append({"status": "processing", "id": 74123, "eta": 1, "future_links": [media_url]})
+    provider.payloads.append(_ModelsLabReply(503, body))
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=1,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert "success" not in result.content.lower()
+    assert len(provider.requests) == (2 if stage == "fetch" else 1)
+    if stage == "fetch":
+        assert "timed out" in result.content.lower()
+        assert "may still" in result.content.lower()
+        assert result.images is not None
+        assert [item.url for item in result.images] == [media_url]
+    else:
+        assert "Network error" in result.content
+        assert not result.images
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _ModelsLabReply(503, {}),
+        _ModelsLabReply(502, b"<html>Bad Gateway</html>"),
+        requests.exceptions.ReadTimeout("Status unavailable"),
+    ],
+)
+def test_failed_status_check_can_recover(
+    provider: _ModelsLabTransport,
+    failure: _ModelsLabReply | requests.exceptions.RequestException,
+) -> None:
+    """An inconclusive fetch is retried within the configured attempt budget."""
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 2},
+        failure,
+        {"status": "success"},
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert "success" in result.content.lower()
+    assert len(provider.requests) == 3
+    assert provider.sleeps == [1]
+
+
+@pytest.mark.parametrize(
+    ("add_to_eta", "max_wait_time", "attempt_count"),
+    [(0.5, 60, 2), (0, 0.5, 1)],
+)
+@pytest.mark.parametrize("final_status", ["success", "processing"])
+def test_fractional_polling_settings_from_runtime_config(
+    provider: _ModelsLabTransport,
+    tmp_path: Path,
+    add_to_eta: float,
+    max_wait_time: float,
+    attempt_count: int,
+    final_status: str,
+) -> None:
+    """Dashboard numbers retain fractional values and round up to polling slots."""
+    media_url = "https://media.example.test/result.gif"
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 1, "future_links": [media_url]},
+        *[{"status": "processing"} for _ in range(attempt_count - 1)],
+        {"status": final_status},
+    ]
+    tool = get_tool_by_name(
+        "modelslabs",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+        credential_overrides={"api_key": "test-api-key"},
+        tool_config_overrides={
+            "file_type": "gif",
+            "wait_for_completion": True,
+            "add_to_eta": add_to_eta,
+            "max_wait_time": max_wait_time,
+        },
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+    assert isinstance(tool, ModelsLabCompletionTools)
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == attempt_count + 1
+    assert all(request.url.endswith("/fetch/74123") for request in provider.requests[1:])
+    assert provider.sleeps == [1] * (attempt_count - 1)
+    assert result.images is not None
+    assert [item.url for item in result.images] == [media_url]
+    if final_status == "success":
+        assert "success" in result.content.lower()
+    else:
+        assert "timed out" in result.content.lower()
+        assert "may still" in result.content.lower()
+        assert "success" not in result.content.lower()
+
+
+@pytest.mark.parametrize("max_wait_time", [1, 60])
+@pytest.mark.parametrize("outcome", ["success", "processing", "transport_error"])
+def test_zero_eta_checks_once(
+    provider: _ModelsLabTransport,
+    max_wait_time: int,
+    outcome: str,
+) -> None:
+    """Zero ETA still checks once under a positive cap, without a trailing sleep."""
+    media_url = "https://media.example.test/result.gif"
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 0, "future_links": [media_url]},
+        requests.exceptions.ReadTimeout("Status unavailable") if outcome == "transport_error" else {"status": outcome},
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=max_wait_time,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 2
+    assert provider.requests[1].url.endswith("/fetch/74123")
+    assert provider.sleeps == []
+    assert result.images is not None
+    assert [item.url for item in result.images] == [media_url]
+    if outcome == "success":
+        assert "success" in result.content.lower()
+    else:
+        assert "timed out" in result.content.lower()
+        assert "may still" in result.content.lower()
+        assert "success" not in result.content.lower()
+
+
+def test_zero_poll_cap_skips_fetch_and_retains_queued_links(provider: _ModelsLabTransport) -> None:
+    """A zero cap permits no status requests and leaves completion unresolved."""
+    media_url = "https://media.example.test/result.gif"
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 0, "future_links": [media_url]},
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=0,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 1
+    assert provider.sleeps == []
+    assert "timed out" in result.content.lower()
+    assert "may still" in result.content.lower()
+    assert result.images is not None
+    assert [item.url for item in result.images] == [media_url]

@@ -85,7 +85,7 @@ if TYPE_CHECKING:
             required=False,
             default=15,
             placeholder="15",
-            description="Time in seconds to add to the ETA to account for the time it takes to fetch the media",
+            description="Extra one-second polling attempts added to the provider ETA; fractional attempt budgets round up",
         ),
         ConfigField(
             name="max_wait_time",
@@ -94,7 +94,7 @@ if TYPE_CHECKING:
             required=False,
             default=60,
             placeholder="60",
-            description="Maximum time in seconds to wait for the media to be ready",
+            description="Cap on polling attempts, rounded up; zero skips polling and HTTP request time is additional",
         ),
     ],
     dependencies=["requests"],  # Already in pyproject.toml

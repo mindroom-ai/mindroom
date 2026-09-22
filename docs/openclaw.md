@@ -34,7 +34,8 @@ Not included:
 ## The `openclaw_compat` preset
 
 `openclaw_compat` is a config macro, not a runtime toolkit.
-`Config.get_agent_tools` expands it into native MindRoom tools and dedupes while preserving order.
+`Config.expand_tool_names` expands presets and implied tools while preserving order and removing duplicates.
+Use `config.resolve_entity(agent_name).available_tools` to read the agent's resolved tool list.
 
 Preset expansion:
 

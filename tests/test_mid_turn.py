@@ -18,8 +18,8 @@ from mindroom import model_loading
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
-from mindroom.judgment.answers import JudgmentResult
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.state import JudgmentMessage
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.response_lifecycle import _QueuedMessageState
@@ -144,10 +144,6 @@ def test_queued_snapshot_keeps_text_until_exact_event_is_consumed() -> None:
     assert state.has_pending_human_messages()
 
 
-def _result(request: JudgmentRequest, decision: bool | None) -> JudgmentResult:
-    return JudgmentResult(decision, None, None, "test", 0, None, None, request.state_bytes)
-
-
 @pytest.mark.parametrize("reaction", ["", "   ", "\n", "x" * 65, 123])
 def test_defer_reaction_rejects_invalid_keys(reaction: object) -> None:
     """Deferred acknowledgements use bounded, nonblank Matrix reaction keys."""
@@ -169,14 +165,14 @@ async def test_defer_reaction_requires_accepted_current_decision(outcome: str) -
             msg = "Matrix unavailable"
             raise RuntimeError(msg)
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
         if outcome == "error":
             raise TimeoutError
         if outcome == "cancel":
             raise asyncio.CancelledError
         if outcome == "queue_changed":
             state.add_waiting_human_message("$correction", text="Stop")
-        return _result(request, outcome != "wrap_up")
+        return outcome != "wrap_up"
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
     model = ParticipationModel(ModelResponse(content="Done"))
@@ -211,8 +207,8 @@ async def test_queue_change_during_reaction_still_requests_wrap_up() -> None:
         acknowledgements.append(event_id)
         state.add_waiting_human_message("$correction", text="Stop")
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
-        return _result(request, True)
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return True
 
     model = ParticipationModel(ModelResponse(content="Done"))
     install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
@@ -231,10 +227,10 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
     """Later stream edits must not change the context of an earlier human message."""
     evidence: list[dict] = []
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> bool | None:
         assert request.body is not None
         evidence.append(json.loads(json.loads(request.body)["state"]["conversation"][0]["text"]))
-        return _result(request, True)
+        return True
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     state = _QueuedMessageState(mid_turn_gate=gate)
@@ -263,7 +259,7 @@ async def test_queued_message_freezes_visible_progress_at_admission() -> None:
 async def test_unknown_or_unsafe_visible_progress_keeps_wrap_up(progress: str | None) -> None:
     """Unavailable or sensitive user-visible context must not leave the runtime."""
 
-    async def evaluate(_request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
         pytest.fail("Incomplete visible progress must not reach inference")
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
@@ -278,10 +274,10 @@ async def test_finish_reuses_exact_queue_but_rechecks_a_new_message() -> None:
     """A later correction must not inherit approval given to unrelated chatter."""
     requests: list[dict] = []
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> bool | None:
         assert request.body is not None
         requests.append(json.loads(request.body))
-        return _result(request, len(requests) == 1)
+        return len(requests) == 1
 
     gate = MidTurnGate(active_text="Install the dependencies", evaluate=evaluate)
     first = (QueuedMessage("$one", "Thanks"),)
@@ -303,7 +299,7 @@ async def test_finish_reuses_exact_queue_but_rechecks_a_new_message() -> None:
 async def test_incomplete_or_sensitive_queue_keeps_wrap_up(text: str | None) -> None:
     """Missing or unsafe queued evidence must never authorize continued tool use."""
 
-    async def evaluate(_request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
         pytest.fail("Incomplete context must not reach inference")
 
     gate = MidTurnGate(active_text="Do the original task", evaluate=evaluate)
@@ -315,8 +311,8 @@ async def test_incomplete_or_sensitive_queue_keeps_wrap_up(text: str | None) -> 
 async def test_nonapproval_keeps_wrap_up(decision: bool | None) -> None:
     """A negative or abstaining judge cannot suppress the default notice."""
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
-        return _result(request, decision)
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
+        return decision
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     assert not await gate.should_finish((QueuedMessage("$one", "Please change it"),))
@@ -327,7 +323,7 @@ async def test_nonapproval_keeps_wrap_up(decision: bool | None) -> None:
 async def test_json_credentials_are_checked_before_evidence_encoding(*, active: bool) -> None:
     """JSON escaping must not hide credentials from the redaction boundary."""
 
-    async def evaluate(_request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
         pytest.fail("Credentials must not reach the judgment backend")
 
     credential_text = '{"password": "fake_secret_for_test"}'
@@ -342,7 +338,7 @@ async def test_judgment_cancellation_propagates_without_caching_approval() -> No
     """Stopping the active response must stop its judge too."""
     entered = asyncio.Event()
 
-    async def evaluate(_request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
         entered.set()
         await asyncio.Event().wait()
         raise AssertionError
@@ -374,10 +370,10 @@ async def test_real_tool_loop_judges_before_next_provider_request(
         state.add_waiting_human_message("$new", text="Thanks for doing this")
         return "Private tool result must not reach the judge"
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> bool | None:
         assert request.body is not None
         evidence.append(json.loads(request.body))
-        return _result(request, finish)
+        return finish
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     state.mid_turn_gate = gate
@@ -427,9 +423,9 @@ async def test_pending_approval_is_not_judged_as_completed_work(*, stream: bool,
         executed.append("ordinary_action")
         return "Read complete"
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> bool | None:
         judgments.append(request)
-        return _result(request, True)
+        return True
 
     names = ["ordinary_action", "approved_action"] if mixed else ["approved_action"]
     model = ParticipationModel(
@@ -465,12 +461,12 @@ async def test_queue_change_during_judgment_cannot_approve_unseen_input(*, remov
     state = _QueuedMessageState()
     state.add_waiting_human_message("$first", text="Thanks")
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
         if remove:
             state.consume_waiting_human_message("$first")
         else:
             state.add_waiting_human_message("$correction", text="Use a different version")
-        return _result(request, True)
+        return True
 
     model = ParticipationModel(ModelResponse(content="Done"))
     install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
@@ -486,9 +482,9 @@ async def test_wrap_up_remains_settled_after_later_queue_changes() -> None:
     state.add_waiting_human_message("$first", text="Change the task")
     judged: list[JudgmentRequest] = []
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> bool | None:
         judged.append(request)
-        return _result(request, len(judged) > 1)
+        return len(judged) > 1
 
     model = ParticipationModel(ModelResponse(content="Done"))
     install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
@@ -507,10 +503,10 @@ async def test_resumed_tools_do_not_expose_invisible_execution_details() -> None
     state.add_waiting_human_message("$queued", text="Thanks")
     evidence: list[dict] = []
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> bool | None:
         assert request.body is not None
         evidence.append(json.loads(json.loads(request.body)["state"]["conversation"][0]["text"]))
-        return _result(request, False)
+        return False
 
     messages = _resumed_messages()
     messages[-1].tool_call_error = True
@@ -542,9 +538,9 @@ async def test_configured_backends_control_resumed_turns(
                 "model": PINNED_MODEL,
                 "usage": {"input_tokens": 20, "output_tokens": 1},
                 "answers": {
-                    "finish_current_turn": {
+                    "interrupt_current_turn": {
                         "type": "noul",
-                        "noul": ("bad" if outcome == "invalid" else 0.9 if outcome == "finish" else 0.1),
+                        "noul": ("bad" if outcome == "invalid" else 0.1 if outcome == "finish" else 0.9),
                     },
                 },
             },
@@ -555,7 +551,7 @@ async def test_configured_backends_control_resumed_turns(
         TimeoutError()
         if outcome == "timeout"
         else ModelResponse(
-            content=("invalid" if outcome == "invalid" else json.dumps({"decision": outcome == "finish"})),
+            content=("invalid" if outcome == "invalid" else json.dumps({"decision": outcome != "finish"})),
         ),
     )
     monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
@@ -600,11 +596,11 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
         state.add_waiting_human_message("$new", text="Change the task")
         return "Completed action"
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(_request: JudgmentRequest) -> bool | None:
         entered.set()
         if cancel:
             await asyncio.Event().wait()
-        return _result(request, False)
+        return False
 
     async def checkpoint(_result: ModelResponse) -> None:
         checkpoints.append([message.get_content_string() for message in messages if message.role in {"tool", "user"}])
@@ -645,3 +641,73 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
     assert "Completed action" in checkpoints[0]
     assert ("WRAP UP NOW" in checkpoints[0]) is (not cancel)
     assert len(model.requests) == (1 if cancel else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probability", "threshold", "finish"),
+    [
+        (0.05, 0.8, True),
+        (0.2, 0.8, True),
+        (0.21, 0.8, False),
+        (0.7, 0.8, False),
+        (0.9, 0.8, False),
+        (0.1, 0.95, False),
+        (0.0, 1.0, True),
+        (1.0, 0.0, True),
+    ],
+)
+async def test_interrupt_probability_preserves_continuation_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probability: float,
+    threshold: float,
+    *,
+    finish: bool,
+) -> None:
+    """A low-confidence no-interruption answer must still request a handoff."""
+
+    async def post(_client: SystemOneClient, body: bytes) -> bytes:
+        question_id = next(iter(json.loads(body)["questions"]))
+        assert question_id == "interrupt_current_turn"
+        return json.dumps(
+            {
+                "model": PINNED_MODEL,
+                "usage": {"input_tokens": 20, "output_tokens": 1},
+                "answers": {question_id: {"type": "noul", "noul": probability}},
+            },
+        ).encode()
+
+    monkeypatch.setattr(SystemOneClient, "_post", post)
+    config = Config.model_validate(
+        {
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test",
+                    "mid_turn": {
+                        "judgment": {"provider": "typesafe", "threshold": threshold},
+                    },
+                },
+            },
+        },
+    )
+    paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": "synthetic"})
+    gate = create_mid_turn_gate(config, paths, request_envelope(), prompt="Do the task", has_media=False)
+    assert gate is not None
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is finish
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget() -> None:
+    """Earlier instructions survive repeated continuations without truncating to the last few turns."""
+    context = tuple(JudgmentMessage("user", f"Accepted task constraint {i}") for i in range(12))
+    captured = []
+
+    async def evaluate(request: JudgmentRequest) -> bool | None:
+        assert request.body is not None
+        captured.append(json.loads(request.body)["state"]["conversation"])
+        return True
+
+    gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]
