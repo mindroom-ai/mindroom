@@ -14,7 +14,9 @@ Condensed from `.claude/agents/mindroom-tester.md`.
 - Agents respond with thread relations.
 - In non-thread clients or bridges, send plain replies and verify the reply chain stays in the same thread whenever it eventually reaches a threaded ancestor, otherwise it stays room-level.
 - Use explicit @mentions to invite the right agents.
-- Wait: singles ~30s, teams 45–60s+. Watch for streaming ellipses, then recheck.
+- Wait: singles ~30s, teams 45–60s+.
+  For streaming completion, inspect the latest `io.mindroom.stream_status` through a client or event view that exposes it.
+  Confirm `completed` for success, or record `cancelled` or `error` as the terminal outcome.
 
 ## Testing Loop
 

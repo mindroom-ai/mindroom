@@ -7,6 +7,27 @@
 {{- if contains "$" (.Values.serviceWorker.navigationFallbackExcludePaths | toJson) -}}
 {{- fail "serviceWorker.navigationFallbackExcludePaths cannot contain $ because nginx expands variables in return bodies" -}}
 {{- end -}}
+{{- if .Values.authenticationRecovery.enabled -}}
+{{- if or (not .Values.nginx.create) .Values.nginx.existingConfigMap -}}
+{{- fail "authenticationRecovery requires the chart-managed nginx config" -}}
+{{- end -}}
+{{- $recoveryUrls := dict "probeUrl" .Values.authenticationRecovery.probeUrl "navigationUrl" (include "mindroom-client.authenticationRecoveryNavigationUrl" .) -}}
+{{- range $name, $url := $recoveryUrls -}}
+{{- $lowerUrl := lower $url -}}
+{{- $lowerPath := regexFind `^[^?#]*` $lowerUrl -}}
+{{- if or (not (hasPrefix "/" $url)) (hasPrefix "//" $url) (contains "\\" $url) (contains "$" $url) (regexMatch `[[:cntrl:]]` $url) (contains "%2f" $lowerPath) (contains "%5c" $lowerPath) (regexMatch `%0[0-9a-f]|%1[0-9a-f]|%7f` $lowerUrl) (regexMatch `(^|/)(\.|%2e)(\.|%2e)?(/|$)` $lowerPath) -}}
+{{- fail (printf "authenticationRecovery.%s must be a safe same-origin root-relative URL" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $recoveryTimeout := .Values.authenticationRecovery.timeoutMs | toString -}}
+{{- if not (regexMatch `^[0-9]+$` $recoveryTimeout) -}}
+{{- fail "authenticationRecovery.timeoutMs must be an integer from 1000 through 30000" -}}
+{{- end -}}
+{{- $recoveryTimeoutMs := int .Values.authenticationRecovery.timeoutMs -}}
+{{- if or (lt $recoveryTimeoutMs 1000) (gt $recoveryTimeoutMs 30000) -}}
+{{- fail "authenticationRecovery.timeoutMs must be an integer from 1000 through 30000" -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.config.create (not .Values.config.existingConfigMap) (not .Values.config.data) (not .Values.matrix.homeserverUrl) (not .Values.matrix.defaultServerName) -}}
 {{- fail "matrix.homeserverUrl or matrix.defaultServerName is required when the chart renders the default client config" -}}
 {{- end -}}

@@ -18,6 +18,7 @@ from agno.tools.function import Function
 
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.approval_receipt import approval_receipt_context, install_approval_receipt_hooks
+from mindroom.mid_turn import QueuedMessage
 from tests.history_helpers import RecordingModel
 
 if TYPE_CHECKING:
@@ -33,6 +34,9 @@ class _QueuedState:
 
     def has_pending_human_messages(self) -> bool:
         return self.pending
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$pending", None),) if self.has_pending_human_messages() else ()
 
 
 def _tool_calls() -> list[dict[str, Any]]:
@@ -228,7 +232,7 @@ async def test_notice_hook_closes_the_wrapped_response_stream() -> None:
     model = _ContinuationModel(id="closing", request_tools=False)
     closed: list[bool] = []
 
-    async def response_stream(_messages: list[Message]) -> AsyncGenerator[ModelResponse]:
+    async def response_stream(_messages: list[Message], **_kwargs: object) -> AsyncGenerator[ModelResponse]:
         try:
             yield ModelResponse(content="partial response")
         finally:

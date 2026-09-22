@@ -1549,7 +1549,7 @@ async def test_matrix_message_read_room_happy_path() -> None:
         ctx.room_id,
         limit=5,
         direction=nio.MessageDirection.back,
-        message_filter={"types": ["m.room.message"]},
+        message_filter={"types": ["m.room.message", "m.room.encrypted"]},
     )
 
 
@@ -1896,7 +1896,7 @@ async def test_matrix_message_read_room_sentinel_uses_room_timeline() -> None:
         ctx.room_id,
         limit=5,
         direction=nio.MessageDirection.back,
-        message_filter={"types": ["m.room.message"]},
+        message_filter={"types": ["m.room.message", "m.room.encrypted"]},
     )
     ctx.conversation_reader.read_strict.assert_not_awaited()
 

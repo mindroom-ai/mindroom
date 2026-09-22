@@ -337,20 +337,17 @@ def _raise_when_composed_from_includes(
 ) -> None:
     """Reject structured config writes that would silently flatten include files.
 
-    The committed snapshot's include usage is authoritative: it reflects the
-    last successful load even when an include has since become unreadable.
+    Committed include usage remains protective when source becomes unreadable.
+    Negative or missing metadata can be stale, so inspect the current source.
     Empty included directories need the same protection as populated ones.
     """
-    if committed_uses_includes is not None:
-        if committed_uses_includes:
-            raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
-        return
+    if committed_uses_includes:
+        raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
     try:
         _, _source_digests, uses_includes = load_yaml_config_source_with_digests(runtime_paths.config_path)
     except CONFIG_LOAD_USER_ERROR_TYPES:
-        # With no committed source metadata, an unreadable or broken on-disk
-        # config stays recoverable through structured replacement, exactly like
-        # before includes existed.
+        # Without committed include evidence, an unreadable or broken on-disk
+        # config remains recoverable through structured replacement.
         return
     if uses_includes:
         raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)

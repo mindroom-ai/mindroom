@@ -65,7 +65,8 @@ MindRoom's architecture consists of several key components working together.
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
-| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `matrix/durable_ingestion.py` | Validates owned batches, invokes journal admission, runs ordered hooks/callbacks, and acknowledges nio |
+| `matrix/journal_ingress.py` | Typed event classification from nio provenance and reconstruction of stored events |
 | `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
@@ -80,6 +81,8 @@ MindRoom's architecture consists of several key components working together.
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
+| `mid_turn.py` / `mid_turn_judgment.py` | Per-response finish-or-wrap-up judgments for queued human messages, bound to interchangeable LLM or TypeSafe backends |
+| `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
 | `judgment/` | Backend-independent boolean questions, minimized context, shared execution limits, and LLM/System One adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM or TypeSafe judge and map its result to a participation decision |
@@ -148,7 +151,9 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
 
 ## Data Flow
 
-1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
+1. **Message arrives** from the Matrix homeserver; `matrix/durable_ingestion.py` validates the owned batch, invokes the journal transaction owner to commit it, runs ordered hooks/callbacks, and acknowledges nio.
+   `matrix/journal_ingress.py` supplies typed classification from nio provenance and replay reconstruction.
+   `journal_dispatch.py` hands admitted events through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome.
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
 3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches each sender's live conversation burst.
    Ordinary text completes an utterance and dispatches immediately; adaptive text waits its configured quiet period.

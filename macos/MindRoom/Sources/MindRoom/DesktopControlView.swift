@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DesktopControlView: View {
   @ObservedObject var store = DesktopControlStore.shared
+  var scrollToSection: (DesktopControlSection) -> Void
   @State private var isSetupExpanded = false
   @State private var isBrowserExpanded = false
   @State private var isDiagnosticsExpanded = false
@@ -13,8 +14,9 @@ struct DesktopControlView: View {
     VStack(alignment: .leading, spacing: 20) {
       header
       sessionCard
-      DesktopApplicationsView(store: store)
-      setupCard
+      DesktopApplicationsView(store: store) { showSection(.setup) }
+        .id(DesktopControlSection.applications)
+      setupCard.id(DesktopControlSection.setup)
       permissionsCard
       browserCard
       diagnosticsCard
@@ -49,6 +51,15 @@ struct DesktopControlView: View {
         "Sign in to \(store.homeserver)\(store.matrixUserID.isEmpty ? "" : " as \(store.matrixUserID)"). This creates a new Matrix device and replaces the saved login on this Mac. You will need to pair the new device again. Cancel to keep using the saved session."
       )
     }
+  }
+
+  private func showSection(_ section: DesktopControlSection) {
+    if section == .setup { isSetupExpanded = true }
+    scrollToSection(section)
+  }
+
+  private var startBlocker: DesktopStartBlocker? {
+    store.status.startBlocker(isBusy: store.isBusy, hasAppSelectionChanges: store.hasAppSelectionChanges)
   }
 
   private var header: some View {
@@ -89,14 +100,25 @@ struct DesktopControlView: View {
 
         HStack {
           Button("Start Observe Only") { store.start() }
-            .disabled(
-              store.isBusy || store.status.bridge.state != "stopped"
-                || store.status.config.state != "ready"
-                || store.status.config.allowedAppIDs?.isEmpty != false
-                || store.hasAppSelectionChanges
-            )
+            .disabled(startBlocker != nil)
+            .help(startBlocker?.message ?? "Start observation of your saved allowed apps.")
           Button("Stop") { store.stop() }
             .disabled(!store.status.canStopBridge)
+            .help(store.status.canStopBridge ? "Stop observation and control." : "Computer access is already stopped.")
+        }
+
+        if let blocker = startBlocker {
+          Text(blocker.message)
+            .font(.callout)
+          if let destination = blocker.destination {
+            Button(destination == .setup ? "Complete Setup" : "Review App Selection") {
+              showSection(destination)
+            }
+          }
+        }
+        if !store.status.canStopBridge {
+          Text("Stop is unavailable because computer access is already stopped.")
+            .font(.callout).foregroundStyle(.secondary)
         }
 
         Divider()
@@ -138,9 +160,27 @@ struct DesktopControlView: View {
           .font(.callout)
           .foregroundStyle(.secondary)
 
-          TextEditor(text: $store.setupDescriptor)
-            .font(.system(.caption, design: .monospaced))
-            .frame(height: 70)
+          Text("Setup data")
+            .font(.subheadline.weight(.medium))
+          ZStack(alignment: .topLeading) {
+            if store.setupDescriptor.isEmpty {
+              Text("Paste setup data here")
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 9).padding(.vertical, 12)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+            TextEditor(text: $store.setupDescriptor)
+              .font(.system(.body, design: .monospaced))
+              .scrollContentBackground(.hidden)
+              .padding(6)
+              .accessibilityLabel("Setup data")
+              .accessibilityHint("Paste the setup data from your direct agent chat, then select Import Setup.")
+          }
+          .frame(height: 110)
+          .background(Color(nsColor: .textBackgroundColor))
+          .clipShape(RoundedRectangle(cornerRadius: 6))
+          .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.5)))
           Button("Import Setup") { store.importSetupDescriptor() }
             .disabled(store.isBusy || store.setupDescriptor.isEmpty)
 
@@ -234,8 +274,13 @@ struct DesktopControlView: View {
   private var permissionsCard: some View {
     AppSectionCard {
       VStack(alignment: .leading, spacing: 12) {
-        Label("macOS permissions", systemImage: "lock.shield")
-          .font(.headline)
+        HStack {
+          Label("macOS permissions", systemImage: "lock.shield")
+            .font(.headline)
+          Spacer()
+          Button("Check Again") { store.refresh() }
+            .disabled(store.isBusy)
+        }
         permissionRow(
           title: "Accessibility",
           key: "accessibility",
@@ -247,6 +292,11 @@ struct DesktopControlView: View {
           key: "screen_recording",
           status: store.status.permissions.screenRecording
         )
+        if store.status.permissions.accessibility.state != "granted"
+          || store.status.permissions.screenRecording.state != "granted" {
+          Text("These checks apply to the running copy of MindRoom. If MindRoom is already enabled in System Settings, quit and reopen it. If access is still unavailable after replacing the app, remove the old permission entry and add the current copy, or reinstall the signed release.")
+            .font(.callout).foregroundStyle(.secondary)
+        }
       }
     }
   }
@@ -256,11 +306,17 @@ struct DesktopControlView: View {
     key: String,
     status: DesktopPermissionStatus
   ) -> some View {
-    HStack {
-      LabeledContent(title, value: status.state.capitalized)
-      if status.state != "granted" {
-        Button("Request") { store.requestPermission(key) }
-        Button("Open Settings") { store.openPermissionSettings(key) }
+    VStack(alignment: .leading, spacing: 6) {
+      HStack {
+        LabeledContent(title, value: status.state == "missing" ? "Not granted to this copy" : status.state.capitalized)
+        if status.state != "granted" {
+          Button("Request") { store.requestPermission(key) }
+            .disabled(store.isBusy || !status.canRequest)
+          Button("Open Settings") { store.openPermissionSettings(key) }
+        }
+      }
+      if let recovery = status.recovery, status.state != "granted" {
+        Text(recovery).font(.callout).foregroundStyle(.secondary)
       }
     }
   }

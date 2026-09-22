@@ -32,7 +32,7 @@ Overview explains the two roles and shows their status separately.
 Open **Local agents** and expand **Set up or reconnect local agents**.
 
 1. **Install MindRoom** installs the command-line runtime using the bundled `uv`.
-2. **Prepare Configuration** creates `config.yaml` and `.env` in `~/.mindroom`, keeping existing files unchanged.
+2. **Prepare Configuration** creates missing `config.yaml` and `.env` files in `~/.mindroom`, preserves an existing config and env values, and appends missing hosted Matrix defaults to `.env`.
    **Open MindRoom Chat**, sign in, and use **Local MindRoom** in the chat sidebar to generate a pair code.
    Enter the code and choose **Pair Account**.
 3. **Open Config Folder** and configure your AI provider in `.env`, or configure a local model in `config.yaml`.
@@ -61,14 +61,24 @@ Computer access uses the bundled Desktop Helper and does not require the local-a
 Open **Computer access** to manage its session independently.
 
 1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
-2. Expand the pairing setup in **Computer access** and import that data.
-3. Review the controller fingerprint, requester, and agent, then sign in and choose the allowed applications.
-4. Confirm the displayed identities and save the setup, then confirm the saved identities again and claim pairing.
-5. Send the displayed `!desktop confirm ...` command back to the same chat.
-6. Check macOS permissions and start observation.
+2. In **Computer access**, choose the allowed applications and select **Continue Setup**.
+3. Paste the copied data into the **Setup data** field under **Setup or reconnect** and select **Import Setup**.
+4. Review the controller fingerprint, requester, and agent, then sign in or use the saved Matrix device.
+5. Confirm the displayed identities and select **Save Setup**, then confirm the saved identities again and select **Claim Pairing**.
+6. Send the displayed `!desktop confirm ...` command back to the same chat.
+7. Check macOS permissions and start observation.
 
 For a homeserver behind Cloudflare Access, complete the Terminal authentication flow shown in chat first.
 The existing native helper owns authentication, pairing, permissions, browser sessions, and control leases.
+
+The session card explains unavailable Start and Stop buttons and provides shortcuts to the next required step.
+If you select apps before saving a connection, **Continue Setup** opens the connection form; **Save Setup** saves your selected apps with that connection.
+Once setup is saved, **Save App Access** updates app selections independently.
+
+Permission status applies to the running copy of MindRoom.
+If System Settings already shows MindRoom enabled but the app reports **Not granted to this copy**, quit and reopen MindRoom first.
+Replacing the signed release with a local build can invalidate the saved approval while leaving the old entry enabled.
+In that case, reinstall the signed release or remove the old permission entry and approve the current copy in System Settings, then select **Check Again**.
 
 Observation and control are separate choices.
 **Grant Control…** shows the saved identities, allowed applications, and duration for explicit confirmation.

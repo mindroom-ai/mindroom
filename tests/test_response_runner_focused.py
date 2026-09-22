@@ -9,6 +9,7 @@ orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import suppress
 from dataclasses import replace
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from mindroom import agents as agents_module
 from mindroom import approval_receipt, interactive, response_runner
 from mindroom import background_tasks as background_tasks_module
 from mindroom.agent_storage import get_agent_session
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval_response import require_ordered_pause_presentation
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
@@ -39,6 +41,7 @@ from mindroom.cancellation import current_task_is_process_shutdown, request_task
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import (
     DURABLE_FINAL_OUTCOME_KEY,
@@ -79,6 +82,7 @@ from mindroom.matrix.client_visible_messages import fetch_latest_visible_body
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
+from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
@@ -146,6 +150,7 @@ if TYPE_CHECKING:
     from nio import AsyncClient
 
     from mindroom.hooks import MessageEnvelope
+    from mindroom.judgment.state import JudgmentRequest
     from mindroom.response_lifecycle import _QueuedMessageState
 
 
@@ -3069,7 +3074,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         resume = asyncio.create_task(runner._resume_approval_source("$source"))
         await asyncio.wait_for(resume_entered.wait(), timeout=1.0)
 
-        pending_human_messages = set(queued_signal.pending_human_message_event_ids)
+        pending_human_messages = {message.event_id for message in queued_signal.pending_message_snapshot()}
         run_approval_continuation.assert_not_awaited()
         release_follow_up.set()
         assert await asyncio.wait_for(follow_up, timeout=1.0) == "$follow-up-response"
@@ -7068,7 +7073,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
     await first_entered.wait()
     reservation = await coordinator.reserve_response_lifecycle(second_envelope)
     queued_signal = coordinator._get_or_create_queued_signal(second_envelope.target)
-    assert queued_signal.pending_human_message_event_ids == {"$second"}
+    assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {"$second"}
 
     with response_lifecycle_reservation_context(reservation):
         second = asyncio.create_task(
@@ -7095,7 +7100,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     await lifecycle_lock.acquire()
     reservation = await coordinator.reserve_response_lifecycle(envelope)
     queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
-    assert queued_signal.pending_human_message_event_ids == {envelope.source_event_id}
+    assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {envelope.source_event_id}
     assert queued_signal.has_active_response_turn()
 
     if consumed:
@@ -7116,7 +7121,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
 
     await reservation.release()
     await reservation.release()
-    assert queued_signal.pending_human_message_event_ids == set()
+    assert {message.event_id for message in queued_signal.pending_message_snapshot()} == set()
     assert not queued_signal.has_active_response_turn()
     lifecycle_lock.release()
 
@@ -8528,3 +8533,169 @@ async def test_scheduled_model_overrides_room_default_for_one_response(tmp_path:
     assert active_models == ["cheap"]
     runtime = await coordinator.prepare_response_runtime(_plain_request(_target()))
     assert runtime.active_model_name == "large"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [None, "partial", "missing_source", "media", "secret", "oversized", "degraded", "refresh_error"],
+)
+async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
+    tmp_path: Path,
+    failure: str | None,
+) -> None:
+    """A resumed turn retains its task and corrections, excluding future and private input."""
+    bot = _bot(tmp_path)
+    history = [
+        make_visible_message(
+            sender="@user:localhost",
+            body="Sleep thirty times for two seconds each",
+            event_id="$root",
+        ),
+        make_visible_message(
+            sender="@user:localhost",
+            body="Actually, make each sleep three seconds",
+            event_id="$correction",
+        ),
+        make_visible_message(sender="@user:localhost", body="Continue", event_id="$resume"),
+        make_visible_message(sender="@user:localhost", body="Future queued text", event_id="$future"),
+    ]
+    if failure == "missing_source":
+        history.pop(2)
+    if failure == "media":
+        history[0].content["msgtype"] = "m.image"
+    if failure == "secret":
+        history[0].body = "My API key is sk-" + "a" * 48
+    if failure == "oversized":
+        history[0].body = "x" * 16001
+    refreshed = ThreadHistoryResult(
+        history,
+        is_full_history=failure != "partial",
+        diagnostics={"thread_read_degraded": True} if failure == "degraded" else {},
+    )
+    resolver = MagicMock(spec=ConversationResolver)
+    resolver.fetch_thread_history = AsyncMock(return_value=refreshed)
+    if failure == "refresh_error":
+        resolver.fetch_thread_history.side_effect = RuntimeError("Unavailable")
+    runner = ResponseRunner(replace(unwrap_extracted_collaborator(bot._response_runner).deps, resolver=resolver))
+    target = _target(thread_id="$root", reply_to_event_id="$resume")
+    envelope = _envelope(target, source_event_id="$resume")
+    request = ResponseRequest(
+        sources=ResponseSources(pending_event_ids=("$resume",), logical_source_event_ids=("$resume",)),
+        thread_history=[
+            make_visible_message(sender="@user:localhost", body="Stale input", event_id="$stale"),
+            make_visible_message(sender="@user:localhost", body="Continue", event_id="$resume"),
+        ],
+        prompt="Continue",
+        user_id="@user:localhost",
+        response_envelope=envelope,
+    )
+    payloads = []
+
+    async def evaluate(judgment: JudgmentRequest) -> bool:
+        assert judgment.body is not None
+        payloads.append(json.loads(judgment.body))
+        return True
+
+    gate = MidTurnGate(active_text="Continue", evaluate=evaluate)
+    with queued_message_signal_context(None, mid_turn_gate=gate):
+        await runner._prepare_request_after_lock(request)
+        finish = await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),))
+    if failure:
+        assert not finish
+        assert payloads == []
+    else:
+        assert finish
+        conversation = payloads[0]["state"]["conversation"]
+        evidence = json.loads(conversation[-1]["text"])
+        assert conversation[:-1] == [
+            {"role": "user", "text": "Sleep thirty times for two seconds each"},
+            {"role": "user", "text": "Actually, make each sleep three seconds"},
+        ]
+        assert evidence["active_request"] == "Continue"
+        assert "Stale input" not in str(payloads)
+        assert "Future queued text" not in str(payloads)
+
+
+@pytest.mark.asyncio
+async def test_approval_continuation_refreshes_mid_turn_context_without_replacing_native_input(tmp_path: Path) -> None:
+    """Approval replay also supplies the judge's public task context before resuming tools."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    runner.deps.runtime.config.agents["general"].mid_turn = MidTurnConfig.model_validate(
+        {"judgment": {"provider": "typesafe"}},
+    )
+    continuation = ApprovalContinuation(
+        approval_id="approval-context",
+        run_id="run-1",
+        session_id="session-1",
+        entity_kind="agent",
+        entity_name="general",
+        room_id="!room:localhost",
+        thread_id="$root",
+        requester_id="@user:localhost",
+        response_event_id="$waiting",
+        calls=(),
+        execution_identity={},
+        sources=ResponseSources(("$resume",), ("$resume",)),
+        state="ready",
+    )
+    target = _target(thread_id="$root", reply_to_event_id="$resume")
+    original = runner._approval_response_request(continuation, target=target)
+    refreshed = ThreadHistoryResult(
+        [
+            make_visible_message(sender="@user:localhost", body="Thirty sleeps", event_id="$root"),
+            make_visible_message(sender="@user:localhost", body="Continue", event_id="$resume"),
+        ],
+        is_full_history=True,
+    )
+    captured = []
+
+    async def evaluate(request: JudgmentRequest) -> bool:
+        assert request.body is not None
+        captured.append(json.loads(request.body)["state"]["conversation"])
+        return True
+
+    gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=None)
+
+    with (
+        queued_message_signal_context(None, mid_turn_gate=gate),
+        patch.object(runner.deps.resolver, "fetch_thread_history", new=AsyncMock(return_value=refreshed)),
+        patch.object(runner, "_build_lifecycle", side_effect=RuntimeError("stop before generation")) as build_lifecycle,
+    ):
+        with pytest.raises(RuntimeError, match="stop before generation"):
+            await runner._run_claimed_approval_lifecycle(continuation, target=target)
+        assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert build_lifecycle.call_args.kwargs["request"].thread_history == original.thread_history
+    assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("thread_id", "finish"), [(None, False), ("$root", False), ("$resume", True)])
+async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
+    tmp_path: Path,
+    thread_id: str | None,
+    *,
+    finish: bool,
+) -> None:
+    """Missing room or existing-thread context cannot authorize continuing an unknown task."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id=thread_id, reply_to_event_id="$resume")
+    request = replace(_plain_request(target, source_event_id="$resume"), prompt="Continue")
+    evaluated = []
+
+    async def evaluate(judgment: JudgmentRequest) -> bool:
+        evaluated.append(judgment)
+        return True
+
+    gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=None)
+    with (
+        queued_message_signal_context(None, mid_turn_gate=gate),
+        patch.object(
+            runner.deps.resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=ThreadHistoryResult([], is_full_history=True)),
+        ),
+    ):
+        await runner._prepare_request_after_lock(request)
+        assert await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),)) is finish
+    assert len(evaluated) == int(finish)

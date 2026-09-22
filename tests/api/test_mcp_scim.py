@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 BASE = "/mcp/scim/v2"
 USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+ENTERPRISE_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
 PATCH_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error"
 TOKEN = "provisioning-test-credential-" + "x" * 32
@@ -89,6 +90,98 @@ def test_user_roundtrip_filter_pagination_replace_delete(client: TestClient) -> 
     assert "displayName" not in client.get(path).json()
     assert client.delete(path).status_code == 204
     assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("schemas", [[USER_SCHEMA, ENTERPRISE_SCHEMA], [ENTERPRISE_SCHEMA, USER_SCHEMA]])
+def test_enterprise_declaration_preserves_core_profile_and_discards_extensions(
+    client: TestClient,
+    schemas: list[str],
+) -> None:
+    """Standard enterprise metadata must not prevent core provisioning or become account state."""
+    payload = {
+        "schemas": schemas,
+        "userName": "alice@example.org",
+        "active": True,
+        "displayName": "Alice",
+        ENTERPRISE_SCHEMA: {
+            "employeeNumber": "ignored-enterprise-marker",
+            "department": "Engineering",
+            "userName": "other@example.org",
+            "active": False,
+            "roles": ["admin"],
+        },
+    }
+    with capture_logs() as logs:
+        created = client.post(BASE + "/Users", json=payload)
+        assert created.status_code == 201
+        account = created.json()
+        path = BASE + "/Users/" + account["id"]
+        updated = client.put(path, json={**payload, "displayName": "Updated"})
+        assert updated.status_code == 200
+    assert not [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert updated.json()["displayName"] == "Updated"
+    assert updated.json()["userName"] == "alice@example.org"
+    assert updated.json()["active"] is True
+    assert updated.json()["schemas"] == [USER_SCHEMA]
+    assert client.get(path).json() == updated.json()
+    assert ENTERPRISE_SCHEMA not in updated.json()
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        profile = json.loads(connection.execute("SELECT profile FROM gateway_accounts").fetchone()[0])
+    assert profile == {"userName": "alice@example.org", "active": True, "displayName": "Updated"}
+
+
+def test_enterprise_user_replacement_still_revokes_on_deactivation(client: TestClient) -> None:
+    """Accepting an optional declaration preserves atomic offboarding effects."""
+    account_id = _create(client).json()["id"]
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        connection.execute(
+            "INSERT INTO pending (state_hash, payload, expires_at, account_id) VALUES (?, '{}', ?, ?)",
+            ("bound-consent", 2_100_000_000, account_id),
+        )
+    payload = {"schemas": [USER_SCHEMA, ENTERPRISE_SCHEMA], "userName": "alice@example.org", "active": False}
+    path = BASE + "/Users/" + account_id
+    response = client.put(path, json=payload)
+    assert response.status_code == 200
+    assert client.get(path).json()["active"] is False
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "schemas",
+    [
+        [ENTERPRISE_SCHEMA],
+        [USER_SCHEMA, ENTERPRISE_SCHEMA, ENTERPRISE_SCHEMA],
+        [USER_SCHEMA, ENTERPRISE_SCHEMA, "urn:example:unsupported"],
+        [USER_SCHEMA, {}],
+    ],
+)
+def test_enterprise_compatibility_does_not_allow_invalid_user_schemas(
+    client: TestClient,
+    schemas: list[object],
+) -> None:
+    """Core schema remains required and duplicate, unknown or malformed declarations remain errors."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    assert (
+        client.put(path, json={"schemas": schemas, "userName": "alice@example.org", "active": False}).status_code == 400
+    )
+    assert client.get(path).json() == account
+
+
+def test_enterprise_schema_is_not_accepted_in_patch_envelope(client: TestClient) -> None:
+    """The User extension is not a PATCH message schema."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    response = client.patch(
+        path,
+        json={
+            "schemas": [PATCH_SCHEMA, ENTERPRISE_SCHEMA],
+            "Operations": [{"op": "replace", "path": "active", "value": False}],
+        },
+    )
+    assert response.status_code == 400
+    assert client.get(path).json() == account
 
 
 def test_patch_case_insensitive_attributes_atomic_failure(client: TestClient) -> None:
@@ -220,6 +313,79 @@ def test_success_and_authentication_failure_do_not_log_validation_diagnostics(cl
         client.headers.pop("Authorization")
         assert _create(client, displayName=None).status_code == 401
     assert not [entry for entry in logs if entry["event"] == "SCIM account validation failed"]
+
+
+@pytest.mark.parametrize(
+    ("fields", "value_type", "count", "recognized", "unknown", "non_strings"),
+    [
+        ({}, "missing", None, [], 0, 0),
+        ({"schemas": None}, "NoneType", None, [], 0, 1),
+        ({"schemas": USER_SCHEMA}, "str", None, [USER_SCHEMA], 0, 0),
+        ({"schemas": []}, "list", 0, [], 0, 0),
+        ({"schemas": [USER_SCHEMA, USER_SCHEMA]}, "list", 2, [USER_SCHEMA], 0, 0),
+        ({"schemas": ["urn:scim:schemas:core:1.0"]}, "list", 1, ["urn:scim:schemas:core:1.0"], 0, 0),
+        (
+            {"schemas": [USER_SCHEMA, ENTERPRISE_SCHEMA, "private-schema-marker"]},
+            "list",
+            3,
+            [USER_SCHEMA, ENTERPRISE_SCHEMA],
+            1,
+            0,
+        ),
+        ({"schemas": [PATCH_SCHEMA]}, "list", 1, [PATCH_SCHEMA], 0, 0),
+        ({"schemas": ["private-schema-marker"] * 1000}, "list", 1000, [], 1000, 0),
+        ({"schemas": [{"private-key": "private-value"}, 3, None, True]}, "list", 4, [], 0, 4),
+        ({"schemas": {"private-key": "private-value"}}, "dict", None, [], 0, 1),
+    ],
+)
+def test_schema_diagnostics_identify_shape_without_logging_arbitrary_values(
+    client: TestClient,
+    fields: dict[str, object],
+    value_type: str,
+    count: int | None,
+    recognized: list[str],
+    unknown: int,
+    non_strings: int,
+) -> None:
+    """Schema failures expose bounded standard identifiers, never arbitrary request values."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    with capture_logs() as logs:
+        response = client.put(path, json={"userName": "private-profile@example.org", "active": False, **fields})
+
+    assert response.status_code == 400
+    assert client.get(path).json() == account
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0] == {
+        "event": "SCIM schema validation failed",
+        "log_level": "warning",
+        "method": "PUT",
+        "expected_schema": USER_SCHEMA,
+        "schemas_type": value_type,
+        "schemas_count": count,
+        "recognized_schemas": recognized,
+        "unknown_schema_count": unknown,
+        "non_string_schema_count": non_strings,
+    }
+    encoded = json.dumps(logs) + response.text
+    for private in (TOKEN, account["id"], "private-profile", "private-schema-marker", "private-key", "private-value"):
+        assert private not in encoded
+
+
+def test_schema_diagnostics_require_authentication_and_leave_valid_requests_quiet(client: TestClient) -> None:
+    """Schema metadata is logged only for authenticated schema failures, including PATCH envelopes."""
+    with capture_logs() as logs:
+        account = _create(client).json()
+        path = BASE + "/Users/" + account["id"]
+        assert client.patch(path, json={"schemas": [USER_SCHEMA], "Operations": []}).status_code == 400
+        client.headers.pop("Authorization")
+        assert _create(client, schemas=["private-schema-marker"]).status_code == 401
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["method"] == "PATCH"
+    assert diagnostics[0]["expected_schema"] == PATCH_SCHEMA
+    assert diagnostics[0]["recognized_schemas"] == [USER_SCHEMA]
 
 
 @pytest.mark.parametrize(

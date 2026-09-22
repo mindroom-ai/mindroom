@@ -23,9 +23,14 @@ from starlette.requests import Request
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.cli.config import validate_config_source_quiet
+from mindroom.commands.config_commands import apply_config_change
 from mindroom.config.legacy_access import AccessMigrationError
 from mindroom.config.main import load_config
 from mindroom.custom_tools.config_manager import ConfigManagerTools
+from mindroom.message_target import MessageTarget
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 
 SPLIT_TOP_SOURCE = (
     "agents: !include_dir_merge_named agents/\nmodels: !include models.yaml\ndefaults:\n  markdown: true\n"
@@ -124,6 +129,32 @@ def empty_include_runtime_paths(tmp_path: Path, request: pytest.FixtureRequest) 
         storage_path=tmp_path / "storage",
         process_env={},
     )
+
+
+@pytest.fixture
+def stale_monolith_app(empty_include_runtime_paths: constants.RuntimePaths) -> FastAPI:
+    """Publish a monolith, then add an include without publishing a reload."""
+    runtime_paths = empty_include_runtime_paths
+    source = (
+        "models:\n  default: {provider: ollama, id: test-model}\n"
+        "agents:\n  operator: {display_name: Operator, role: Original role}\n"
+        "teams: {}\n"
+        "administrators: ['@admin:example.org']\n"
+    )
+    runtime_paths.config_path.write_text(source, encoding="utf-8")
+    api_app = _make_api_app(runtime_paths)
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+    before = _snapshot(api_app)
+    assert before.uses_includes is False
+    runtime_paths.config_path.write_text(
+        source.replace("teams: {}", "teams: !include_dir_merge_named entries/"),
+        encoding="utf-8",
+    )
+    config = load_config(runtime_paths)
+    assert config.uses_includes is True
+    assert config.source_files == frozenset({runtime_paths.config_path.resolve()})
+    assert _snapshot(api_app) is before
+    return api_app
 
 
 class TestEmptyDirectoryIncludes:
@@ -556,6 +587,113 @@ class TestEmptyDirectoryIncludes:
         assert "does not support !include" in str(exc_info.value.detail)
         assert path.read_text(encoding="utf-8") == source
         assert not path.with_name(f"{path.name}.pre-membership-access").exists()
+
+
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_recheck_includes_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    write_kind: str,
+) -> None:
+    """Unpublished include topology must protect every structured writer."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    source = runtime_paths.config_path.read_bytes()
+    payload = load_config(runtime_paths).authored_model_dump()
+    payload["timezone"] = "Europe/Amsterdam"
+
+    if write_kind == "external":
+        with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
+            config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        with pytest.raises(HTTPException) as exc_info:
+            writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "config_composed_from_includes"
+
+    assert runtime_paths.config_path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
+    assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
+
+
+@pytest.mark.parametrize("operation", ["agent-create", "agent-update", "team-create", "config-patch"])
+def test_config_tools_preserve_new_includes_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    operation: str,
+) -> None:
+    """Authorized tools must preserve newly authored include source."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    source = runtime_paths.config_path.read_bytes()
+    config = load_config(runtime_paths)
+    manager = ConfigManagerTools(runtime_paths)
+    context = make_test_tool_runtime_context(
+        agent_name="operator",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id="$thread",
+            reply_to_event_id="$request",
+        ),
+        requester_id="@admin:example.org",
+        client=make_matrix_client_mock(),
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
+    )
+    with tool_runtime_context(context):
+        if operation == "agent-create":
+            result = manager.manage_agent(
+                operation="create",
+                agent_name="new_agent",
+                display_name="New Agent",
+                role="New role",
+            )
+        elif operation == "agent-update":
+            result = manager.manage_agent(operation="update", agent_name="operator", role="Updated role")
+        elif operation == "team-create":
+            result = manager.manage_team(
+                team_name="reviewers",
+                display_name="Reviewers",
+                role="Review",
+                agents=["operator"],
+            )
+        else:
+            result = manager.manage_config(
+                operation="patch",
+                changes=[{"op": "replace", "path": "/agents/operator/role", "value": "Updated role"}],
+            )
+
+    assert "!include" in result
+    assert "Changes were NOT applied." in result
+    assert runtime_paths.config_path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
+    (runtime_paths.config_path.parent / "entries" / "late_team.yaml").write_text(
+        "late_team: {display_name: Late Team, role: Later addition, agents: [operator]}\n",
+        encoding="utf-8",
+    )
+    assert "late_team" in load_config(runtime_paths).teams
+
+
+@pytest.mark.asyncio
+async def test_confirmed_config_change_preserves_new_includes_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+) -> None:
+    """Confirmed command persistence must honor unpublished include topology."""
+    before = _snapshot(stale_monolith_app)
+    source = before.runtime_paths.config_path.read_bytes()
+
+    result = await apply_config_change("agents.operator.role", "Updated role", before.runtime_paths)
+
+    assert "!include" in result
+    assert "Changes were NOT applied." in result
+    assert before.runtime_paths.config_path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
 
 
 class TestIncludeAwareSnapshots:
