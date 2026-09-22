@@ -95,7 +95,7 @@ visibility = [
 
 [[modules]]
 path = "mindroom.dynamic_workflows"
-depends_on = ["mindroom.durable_write"]
+depends_on = ["mindroom.durable_write", "mindroom.file_locks"]
 
 [[modules]]
 path = "mindroom.private_instance_identity"
