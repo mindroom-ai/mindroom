@@ -1691,7 +1691,8 @@ async def edit_scheduled_task(
     silent: bool | None = None,
     model: str | None = None,
 ) -> str:
-    """Edit an existing scheduled task by replacing its workflow details."""
+    """Edit an existing scheduled task while preserving its saved delivery scope."""
+    del thread_id
     client = runtime.client
     existing_task = await get_scheduled_task(client=client, room_id=room_id, task_id=task_id)
     if not existing_task:
@@ -1700,7 +1701,7 @@ async def edit_scheduled_task(
         return f"❌ Task `{task_id}` cannot be edited because it is `{existing_task.status}`."
 
     target_new_thread = existing_task.workflow.new_thread
-    target_thread_id = None if target_new_thread else existing_task.workflow.thread_id or thread_id
+    target_thread_id = None if target_new_thread else existing_task.workflow.thread_id
 
     edited_task_id, response_text = await schedule_task(
         runtime=runtime,
