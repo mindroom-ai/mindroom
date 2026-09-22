@@ -622,6 +622,8 @@ bun install && bun run dev
 Run these commands from the repository root.
 For staging, copy the example values and fill in the Supabase, Stripe, and provisioner credentials before running Helm.
 The `domain` value selects ingress hosts; the namespace alone does not select staging domains.
+For a fresh staging install, store Helm release records in `staging`; the chart creates application resources in `mindroom-staging`, matching the Terraform namespace layout.
+For an existing release, retain its original release name and namespace.
 
 ```bash
 # Set kubeconfig path
@@ -630,7 +632,7 @@ export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 # Prepare staging values (keep the populated file private)
 cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
 # Fill in credentials before deploying
-helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values-staging.yaml --namespace mindroom-staging
+helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values-staging.yaml --namespace staging --create-namespace
 
 # Create customer instances through the portal or authenticated POST /my/instances/provision.
 # See docs/deployment/kubernetes.md for the customer and operator API flows.

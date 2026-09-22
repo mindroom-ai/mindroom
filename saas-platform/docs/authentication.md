@@ -53,5 +53,8 @@ This is separate from the instance dashboard/API Supabase authentication path.
 - Missing tenant cookie: check the configured domain, HTTPS, and whether a host-only exception applies.
 - API `401`: check the credentials required by the active authentication mode.
 - Supabase API `403`: check the configured account ID; cookie-authenticated mutations can also fail origin checks.
-- Unauthenticated dashboard requests redirect to the configured platform login URL, or return `401` when no login URL is configured.
+- With hosted Supabase authentication, unauthenticated dashboard requests redirect to the configured platform login URL.
+- Standalone API-key dashboards redirect unauthenticated users to `/login`; unauthenticated API requests return `401`.
+- Trusted-upstream authentication failures return `401` without a login redirect, even when a platform login URL is configured.
+- Other unauthenticated dashboard requests return `401` when the active mode provides no login redirect.
 - Missing bundled frontend assets return `404`; inspect the runtime image and backend logs.
