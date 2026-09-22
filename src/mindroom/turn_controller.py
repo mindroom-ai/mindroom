@@ -888,7 +888,8 @@ class TurnController:
         source_kind: str,
     ) -> float:
         """Resolve adaptive eligibility before queue admission without delaying ordinary text."""
-        participation = self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths)
+        agent = self.deps.runtime.config.agents.get(self.deps.agent_name)
+        participation = agent.participation if agent is not None else None
         if (
             participation is None
             or participation.debounce_seconds <= 0

@@ -185,7 +185,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
-    from mindroom.config.participation import RoomParticipationConfig
+    from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
     from mindroom.conversation_resolver import ConversationResolver
     from mindroom.conversation_state_writer import ConversationStateWriter
@@ -472,7 +472,7 @@ class ResponseRequest:
     prompt: str
     response_envelope: MessageEnvelope
     sources: ResponseSources
-    participation: RoomParticipationConfig | None = None
+    participation: ParticipationConfig | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     existing_event_id: str | None = None

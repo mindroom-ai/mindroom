@@ -222,7 +222,12 @@ def thread_requires_explicit_agent_targeting(
     )
     if sender_visible_responders:
         return True
-    return has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths)
+    return has_multiple_non_agent_users_in_thread(
+        thread_history,
+        config,
+        runtime_paths,
+        current_sender_id=sender_id,
+    )
 
 
 def filter_thread_agents_for_sender(

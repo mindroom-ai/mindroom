@@ -22,7 +22,7 @@ from agno.session.agent import AgentSession
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.participation import RoomParticipationConfig
+from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
@@ -3536,7 +3536,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 user_id="@alice:localhost",
                 agent_name=bot.agent_name,
             ),
-            participation=RoomParticipationConfig.model_validate(
+            participation=ParticipationConfig.model_validate(
                 {
                     "decline_reaction": reaction,
                     "judgment": (
@@ -3653,7 +3653,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
                 thread_history=[],
                 response_envelope=envelope,
-                participation=RoomParticipationConfig(),
+                participation=ParticipationConfig(),
                 requires_model_history_refresh=True,
                 payload_preparation=preparation if failure_stage == "payload" else None,
                 on_no_response_handled=settled,
@@ -3708,7 +3708,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                     thread_id="$thread",
                     agent_name=bot.agent_name,
                 ),
-                participation=RoomParticipationConfig(),
+                participation=ParticipationConfig(),
                 on_no_response_handled=settled,
             ),
         )

@@ -1728,6 +1728,29 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         await orchestrator.config_reload.cancel()
 
 
+@pytest.mark.parametrize(
+    ("old_settings", "new_settings"),
+    [(None, {}), ({}, None), ({}, {"decline_reaction": "👍"}), ({}, {"debounce_seconds": 0})],
+)
+def test_participation_changes_restart_only_owning_agent(
+    old_settings: dict[str, object] | None,
+    new_settings: dict[str, object] | None,
+) -> None:
+    """Enabling, disabling, and tuning participation must refresh the owning agent."""
+    configs = [
+        Config.model_validate(
+            {
+                "agents": {
+                    "helper": {"display_name": "Helper", "participation": settings},
+                    "other": {"display_name": "Other"},
+                },
+            },
+        )
+        for settings in (old_settings, new_settings)
+    ]
+    assert _get_changed_agents(configs[0], configs[1], agent_bots={}) == {"helper"}
+
+
 def test_get_changed_agents_detects_tool_override_updates() -> None:
     """Agent restarts should trigger when authored tool overrides change."""
     old_config = _runtime_bound_config(

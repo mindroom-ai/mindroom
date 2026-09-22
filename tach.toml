@@ -2361,7 +2361,6 @@ depends_on = []
 path = "mindroom.config.main"
 depends_on = [
     "mindroom.config.judgment",
-    "mindroom.config.participation",
     "mindroom.agent_policy",
     "mindroom.config.agent",
     "mindroom.config.auth",
@@ -6111,7 +6110,7 @@ visibility = ["mindroom.model_loading"]
 [[modules]]
 path = "mindroom.config.participation"
 depends_on = ["mindroom.config.judgment"]
-visibility = ["mindroom.config.main", "mindroom.turn_policy", "mindroom.response_runner"]
+visibility = ["mindroom.config.agent", "mindroom.turn_policy", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.delegation.sessions"

@@ -18,7 +18,7 @@ from groq import AsyncGroq
 from mindroom import model_loading
 from mindroom.agno_participation import participation_model
 from mindroom.config.main import Config
-from mindroom.config.participation import RoomParticipationConfig
+from mindroom.config.participation import ParticipationConfig
 from mindroom.groq_model import MindRoomGroq
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
@@ -50,7 +50,7 @@ def _gate(
     backend: str = "typesafe",
 ) -> ParticipationGate:
     paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": key})
-    room = RoomParticipationConfig.model_validate(
+    participation = ParticipationConfig.model_validate(
         {
             "instructions": "Offer technical help.",
             "judgment": {"provider": "typesafe", "threshold": threshold, "timeout_seconds": timeout}
@@ -59,9 +59,9 @@ def _gate(
         },
     )
     return ParticipationGate(
-        instructions=room.instructions,
+        instructions=participation.instructions,
         decider=create_participation_decider(
-            room,
+            participation,
             Config(models={"cheap": {"provider": "test", "id": "cheap"}}),
             paths,
             agent_name="helper",

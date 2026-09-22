@@ -100,7 +100,7 @@ async def _request_decision(
                 return decision
     prompt = _DECISION_INSTRUCTION
     if gate.instructions:
-        prompt += f"\nRoom participation guidance:\n{gate.instructions}"
+        prompt += f"\nAgent participation guidance:\n{gate.instructions}"
     decision_messages = [message.model_copy(deep=True) for message in messages]
     decision_messages.append(Message(role="user", content=render_transient_context([prompt])))
     try:

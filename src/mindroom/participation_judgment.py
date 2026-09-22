@@ -10,19 +10,19 @@ from mindroom.participation import PARTICIPATION_QUESTION, ParticipationDecider,
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
-    from mindroom.config.participation import RoomParticipationConfig
+    from mindroom.config.participation import ParticipationConfig
     from mindroom.constants import RuntimePaths
 
 
 def create_participation_decider(
-    room: RoomParticipationConfig,
+    participation: ParticipationConfig,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     agent_name: str,
 ) -> ParticipationDecider | None:
     """Map the common yes/no/abstain outcome to the participation lifecycle."""
-    settings = room.judgment
+    settings = participation.judgment
     if settings is None:
         return None
     evaluate = create_judgment_evaluator(
@@ -34,7 +34,7 @@ def create_participation_decider(
     )
     if evaluate is None:
         return None
-    instructions = room.instructions
+    instructions = participation.instructions
 
     async def decide(messages: tuple[JudgmentMessage, ...]) -> ParticipationDecision | None:
         request = build_judgment_request(PARTICIPATION_QUESTION, messages, instructions=instructions)
