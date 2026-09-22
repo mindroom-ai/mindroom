@@ -12,6 +12,10 @@ struct AppSettingsView: View {
             Text("Settings").font(.largeTitle).fontWeight(.semibold)
             Text("App preferences, updates, and troubleshooting.").foregroundStyle(.secondary)
             AppSectionCard {
+                LabeledContent("MindRoom version", value: appVersion)
+                    .textSelection(.enabled)
+            }
+            AppSectionCard {
                 Toggle("Open menu bar app at login", isOn: Binding(
                     get: { startAtLogin },
                     set: { _ in toggleLogin() }
@@ -69,6 +73,12 @@ struct AppSettingsView: View {
     private func refreshLogin() {
         startAtLogin = LoginItemController.shared.isEnabled
         loginTitle = LoginItemController.shared.menuTitle
+    }
+
+    private var appVersion: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development"
+        guard let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else { return version }
+        return "\(version) (build \(build))"
     }
 
     private func toggleLogin() {

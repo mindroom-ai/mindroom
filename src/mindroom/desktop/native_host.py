@@ -209,11 +209,17 @@ class NativeDesktopHost:
         if action == "status":
             _expect_keys(parameters, set())
             return {"status": self.status()}
-        if action == "configure":
-            _expect_keys(parameters, {"expected_revision", "config"})
+        if action in {"configure", "set_allowed_apps"}:
+            config_key = "config" if action == "configure" else "allowed_app_ids"
+            _expect_keys(parameters, {"expected_revision", config_key})
             if self._runtime is not None:
                 raise NativeProtocolError("busy", "Stop the desktop bridge before changing its configuration.")
-            config = NativeDesktopConfig.from_payload(parameters.get("config"))
+            if action == "set_allowed_apps":
+                if self._config is None:
+                    raise NativeProtocolError("invalid_request", "Complete desktop setup before saving app access.")
+                config = self._config.with_allowed_apps(parameters.get("allowed_app_ids"))
+            else:
+                config = NativeDesktopConfig.from_payload(parameters.get("config"))
             try:
                 check_controller_binding(
                     self._runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
@@ -275,6 +281,8 @@ class NativeDesktopHost:
             config = self._require_config()
             if not config.enabled:
                 raise NativeProtocolError("configuration_missing", "Enable Desktop Control before starting.")
+            if not config.allowed_app_ids:
+                raise NativeProtocolError("configuration_missing", "Select and save at least one app before starting.")
             if self._runtime is not None:
                 raise NativeProtocolError("already_running", "The desktop bridge is already running.")
             runtime = (self._dependencies.runtime_factory or NativeBridgeRuntime)(self._runtime_paths, config)

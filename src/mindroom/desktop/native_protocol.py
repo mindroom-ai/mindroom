@@ -20,6 +20,7 @@ NATIVE_ACTIONS = frozenset(
     {
         "status",
         "configure",
+        "set_allowed_apps",
         "import_setup",
         "login",
         "pair",

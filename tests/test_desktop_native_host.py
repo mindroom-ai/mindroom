@@ -1,7 +1,7 @@
 """Native desktop host lifecycle tests."""
 
 # Compact fakes keep the wire-level lifecycle assertions readable.
-# ruff: noqa: C416, D101, D102, D103, EM101, S106, TC001, TRY003
+# ruff: noqa: C416, D101, D102, D103, EM101, S106, TRY003
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from uuid import uuid4
 import pytest
 
 from mindroom.desktop.command_journal import DesktopCommandJournal
-from mindroom.desktop.native_config import NativeDesktopConfig
+from mindroom.desktop.native_config import NativeDesktopConfig, load_native_config, native_config_path
 from mindroom.desktop.native_host import (
     NativeDesktopHost,
     NativeHostDependencies,
@@ -310,6 +310,79 @@ def test_configure_same_controller_preserves_journal_and_saves_app_changes(tmp_p
     assert result["status"]["config"]["revision"] == 2
     assert result["status"]["config"]["allowed_app_ids"] == ["com.example.Other"]
     assert journal_path.read_bytes() == original_journal
+
+
+def test_set_allowed_apps_preserves_connection_and_other_settings(tmp_path: Path) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    payload = _config_payload()
+    payload["capture"] = {"max_screenshot_width": 1200, "jpeg_quality": 65}
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+    original = load_native_config(native_config_path(tmp_path)).to_payload()
+
+    result = asyncio.run(
+        host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=["com.example.Other"])),
+    )
+
+    saved = load_native_config(native_config_path(tmp_path)).to_payload()
+    assert saved == original | {"revision": 2, "allowed_app_ids": ["com.example.Other"]}
+    assert result["status"]["config"]["allowed_app_ids"] == ["com.example.Other"]
+    with pytest.raises(NativeProtocolError, match="changed"):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+    assert load_native_config(native_config_path(tmp_path)).to_payload() == saved
+
+
+def test_set_allowed_apps_requires_saved_configuration_and_stopped_access(tmp_path: Path) -> None:
+    runtime = FakeRuntime()
+    host = NativeDesktopHost(
+        SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None),
+        helper_version="1",
+        dependencies=NativeHostDependencies(runtime_factory=lambda _paths, _config: runtime),
+    )
+    with pytest.raises(NativeProtocolError, match="setup"):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=0, allowed_app_ids=[])))
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    asyncio.run(host.handle(_request("start")))
+    with pytest.raises(NativeProtocolError, match="Stop"):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+    asyncio.run(host.handle(_request("stop")))
+    result = asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+    assert result["status"]["config"]["allowed_app_ids"] == []
+    assert result["status"]["bridge"]["state"] == "stopped"
+    with pytest.raises(NativeProtocolError, match="at least one app"):
+        asyncio.run(host.handle(_request("start")))
+
+
+@pytest.mark.parametrize("app_ids", ["com.example.Editor", [""], [123]])
+def test_set_allowed_apps_validates_app_ids(tmp_path: Path, app_ids: object) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    with pytest.raises(NativeProtocolError):
+        asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=app_ids)))
+    assert host.status()["config"]["revision"] == 1
+
+
+def test_app_only_save_preserves_browser_config_when_paths_disappear(tmp_path: Path) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    executable = tmp_path / "browser"
+    executable.touch()
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    payload = _config_payload()
+    payload["browser"] = {
+        "enabled": True,
+        "executable_path": str(executable),
+        "user_data_dir": str(profile),
+        "timeout_seconds": 45,
+    }
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+    executable.unlink()
+    profile.rmdir()
+
+    asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+
+    saved = load_native_config(native_config_path(tmp_path))
+    assert saved.allowed_app_ids == ()
+    assert saved.to_payload()["browser"] == payload["browser"]
 
 
 @pytest.mark.parametrize("journal_kind", ["malformed", "directory", "symlink"])
