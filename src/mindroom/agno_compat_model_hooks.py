@@ -111,16 +111,20 @@ def _with_tool_checkpoint(
 
 
 # AGNO_COMPAT: Post-tool callbacks lack mutable messages and results.
-# Reason: after_tool_results exists in Agno 3.0.9 but lacks the mutable messages
-# and results and is not exposed as an owner callback through Agent/Team runs.
+# Reason: after_tool_results exists in Agno 3.0.9 but does not expose mutable
+# input messages or raw tool-result messages to the owner through Agent/Team runs.
 # Approved continuations append results directly before entering aresponse or
 # aresponse_stream, bypassing both formatting and media callbacks.
+# Mid-turn judgments must be awaited after a completed batch or at resumed entry,
+# before the next provider request; existing checkpoints must run even on cancellation.
 # Upstream issue: No matching public post-tool message callback issue identified.
 # Upstream PR: None identified; existing checkpoint callbacks are only a partial API.
-# Remove when: Public callbacks expose messages/results after formatting and media
+# Remove when: Public awaitable callbacks expose messages/results after formatting and media
 # insertion, including resumed batches; retain the owner's notice deduplication
 # and stop-after policy.
-# Coverage: tests/test_queued_message_notify.py; tests/test_approval_queued_notice.py.
+# Coverage: tests/test_mid_turn.py exercises streaming, resumed batches, terminal tools,
+# and checkpoint cancellation; tests/test_queued_message_notify.py and
+# tests/test_approval_queued_notice.py cover queued notices and approval resumes.
 def install_tool_result_callback(
     model: Model,
     *,
