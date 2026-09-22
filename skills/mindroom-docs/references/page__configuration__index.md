@@ -1115,7 +1115,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `administrators`, room invitations, responder access, Matrix power, and `credential_managers` are independent capabilities
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` requires a platform administrator
 - Responder `access` can match static users, current-room members, or members of configured managed rooms
-- Responder access and room membership never grant dashboard credential or OAuth management
+- Responder access and room membership do not grant general dashboard or shared-credential management; eligible requesters may manage [their own OAuth connections](https://docs.mindroom.chat/oauth-framework/)
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
 - Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually

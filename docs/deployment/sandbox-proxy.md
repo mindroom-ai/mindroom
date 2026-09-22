@@ -28,7 +28,7 @@ This page describes the current sandboxed execution model.
 The static worker runtime authenticates requests with `MINDROOM_SANDBOX_PROXY_TOKEN`.
 Kubernetes dedicated workers derive a separate runner token for each worker from that control-plane token and the worker key.
 Compromising one dedicated worker token does not authorize requests to another dedicated worker runner.
-For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
+For worker-routed toolkits with declared credential configuration fields, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
 Credentials never become part of the normal tool arguments or the model prompt.
 
 MindRoom currently ships three worker backend shapes:
@@ -546,19 +546,14 @@ For an example, see `docs/tools/execution-and-coding.md`.
 
 ## Credential leases
 
-Some proxied tools need credentials, such as a `shell` tool that runs `git push` and needs an SSH key.
-Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease**.
-That lease is a short-lived, single-use token that the runner exchanges for credentials during execution.
+A **credential lease** supplies short-lived credential values as constructor configuration overrides to a worker-routed toolkit.
+`MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` maps tool names, `tool.function` selectors, or `*` to lists of credential service names.
+Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
+Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
+The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 
-Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
-
-```bash
-export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
-```
-
-This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
-Credentials are never persisted by the runner; a lease holds them in memory until consumed or expired.
-Each lease is consumed on use and expires after the configured TTL.
+Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
+For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
 
 ## Security considerations
 

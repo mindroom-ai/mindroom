@@ -2169,7 +2169,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `administrators`, room invitations, responder access, Matrix power, and `credential_managers` are independent capabilities
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` requires a platform administrator
 - Responder `access` can match static users, current-room members, or members of configured managed rooms
-- Responder access and room membership never grant dashboard credential or OAuth management
+- Responder access and room membership do not grant general dashboard or shared-credential management; eligible requesters may manage [their own OAuth connections](https://docs.mindroom.chat/oauth-framework/)
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
 - Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually
@@ -2339,7 +2339,7 @@ agents:
 | `private` | object | `null` | Optional requester-private state for one shared agent definition |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](https://docs.mindroom.chat/authorization/) |
-| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and OAuth connections. Independent of `access`: a credential manager gains no conversation access, and a responder user gains no credential authority |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and shared OAuth connections. Does not grant conversation access. Eligible requesters manage their own isolated OAuth connections separately; see [OAuth authorization](https://docs.mindroom.chat/oauth-framework/) |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -12808,7 +12808,7 @@ Use `sse` for MCP servers that expose a Server-Sent Events endpoint.
 mcp_servers:
   remote_sse:
     transport: sse
-    url: http://127.0.0.1:9000/sse
+    url: https://mcp.example.com/sse
     headers:
       Authorization: Bearer ${MCP_API_TOKEN}
 ```
@@ -12825,7 +12825,7 @@ Use `streamable-http` for MCP servers that expose the newer streamable HTTP endp
 mcp_servers:
   remote_http:
     transport: streamable-http
-    url: http://127.0.0.1:9000/mcp
+    url: https://mcp.example.com/mcp
     headers:
       Authorization: Bearer ${MCP_API_TOKEN}
 ```
@@ -12833,6 +12833,9 @@ mcp_servers:
 For `streamable-http` servers, `url` is required.
 `headers` are optional.
 `command`, `args`, `cwd`, and `env` are not allowed on this transport.
+
+Both remote transports reject loopback and private-network destinations.
+Use `stdio` for local subprocess servers.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
@@ -12864,7 +12867,7 @@ Use `worker_scope: shared` when one connected account belongs to the agent and e
 | `startup_timeout_seconds` | float | `20.0` | Maximum time to open the transport, initialize, and discover tools |
 | `call_timeout_seconds` | float | `120.0` | Default timeout for each tool call |
 | `max_concurrent_calls` | int | `1` | Maximum concurrent tool calls for that server |
-| `auto_reconnect` | bool | `true` | Retry once after connection or timeout failures during a call |
+| `auto_reconnect` | bool | `true` | Refresh the connection for future calls after eligible connection or timeout failures; never replay an ambiguous call automatically |
 
 `tool_prefix` must use only letters, numbers, and underscores.
 `include_tools` and `exclude_tools` are matched against the remote MCP tool names, not the MindRoom-prefixed function names.
@@ -13031,6 +13034,7 @@ mcp_servers:
 
 OAuth discovery requires HTTPS by default and does not follow redirects.
 For local development, set `MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY=1` to allow non-HTTPS discovery URLs, and set `MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY=1` to allow loopback or private-network discovery hosts.
+These options affect OAuth discovery only; they do not relax the address checks for SSE or streamable HTTP transport requests.
 
 ## Tool Naming
 
@@ -13185,12 +13189,14 @@ agents:
       - mcp_mempalace
 ```
 
-Before the MCP server can return results, initialize and seed the palace:
+Before the MCP server can return results, initialize and seed the same palace directory configured above:
 
 ```bash
-uvx mempalace init /path/to/content
-uvx mempalace mine /path/to/content
+uvx mempalace --palace /path/to/.mempalace/palace init /path/to/content
+uvx mempalace --palace /path/to/.mempalace/palace mine /path/to/content
 ```
+
+The positional directory supplies content to scan or mine; `--palace` selects the destination store (see the [MemPalace CLI reference](https://mempalaceofficial.com/reference/cli)).
 
 Agents can also add memories on the fly via the `mempalace_add_drawer` tool.
 The palace enforces deduplication at a 0.9 similarity threshold.
@@ -13212,9 +13218,11 @@ Set `required: true` on a server to restore hard-fail behavior, where dependent 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.
 Those explicit server-side errors are not retried automatically.
 
-Connection drops and timeouts are treated differently.
-When `auto_reconnect: true`, MindRoom refreshes the server connection and retries the tool call once.
-If reconnect also fails, the error is surfaced to the caller.
+A connection drop or timeout after dispatch can leave the remote action's outcome unknown.
+When `auto_reconnect: true`, MindRoom can refresh the connection and catalog for future calls, but it does not replay the failed action.
+The caller receives an error even if reconnection succeeds.
+Check whether a potentially mutating action completed before explicitly retrying it.
+Retries during authorization or catalog preparation before dispatch do not replay a tool invocation.
 
 If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
 If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.
@@ -15165,15 +15173,21 @@ When a scoped token exists but cannot be decoded, status returns `reset_required
 Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the browser-openable `authorize` URL before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets a shared agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
-An authenticated requester may manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
-Responder access and room membership never grant OAuth-management access.
+When an agent-targeted OAuth request resolves to shared or unscoped credentials, the authenticated requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+For Connections portal routes and dashboard credential targeting, a verified Matrix requester with current responder access can manage their own `user` or `user_agent` OAuth connection on a non-private agent definition, including when the provider requires requester-only storage.
+An authenticated requester may also manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
+These personal permissions do not grant general dashboard access or authority over shared credentials.
+With the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal) enabled, eligible users use its dedicated `/api/connections/...` routes with signed Matrix authentication, while ordinary dashboard routes require administrator authority.
+Ordinary generic `/api/oauth/...` requests remain subject to deployment authentication and the Connections route restrictions; conversation capabilities use the separately checked flow below.
+For providers that follow agent scope, credential targets use saved configuration, and a different execution-scope override is rejected until that configuration is saved.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
 Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
 Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
-MindRoom rechecks the requester's current agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
+MindRoom rechecks the conversation link requester's agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
+For a non-private agent, this link flow requires an administrator or configured credential manager even when the connection uses requester-only storage; responder access alone is insufficient.
+The requester-private-agent exception still applies to its isolated connection.
 Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
 Requester-scoped reset links still require the original authenticated browser user.
 Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.
@@ -15198,7 +15212,11 @@ Legacy `<credential_service>_credentials.json` token documents and their sidecar
 An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.
 Providers can declare that credentials follow the requester independently of agent worker reuse.
 GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
-For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
+For providers without that policy, token placement follows the agent's saved effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise unscoped.
+Private agents use `private.per` and cannot also set `worker_scope`.
+A `user` connection follows the authenticated requester across user-scoped agents, while `user_agent` binds it to that requester and agent.
+A `shared` connection uses a per-agent primary-runtime store.
+Only agents with no private, per-agent, or inherited scope use the global credential store.
 Conversation capabilities reconstruct the bound requester and worker target from server-side state; invalid, expired, reused, unauthorized, or stale links fail closed and save no credentials.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
@@ -20745,9 +20763,10 @@ The software running on your machine stores the connection, while the Google API
 The installation operator and anyone with administrative or filesystem access to its storage may be able to access locally stored credentials and data.
 
 The example above uses `worker_scope: user_agent`, which keeps each authenticated Matrix requester's connection separate for that agent.
-With `worker_scope: user`, one requester can reuse the connection across that requester's user-scoped agents.
-With `worker_scope: shared`, any user authorized to invoke the selected shared agent can cause it to use the connected Google Account and may receive Google data in its response.
-With no worker scope configured, the connection is stored at the installation level and is not isolated by requester.
+In general, the saved effective execution scope comes from `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope.
+With effective scope `user`, one requester can reuse the connection across that requester's user-scoped agents.
+With effective scope `shared`, any user authorized to invoke the selected agent can cause it to use the connected Google Account and may receive Google data in its response.
+Only with no private, per-agent, or inherited scope is the connection stored at the installation level without requester isolation.
 
 Being signed in to the computer does not itself determine access.
 MindRoom uses authenticated Matrix requester identity, agent authorization, and the configured credential scope, while operating-system and storage permissions remain the installation operator's responsibility.
@@ -21638,7 +21657,7 @@ This page describes the current sandboxed execution model.
 The static worker runtime authenticates requests with `MINDROOM_SANDBOX_PROXY_TOKEN`.
 Kubernetes dedicated workers derive a separate runner token for each worker from that control-plane token and the worker key.
 Compromising one dedicated worker token does not authorize requests to another dedicated worker runner.
-For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
+For worker-routed toolkits with declared credential configuration fields, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
 Credentials never become part of the normal tool arguments or the model prompt.
 
 MindRoom currently ships three worker backend shapes:
@@ -22156,19 +22175,14 @@ For an example, see `docs/tools/execution-and-coding.md`.
 
 ## Credential leases
 
-Some proxied tools need credentials, such as a `shell` tool that runs `git push` and needs an SSH key.
-Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease**.
-That lease is a short-lived, single-use token that the runner exchanges for credentials during execution.
+A **credential lease** supplies short-lived credential values as constructor configuration overrides to a worker-routed toolkit.
+`MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` maps tool names, `tool.function` selectors, or `*` to lists of credential service names.
+Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
+Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
+The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 
-Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
-
-```bash
-export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
-```
-
-This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
-Credentials are never persisted by the runner; a lease holds them in memory until consumed or expired.
-Each lease is consumed on use and expires after the configured TTL.
+Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
+For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
 
 ## Security considerations
 
