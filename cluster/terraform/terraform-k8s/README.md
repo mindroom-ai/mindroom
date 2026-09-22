@@ -1,11 +1,11 @@
 # MindRoom K8s Infrastructure
 
-Complete Terraform configuration for deploying MindRoom on Kubernetes with a single `terraform apply`.
+Terraform configuration for deploying MindRoom on Kubernetes, with separate cluster bootstrap and platform deployment steps.
 
 ## Prerequisites
 
 1. **Required Tools:**
-   - [Terraform](https://www.terraform.io/downloads) >= 1.0
+   - [Terraform](https://www.terraform.io/downloads) >= 1.5.0 (required by the pinned kube-hetzner module)
    - [kubectl](https://kubernetes.io/docs/tasks/tools/)
    - [Packer](https://developer.hashicorp.com/packer/downloads) (for MicroOS snapshots)
    - Docker (for building images)
@@ -65,13 +65,16 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    cp terraform.tfvars.example terraform.tfvars
    # Edit terraform.tfvars with your credentials
    ```
+   The example enables the platform with `deploy_platform = true`; the variable defaults to `false` when omitted, which skips the platform Helm release.
+   Replace the example `domain` and `root_domain` with your deployment hostname suffix and Porkbun DNS zone (see [Environments](#environments)).
+   Set a strong, unique `provisioner_api_key` before deploying the platform (see [Required Credentials](#required-credentials)).
 
 3. **Generate SSH keys for the cluster:**
    ```bash
    ssh-keygen -t ed25519 -f cluster_ssh_key -N ""
    ```
 
-4. **Build MicroOS snapshots (first time only):**
+4. **Build MicroOS snapshots if the target Hetzner project lacks them:**
    ```bash
    # Install Packer if not already installed
    # https://developer.hashicorp.com/packer/downloads
@@ -79,17 +82,25 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
    # Export your Hetzner token for Packer
    export HCLOUD_TOKEN="your-hetzner-token-here"
 
+   # Install the plugins declared by the template
+   packer init hcloud-microos-snapshots.pkr.hcl
+
    # Build the MicroOS snapshots (takes ~5-10 minutes)
    packer build hcloud-microos-snapshots.pkr.hcl
    ```
-   Note: This creates OpenSUSE MicroOS snapshots in your Hetzner account.
-   Only needed once per Hetzner account. The snapshots will be reused for all future deployments.
+   This creates OpenSUSE MicroOS snapshots in the project selected by `HCLOUD_TOKEN`.
+   Packer's `HCLOUD_TOKEN` and Terraform's `hcloud_token` must target the intended project because [Hetzner API tokens are scoped to projects](https://docs.hetzner.com/cloud/api/getting-started/using-api/).
+   Suitable snapshots can be reused within that project.
+   For another project, build the snapshots there or [move existing snapshots to that project](https://docs.hetzner.com/cloud/servers/backups-snapshots/faq/#are-backupssnapshots-moveable).
 
-5. **Deploy everything:**
+5. **Bootstrap the cluster, then deploy the platform and remaining resources:**
    ```bash
    terraform init
+   terraform apply -target=module.kube-hetzner
    terraform apply
    ```
+   The initial targeted apply follows `scripts/up.sh` and creates the kubeconfig used by the Kubernetes and Helm providers.
+   Run the full apply afterward to include DNS, certificate issuers, monitoring, and the enabled platform.
 
 ## Required Credentials
 
@@ -97,6 +108,10 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 - **Porkbun API Keys**: From https://porkbun.com/account/api
 - **Supabase**: Project URL and keys
 - **Stripe**: API keys and webhook secret
+- **Provisioner**: Set `provisioner_api_key` to a strong, unique secret and configure clients of the provisioning `/system/*` endpoints to send the same value as a bearer token.
+
+The provisioner key also derives stable per-instance secrets when `INSTANCE_CREDENTIALS_ENCRYPTION_SECRET` is unset.
+This Terraform configuration passes `provisioner_api_key` to Helm but does not configure a dedicated derivation root, so keep the key stable for existing tenants.
 
 ## Outputs
 
@@ -132,10 +147,25 @@ Terraform will output OAuth setup instructions after deployment.
 
 ## Environments
 
-- **Staging/Test**: Uses `<environment>.<domain>` as the superdomain
-- **Production**: Uses root `<domain>` as the superdomain
+`environment` controls deployment naming; it does not prepend a hostname prefix.
+`domain` is the full deployment domain used for hosts such as `app.<domain>`, while `root_domain` selects the Porkbun DNS zone.
+Replace `example.test` below with your own domain.
 
-Set via `environment` variable in terraform.tfvars.
+For staging, set these values in `terraform.tfvars`:
+
+```hcl
+environment = "staging"
+domain      = "staging.example.test"
+root_domain = "example.test"
+```
+
+For production at the root domain:
+
+```hcl
+environment = "production"
+domain      = "example.test"
+root_domain = "example.test"
+```
 
 ## Destroying
 
