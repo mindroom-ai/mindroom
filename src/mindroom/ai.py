@@ -30,6 +30,7 @@ from mindroom.agents import agent_build_can_overlap_file_memory, create_agent
 from mindroom.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.agno_participation import participation_model
 from mindroom.ai_run_metadata import (
+    accumulate_model_request_metrics,
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
     build_prepared_history_metadata_content,
@@ -752,33 +753,26 @@ def _track_model_request_metrics(
         state.latest_model_id = event.model
     if event.model_provider:
         state.latest_model_provider = event.model_provider
+    state.first_token_latency = accumulate_model_request_metrics(
+        state.request_metric_totals,
+        state.observed_request_metric_fields,
+        input_tokens=event.input_tokens,
+        output_tokens=event.output_tokens,
+        total_tokens=event.total_tokens,
+        reasoning_tokens=event.reasoning_tokens,
+        cache_read_tokens=event.cache_read_tokens,
+        cache_write_tokens=event.cache_write_tokens,
+        time_to_first_token=event.time_to_first_token,
+        first_token_latency=state.first_token_latency,
+    )
     if isinstance(event.input_tokens, int):
-        state.observed_request_metric_fields.add("input_tokens")
         state.latest_request_input_tokens = event.input_tokens
-        state.request_metric_totals["input_tokens"] += event.input_tokens
-    if isinstance(event.output_tokens, int):
-        state.observed_request_metric_fields.add("output_tokens")
-        state.request_metric_totals["output_tokens"] += event.output_tokens
-    if isinstance(event.total_tokens, int):
-        state.observed_request_metric_fields.add("total_tokens")
-        state.request_metric_totals["total_tokens"] += event.total_tokens
-    if isinstance(event.reasoning_tokens, int):
-        state.observed_request_metric_fields.add("reasoning_tokens")
-        state.request_metric_totals["reasoning_tokens"] += event.reasoning_tokens
-    if isinstance(event.cache_read_tokens, int):
-        state.observed_request_metric_fields.add("cache_read_tokens")
-        state.request_metric_totals["cache_read_tokens"] += event.cache_read_tokens
-    if isinstance(event.cache_write_tokens, int):
-        state.observed_request_metric_fields.add("cache_write_tokens")
-        state.request_metric_totals["cache_write_tokens"] += event.cache_write_tokens
     state.latest_request_cache_read_tokens = (
         event.cache_read_tokens if isinstance(event.cache_read_tokens, int) else None
     )
     state.latest_request_cache_write_tokens = (
         event.cache_write_tokens if isinstance(event.cache_write_tokens, int) else None
     )
-    if state.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
-        state.first_token_latency = float(event.time_to_first_token)
 
 
 def _stream_completed_without_visible_output(state: _StreamingAttemptState) -> bool:

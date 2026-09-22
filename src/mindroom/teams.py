@@ -38,6 +38,7 @@ from mindroom.agent_storage import get_team_session
 from mindroom.agents import create_agent, enable_all_history_replay
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import (
+    accumulate_model_request_metrics,
     build_ai_run_metadata_content,
     build_model_request_metrics_fallback,
     build_prepared_history_metadata_content,
@@ -1835,19 +1836,18 @@ class _TeamStreamUsage:
             self.latest_model_id = event.model
         if event.model_provider:
             self.latest_model_provider = event.model_provider
-        self._add("input_tokens", event.input_tokens)
-        self._add("output_tokens", event.output_tokens)
-        self._add("total_tokens", event.total_tokens)
-        self._add("reasoning_tokens", event.reasoning_tokens)
-        self._add("cache_read_tokens", event.cache_read_tokens)
-        self._add("cache_write_tokens", event.cache_write_tokens)
-        if self.first_token_latency is None and isinstance(event.time_to_first_token, (int, float)):
-            self.first_token_latency = float(event.time_to_first_token)
-
-    def _add(self, field_name: str, value: int | None) -> None:
-        if isinstance(value, int):
-            self.observed_fields.add(field_name)
-            self.request_metric_totals[field_name] = self.request_metric_totals.get(field_name, 0) + value
+        self.first_token_latency = accumulate_model_request_metrics(
+            self.request_metric_totals,
+            self.observed_fields,
+            input_tokens=event.input_tokens,
+            output_tokens=event.output_tokens,
+            total_tokens=event.total_tokens,
+            reasoning_tokens=event.reasoning_tokens,
+            cache_read_tokens=event.cache_read_tokens,
+            cache_write_tokens=event.cache_write_tokens,
+            time_to_first_token=event.time_to_first_token,
+            first_token_latency=self.first_token_latency,
+        )
 
     def fallback_payload(self) -> dict[str, Any] | None:
         """Return the aggregate usage payload built from the tracked requests."""
