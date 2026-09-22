@@ -66,7 +66,6 @@ export function AgentList() {
       icon={Bot}
       items={agents as AgentListItem[]}
       selectedId={selectedAgentId || undefined}
-      onItemSelect={selectAgent}
       onCreateItem={handleCreateAgent}
       renderItem={renderAgent}
       showSearch={true}

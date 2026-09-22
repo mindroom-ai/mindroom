@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.config.models import DefaultsConfig
 from mindroom.config.tool_entries import raw_tool_entry_name
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ class _RuntimeApprovedEgressOverlayResult:
 
     data: object
     injected_default_tool: bool = False
+    inherited_default_tools: bool = False
     injected_approval_rule: bool = False
 
 
@@ -55,7 +57,8 @@ def apply_runtime_approved_egress_overlay(
     if "defaults" in config_data and not isinstance(raw_defaults, dict):
         return _RuntimeApprovedEgressOverlayResult(config_data)
     defaults = cast("dict[object, object]", raw_defaults).copy() if isinstance(raw_defaults, dict) else {}
-    raw_tools = defaults.get("tools")
+    raw_tools = defaults.get("tools", DefaultsConfig().tool_names)
+    inherited_default_tools = "tools" not in defaults
     if raw_tools is None:
         tools: list[object] = []
     elif isinstance(raw_tools, list):
@@ -75,6 +78,7 @@ def apply_runtime_approved_egress_overlay(
         return _RuntimeApprovedEgressOverlayResult(
             config_data,
             injected_default_tool=injected_default_tool,
+            inherited_default_tools=inherited_default_tools,
         )
     tool_approval = (
         cast("dict[object, object]", raw_tool_approval).copy() if isinstance(raw_tool_approval, dict) else {}
@@ -89,6 +93,7 @@ def apply_runtime_approved_egress_overlay(
         return _RuntimeApprovedEgressOverlayResult(
             config_data,
             injected_default_tool=injected_default_tool,
+            inherited_default_tools=inherited_default_tools,
         )
     injected_approval_rule = False
     if not _runtime_approved_egress_rule_present(rules):
@@ -99,11 +104,16 @@ def apply_runtime_approved_egress_overlay(
     return _RuntimeApprovedEgressOverlayResult(
         config_data,
         injected_default_tool=injected_default_tool,
+        inherited_default_tools=inherited_default_tools,
         injected_approval_rule=injected_approval_rule,
     )
 
 
-def _strip_runtime_approved_egress_default_tool(authored_payload: dict[str, Any]) -> None:
+def _strip_runtime_approved_egress_default_tool(
+    authored_payload: dict[str, Any],
+    *,
+    inherited_default_tools: bool,
+) -> None:
     defaults = authored_payload.get("defaults")
     if not isinstance(defaults, dict):
         return
@@ -111,7 +121,7 @@ def _strip_runtime_approved_egress_default_tool(authored_payload: dict[str, Any]
     if not isinstance(tools, list):
         return
     defaults["tools"] = [entry for entry in tools if raw_tool_entry_name(entry) != _APPROVED_EGRESS_TOOL_NAME]
-    if not defaults["tools"]:
+    if inherited_default_tools and defaults["tools"] == DefaultsConfig().tool_names:
         defaults.pop("tools", None)
     if not defaults:
         authored_payload.pop("defaults", None)
@@ -136,12 +146,16 @@ def strip_runtime_approved_egress_overlay_from_dump(
     payload: dict[str, Any],
     *,
     injected_default_tool: bool,
+    inherited_default_tools: bool,
     injected_approval_rule: bool,
 ) -> dict[str, Any]:
     """Remove runtime-derived approved egress entries from an authored config dump."""
     authored_payload = deepcopy(payload)
     if injected_default_tool:
-        _strip_runtime_approved_egress_default_tool(authored_payload)
+        _strip_runtime_approved_egress_default_tool(
+            authored_payload,
+            inherited_default_tools=inherited_default_tools,
+        )
     if injected_approval_rule:
         _strip_runtime_approved_egress_approval_rule(authored_payload)
     return authored_payload

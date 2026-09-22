@@ -3,8 +3,6 @@
 
 set -euo pipefail
 
-export KUBECONFIG=~/.kube/kind-mindroom
-
 echo "🔍 Validating MindRoom local setup..."
 echo ""
 
@@ -17,7 +15,7 @@ fi
 echo "✓ Kind cluster exists"
 
 # Check platform pods
-PLATFORM_RUNNING=$(kubectl get pods -n mindroom-staging --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
+PLATFORM_RUNNING=$(kubectl --context kind-mindroom get pods -n mindroom-staging --field-selector=status.phase=Running --no-headers 2>/dev/null | wc -l)
 if [ "$PLATFORM_RUNNING" -ge 2 ]; then
     echo "✓ Platform pods running ($PLATFORM_RUNNING/2)"
 else
@@ -25,7 +23,7 @@ else
 fi
 
 # Test frontend access
-kubectl port-forward -n mindroom-staging svc/platform-frontend 3001:3000 >/dev/null 2>&1 &
+kubectl --context kind-mindroom port-forward -n mindroom-staging svc/platform-frontend 3001:3000 >/dev/null 2>&1 &
 PF_PID=$!
 sleep 3
 
@@ -37,7 +35,7 @@ fi
 kill $PF_PID 2>/dev/null || true
 
 # Test backend health
-kubectl port-forward -n mindroom-staging svc/platform-backend 8001:8000 >/dev/null 2>&1 &
+kubectl --context kind-mindroom port-forward -n mindroom-staging svc/platform-backend 8001:8000 >/dev/null 2>&1 &
 PB_PID=$!
 sleep 3
 

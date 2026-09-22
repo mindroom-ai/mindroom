@@ -5,6 +5,7 @@
 ### Prerequisites
 - Docker and Docker Compose installed
 - Python 3.12+ installed
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) installed and available in your shell; `deploy.py` and `bridge.py` use its script launcher
 - API keys for LLM providers (OpenAI, Anthropic, etc.)
 - Optional for HTTPS/domain routing: a Traefik container attached to the external Docker network `mynetwork`
 - HTTPS/domain routes only work when Traefik exposes entrypoint names and a certresolver that match the instance labels.
@@ -66,9 +67,12 @@ GOOGLE_API_KEY=...
 
 This will start:
 - MindRoom on its bundled dashboard/API port (automatically assigned, e.g., 8765)
+- The sandbox runner used by the default shell, file, and Python tool routing
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
 - Authelia authentication server if enabled
 - PostgreSQL and Redis (if using Synapse)
+
+Before starting the sandbox runner, Compose initializes its scratch volume ownership using `UID` and `GID` (both default to `1000`).
 
 ### 4. Access Your Instance
 
@@ -103,6 +107,9 @@ To find your ports:
 # Fully remove instance (including data)
 ./deploy.py remove myapp
 ```
+
+`remove` requests Docker Compose teardown with `down -v`, including named-volume removal, before deleting the instance data directory and environment file.
+`stop` omits `-v` and keeps persistent data.
 
 ## Managing Multiple Instances
 
@@ -184,20 +191,29 @@ The instance manager ensures no port conflicts.
 
 ## Data Storage
 
-Each instance has its own data directory:
+Core MindRoom and Matrix bind mounts use each instance's data directory (`DATA_DIR`):
 ```
 local/instances/deploy/instance_data/
 ├── myapp/
-│   ├── config/       # MindRoom configuration
-│   ├── tmp/          # Temporary files
-│   ├── logs/         # Application logs
-│   ├── synapse/      # Synapse data (if using Synapse)
-│   ├── tuwunel/      # Tuwunel data (if using Tuwunel)
-│   ├── postgres/     # PostgreSQL data (if using Synapse)
-│   └── redis/        # Redis data (if using Synapse)
+│   ├── config/         # config.yaml mounted at /app/config.yaml
+│   ├── mindroom_data/  # Persistent MindRoom state mounted at /app/mindroom_data
+│   ├── logs/           # Mounted at /app/logs
+│   ├── synapse/        # Synapse config and media mounted at /data (if enabled)
+│   └── tuwunel/        # Tuwunel data mounted at /var/lib/tuwunel (if enabled)
 └── another-instance/
     └── ...
 ```
+
+Synapse's PostgreSQL and Redis data live in Docker named volumes, outside this directory:
+
+| Docker volume | Container mount |
+|---------------|-----------------|
+| `<instance>-postgres-data` | `/var/lib/postgresql/data` |
+| `<instance>-redis-data` | `/data` |
+
+The setup helper also creates `postgres/` and `redis/` host directories, but these are not mounted into those services.
+Backing up only the instance directory therefore omits the PostgreSQL and Redis volumes.
+The shared sandbox also stores its workspace in the Compose-managed `sandbox-workspace` named volume.
 
 ## Troubleshooting
 

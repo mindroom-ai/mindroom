@@ -440,12 +440,14 @@ run_sql_query("SELECT event_name, COUNT(*) AS total FROM events GROUP BY 1 ORDER
 
 ### What It Does
 
-MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `google_drive_read_file()`, `google_drive_download_file()`, `google_drive_upload_file()`, `google_drive_create_folder()`, `google_drive_move_file()`, and `google_drive_trash_file()` through the Google Drive OAuth provider.
+MindRoom exposes `google_drive_list_files()`, `google_drive_search_files()`, `google_drive_read_file()`, `google_drive_download_file()`, `google_drive_upload_file()`, `google_drive_update_file()`, `google_drive_create_folder()`, `google_drive_move_file()`, and `google_drive_trash_file()` through the Google Drive OAuth provider.
 `google_drive_list_files()` returns recent Drive files visible to the connected account.
 `google_drive_search_files()` searches Drive metadata.
 `google_drive_read_file()` reads Google Workspace files and non-Google files up to the configured `max_read_size`.
 `google_drive_download_file()` downloads a Drive file, exporting Google Workspace files to their best native format, for example a complete Google Sheets workbook as `.xlsx`.
 `google_drive_upload_file()` uploads a local file and resolves relative paths from the agent workspace.
+`google_drive_update_file(file_id, local_path, mime_type=None)` replaces an existing binary file's contents from a file inside the agent workspace.
+Native Google Workspace files require their respective Workspace APIs for content updates.
 `google_drive_create_folder()` creates a folder under the Drive root or an optional parent.
 `google_drive_move_file()` moves a file to a new parent and can rename it in the same request.
 `google_drive_trash_file()` moves a file to trash and never permanently deletes it.
@@ -460,7 +462,7 @@ When no usable MindRoom OAuth credentials exist, the wrapper raises `OAuthConnec
 | `search_files` | `boolean` | `no` | `true` | Enable Drive metadata search. |
 | `read_file` | `boolean` | `no` | `true` | Enable file content reads. |
 | `download_file` | `boolean` | `no` | `false` | Enable file downloads and Workspace exports into the agent workspace. |
-| `write` | `boolean` | `no` | `true` | Enable uploads, folder creation, file moves or renames, and trashing. |
+| `write` | `boolean` | `no` | `true` | Enable uploads, binary content replacement, folder creation, file moves or renames, and trashing. |
 | `max_read_size` | `number` | `no` | `10485760` | Maximum non-Google-Workspace file size to read in bytes. |
 
 ### Example
@@ -481,6 +483,7 @@ google_drive_search_files("name contains 'budget'")
 google_drive_read_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 google_drive_download_file("1AbCdEfGhIjKlMnOpQrStUvWxYz")
 google_drive_upload_file("reports/launch-plan.pdf", folder_id="1FolderId")
+google_drive_update_file("1FileId", "reports/launch-plan.pdf")
 google_drive_create_folder("Launch", parent_id="1FolderId")
 google_drive_move_file("1FileId", "1NewFolderId", name="Final plan.pdf")
 google_drive_trash_file("1OldFileId")
@@ -501,6 +504,8 @@ google_drive_trash_file("1OldFileId")
 tool_approval:
   rules:
     - match: google_drive_upload_file
+      action: require_approval
+    - match: google_drive_update_file
       action: require_approval
     - match: google_drive_create_folder
       action: require_approval

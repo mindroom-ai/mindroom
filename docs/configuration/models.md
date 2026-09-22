@@ -152,7 +152,7 @@ models:
     id: gpt-6-astra
     context_window: 258000
 
-  # Kimi K3 via a Kimi Code CLI login
+  # Kimi K3 via a Kimi Code CLI login (1M requires Pro/Allegretto or higher)
   kimi:
     provider: kimi
     id: k3
@@ -170,7 +170,7 @@ models:
     id: claude-sonnet-5
     extra_kwargs:
       project_id: your-gcp-project
-      region: us-central1
+      region: global
 
   # Local via Ollama
   local:
@@ -222,7 +222,9 @@ Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5
 Its [tool-choice rules](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide) allow `auto` and `none`; forcing `any` or a named tool returns an error.
 The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
-The direct DeepSeek API keeps the aliases `deepseek-v4-flash` and `deepseek-v4-pro`; OpenRouter exposes the newer Flash route as `deepseek/deepseek-v4.1-flash`.
+For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro.
+The older `deepseek-v4-flash` name remains accepted as a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
+OpenRouter uses the distinct model ID `deepseek/deepseek-v4.1-flash`.
 
 ## Built-In Synthetic Model
 
@@ -373,12 +375,14 @@ MindRoom refreshes the access token when needed and sends requests to the Kimi C
 | Kimi for Coding | `kimi-for-coding` | Coding-tuned tier exposed by the Kimi Code CLI |
 | Kimi for Coding Highspeed | `kimi-for-coding-highspeed` | Faster coding tier exposed by the Kimi Code CLI |
 
-[Kimi Code context limits depend on the subscription plan](https://www.kimi.com/code/docs/en/kimi-code/models.html): `k3` supports 1,048,576 tokens on Allegretto and higher plans, while Moderato is limited to 262,144 tokens.
-Set `context_window: 262144` for Moderato, or use `k3-256k` for a fixed 256k window.
+[Kimi Code context limits depend on the subscription plan](https://www.kimi.com/code/docs/en/kimi-code/models.html): `k3` supports 1,048,576 tokens on Pro (legacy Allegretto) and higher plans, while Plus (legacy Moderato) is limited to 262,144 tokens.
+Set `context_window: 262144` for Plus/Moderato.
+The fixed-window `k3-256k` model also requires `context_window: 262144`; changing the model ID does not set MindRoom's context budget or grant a higher plan limit.
 
 The CLI-config-style form `kimi-code/k3` is accepted as an alternative to the bare slug.
 If you keep Kimi Code state outside `~/.kimi-code`, set `KIMI_CODE_HOME` or pass `extra_kwargs.kimi_home`; user-home prefixes such as `~/custom-kimi` are expanded.
 For starter config generation, use `mindroom config init --provider kimi`.
+The starter and the following 1M example require Pro/Allegretto or higher; Plus/Moderato users must change `context_window` to `262144`.
 
 ```yaml
 models:
@@ -597,9 +601,10 @@ For Vertex AI Claude, set these instead of an API key:
 
 ```bash
 ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project
-CLOUD_ML_REGION=us-central1
+CLOUD_ML_REGION=global
 ```
 
+For `claude-sonnet-5`, use the [global endpoint or a supported multi-region endpoint](https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai#global-multi-region-and-regional-endpoints), with `region` / `CLOUD_ML_REGION` set to `global`, `us`, or `eu`.
 Authenticate with `gcloud auth application-default login` or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
 
 ### File-based Secrets

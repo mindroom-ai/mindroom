@@ -2,7 +2,8 @@
 
 This chart deploys the [MindRoom Tuwunel fork](https://github.com/mindroom-ai/mindroom-tuwunel) as a standalone single-replica Matrix homeserver.
 Use it together with the `mindroom-runtime` chart when MindRoom should talk to a chart-managed Tuwunel instead of an externally provided homeserver.
-The chart renders `tuwunel.toml`, creates the Deployment, Service, and storage PVC, and leaves ingress, TLS, and apex well-known delegation to your cluster.
+The chart renders `tuwunel.toml`, creates the Deployment, Service, and storage PVC, and leaves ingress and TLS to your cluster.
+If apex well-known requests do not route to Tuwunel, serve the delegation documents at the apex separately.
 
 ## Minimal Install
 
@@ -63,7 +64,8 @@ tuwunel:
 ```
 
 The registration should use `url: null`, a dedicated `as_token`, and an exclusive anchored user namespace that matches only MindRoom-managed accounts.
-The same Secret can expose the `as_token` under a separate key for the runtime chart's `matrix.appserviceToken` setting.
+When both releases share a namespace, the same Secret can expose the `as_token` under a separate key for the runtime chart's `matrix.appserviceToken` setting.
+Otherwise, copy the `as_token` value into a Secret in the runtime release's namespace and reference its local name and key.
 Application-service registration bypasses normal registration controls, so `tuwunel.registrationToken` is unnecessary in this mode.
 
 ## OIDC Login
@@ -102,7 +104,7 @@ Config changes in an existing ConfigMap do not roll the pod automatically; resta
 
 ## Pairing With mindroom-runtime
 
-Point the runtime chart at this homeserver's Service and share the registration token Secret:
+Point the runtime chart at this homeserver's Service and configure the matching registration token for password-based managed accounts:
 
 ```yaml
 matrix:
@@ -115,7 +117,10 @@ matrix:
 
 `matrix.homeserverUrl` uses the in-cluster Service DNS name `<release>-mindroom-tuwunel.<namespace>.svc.cluster.local` and the `service.port` of this chart.
 `matrix.serverName` must equal `tuwunel.serverName` here.
-`matrix.registrationToken` must reference the same Secret as `tuwunel.registrationToken` so MindRoom can register its agent accounts.
+`matrix.registrationToken` must resolve to the same token value as `tuwunel.registrationToken` so MindRoom can register its agent accounts.
+Each Secret reference resolves in its release's namespace.
+When both releases share a namespace, they can reference the same Secret and key.
+For different namespaces, copy the token value into a Secret in the runtime release's namespace and set `matrix.registrationToken.existingSecret` and `matrix.registrationToken.key` to that local Secret and key.
 
 ## Well-Known Delegation
 
