@@ -22,6 +22,7 @@ from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.matrix.avatar import set_room_avatar_from_file
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import (
+    admin_join_room_user,
     create_room,
     ensure_room_admin_power_levels,
     get_room_members,
@@ -133,7 +134,14 @@ class PersonalRoomService:
             raise RuntimeError(msg)
         return self._current_settings(user_id, source_room_id) if user_id in members else None
 
-    async def ensure(self, user_id: str, source_room_id: str, source_client: nio.AsyncClient) -> str | None:
+    async def ensure(
+        self,
+        user_id: str,
+        source_room_id: str,
+        source_client: nio.AsyncClient,
+        *,
+        reinvite_departed_owner: bool = False,
+    ) -> str | None:
         """Reconcile a currently eligible human from a router-observed room."""
         if await self._eligible_settings(user_id, source_room_id, source_client) is None:
             return None
@@ -158,23 +166,111 @@ class PersonalRoomService:
                 if record.room_id is None:
                     record.room_id = await self._resolve_or_create(record)
                     await run_blocking_until_complete(write_personal_room, path, record)
-                roster = await self._validate_room(record)
-                self._require_current_settings(user_id, source_room_id)
-                if not await self.change_membership(record.room_id, "join"):
-                    msg = "Personal-room agent membership failed"
-                    raise RuntimeError(msg)
-                if roster.get(user_id) not in {"join", "invite"}:
-                    self._require_current_settings(user_id, source_room_id)
-                    if not await invite_to_room(self._client(), record.room_id, user_id):
-                        msg = "Personal-room invite failed"
-                        raise RuntimeError(msg)
-                await self._finish(record, path, human_joined=roster.get(user_id) == "join")
+                human_joined = await self._reconcile_membership(
+                    record,
+                    path,
+                    source_client,
+                    source_room_id,
+                    reinvite_departed_owner,
+                )
+                if human_joined is None:
+                    return record.room_id
+                await self._finish(record, path, human_joined=human_joined)
                 settings = self._require_current_settings(user_id, source_room_id)
                 if source_room_id == record.source_room_id:
                     await self._confirm(record, path, settings, source_client)
                 return record.room_id
         except _PolicyChangedError:
             return None
+
+    async def _reconcile_membership(
+        self,
+        record: PersonalRoomRecord,
+        path: Path,
+        source_client: nio.AsyncClient,
+        source_room_id: str,
+        reinvite_departed_owner: bool,
+    ) -> bool | None:
+        """Refresh remote authority at each requester mutation; None preserves a departure."""
+        roster = await self._validate_room(record)
+        initial_owner_membership = roster.get(record.user_id)
+        allow_reinvite = initial_owner_membership == "leave" and reinvite_departed_owner and record.adoption is None
+        if await self._observe_owner_membership(record, path, initial_owner_membership, allow_reinvite):
+            return None
+        self._require_current_settings(record.user_id, source_room_id)
+        assert record.room_id is not None
+        if not await self.change_membership(record.room_id, "join"):
+            msg = "Personal-room agent membership failed"
+            raise RuntimeError(msg)
+        roster = await self._validate_room(record)
+        owner_membership = roster.get(record.user_id)
+        if await self._observe_owner_membership(record, path, owner_membership, allow_reinvite):
+            return None
+        await self._invite_owner_if_needed(record, owner_membership)
+        roster = await self._validate_room(record)
+        owner_membership = roster.get(record.user_id)
+        if await self._observe_owner_membership(record, path, owner_membership, False):
+            return None
+        return await self._finish_initial_join(
+            record,
+            path,
+            source_client,
+            initial_owner_membership,
+            owner_membership,
+        )
+
+    async def _invite_owner_if_needed(self, record: PersonalRoomRecord, owner_membership: str | None) -> None:
+        """Invite only an absent owner or one with explicit re-invite authority."""
+        if owner_membership in {"join", "invite"}:
+            return
+        self._require_current_settings(record.user_id, record.source_room_id)
+        assert record.room_id is not None
+        if not await invite_to_room(self._client(), record.room_id, record.user_id):
+            msg = "Personal-room invite failed"
+            raise RuntimeError(msg)
+
+    async def _observe_owner_membership(
+        self,
+        record: PersonalRoomRecord,
+        path: Path,
+        owner_membership: str | None,
+        reinvite_departed_owner: bool,
+    ) -> bool:
+        """Retire initial join intent on observed completion or departure before further work."""
+        if record.initial_join_pending and owner_membership in {"join", "leave", "ban"}:
+            record.initial_join_pending = False
+            await run_blocking_until_complete(write_personal_room, path, record)
+        if owner_membership not in {"leave", "ban"}:
+            return False
+        return owner_membership == "ban" or record.adoption is not None or not reinvite_departed_owner
+
+    async def _finish_initial_join(
+        self,
+        record: PersonalRoomRecord,
+        path: Path,
+        source_client: nio.AsyncClient,
+        initial_owner_membership: str | None,
+        current_owner_membership: str | None,
+    ) -> bool:
+        """Retry only an initial create's join while the original roster permits it."""
+        if not record.initial_join_pending:
+            return current_owner_membership == "join"
+        settings = self._require_current_settings(record.user_id, record.source_room_id)
+        if (
+            initial_owner_membership in {None, "invite"}
+            and current_owner_membership == "invite"
+            and settings.auto_join_requester
+        ):
+            assert record.room_id is not None
+            if not await admin_join_room_user(source_client, record.room_id, record.user_id):
+                msg = "Personal-room initial join failed"
+                raise RuntimeError(msg)
+            human_joined = True
+        else:
+            human_joined = current_owner_membership == "join"
+        record.initial_join_pending = False
+        await run_blocking_until_complete(write_personal_room, path, record)
+        return human_joined
 
     def _ownership(self, user_id: str) -> dict[str, str]:
         return {"user_id": user_id, "agent_user_id": self._client().user_id}
@@ -203,6 +299,7 @@ class PersonalRoomService:
             ],
         )
         if room_id is not None:
+            record.initial_join_pending = settings.auto_join_requester
             return room_id
         # Concurrent creators and ambiguous create responses converge on the alias.
         response = await client.room_resolve_alias(record.alias)
@@ -236,9 +333,12 @@ class PersonalRoomService:
         }
         agent_id = self._client().user_id
         expected_creator = agent_id
+        expected_history = "invited"
         permitted_members = {record.user_id, agent_id}
         if record.adoption is not None:
             expected_creator = record.adoption.creator_user_id
+            expected_history = record.adoption.expected_history_visibility
+            permitted_members.update(record.adoption.additional_user_ids)
             router_id = record.adoption.router_user_id
             if record.adoption.agent_user_id != agent_id or (
                 router_id is not None
@@ -262,7 +362,7 @@ class PersonalRoomService:
             or agent_power < max(100, power.get("state_default", 50), power.get("invite", 0))
             or state.get(("m.room.join_rules", ""), {}).get("content", {}).get("join_rule") != "invite"
             or state.get(("m.room.history_visibility", ""), {}).get("content", {}).get("history_visibility")
-            != "invited"
+            != expected_history
         ):
             msg = "Personal-room ownership or membership does not match"
             raise RuntimeError(msg)
@@ -442,4 +542,5 @@ class PersonalRoomService:
             if settings is None or not self._allowed(user_id, room_id):
                 return
             roster = await self._validate_room(record)
+            await self._observe_owner_membership(record, path, roster.get(user_id), False)
             await self._finish(record, path, human_joined=roster.get(user_id) == "join")

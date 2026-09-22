@@ -5016,6 +5016,7 @@ exclusive = true
 expose = [
     "RoomJoinOutcome",
     "add_room_to_space",
+    "admin_join_room_user",
     "create_room",
     "create_space",
     "ensure_room_admin_power_levels",

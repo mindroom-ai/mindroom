@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import nio
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.durable_write import write_json_file_durable
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -26,6 +27,14 @@ class PersonalRoomAdoption(BaseModel):
     creator_user_id: str
     agent_user_id: str
     router_user_id: str | None = None
+    expected_history_visibility: Literal["invited", "joined", "shared"] = "invited"
+    additional_user_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("additional_user_ids")
+    @classmethod
+    def validate_additional_user_ids(cls, value: list[str]) -> list[str]:
+        """Keep imported membership attestations exact and unambiguous."""
+        return validate_concrete_matrix_user_ids(value, field_name="additional_user_ids")
 
 
 class PersonalRoomRecord(BaseModel):
@@ -46,12 +55,19 @@ class PersonalRoomRecord(BaseModel):
     confirmation_event_id: str | None = None
     avatar_done: bool = False
     adoption: PersonalRoomAdoption | None = None
+    initial_join_pending: bool = False
 
     @model_validator(mode="after")
     def require_adoption_room_id(self) -> PersonalRoomRecord:
         """Operator trust applies only to an explicit immutable room ID."""
         if self.adoption is not None and not self.room_id:
             msg = "Personal-room adoption requires an exact room_id"
+            raise ValueError(msg)
+        if self.adoption is not None and self.initial_join_pending:
+            msg = "Personal-room adoption cannot request initial joining"
+            raise ValueError(msg)
+        if self.initial_join_pending and not self.room_id:
+            msg = "Personal-room initial joining requires an exact room_id"
             raise ValueError(msg)
         return self
 
@@ -83,7 +99,9 @@ def read_personal_room(path: Path) -> PersonalRoomRecord | None:
 
 def write_personal_room(path: Path, record: PersonalRoomRecord) -> None:
     """Publish one lifecycle update with the existing durable-write primitive."""
-    write_json_file_durable(path, record.model_dump(mode="json"), strict_atomic_replace=True)
+    data = record.model_dump(mode="json")
+    PersonalRoomRecord.model_validate(data)
+    write_json_file_durable(path, data, strict_atomic_replace=True)
 
 
 def _personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list[PersonalRoomRecord]:

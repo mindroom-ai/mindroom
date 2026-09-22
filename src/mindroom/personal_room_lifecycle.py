@@ -62,7 +62,13 @@ class PersonalRoomLifecycle:
         self._config_revision += 1
         self._reconciled = False
 
-    async def _onboard(self, user_id: str, source_room_id: str) -> None:
+    async def _onboard(
+        self,
+        user_id: str,
+        source_room_id: str,
+        *,
+        reinvite_departed_owner: bool = False,
+    ) -> None:
         """Forward a trusted router observation; unavailable owners leave it retryable."""
         settings = self.runtime.config.personal_rooms
         if (
@@ -76,7 +82,12 @@ class PersonalRoomLifecycle:
         if target is None or self.runtime.client is None:
             msg = "Personal-room target is not ready"
             raise RuntimeError(msg)
-        await target.service.ensure(user_id, source_room_id, self.runtime.client)
+        await target.service.ensure(
+            user_id,
+            source_room_id,
+            self.runtime.client,
+            reinvite_departed_owner=reinvite_departed_owner,
+        )
 
     async def handle_command(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> bool:
         """Recognize exact self-onboarding commands through trusted requester resolution."""
@@ -107,7 +118,11 @@ class PersonalRoomLifecycle:
             return
         await self.service.member_joined(room.room_id, event.state_key)
         if self.observes_onboarding_joins and event.prev_membership is not None:
-            await self._onboard(event.state_key, room.room_id)
+            await self._onboard(
+                event.state_key,
+                room.room_id,
+                reinvite_departed_owner=event.prev_membership == "leave",
+            )
 
     async def baseline_join(self, join: RoomMemberJoin) -> None:
         """Onboard unknown prior membership only after the existing durable baseline gate."""
