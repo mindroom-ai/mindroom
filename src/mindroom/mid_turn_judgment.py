@@ -18,6 +18,7 @@ def create_mid_turn_gate(
     runtime_paths: RuntimePaths,
     envelope: MessageEnvelope,
     *,
+    prompt: str,
     has_media: bool,
 ) -> MidTurnGate | None:
     """Bind one response's decision owner without performing inference."""
@@ -34,7 +35,7 @@ def create_mid_turn_gate(
     if evaluate is None:
         return None
     return MidTurnGate(
-        active_text=None if has_media else message_text_for_judgment(envelope),
+        active_text=None if has_media or message_text_for_judgment(envelope) is None else prompt,
         evaluate=evaluate,
         instructions=settings.instructions,
     )

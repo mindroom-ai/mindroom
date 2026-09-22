@@ -156,6 +156,10 @@ Use these measurements alongside observed decision quality and provider pricing 
 When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
 Opt-in `room_mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
 This is separate from participation eligibility and the debounce used to group incoming messages.
+`room_mid_turn` maps room aliases or Matrix room IDs to settings with a required `judgment` object and optional `instructions` string (default `""`).
+The `llm` judgment requires `provider: llm` and a `model` string naming an existing alias; its numeric `timeout_seconds` defaults to `5.0`.
+The `typesafe` judgment requires `provider: typesafe`; its numeric `threshold` defaults to `0.8` (range `0`–`1`) and `timeout_seconds` to `1.5`.
+Both backends require a positive timeout of at most `30` seconds and reject unknown fields.
 
 ```yaml
 room_mid_turn:
@@ -190,6 +194,7 @@ Judgments reuse the shared participation concurrency limits and backend deadline
 
 The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
 It receives the active request text, up to eight pending human messages, completed tool names, and the configured guidance.
+For interactive selections, the active request includes the original question and selected option.
 Tool outputs, arguments, system prompts, memory, and attachment contents are excluded.
 Tool side effects are treated as unknown; a tool name does not establish that continuing is harmless.
 Missing text, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.

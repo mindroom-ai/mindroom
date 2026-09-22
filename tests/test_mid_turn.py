@@ -174,7 +174,13 @@ async def test_judgment_cancellation_propagates_without_caching_approval() -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("finish", [False, True])
-async def test_real_tool_loop_judges_before_next_provider_request(*, stream: bool, finish: bool) -> None:
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_real_tool_loop_judges_before_next_provider_request(
+    *,
+    stream: bool,
+    finish: bool,
+    terminal: bool,
+) -> None:
     """Both provider paths must receive a notice only when the judge requests wrap-up."""
     state = _QueuedMessageState()
     evidence: list[dict] = []
@@ -197,19 +203,23 @@ async def test_real_tool_loop_judges_before_next_provider_request(*, stream: boo
         ),
     )
     install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
-    agent = Agent(model=model, tools=[queue_followup], telemetry=False)
+    function = Function.from_callable(queue_followup)
+    function.stop_after_tool_call = terminal
+    agent = Agent(model=model, tools=[function], telemetry=False)
     with queued_message_signal_context(state, mid_turn_gate=gate) as context:
         if stream:
             async for _ in agent.arun("Do the task", stream=True):
                 pass
         else:
             await agent.arun("Do the task")
-        assert context.notice_fired is (not finish)
-    assert len(evidence) == 1
+        assert context.notice_fired is (not finish and not terminal)
+    assert len(evidence) == (0 if terminal else 1)
     assert "Private tool result" not in json.dumps(evidence)
-    assert "queue_followup" in json.dumps(evidence)
-    assert len(model.requests) == 2
-    assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is (not finish)
+    assert ("queue_followup" in json.dumps(evidence)) is (not terminal)
+    assert len(model.requests) == (1 if terminal else 2)
+    assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is (
+        not finish and not terminal
+    )
     assert {message.event_id for message in state.pending_message_snapshot()} == {"$new"}
 
 
@@ -373,7 +383,13 @@ async def test_configured_backends_control_resumed_turns(
         },
     )
     paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": "synthetic"})
-    gate = create_mid_turn_gate(config, paths, request_envelope(prompt="Do the task"), has_media=False)
+    gate = create_mid_turn_gate(
+        config,
+        paths,
+        request_envelope(prompt="Do the task"),
+        prompt="Do the task",
+        has_media=False,
+    )
     assert gate is not None
     state = _QueuedMessageState()
     state.add_waiting_human_message("$new", text="Thanks")
@@ -411,18 +427,21 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
         ModelResponse(
             tool_calls=[
                 {"id": "call", "type": "function", "function": {"name": "work", "arguments": "{}"}},
-            ]
-        )
+            ],
+        ),
     )
     install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
 
     async def run() -> None:
         with queued_message_signal_context(
-            state, mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate)
+            state,
+            mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate),
         ):
             if stream:
                 async for _ in model.aresponse_stream(
-                    messages, tools=[Function.from_callable(work)], after_tool_results=checkpoint
+                    messages,
+                    tools=[Function.from_callable(work)],
+                    after_tool_results=checkpoint,
                 ):
                     pass
             else:

@@ -4640,11 +4640,13 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pending_media", [False, True])
+@pytest.mark.parametrize("selection", [False, True])
 async def test_response_runner_binds_room_mid_turn_judge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     pending_media: bool,
+    selection: bool,
 ) -> None:
     """Room opt-in reaches the real tool loop while unprepared media keeps wrap-up."""
     bot = _bot(tmp_path)
@@ -4655,12 +4657,16 @@ async def test_response_runner_binds_room_mid_turn_judge(
     judge = ParticipationModel(ModelResponse(content='{"decision": true}'))
     monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
     envelope = _envelope(target=MessageTarget.resolve("!room:localhost", "$thread", "$event"))
+    prompt = "hello"
+    if selection:
+        envelope = replace(envelope, body="The user selected: yes")
+        prompt = "Question: Install the dependency?\nSelected option: yes (install)"
     preparation = _payload_preparation(envelope.target)
     if pending_media:
         preparation = replace(preparation, payload_inputs=replace(preparation.payload_inputs, raw_audio_fallback=True))
     request = ResponseRequest(
         sources=ResponseSources(("$event",), ("$event",)),
-        prompt="hello",
+        prompt=prompt,
         thread_history=[],
         response_envelope=envelope,
         payload_preparation=preparation if pending_media else None,
@@ -4702,6 +4708,10 @@ async def test_response_runner_binds_room_mid_turn_judge(
         assert len(model.requests) == 2
         assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is pending_media
         assert len(judge.requests) == (0 if pending_media else 1)
+        if selection and not pending_media:
+            evidence = "\n".join(str(message.content) for message in judge.requests[0]["messages"])
+            assert "Install the dependency?" in evidence
+            assert "yes (install)" in evidence
     finally:
         for reservation in reservations:
             reservation.cancel()

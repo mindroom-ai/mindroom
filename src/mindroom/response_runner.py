@@ -551,7 +551,13 @@ def _mid_turn_for_request(request: ResponseRequest, config: Config, runtime_path
             )
         ),
     )
-    return create_mid_turn_gate(config, runtime_paths, request.response_envelope, has_media=has_media)
+    return create_mid_turn_gate(
+        config,
+        runtime_paths,
+        request.response_envelope,
+        prompt=request.prompt,
+        has_media=has_media,
+    )
 
 
 def _participation_for_request(
