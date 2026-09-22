@@ -69,6 +69,7 @@ Saved applications remain visible even when they are no longer installed.
 For an existing connection, saving apps preserves the controller, requester, browser, and capture settings without requiring pairing again.
 If computer access is active, Stop and Save asks for confirmation, stops observation and control, and leaves access stopped after saving.
 Start Observe Only explicitly to resume with the saved app list.
+Saving an empty selection removes all app access; select and save at least one app before Start Observe Only becomes available again.
 During initial setup, choose apps first and save them with Save Setup.
 Primary-screen access is a separate advanced option because it can expose content outside selected apps.
 Settings shows the installed app version and build number.

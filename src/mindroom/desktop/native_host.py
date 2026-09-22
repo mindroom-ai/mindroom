@@ -215,9 +215,7 @@ class NativeDesktopHost:
             if action == "set_allowed_apps":
                 if self._config is None:
                     raise NativeProtocolError("invalid_request", "Complete desktop setup before saving app access.")
-                payload = self._config.to_payload()
-                payload["allowed_app_ids"] = parameters.get("allowed_app_ids")
-                config = NativeDesktopConfig.from_payload(payload)
+                config = self._config.with_allowed_apps(parameters.get("allowed_app_ids"))
             else:
                 config = NativeDesktopConfig.from_payload(parameters.get("config"))
             try:

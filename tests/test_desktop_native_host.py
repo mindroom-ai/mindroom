@@ -262,6 +262,30 @@ def test_set_allowed_apps_validates_app_ids(tmp_path: Path, app_ids: object) -> 
     assert host.status()["config"]["revision"] == 1
 
 
+def test_app_only_save_preserves_browser_config_when_paths_disappear(tmp_path: Path) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_args: None), helper_version="1")
+    executable = tmp_path / "browser"
+    executable.touch()
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    payload = _config_payload()
+    payload["browser"] = {
+        "enabled": True,
+        "executable_path": str(executable),
+        "user_data_dir": str(profile),
+        "timeout_seconds": 45,
+    }
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=payload)))
+    executable.unlink()
+    profile.rmdir()
+
+    asyncio.run(host.handle(_request("set_allowed_apps", expected_revision=1, allowed_app_ids=[])))
+
+    saved = load_native_config(native_config_path(tmp_path))
+    assert saved.allowed_app_ids == ()
+    assert saved.to_payload()["browser"] == payload["browser"]
+
+
 @pytest.mark.parametrize("journal_kind", ["malformed", "directory", "symlink"])
 def test_configure_rejects_unreadable_journal_without_creating_configuration(tmp_path: Path, journal_kind: str) -> None:
     journal_path = tmp_path / "desktop_bridge" / "commands.sqlite3"

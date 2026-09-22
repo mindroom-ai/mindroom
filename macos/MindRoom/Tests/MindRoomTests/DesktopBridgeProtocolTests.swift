@@ -102,6 +102,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
             }
             XCTAssertEqual(records.compactMap { $0["action"] as? String }, stopFails ? ["stop"] : ["stop", "set_allowed_apps"])
             XCTAssertEqual(store.selectedAppIDs, ["com.example.Other"])
+            XCTAssertEqual(store.browserProfile, "/unsaved")
             if stopFails {
                 XCTAssertEqual(store.errorMessage, "Stop failed")
                 XCTAssertTrue(store.hasAppSelectionChanges)

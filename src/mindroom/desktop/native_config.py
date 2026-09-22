@@ -71,7 +71,7 @@ class NativeDesktopConfig:
     browser: NativeBrowserConfig
 
     @classmethod
-    def from_payload(cls, raw: object) -> NativeDesktopConfig:
+    def from_payload(cls, raw: object, *, validate_browser_paths: bool = True) -> NativeDesktopConfig:
         """Parse a strict version-one configuration."""
         payload = _mapping(raw, "configuration")
         version = payload.get("v")
@@ -124,9 +124,9 @@ class NativeDesktopConfig:
                 maximum=120,
             ),
         )
-        if browser.executable_path is not None and not browser.executable_path.is_file():
+        if validate_browser_paths and browser.executable_path is not None and not browser.executable_path.is_file():
             raise NativeConfigError("invalid_request", "Native desktop browser executable_path must be a file.")
-        if browser.user_data_dir is not None and not browser.user_data_dir.is_dir():
+        if validate_browser_paths and browser.user_data_dir is not None and not browser.user_data_dir.is_dir():
             raise NativeConfigError("invalid_request", "Native desktop browser user_data_dir must be a directory.")
         return cls(
             revision=revision,
@@ -138,6 +138,10 @@ class NativeDesktopConfig:
             capture=capture,
             browser=browser,
         )
+
+    def with_allowed_apps(self, raw: object) -> NativeDesktopConfig:
+        """Validate an app-only edit without revalidating unrelated browser paths."""
+        return replace(self, allowed_app_ids=_text_tuple(raw, "allowed application", allow_empty=True))
 
     def to_payload(self) -> dict[str, object]:
         """Serialize the complete non-secret configuration."""
@@ -195,7 +199,8 @@ def load_native_config(path: Path) -> NativeDesktopConfig:
         ) from exc
     except OSError as exc:
         raise NativeConfigError("invalid_request", "Native desktop configuration could not be read.") from exc
-    config = NativeDesktopConfig.from_payload(payload)
+    # Persisted paths may disappear; they must not prevent unrelated settings from being loaded or edited.
+    config = NativeDesktopConfig.from_payload(payload, validate_browser_paths=False)
     if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) & 0o077:
         raise NativeConfigError(
             "configuration_repair_required",

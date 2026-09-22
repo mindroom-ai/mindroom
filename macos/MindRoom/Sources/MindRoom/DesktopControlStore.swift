@@ -37,6 +37,8 @@ final class DesktopControlStore: ObservableObject {
     private var countdownTimer: Timer?
     @Published private var confirmedIdentity: String?
     private var observedConfigRevision = 0
+    private var observedBrowserConfiguration: DesktopBrowserStatus?
+    private var addedApplicationURLs = Set<URL>()
     private var pendingOperationCount = 0
 
     init(helper: DesktopBridgeProcess? = nil) {
@@ -138,7 +140,12 @@ final class DesktopControlStore: ObservableObject {
     }
 
     func refreshApplications() {
-        applications = InstalledApplicationCatalog.applications()
+        let imported = addedApplicationURLs.compactMap {
+            InstalledApplicationCatalog.application(at: $0)
+        }
+        var found: [String: InstalledDesktopApplication] = [:]
+        for application in imported + InstalledApplicationCatalog.applications() { found[application.id] = application }
+        applications = found.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     func addApplication(at url: URL) -> String? {
@@ -147,9 +154,8 @@ final class DesktopControlStore: ObservableObject {
             recovery = nil
             return nil
         }
-        applications.removeAll { $0.id == application.id }
-        applications.append(application)
-        applications.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        addedApplicationURLs.insert(url)
+        refreshApplications()
         selectedAppIDs.insert(application.id)
         return application.id
     }
@@ -314,9 +320,16 @@ final class DesktopControlStore: ObservableObject {
             controllerFingerprint = value.pairing.controllerFingerprint ?? ""
         }
         if shouldHydrateConfiguration {
-            browserEnabled = value.browser.configured
-            browserExecutable = value.browser.executablePath ?? ""
-            browserProfile = value.browser.userDataDirectory ?? ""
+            if observedBrowserConfiguration == nil || browserEnabled == observedBrowserConfiguration?.configured {
+                browserEnabled = value.browser.configured
+            }
+            if observedBrowserConfiguration == nil || browserExecutable == (observedBrowserConfiguration?.executablePath ?? "") {
+                browserExecutable = value.browser.executablePath ?? ""
+            }
+            if observedBrowserConfiguration == nil || browserProfile == (observedBrowserConfiguration?.userDataDirectory ?? "") {
+                browserProfile = value.browser.userDataDirectory ?? ""
+            }
+            observedBrowserConfiguration = value.browser
         }
     }
 
