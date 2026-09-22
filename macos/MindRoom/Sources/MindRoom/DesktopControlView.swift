@@ -12,8 +12,8 @@ struct DesktopControlView: View {
     VStack(alignment: .leading, spacing: 20) {
       header
       sessionCard
+      DesktopApplicationsView(store: store)
       setupCard
-      applicationsCard
       permissionsCard
       browserCard
       diagnosticsCard
@@ -76,7 +76,12 @@ struct DesktopControlView: View {
 
         HStack {
           Button("Start Observe Only") { store.start() }
-            .disabled(store.isBusy || store.status.bridge.state != "stopped")
+            .disabled(
+              store.isBusy || store.status.bridge.state != "stopped"
+                || store.status.config.state != "ready"
+                || store.status.config.allowedAppIDs?.isEmpty != false
+                || store.hasAppSelectionChanges
+            )
           Button("Stop") { store.stop() }
             .disabled(!store.status.canStopBridge)
         }
@@ -195,51 +200,6 @@ struct DesktopControlView: View {
       } label: {
         Label("Setup or reconnect", systemImage: "arrow.triangle.2.circlepath")
           .font(.headline)
-      }
-    }
-  }
-
-  private var applicationsCard: some View {
-    AppSectionCard {
-      VStack(alignment: .leading, spacing: 12) {
-        HStack {
-          Label("Allowed applications", systemImage: "app.badge.checkmark")
-            .font(.headline)
-          Spacer()
-          Text("\(store.selectedAppIDs.count) selected")
-            .font(.callout)
-            .foregroundStyle(.secondary)
-        }
-        Text(
-          "Choose which bundle identifiers Desktop tools may see. Changes take effect after you confirm the identity and select Save Setup under Setup or reconnect."
-        )
-        .font(.callout)
-        .foregroundStyle(.secondary)
-
-        if store.applications.isEmpty {
-          Text("No applications found.")
-            .foregroundStyle(.secondary)
-        } else {
-          List(store.applications, selection: $store.selectedAppIDs) { application in
-            HStack {
-              Text(application.name)
-              Spacer()
-              Text(application.id)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-              if application.running {
-                Image(systemName: "circle.fill")
-                  .font(.caption2)
-                  .foregroundStyle(.green)
-                  .help("Running")
-              }
-            }
-            .tag(application.id)
-          }
-          .frame(height: 180)
-        }
       }
     }
   }

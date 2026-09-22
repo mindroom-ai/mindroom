@@ -63,6 +63,16 @@ Import only fills transient form state.
 The one-time pairing code is not written to the native configuration.
 The person at the Mac must confirm the exact controller fingerprint, requester, and agent after edits or configuration revision changes.
 
+Allowed applications has searchable checkboxes and a separate Save App Access action.
+The list includes apps in standard installation folders and currently running apps; Add App can select an application elsewhere.
+Saved applications remain visible even when they are no longer installed.
+For an existing connection, saving apps preserves the controller, requester, browser, and capture settings without requiring pairing again.
+If computer access is active, Stop and Save asks for confirmation, stops observation and control, and leaves access stopped after saving.
+Start Observe Only explicitly to resume with the saved app list.
+During initial setup, choose apps first and save them with Save Setup.
+Primary-screen access is a separate advanced option because it can expose content outside selected apps.
+Settings shows the installed app version and build number.
+
 Ordinary setup mutations are serialized and the stdio server admits at most four concurrently queued regular requests.
 Stop has a separate single request lane; status, revoke, and emergency reset remain available while a login, pairing, browser, or stop request is pending.
 Excess requests receive an immediate retryable `busy` response.

@@ -134,7 +134,7 @@ class NativeDesktopConfig:
             controller=controller,
             allowed_requester_ids=_text_tuple(payload.get("allowed_requester_ids"), "allowed requester"),
             allowed_agent_names=_text_tuple(payload.get("allowed_agent_names"), "allowed agent"),
-            allowed_app_ids=_text_tuple(payload.get("allowed_app_ids"), "allowed application"),
+            allowed_app_ids=_text_tuple(payload.get("allowed_app_ids"), "allowed application", allow_empty=True),
             capture=capture,
             browser=browser,
         )
@@ -258,8 +258,10 @@ def _text(raw: object, label: str) -> str:
     return raw
 
 
-def _text_tuple(raw: object, label: str) -> tuple[str, ...]:
-    if not isinstance(raw, list) or not raw or len(raw) > 256:
+def _text_tuple(raw: object, label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if not isinstance(raw, list) or len(raw) > 256:
+        raise NativeConfigError("invalid_request", f"Native desktop {label} must be a list of at most 256 entries.")
+    if not raw and not allow_empty:
         raise NativeConfigError("invalid_request", f"Native desktop {label} list must not be empty.")
     values = tuple(_text(value, label) for value in raw)
     if len(set(values)) != len(values):
