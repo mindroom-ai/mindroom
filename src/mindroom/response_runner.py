@@ -70,6 +70,7 @@ from mindroom.memory import (
     store_conversation_memory,
     strip_user_turn_time_prefix,
 )
+from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     cancel_failure_reason,
     cancel_source_from_failure_reason,
@@ -196,6 +197,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.identity import MatrixID
     from mindroom.message_target import MessageTarget
+    from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.response_payload_preparation import ResponsePayloadPreparation, ResponsePayloadPreparer
     from mindroom.stop import StopManager
@@ -531,6 +533,25 @@ class ResponseRequest:
     def thread_id(self) -> str | None:
         """Return the canonical resolved response thread root."""
         return self.response_envelope.target.resolved_thread_id
+
+
+def _mid_turn_for_request(request: ResponseRequest, config: Config, runtime_paths: RuntimePaths) -> MidTurnGate | None:
+    """Treat deferred attachment registration as incomplete judgment context too."""
+    preparation = request.payload_preparation
+    has_media = bool(
+        request.attachment_ids
+        or (request.media is not None and request.media.has_any())
+        or (
+            preparation is not None
+            and (
+                preparation.payload_inputs.media_events
+                or preparation.payload_inputs.message_attachment_ids
+                or preparation.payload_inputs.trusted_attachment_ids
+                or preparation.payload_inputs.raw_audio_fallback
+            )
+        ),
+    )
+    return create_mid_turn_gate(config, runtime_paths, request.response_envelope, has_media=has_media)
 
 
 def _participation_for_request(
@@ -2493,6 +2514,7 @@ class ResponseRunner:
                     target=resolved_target,
                     response_envelope=request.response_envelope,
                     pipeline_timing=request.pipeline_timing,
+                    mid_turn_gate=_mid_turn_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
                     locked_operation=lambda target: self._run_owned_or_locked_response(
                         request,
                         target=target,

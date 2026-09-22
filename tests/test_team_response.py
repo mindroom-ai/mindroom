@@ -66,6 +66,7 @@ from mindroom.history.types import CompactionDecision, CompactionReplyOutcome, H
 from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.media_inputs import MediaInputs
+from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import (
@@ -682,6 +683,9 @@ def _has_persisted_queued_notice(
 class _PendingQueuedMessageState:
     def has_pending_human_messages(self) -> bool:
         return True
+
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$pending", None),) if self.has_pending_human_messages() else ()
 
 
 def _assert_retry_notice_not_relocated(

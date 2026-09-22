@@ -29,8 +29,10 @@ if TYPE_CHECKING:
     from agno.agent import Agent
     from agno.db.base import BaseDb
     from agno.models.base import Model
+    from agno.models.response import ModelResponse
 
     from mindroom.history.session_context import ScopeSessionContext
+    from mindroom.mid_turn import MidTurnGate, QueuedMessage
     from mindroom.timing import DispatchPipelineTiming
 
 __all__ = [
@@ -145,10 +147,13 @@ def attach_media_to_run_input(
 class _SupportsQueuedMessageState(Protocol):
     def has_pending_human_messages(self) -> bool: ...
 
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]: ...
+
 
 @dataclass
 class _QueuedMessageNoticeContext:
     state: _SupportsQueuedMessageState | None
+    mid_turn_gate: MidTurnGate | None = None
     response_turn_id: str = field(default_factory=lambda: str(uuid4()))
     notice_fired: bool = False
     storage_targets: dict[tuple[str, str, SessionType], _QueuedNoticeStorageTarget] = field(default_factory=dict)
@@ -171,9 +176,11 @@ _queued_message_notice_context: ContextVar[_QueuedMessageNoticeContext | None] =
 @contextmanager
 def queued_message_signal_context(
     signal: _SupportsQueuedMessageState | None,
+    *,
+    mid_turn_gate: MidTurnGate | None = None,
 ) -> Generator[_QueuedMessageNoticeContext, None, None]:
     """Bind one queued-message signal to the current async task."""
-    notice_context = _QueuedMessageNoticeContext(state=signal)
+    notice_context = _QueuedMessageNoticeContext(state=signal, mid_turn_gate=mid_turn_gate)
     token = _queued_message_notice_context.set(notice_context)
     try:
         yield notice_context
@@ -245,9 +252,12 @@ def _append_queued_notice_if_needed(
     messages: list[Message],
     function_call_results: Sequence[Message],
     notice_text: str,
+    judged: bool = False,
 ) -> None:
     notice_context = _queued_message_notice_context.get()
     if any(message.stop_after_tool_call for message in function_call_results):
+        return
+    if notice_context is not None and notice_context.mid_turn_gate is not None and not judged:
         return
     if notice_context is not None:
         _strip_queued_notice_messages(
@@ -274,17 +284,23 @@ def _append_queued_notice_if_needed(
         )
 
 
-def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice_text: str) -> None:
-    """Notify at response entry only after a complete trailing tool batch."""
-    notice_context = _queued_message_notice_context.get()
-    if notice_context is None or notice_context.state is None or not notice_context.state.has_pending_human_messages():
-        return
+def _completed_trailing_tool_results(
+    messages: list[Message],
+    response_turn_id: str,
+    *,
+    after_tool_batch: bool = False,
+) -> list[Message] | None:
+    """Find a complete resumed batch without crossing a real user or assistant message."""
     results: list[Message] = []
     for message in reversed(messages):
-        if _is_queued_notice_message(message, response_turn_id=notice_context.response_turn_id):
+        if _is_queued_notice_message(message, response_turn_id=response_turn_id):
             continue
         # Provider projections can insert trusted context between calls and results.
         if message.role in {"system", "developer"}:
+            continue
+        # Formatting may append user-role media after a just-completed batch.
+        # At response entry real user messages must still stop this scan.
+        if after_tool_batch and message.role == "user":
             continue
         if message.role == "tool":
             results.append(message)
@@ -293,12 +309,52 @@ def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice
             call_ids = {call.get("id") for call in message.tool_calls}
             result_ids = {result.tool_call_id for result in results}
             if None not in call_ids and call_ids <= result_ids:
-                _append_queued_notice_if_needed(
-                    messages=messages,
-                    function_call_results=results,
-                    notice_text=notice_text,
-                )
+                return results
+        return None
+    return None
+
+
+def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice_text: str) -> None:
+    """Notify at response entry only after a complete trailing tool batch."""
+    context = _queued_message_notice_context.get()
+    if context is None or context.state is None or not context.state.has_pending_human_messages():
         return
+    results = _completed_trailing_tool_results(messages, context.response_turn_id)
+    if results is not None:
+        _append_queued_notice_if_needed(messages=messages, function_call_results=results, notice_text=notice_text)
+
+
+async def _judge_queued_notice(messages: list[Message], *, completed_tools: tuple[str, ...], notice_text: str) -> None:
+    context = _queued_message_notice_context.get()
+    if context is None or context.mid_turn_gate is None or context.state is None:
+        return
+    pending = context.state.pending_message_snapshot()
+    if not pending:
+        return
+    if not context.notice_fired:
+        try:
+            finish = await context.mid_turn_gate.should_finish(pending, completed_tools=completed_tools)
+        except Exception:
+            # Agno logs and ignores post-tool callback failures, so restore the default here.
+            finish = False
+        if finish and not context.notice_fired and pending == context.state.pending_message_snapshot():
+            return
+    _append_queued_notice_if_needed(messages=messages, function_call_results=(), notice_text=notice_text, judged=True)
+
+
+async def _judge_resumed_tool_notice(messages: list[Message], *, notice_text: str) -> None:
+    context = _queued_message_notice_context.get()
+    if context is None or context.mid_turn_gate is None:
+        return
+    results = _completed_trailing_tool_results(messages, context.response_turn_id)
+    if results is not None and not any(message.stop_after_tool_call for message in results):
+        await _judge_queued_notice(
+            messages,
+            completed_tools=tuple(
+                message.tool_name for message in results if message.tool_name and not message.tool_call_error
+            ),
+            notice_text=notice_text,
+        )
 
 
 def _strip_response_turn_notice_from_run_output(
@@ -757,6 +813,28 @@ def discard_empty_completed_run(
 
 def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> None:
     """Append a hidden notice after tool results when a newer message is queued."""
+
+    async def after_tools(messages: list[Message], _result: ModelResponse) -> None:
+        context = _queued_message_notice_context.get()
+        if context is None or context.mid_turn_gate is None:
+            return
+        results = _completed_trailing_tool_results(messages, context.response_turn_id, after_tool_batch=True)
+        if results is None:
+            _append_queued_notice_if_needed(
+                messages=messages,
+                function_call_results=(),
+                notice_text=notice_text,
+                judged=True,
+            )
+            return
+        await _judge_queued_notice(
+            messages,
+            completed_tools=tuple(
+                message.tool_name for message in results if message.tool_name and not message.tool_call_error
+            ),
+            notice_text=notice_text,
+        )
+
     install_tool_result_callback(
         model,
         marker=_QUEUED_MESSAGE_NOTICE_HOOK_ATTR,
@@ -766,6 +844,8 @@ def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> Non
             notice_text=notice_text,
         ),
         before_response=lambda messages: _append_queued_notice_after_resumed_tools(messages, notice_text=notice_text),
+        before_response_async=lambda messages: _judge_resumed_tool_notice(messages, notice_text=notice_text),
+        after_tools_async=after_tools,
     )
 
 

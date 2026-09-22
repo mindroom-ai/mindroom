@@ -151,6 +151,58 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 These outcome logs omit request text and credentials; separately enabled LLM request debug logging still follows the normal model configuration.
 Use these measurements alongside observed decision quality and provider pricing to compare backends; token counts alone do not establish cost or quality advantages.
 
+## Mid-Turn Coalescing
+
+When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
+Opt-in `room_mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
+This is separate from participation eligibility and the debounce used to group incoming messages.
+
+```yaml
+room_mid_turn:
+  lobby:
+    instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
+    judgment:
+      provider: llm
+      model: fast  # An existing alias under models
+      timeout_seconds: 5
+```
+
+To use TypeSafe instead, configure the same room with:
+
+```yaml
+room_mid_turn:
+  lobby:
+    judgment:
+      provider: typesafe
+      threshold: 0.8
+      timeout_seconds: 1.5
+```
+
+TypeSafe also requires `TYPESAFE_API_KEY`.
+Room keys accept configured aliases or concrete Matrix room IDs.
+Omitting a room preserves the normal unconditional wrap-up notice.
+
+The question is whether the active task may finish before the queued messages are handled.
+Only an affirmative answer suppresses the notice; a negative answer, abstention, timeout, missing credentials, exhausted capacity, or backend error keeps the normal wrap-up behavior.
+The TypeSafe threshold defaults to `0.8` and has not been calibrated for this task.
+The LLM returns a boolean rather than a confidence score.
+Judgments reuse the shared participation concurrency limits and backend deadlines.
+
+The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
+It receives the active request text, up to eight pending human messages, completed tool names, and the configured guidance.
+Tool outputs, arguments, system prompts, memory, and attachment contents are excluded.
+Tool side effects are treated as unknown; a tool name does not establish that continuing is harmless.
+Missing text, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.
+Message text can still contain identifying or private information.
+
+A finish decision is reused for the same pending messages within the active response.
+A later queued message requires a new decision, and a queue change during inference cannot inherit approval for unseen input.
+Once a wrap-up notice is sent, later messages cannot reverse that handoff.
+The queued messages remain queued and are handled through the existing dispatch path after the active response releases its lock.
+The notice requests a handoff from the model; it does not forcibly cancel tools, abort a response, or inject the queued text into the running model.
+Explicit stop handling and tool-approval requirements remain unchanged.
+Teams use the existing shared-team-model notice boundary; member models do not gain separate checks.
+
 ## Splitting the Configuration Into Multiple Files
 
 Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.

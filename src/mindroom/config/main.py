@@ -54,6 +54,7 @@ from mindroom.config.matrix import (
     MindRoomUserConfig,
 )
 from mindroom.config.memory import MemoryBackend, MemoryConfig, MemorySearchConfig
+from mindroom.config.mid_turn import RoomMidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
     CompactionConfig,
     CompactionOverrideConfig,
@@ -87,6 +88,7 @@ from mindroom.constants import (
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
+from mindroom.entity_resolution import resolve_room_scoped_override
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
@@ -160,6 +162,7 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "rooms",
     "room_models",
+    "room_mid_turn",
     "room_thread_summary_models",
     "knowledge_bases",
     "mcp_servers",
@@ -422,6 +425,7 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
+    room_mid_turn: dict[str, RoomMidTurnConfig] = Field(default_factory=dict)
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     room_thread_summary_models: dict[str, str] = Field(
         default_factory=dict,
@@ -1870,6 +1874,20 @@ class Config(BaseModel):
                 msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
                 raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def validate_room_mid_turn(self) -> Config:
+        """Validate dedicated judgment model aliases for opted-in rooms."""
+        for room, settings in self.room_mid_turn.items():
+            judgment = settings.judgment
+            if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
+                msg = f"Unknown judgment model for room {room!r}: {judgment.model!r}"
+                raise ValueError(msg)
+        return self
+
+    def get_room_mid_turn(self, room_id: str, runtime_paths: RuntimePaths) -> RoomMidTurnConfig | None:
+        """Resolve queued-message judgments by room ID or persisted room alias."""
+        return resolve_room_scoped_override(self.room_mid_turn, room_id, runtime_paths, allow_raw_room_id=True)
 
     def _entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.

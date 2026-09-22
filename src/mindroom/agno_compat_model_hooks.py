@@ -92,6 +92,24 @@ def install_message_projection(
     model_dict["aresponse"] = response_with_projection
 
 
+def _with_tool_checkpoint(
+    messages: list[Message],
+    kwargs: dict[str, object],
+    after_tools: Callable[[list[Message], ModelResponse], Awaitable[None]],
+) -> dict[str, object]:
+    """Run the owner's post-tool policy without discarding Agno's checkpoint."""
+    previous = cast("Callable[[ModelResponse], Awaitable[None]] | None", kwargs.get("after_tool_results"))
+
+    async def after_tool_results(result: ModelResponse) -> None:
+        try:
+            await after_tools(messages, result)
+        finally:
+            if previous is not None:
+                await previous(result)
+
+    return {**kwargs, "after_tool_results": after_tool_results}
+
+
 # AGNO_COMPAT: Post-tool callbacks lack mutable messages and results.
 # Reason: after_tool_results exists in Agno 3.0.9 but lacks the mutable messages
 # and results and is not exposed as an owner callback through Agent/Team runs.
@@ -109,6 +127,8 @@ def install_tool_result_callback(
     marker: str,
     callback: Callable[[list[Message], list[Message]], None],
     before_response: Callable[[list[Message]], None],
+    before_response_async: Callable[[list[Message]], Awaitable[None]],
+    after_tools_async: Callable[[list[Message], ModelResponse], Awaitable[None]],
 ) -> None:
     """Observe tool-result stages and response entry after approved batches."""
     try:
@@ -127,7 +147,8 @@ def install_tool_result_callback(
 
     async def response(messages: list[Message], *args: object, **kwargs: object) -> ModelResponse:
         before_response(messages)
-        return await original_response(messages, *args, **kwargs)
+        await before_response_async(messages)
+        return await original_response(messages, *args, **_with_tool_checkpoint(messages, kwargs, after_tools_async))
 
     async def response_stream(
         messages: list[Message],
@@ -135,7 +156,10 @@ def install_tool_result_callback(
         **kwargs: object,
     ) -> AsyncIterator[ModelResponse | RunOutputEvent | TeamRunOutputEvent]:
         before_response(messages)
-        async with aclosing(original_stream(messages, *args, **kwargs)) as stream:
+        await before_response_async(messages)
+        async with aclosing(
+            original_stream(messages, *args, **_with_tool_checkpoint(messages, kwargs, after_tools_async)),
+        ) as stream:
             async for event in stream:
                 yield event
 
