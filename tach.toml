@@ -1563,6 +1563,27 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.personal_rooms"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+    "mindroom.matrix_identifiers",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.personal_room_lifecycle"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.bot_room_lifecycle"
 depends_on = [
     "mindroom.commands.handler",
@@ -2751,6 +2772,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
+    "mindroom.matrix.personal_rooms",
     "mindroom.custom_tools.matrix_message_idempotency",
     "mindroom.approval_transport",
     "mindroom.commands.config_confirmation",
@@ -2793,8 +2815,10 @@ depends_on = [
     "mindroom.thread_tags",
 ]
 visibility = [
+    "mindroom.matrix.personal_rooms",
     "mindroom.api.matrix_operations",
     "mindroom.bot",
+    "mindroom.personal_room_lifecycle",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
     "mindroom.commands.room_model_commands",
@@ -3486,6 +3510,7 @@ depends_on = [
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.event_info",
     "mindroom.matrix.journal_ingress",
+    "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
@@ -3495,6 +3520,7 @@ depends_on = [
     "mindroom.matrix.visible_body",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
+    "mindroom.personal_room_lifecycle",
     "mindroom.post_response_effects",
     "mindroom.reaction_dispatch",
     "mindroom.matrix_delivery",

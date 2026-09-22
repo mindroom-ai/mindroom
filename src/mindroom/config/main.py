@@ -64,6 +64,7 @@ from mindroom.config.models import (
     RouterConfig,
     ToolConfigEntry,
 )
+from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
@@ -454,6 +455,7 @@ class Config(BaseModel):
         description="Tool-approval rules for agent-initiated tool calls",
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
+    personal_rooms: PersonalRoomsConfig | None = Field(default=None, description="Optional native personal agent rooms")
     voice: VoiceConfig = Field(default_factory=VoiceConfig, description="Voice configuration")
     calls: CallsConfig = Field(default_factory=CallsConfig, description="Voice call (MatrixRTC) configuration")
     event_journal: EventJournalConfig = Field(
@@ -521,6 +523,18 @@ class Config(BaseModel):
             return
         if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
             raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def validate_personal_rooms(self) -> Config:
+        """Require a real target and onboarding rooms observed by the router."""
+        if self.personal_rooms is not None:
+            if self.personal_rooms.agent not in self.agents:
+                msg = "personal_rooms.agent must name a configured agent"
+                raise ValueError(msg)
+            if set(self.personal_rooms.onboarding_rooms) - self.get_all_configured_rooms():
+                msg = "personal_rooms.onboarding_rooms must name configured rooms"
+                raise ValueError(msg)
+        return self
 
     @model_validator(mode="before")
     @classmethod
