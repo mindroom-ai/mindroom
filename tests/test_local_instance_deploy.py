@@ -515,3 +515,39 @@ def test_telegram_bridge_compose_renders_configured_image(
 
     overridden_compose = yaml.safe_load(compose_path.read_text())
     assert overridden_compose["services"]["telegram"]["image"] == "registry.example/telegram:compatible"
+
+
+@pytest.mark.parametrize("matrix_type", [None, deploy.MatrixType.TUWUNEL, deploy.MatrixType.SYNAPSE])
+@pytest.mark.parametrize("auth_type", [None, deploy.AuthType.AUTHELIA])
+def test_full_stack_starts_its_configured_sandbox_runner(
+    tmp_path: Path,
+    matrix_type: deploy.MatrixType | None,
+    auth_type: deploy.AuthType | None,
+) -> None:
+    """Fresh full stacks select the worker endpoint configured for their execution tools."""
+    instance = _instance("alpha", matrix_type=matrix_type, data_root=tmp_path)
+    instance.auth_type = auth_type
+    selected = set(deploy._get_services_to_start(instance).split())
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    proxy_url = next(
+        value
+        for value in compose["services"]["mindroom"]["environment"]
+        if value.startswith("MINDROOM_SANDBOX_PROXY_URL=")
+    )
+    assert "sandbox-runner" in proxy_url
+    assert "sandbox-runner" in compose["services"]
+    assert "mindroom" in selected
+    assert "sandbox-runner" in selected
+
+
+@pytest.mark.parametrize("matrix_type", [deploy.MatrixType.TUWUNEL, deploy.MatrixType.SYNAPSE])
+def test_matrix_only_start_excludes_runtime_and_sandbox(
+    tmp_path: Path,
+    matrix_type: deploy.MatrixType,
+) -> None:
+    """Starting only the homeserver must not start either execution runtime."""
+    instance = _instance("alpha", matrix_type=matrix_type, data_root=tmp_path)
+    instance.auth_type = deploy.AuthType.AUTHELIA
+    selected = set(deploy._get_services_to_start(instance, only_matrix=True).split())
+    assert matrix_type.value in selected
+    assert selected.isdisjoint({"mindroom", "sandbox-runner", "authelia"})
