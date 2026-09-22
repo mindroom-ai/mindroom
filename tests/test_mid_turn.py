@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from mindroom import model_loading
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
+from mindroom.config.mid_turn import RoomMidTurnConfig
 from mindroom.judgment.answers import JudgmentResult
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
@@ -84,6 +85,84 @@ def test_queued_snapshot_keeps_text_until_exact_event_is_consumed() -> None:
 
 def _result(request: JudgmentRequest, decision: bool | None) -> JudgmentResult:
     return JudgmentResult(decision, None, None, "test", 0, None, None, request.state_bytes)
+
+
+@pytest.mark.parametrize("reaction", ["", "   ", "\n", "x" * 65, 123])
+def test_defer_reaction_rejects_invalid_keys(reaction: object) -> None:
+    """Deferred acknowledgements use bounded, nonblank Matrix reaction keys."""
+    with pytest.raises(ValidationError):
+        RoomMidTurnConfig.model_validate({"judgment": {"provider": "typesafe"}, "defer_reaction": reaction})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["finish", "wrap_up", "error", "queue_changed", "cancel", "reaction_error"])
+async def test_defer_reaction_requires_accepted_current_decision(outcome: str) -> None:
+    """Never acknowledge a failed, cancelled, negative, or superseded judgment."""
+    state = _QueuedMessageState()
+    state.add_waiting_human_message("$first", text="Thanks")
+    acknowledgements: list[str] = []
+
+    async def acknowledge(event_id: str) -> None:
+        acknowledgements.append(event_id)
+        if outcome == "reaction_error":
+            msg = "Matrix unavailable"
+            raise RuntimeError(msg)
+
+    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+        if outcome == "error":
+            raise TimeoutError
+        if outcome == "cancel":
+            raise asyncio.CancelledError
+        if outcome == "queue_changed":
+            state.add_waiting_human_message("$correction", text="Stop")
+        return _result(request, outcome != "wrap_up")
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge)
+    model = ParticipationModel(ModelResponse(content="Done"))
+    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    with queued_message_signal_context(state, mid_turn_gate=gate):
+        if outcome == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await model.aresponse(_resumed_messages())
+        else:
+            await model.aresponse(_resumed_messages())
+            await model.aresponse(_resumed_messages())
+            if outcome == "finish":
+                state.add_waiting_human_message("$second", text="No rush")
+                await model.aresponse(_resumed_messages())
+    assert acknowledgements == (
+        ["$first", "$second"] if outcome == "finish" else ["$first"] if outcome == "reaction_error" else []
+    )
+    if outcome == "reaction_error":
+        assert all(not any(message.content == "WRAP UP NOW" for message in call["messages"]) for call in model.requests)
+    assert state.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+async def test_queue_change_during_reaction_still_requests_wrap_up() -> None:
+    """A correction arriving while Matrix acknowledges a reaction must still cause handoff."""
+    state = _QueuedMessageState()
+    state.add_waiting_human_message("$first", text="Thanks")
+    state.add_waiting_human_message("$second", text="No rush")
+    acknowledgements: list[str] = []
+
+    async def acknowledge(event_id: str) -> None:
+        acknowledgements.append(event_id)
+        state.add_waiting_human_message("$correction", text="Stop")
+
+    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+        return _result(request, True)
+
+    model = ParticipationModel(ModelResponse(content="Done"))
+    install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
+    with queued_message_signal_context(
+        state,
+        mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate, on_defer=acknowledge),
+    ) as context:
+        await model.aresponse(_resumed_messages())
+        assert context.notice_fired
+    assert acknowledgements == ["$first"]
+    assert any(message.content == "WRAP UP NOW" for message in model.requests[0]["messages"])
 
 
 @pytest.mark.asyncio

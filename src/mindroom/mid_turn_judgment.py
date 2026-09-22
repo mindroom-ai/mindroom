@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.judgment.evaluator import create_judgment_evaluator
 from mindroom.mid_turn import MID_TURN_QUESTION, MidTurnGate, message_text_for_judgment
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import MessageEnvelope
@@ -20,6 +23,7 @@ def create_mid_turn_gate(
     *,
     prompt: str,
     has_media: bool,
+    on_defer: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> MidTurnGate | None:
     """Bind one response's decision owner without performing inference."""
     settings = config.get_room_mid_turn(envelope.room_id, runtime_paths)
@@ -38,4 +42,9 @@ def create_mid_turn_gate(
         active_text=None if has_media or message_text_for_judgment(envelope) is None else prompt,
         evaluate=evaluate,
         instructions=settings.instructions,
+        on_defer=(
+            partial(on_defer, settings.defer_reaction)
+            if on_defer is not None and settings.defer_reaction is not None
+            else None
+        ),
     )

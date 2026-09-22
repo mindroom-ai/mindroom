@@ -160,7 +160,7 @@ Use these measurements alongside observed decision quality and provider pricing 
 When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
 Opt-in `room_mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
 This is separate from participation eligibility and the debounce used to group incoming messages.
-`room_mid_turn` maps room aliases or Matrix room IDs to settings with a required `judgment` object and optional `instructions` string (default `""`).
+`room_mid_turn` maps room aliases or Matrix room IDs to settings with a required `judgment` object, optional `instructions` string (default `""`), and optional `defer_reaction` (default `null`).
 The `llm` judgment requires `provider: llm` and a `model` string naming an existing alias; its numeric `timeout_seconds` defaults to `5.0`.
 The `typesafe` judgment requires `provider: typesafe`; its numeric `threshold` defaults to `0.8` (range `0`–`1`) and `timeout_seconds` to `1.5`.
 Both backends require a positive timeout of at most `30` seconds and reject unknown fields.
@@ -169,6 +169,7 @@ Both backends require a positive timeout of at most `30` seconds and reject unkn
 room_mid_turn:
   lobby:
     instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
+    defer_reaction: "👀"
     judgment:
       provider: llm
       model: fast  # An existing alias under models
@@ -189,6 +190,13 @@ room_mid_turn:
 TypeSafe also requires `TYPESAFE_API_KEY`.
 Room keys accept configured aliases or concrete Matrix room IDs.
 Omitting a room preserves the normal unconditional wrap-up notice.
+Set `defer_reaction` to acknowledge queued messages when the judge lets the active task finish first.
+For example, `"👀"` means the message was seen and deferred; it remains queued for a later turn.
+Omit the setting or use `null` to keep deferrals invisible.
+Like participation's `decline_reaction`, the key must be a nonblank string of at most 64 characters.
+Each message is acknowledged at most once per active response, and stable Matrix transaction IDs prevent duplicate reactions on replay.
+Negative, failed, timed-out, cancelled, or superseded judgments do not trigger the reaction.
+Reaction delivery is best effort; failures do not change the judgment, and a correction arriving during delivery still requests wrap-up.
 
 The question is whether the active task may finish before the queued messages are handled.
 Only an affirmative answer suppresses the notice; a negative answer, abstention, timeout, missing credentials, exhausted capacity, or backend error keeps the normal wrap-up behavior.

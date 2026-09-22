@@ -1,6 +1,6 @@
 """Opt-in judgments for messages queued during an active response."""
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.config.judgment import JudgmentConfig
 
@@ -12,3 +12,4 @@ class RoomMidTurnConfig(BaseModel):
 
     judgment: JudgmentConfig
     instructions: str = ""
+    defer_reaction: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"\S")

@@ -59,6 +59,8 @@ class MidTurnGate:
     evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult]]
     instructions: str = ""
     visible_response_text: str | None = ""
+    on_defer: Callable[[str], Awaitable[None]] | None = None
+    _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -66,6 +68,13 @@ class MidTurnGate:
     def record_visible_response(self, text: str) -> None:
         """Keep only bounded Matrix-acknowledged text for subsequent queue snapshots."""
         self.visible_response_text = text if len(text) <= MAX_REQUEST_BYTES else None
+
+    async def acknowledge_deferred(self, message: QueuedMessage) -> None:
+        """Attempt one acknowledgement per message after the caller accepts the decision."""
+        if self.on_defer is None or message.event_id in self._acknowledged:
+            return
+        self._acknowledged.add(message.event_id)
+        await self.on_defer(message.event_id)
 
     async def should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
         """Only a valid affirmative judgment can suppress the existing wrap-up notice."""

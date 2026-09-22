@@ -4632,6 +4632,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
 @pytest.mark.parametrize("pending_media", [False, True])
 @pytest.mark.parametrize("selection", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("reaction", [None, "👀"])
 async def test_response_runner_binds_room_mid_turn_judge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4639,12 +4640,19 @@ async def test_response_runner_binds_room_mid_turn_judge(
     pending_media: bool,
     selection: bool,
     enabled: bool,
+    reaction: str | None,
 ) -> None:
     """Room opt-in reaches the real tool loop while unprepared media keeps wrap-up."""
     bot = _bot(tmp_path)
+    bot.client.room_send.return_value = nio.RoomSendResponse.from_dict({"event_id": "$reaction"}, "!room:localhost")
     runner = unwrap_extracted_collaborator(bot._response_runner)
     runner.deps.runtime.config.room_mid_turn = (
-        {"!room:localhost": RoomMidTurnConfig(judgment=LLMJudgmentConfig(provider="llm", model="default"))}
+        {
+            "!room:localhost": RoomMidTurnConfig(
+                judgment=LLMJudgmentConfig(provider="llm", model="default"),
+                defer_reaction=reaction,
+            ),
+        }
         if enabled
         else {}
     )
@@ -4707,6 +4715,16 @@ async def test_response_runner_binds_room_mid_turn_judge(
             == "$response"
         )
         assert len(model.requests) == 2
+        reactions = [
+            call.kwargs["content"]
+            for call in bot.client.room_send.await_args_list
+            if call.kwargs["message_type"] == "m.reaction"
+        ]
+        assert reactions == (
+            [{"m.relates_to": {"rel_type": "m.annotation", "event_id": "$queued", "key": "👀"}}]
+            if enabled and not pending_media and reaction
+            else []
+        )
         assert any(message.content == "WRAP UP NOW" for message in model.requests[-1]["messages"]) is (
             pending_media or not enabled
         )

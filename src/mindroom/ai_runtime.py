@@ -338,7 +338,16 @@ async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> 
             # Agno logs and ignores post-tool callback failures, so restore the default here.
             finish = False
         if finish and not context.notice_fired and pending == context.state.pending_message_snapshot():
-            return
+            for message in pending:
+                if context.notice_fired or pending != context.state.pending_message_snapshot():
+                    break
+                try:
+                    await context.mid_turn_gate.acknowledge_deferred(message)
+                except Exception:
+                    logger.warning("mid_turn_reaction_failed")
+            # Matrix delivery can yield to a newer correction or a concurrent handoff.
+            if not context.notice_fired and pending == context.state.pending_message_snapshot():
+                return
     _append_queued_notice_if_needed(messages=messages, function_call_results=(), notice_text=notice_text, judged=True)
 
 

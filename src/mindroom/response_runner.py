@@ -535,7 +535,13 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
-def _mid_turn_for_request(request: ResponseRequest, config: Config, runtime_paths: RuntimePaths) -> MidTurnGate | None:
+def _mid_turn_for_request(
+    request: ResponseRequest,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    on_defer: Callable[[str, str], Awaitable[None]],
+) -> MidTurnGate | None:
     """Treat deferred attachment registration as incomplete judgment context too."""
     preparation = request.payload_preparation
     has_media = bool(
@@ -557,6 +563,7 @@ def _mid_turn_for_request(request: ResponseRequest, config: Config, runtime_path
         request.response_envelope,
         prompt=request.prompt,
         has_media=has_media,
+        on_defer=on_defer,
     )
     if gate is not None and request.existing_event_id and not request.existing_event_is_placeholder:
         gate.visible_response_text = None
@@ -2515,6 +2522,16 @@ class ResponseRunner:
         )
         self._admission_gate.response_identities.add(identity)
         self._in_flight_response_count += 1
+
+        async def acknowledge_deferred(key: str, event_id: str) -> None:
+            await self.deps.delivery_gateway.send_judgment_reaction(
+                identity=self._response_identity(request, response_kind=response_kind),
+                room_id=request.room_id,
+                event_id=event_id,
+                key=key,
+                kind="mid_turn_defer",
+            )
+
         try:
             resolved_target = request.response_envelope.target
             early_placeholder = _EarlyPlaceholderState()
@@ -2523,7 +2540,12 @@ class ResponseRunner:
                     target=resolved_target,
                     response_envelope=request.response_envelope,
                     pipeline_timing=request.pipeline_timing,
-                    mid_turn_gate=_mid_turn_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
+                    mid_turn_gate=_mid_turn_for_request(
+                        request,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                        on_defer=acknowledge_deferred,
+                    ),
                     locked_operation=lambda target: self._run_owned_or_locked_response(
                         request,
                         target=target,
@@ -5252,11 +5274,12 @@ class ResponseRunner:
                 and request.participation.decline_reaction is not None
                 and generation.delivery.failure_reason == "participation_declined"
             ):
-                await self.deps.delivery_gateway.send_decline_reaction(
+                await self.deps.delivery_gateway.send_judgment_reaction(
                     identity=response_identity,
                     room_id=request.room_id,
                     event_id=request.sources.logical_source_event_ids[-1],
                     key=request.participation.decline_reaction,
+                    kind="participation_decline",
                 )
             progress.settle(generation.delivery)
 
