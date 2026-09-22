@@ -56,7 +56,7 @@ class MidTurnGate:
     """Reuse one decision per pending snapshot within one active response."""
 
     active_text: str | None
-    evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult]]
+    evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult[bool]]]
     instructions: str = ""
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None

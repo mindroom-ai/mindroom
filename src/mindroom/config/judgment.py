@@ -1,4 +1,4 @@
-"""Interchangeable backends for bounded boolean judgments."""
+"""Interchangeable backends for bounded boolean and choice judgments."""
 
 from typing import Annotated, Literal
 
@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class LLMJudgmentConfig(BaseModel):
-    """Use a configured model alias for a structured yes/no decision."""
+    """Use a configured model alias for a structured judgment."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -16,7 +16,7 @@ class LLMJudgmentConfig(BaseModel):
 
 
 class TypeSafeJudgmentConfig(BaseModel):
-    """Use System One probabilities with a task-specific threshold."""
+    """Use System One probabilities with a task-specific acceptance threshold."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

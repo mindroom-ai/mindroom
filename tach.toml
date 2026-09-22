@@ -514,6 +514,7 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.routing",
+    "mindroom.routing_judgment",
 ]
 
 [[modules]]
@@ -2277,6 +2278,7 @@ visibility = [
 [[modules]]
 path = "mindroom.routing"
 depends_on = [
+    "mindroom.routing_judgment",
     "mindroom.agent_descriptions",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -2342,6 +2344,7 @@ depends_on = ["mindroom.config.models", "mindroom.path_globs"]
 [[modules]]
 path = "mindroom.config.models"
 depends_on = [
+    "mindroom.config.judgment",
     "mindroom.config.access",
     "mindroom.config.legacy_fields",
     "mindroom.config.validation",
@@ -6622,3 +6625,8 @@ visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.res
 path = "mindroom.mid_turn_judgment"
 depends_on = ["mindroom.judgment.evaluator", "mindroom.mid_turn"]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.routing_judgment"
+depends_on = ["mindroom.agent_descriptions", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
+visibility = ["mindroom.routing"]

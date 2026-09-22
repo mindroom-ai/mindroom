@@ -38,20 +38,29 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
-class JudgmentResponse:
+class ChoiceDecision:
+    """One allowlisted option, with provider probabilities when available."""
+
+    option: str
+    confidence: float | None = None
+    probabilities: tuple[tuple[str, float], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class JudgmentResponse[T]:
     """One validated backend response, including an explicit abstention."""
 
     model: str
-    decision: bool | None
+    decision: T | None
     probability: float | None
     usage: TokenUsage | None
 
 
 @dataclass(frozen=True, slots=True)
-class JudgmentResult:
+class JudgmentResult[T]:
     """A successful answer or one closed failure category."""
 
-    decision: bool | None
+    decision: T | None
     probability: float | None
     failure: JudgmentFailure | None
     model_id: str | None

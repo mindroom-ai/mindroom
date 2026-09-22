@@ -1,1 +1,1 @@
-"""Bounded boolean judgments with interchangeable LLM and System One backends."""
+"""Bounded boolean and choice judgments with interchangeable LLM and System One backends."""

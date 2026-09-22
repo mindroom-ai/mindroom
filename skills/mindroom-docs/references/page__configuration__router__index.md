@@ -15,11 +15,12 @@ router:
 
 ```
 
-The router has two configuration options:
+The router supports these configuration options:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `model` | string | `"default"` | Model to use for routing decisions |
+| `model` | string | `"default"` | Model to use for ordinary routing and judgment fallback |
+| `judgment` | object or null | `null` | Optional LLM or TypeSafe choice backend for responder selection |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted room IDs are persisted, rejoined after restart, and preserved during room cleanup |
 
 Invitation patterns are matched after identity alias resolution and use the same case-sensitive wildcard semantics as responder `access.users`.
@@ -41,6 +42,55 @@ For configured rooms, routing candidates come only from `agents.<name>.rooms` an
 For ad-hoc rooms accepted through invites, routing candidates come from the sender-visible MindRoom agents and teams currently joined to that room, then are filtered by the same sender permissions.
 
 When multiple responders are eligible, the router uses a structured output schema to ensure consistent routing decisions, including the selected agent or team name and reasoning for the selection.
+
+## Responder selection judgments
+
+Set `router.judgment` to make one bounded choice among the already eligible agents and teams before ordinary routing.
+This is optional; omitting it or setting it to `null` preserves existing behavior, even when a TypeSafe API key is present.
+Explicit mentions, existing thread participation rules, authorization, and deterministic single-candidate routing are unchanged.
+
+Use a configured model alias for an LLM judgment:
+
+```yaml
+router:
+  model: default
+  judgment:
+    provider: llm
+    model: cheap_judge  # Must exist under models
+    timeout_seconds: 5.0
+```
+
+Or use System One with `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
+
+```yaml
+router:
+  model: default
+  judgment:
+    provider: typesafe
+    threshold: 0.8
+    timeout_seconds: 1.5
+```
+
+Both backends receive the same question and candidate descriptions: roles, available tools, delegation capabilities, and the brief instructions used by ordinary routing.
+They see the current request text and the last three complete visible message bodies, with sender fields replaced by speaker aliases.
+This is a text-only view: no system prompt, private tool results, attachment contents, or full conversation history is added.
+Messages are not cut off to fit: sensitive or oversized input uses ordinary routing instead.
+The complete judgment request is limited to 16,000 UTF-8 bytes and at most 253 candidate responders (plus two special choices).
+
+A selected candidate routes through the existing delivery path.
+A confident `no_fit` produces the existing message asking the user to mention a responder or rephrase.
+The `multiple` choice means no single candidate can cover the request; it falls back to ordinary single-responder routing and does not launch several agents.
+Low confidence, abstention, invalid output, missing credentials, capacity exhaustion, or a timeout also falls back to ordinary routing using the existing runtime model resolution.
+The judgment's configured model alias is independent of room/thread model overrides; those overrides still apply to the fallback router.
+
+System One returns a distribution and confidence; both the selected option's probability and confidence must meet `threshold`, and tied winners abstain.
+LLMs return an allowlisted option or abstain without inventing a confidence score.
+Their predictions may differ; switching backends preserves the decision contract, not identical selections.
+The dedicated rubric does not use the ordinary router prompt overrides; those still apply to fallback routing.
+
+Judgments share the same process-wide capacity limits as participation and mid-turn checks: eight concurrent calls and one per instance/router owner, without a waiting queue.
+There are no application-level retries; the configured deadline includes model loading and inference.
+Logs record the backend, decision, probability when available, latency, token usage, and failure category without logging the request text.
 
 ## Router Responsibilities
 

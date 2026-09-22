@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.judgment import LLMJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
-from mindroom.judgment.llm import judge_with_llm
+from mindroom.judgment.llm import judge_choice_with_llm, judge_with_llm
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -15,12 +15,12 @@ if TYPE_CHECKING:
     from mindroom.config.judgment import JudgmentConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.judgment.answers import JudgmentResult
+    from mindroom.judgment.answers import ChoiceDecision, JudgmentResult
     from mindroom.judgment.state import JudgmentRequest
 
 logger = get_logger(__name__)
 
-type _JudgmentEvaluator = Callable[[JudgmentRequest], Awaitable[JudgmentResult]]
+type _JudgmentEvaluator[T] = Callable[[JudgmentRequest], Awaitable[JudgmentResult[T]]]
 
 
 def create_judgment_evaluator(
@@ -30,8 +30,49 @@ def create_judgment_evaluator(
     *,
     owner: str,
     question_id: str,
-) -> _JudgmentEvaluator | None:
+) -> _JudgmentEvaluator[bool] | None:
     """Bind backend settings and credentials without starting an inference request."""
+    return _create_evaluator(
+        settings,
+        runtime_paths,
+        question_id=question_id,
+        llm=lambda request, llm_settings: judge_with_llm(request, llm_settings, config, runtime_paths, owner=owner),
+        typesafe=lambda client, request: client.judge(request, owner=owner, allow_network=True),
+    )
+
+
+def create_choice_evaluator(
+    settings: JudgmentConfig,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    owner: str,
+    question_id: str,
+) -> _JudgmentEvaluator[ChoiceDecision] | None:
+    """Bind a comparative choice with the same credentials and metrics as boolean judgments."""
+    return _create_evaluator(
+        settings,
+        runtime_paths,
+        question_id=question_id,
+        llm=lambda request, llm_settings: judge_choice_with_llm(
+            request,
+            llm_settings,
+            config,
+            runtime_paths,
+            owner=owner,
+        ),
+        typesafe=lambda client, request: client.judge_choice(request, owner=owner, allow_network=True),
+    )
+
+
+def _create_evaluator[T](
+    settings: JudgmentConfig,
+    runtime_paths: RuntimePaths,
+    *,
+    question_id: str,
+    llm: Callable[[JudgmentRequest, LLMJudgmentConfig], Awaitable[JudgmentResult[T]]],
+    typesafe: Callable[[SystemOneClient, JudgmentRequest], Awaitable[JudgmentResult[T]]],
+) -> _JudgmentEvaluator[T] | None:
     client: SystemOneClient | None = None
     if isinstance(settings, TypeSafeJudgmentConfig):
         key = (runtime_paths.env_value("TYPESAFE_API_KEY") or "").strip()
@@ -50,12 +91,12 @@ def create_judgment_evaluator(
             timeout_seconds=settings.timeout_seconds,
         )
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> JudgmentResult[T]:
         if isinstance(settings, LLMJudgmentConfig):
-            result = await judge_with_llm(request, settings, config, runtime_paths, owner=owner)
+            result = await llm(request, settings)
         else:
             assert client is not None
-            result = await client.judge(request, owner=owner, allow_network=True)
+            result = await typesafe(client, request)
         logger.info(
             "Judgment evaluated",
             question=question_id,

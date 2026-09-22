@@ -14,6 +14,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
+from mindroom.routing_judgment import judge_responder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -62,6 +63,10 @@ async def suggest_responder(
 
     """
     try:
+        if config.router.judgment is not None:
+            selection = await judge_responder(message, available_entity_names, config, runtime_paths, thread_context)
+            if selection is not None:
+                return selection.entity_name
         entity_descriptions = []
         for entity_name in available_entity_names:
             description = describe_agent(entity_name, config)

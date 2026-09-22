@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import math
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import httpx
 
 from mindroom.json_utils import DuplicateJSONKeyError, object_with_unique_keys
 from mindroom.judgment.answers import (
+    ChoiceDecision,
     JudgmentError,
     JudgmentResponse,
     JudgmentResult,
@@ -17,6 +18,9 @@ from mindroom.judgment.answers import (
 )
 from mindroom.judgment.execution import SHARED_CAPACITY, JudgmentCapacity, run_judgment
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentRequest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 PINNED_MODEL = "jev-1.13.0"
 
@@ -99,7 +103,13 @@ def _decode_envelope(body: bytes, *, expected_model: str) -> tuple[dict[str, obj
     return root, token_usage
 
 
-def _decode_response(body: bytes, *, expected_model: str, expected_question: str, threshold: float) -> JudgmentResponse:
+def _decode_response(
+    body: bytes,
+    *,
+    expected_model: str,
+    expected_question: str,
+    threshold: float,
+) -> JudgmentResponse[bool]:
     """Accept only the requested judgment probability, never a generated decision."""
     root, usage = _decode_envelope(body, expected_model=expected_model)
     answers = _exact_keys(root["answers"], {expected_question}, "question map")
@@ -114,6 +124,38 @@ def _decode_response(body: bytes, *, expected_model: str, expected_question: str
         probability=probability,
         usage=usage,
     )
+
+
+def _decode_choice_response(
+    body: bytes,
+    *,
+    expected_model: str,
+    expected_question: str,
+    options: set[str],
+    threshold: float,
+) -> JudgmentResponse[ChoiceDecision]:
+    """Validate the full distribution before accepting a unique, confident winner."""
+    root, usage = _decode_envelope(body, expected_model=expected_model)
+    answers = _exact_keys(root["answers"], {expected_question}, "question map")
+    answer = _exact_keys(answers[expected_question], {"type", "choice", "confidence", "probabilities"}, "choice answer")
+    choice = answer["choice"]
+    if answer["type"] != "choice" or not isinstance(choice, str) or choice not in options:
+        msg = "response choice is not a requested option"
+        raise _InvalidJudgmentResponseError(msg)
+    confidence = _number(answer["confidence"], "confidence")
+    raw = _exact_keys(answer["probabilities"], options, "choice probabilities")
+    probabilities = {key: _number(value, "choice probability") for key, value in raw.items()}
+    probability = probabilities[choice]
+    if not math.isclose(sum(probabilities.values()), 1.0, abs_tol=0.01) or probability != max(probabilities.values()):
+        msg = "response choice distribution is inconsistent"
+        raise _InvalidJudgmentResponseError(msg)
+    unique = sum(value == probability for value in probabilities.values()) == 1
+    decision = (
+        ChoiceDecision(choice, confidence, tuple(probabilities.items()))
+        if unique and min(confidence, probability) >= threshold
+        else None
+    )
+    return JudgmentResponse(model=expected_model, decision=decision, probability=probability, usage=usage)
 
 
 class SystemOneClient:
@@ -175,17 +217,31 @@ class SystemOneClient:
             finally:
                 await response.aclose()
 
-    async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse:
+    async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse[bool]:
+        return await self._evaluate_with_decoder(request, choice=False, decode=_decode_response)
+
+    async def _evaluate_choice(self, request: JudgmentRequest) -> JudgmentResponse[ChoiceDecision]:
+        return await self._evaluate_with_decoder(request, choice=True, decode=_decode_choice_response)
+
+    async def _evaluate_with_decoder[T](
+        self,
+        request: JudgmentRequest,
+        *,
+        choice: bool,
+        decode: Callable[..., JudgmentResponse[T]],
+    ) -> JudgmentResponse[T]:
         assert request.body is not None
         payload = json.loads(request.body)
         question = payload["question"]
+        if (question.get("type") == "choice") != choice:
+            raise JudgmentError(failure="invalid_request")
         body = json.dumps(
             {
                 "model": self._model,
                 "state": payload["state"],
                 "questions": {
                     question["id"]: {
-                        "type": "noul",
+                        "type": "choice" if choice else "noul",
                         "instructions": {"question": question["instructions"], "guidance": payload["guidance"]},
                         "criteria": question["criteria"],
                     },
@@ -198,11 +254,12 @@ class SystemOneClient:
             raise JudgmentError(failure="incomplete_state")
         try:
             response_body = await self._post(body)
-            return _decode_response(
+            return decode(
                 response_body,
                 expected_model=self._model,
                 expected_question=question["id"],
                 threshold=self._threshold,
+                **({"options": set(question["criteria"])} if choice else {}),
             )
         except httpx.TimeoutException as error:
             raise JudgmentError(failure="timeout") from error
@@ -224,11 +281,28 @@ class SystemOneClient:
         *,
         owner: str,
         allow_network: bool = False,
-    ) -> JudgmentResult:
+    ) -> JudgmentResult[bool]:
         """Evaluate one question with the shared deadline and concurrency limits."""
         return await run_judgment(
             request,
             self._evaluate,
+            owner=owner,
+            timeout_seconds=self._timeout_seconds,
+            allow_network=allow_network,
+            capacity=self._capacity,
+        )
+
+    async def judge_choice(
+        self,
+        request: JudgmentRequest,
+        *,
+        owner: str,
+        allow_network: bool = False,
+    ) -> JudgmentResult[ChoiceDecision]:
+        """Evaluate a choice under the same limits as boolean judgments."""
+        return await run_judgment(
+            request,
+            self._evaluate_choice,
             owner=owner,
             timeout_seconds=self._timeout_seconds,
             allow_network=allow_network,
