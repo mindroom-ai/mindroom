@@ -2974,6 +2974,7 @@ class TestAgentBot(AgentBotTestBase):
             # hold until sync echoes it back.
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
+            membership_index=bot._runtime_view.agent_reply_memberships,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -3095,6 +3096,7 @@ class TestAgentBot(AgentBotTestBase):
             conversation_reader=bot._conversation_reader,
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
+            membership_index=bot._runtime_view.agent_reply_memberships,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()
         compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs

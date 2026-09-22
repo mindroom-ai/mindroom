@@ -4110,6 +4110,8 @@ depends_on = []
 [[modules]]
 path = "mindroom.thread_summary"
 depends_on = [
+    "mindroom.authorization",
+    "mindroom.requester_identity",
     "mindroom.matrix.room_history_reads",
     "mindroom.ai_runtime",
     "mindroom.entity_resolution",

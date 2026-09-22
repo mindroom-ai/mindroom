@@ -110,6 +110,8 @@ class ThreadSummaryTools(Toolkit):
                 config=context.config,
                 runtime_paths=context.runtime_paths,
                 conversation_reader=context.conversation_reader,
+                entity_name=context.agent_name,
+                membership_index=context.require_agent_reply_memberships(),
                 pin=pin,
             )
         except ThreadSummaryWriteError as exc:

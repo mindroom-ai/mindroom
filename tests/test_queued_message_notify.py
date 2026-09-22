@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -1028,6 +1028,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         "default",
         conversation_reader,
         initial_enrichment_complete=None,
+        generated_at=ANY,
     )
 
 

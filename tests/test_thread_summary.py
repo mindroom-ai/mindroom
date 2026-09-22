@@ -8,13 +8,14 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 from agno.models.vertexai.claude import Claude as VertexAIClaude
 from pydantic import ValidationError
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.anthropic_claude import MindRoomAnthropicClaude
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
@@ -741,6 +742,8 @@ class TestMaybeGenerateThreadSummary:
             rp,
             conversation_reader=self.conversation_reader,
             delivered_response=_DELIVERED_AND_ECHOED,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
         )
 
     async def test_pinned_thread_skips_generation(self) -> None:
@@ -1013,6 +1016,7 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_reader,
             initial_enrichment_complete=None,
+            generated_at=ANY,
         )
         set_tags.assert_not_awaited()
 
@@ -1067,6 +1071,7 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_reader,
             initial_enrichment_complete=True,
+            generated_at=ANY,
         )
         set_tags.assert_awaited_once_with(
             client,
@@ -1574,6 +1579,7 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_reader,
             initial_enrichment_complete=None,
+            generated_at=ANY,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -1608,6 +1614,7 @@ class TestMaybeGenerateThreadSummary:
             "default",
             self.conversation_reader,
             initial_enrichment_complete=None,
+            generated_at=ANY,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 5
 
@@ -2254,6 +2261,8 @@ class TestSetManualThreadSummary:
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
                 conversation_reader=conversation_reader,
+                entity_name="router",
+                membership_index=AgentReplyMembershipIndex(),
             )
 
         assert result.event_id == "$summary1"
@@ -2271,6 +2280,7 @@ class TestSetManualThreadSummary:
             "manual",
             conversation_reader,
             pinned=True,
+            generated_at=ANY,
         )
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 4
 
@@ -2296,6 +2306,8 @@ class TestSetManualThreadSummary:
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
                 conversation_reader=conversation_reader,
+                entity_name="router",
+                membership_index=AgentReplyMembershipIndex(),
             )
 
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$root1")] == 2
@@ -2315,6 +2327,8 @@ class TestSetManualThreadSummary:
                 config=_mock_config(),
                 runtime_paths=_mock_runtime_paths(),
                 conversation_reader=conversation_reader,
+                entity_name="router",
+                membership_index=AgentReplyMembershipIndex(),
             )
 
 
@@ -3171,6 +3185,8 @@ class TestPinLandingDuringGeneration:
                 _mock_runtime_paths(),
                 conversation_reader=make_conversation_reader_mock(),
                 delivered_response=_DELIVERED_AND_ECHOED,
+                entity_name="router",
+                membership_index=AgentReplyMembershipIndex(),
             )
         return deliver
 
@@ -3244,6 +3260,8 @@ class TestTruncatedHistoryIsNotCounted:
                 _mock_runtime_paths(),
                 conversation_reader=make_conversation_reader_mock(),
                 delivered_response=_DELIVERED_AND_ECHOED,
+                entity_name="router",
+                membership_index=AgentReplyMembershipIndex(),
             )
 
     async def test_an_automatic_summary_is_skipped_for_a_truncated_history(self) -> None:
@@ -3355,6 +3373,8 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
                 _mock_runtime_paths(),
                 conversation_reader=reader,
                 delivered_response=DeliveredResponse(event_id=answer_event_id, body=answer),
+                entity_name="router",
+                membership_index=AgentReplyMembershipIndex(),
             )
         return generate, sent
 

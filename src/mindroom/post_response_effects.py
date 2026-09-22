@@ -9,7 +9,7 @@ from mindroom import interactive
 from mindroom.background_tasks import create_background_task
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.conversation_reads import DeliveredResponse
-from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
+from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.thread_summary import maybe_generate_thread_summary
 from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
@@ -64,7 +64,7 @@ class PostResponseEffectsDeps:
 class PostResponseEffectsSupport:
     """Shared support used to build per-response post-effect deps."""
 
-    runtime: SupportsClientConfig
+    runtime: SupportsClientConfigMemberships
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     conversation_reader: ConversationReader
@@ -119,7 +119,8 @@ class PostResponseEffectsSupport:
             runtime_paths=self.runtime_paths,
             conversation_reader=self.conversation_reader,
             delivered_response=delivered_response,
-            entity_name=entity_name,
+            entity_name=entity_name or self.agent_name,
+            membership_index=self.runtime.agent_reply_memberships,
         )
         create_background_task(
             self._timed_thread_summary(

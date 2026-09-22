@@ -8188,6 +8188,13 @@ Manual summaries are marked with `model_name="manual"` and pin the thread by def
 Pass `pin=False` to write a summary that later automatic summaries may replace; that also releases a thread pinned by an earlier call.
 A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
 
+Manual edits from MindRoom Chat also pin the summary immediately using a version 1 `m.notice` with `model="manual"` and `pinned=true` in `io.mindroom.thread_summary` metadata.
+The sender must have responder access to the updating agent or another eligible responder in the room, so a shared thread title stays pinned across agents.
+Human notices can establish a pin, but their message counts and enrichment markers are never trusted.
+Pins are recovered from thread history after restart and checked again before an in-flight automatic summary is delivered.
+Explicit tool writes and later automatic updates advance past authorized predecessor timestamps, including client clock skew.
+If an existing timestamp cannot be advanced within the supported date range, a manual write returns an error instead of silently failing to replace the title.
+
 ### Configuration
 
 This tool has no tool-specific inline configuration fields.

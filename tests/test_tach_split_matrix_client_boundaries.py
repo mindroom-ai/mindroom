@@ -341,8 +341,8 @@ def test_tach_rejects_forbidden_boundary_imports(tmp_path: Path) -> None:
             "from __future__ import annotations\n\n",
             f"from __future__ import annotations\n\n{runtime_view_probe}",
         ).replace(
-            "from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n",
-            f"from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001\n{private_protocol_probe}",
+            "from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001\n",
+            f"from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001\n{private_protocol_probe}",
         ),
     )
 
