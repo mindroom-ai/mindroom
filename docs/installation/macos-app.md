@@ -106,6 +106,8 @@ Afterward, **Apply Runtime to Service…** rewrites the version-pinned launchd s
 App updates include the bundled Desktop Helper; updating the local-agent CLI does not replace that helper.
 
 **Open Logs Folder** opens `~/Library/Logs/mindroom`.
+Background services disable terminal colors; redirected output and runtime log files use plain text unless JSON logging is configured.
+The service appends to its existing logs, so records written by older versions may still contain terminal escape codes.
 **Open Config Folder** opens `~/.mindroom`, which is shared with the CLI.
 Failed local-agent actions show their output in the window with a copy action.
 If the dashboard cannot be opened, start the service and check its logs for missing provider credentials or startup errors.

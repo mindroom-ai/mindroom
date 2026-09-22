@@ -373,6 +373,47 @@ def test_setup_logging_text_mode_does_not_emit_json(
         json.loads(line)
 
 
+@pytest.mark.parametrize(
+    ("is_terminal", "no_color", "console_colors"),
+    [(False, None, False), (True, None, True), (True, "", True), (True, "1", False)],
+)
+def test_log_colors_follow_output_and_no_color_without_coloring_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    is_terminal: bool,
+    no_color: str | None,
+    console_colors: bool,
+) -> None:
+    """Only interactive output without NO_COLOR may contain terminal styling."""
+    monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+    if no_color is None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+    else:
+        monkeypatch.setenv("NO_COLOR", no_color)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: is_terminal)
+    runtime_paths = _runtime_paths(tmp_path)
+    setup_logging(runtime_paths=runtime_paths)
+    capsys.readouterr()
+
+    get_logger("tests.logging").info("structured_event", sample_count=12)
+    logging.getLogger("nio.client.async_client").warning("Timed out, sleeping for 60s")
+    try:
+        _raise_value_error()
+    except ValueError:
+        get_logger("tests.logging").exception("exception_event")
+
+    console = capsys.readouterr().err
+    saved = next((runtime_paths.storage_root / "logs").glob("mindroom_*.log")).read_text()
+    for output in (console, saved):
+        assert "structured_event" in output
+        assert "Timed out, sleeping for 60s" in output
+        assert "ValueError" in output
+        assert "boom" in output
+    assert ("\x1b[" in console) is console_colors
+    assert "\x1b" not in saved
+
+
 @pytest.mark.parametrize("is_terminal", [False, True])
 def test_setup_logging_text_mode_redacts_exception_tracebacks_without_pretty_exception_warning(
     tmp_path: Path,
@@ -382,6 +423,7 @@ def test_setup_logging_text_mode_redacts_exception_tracebacks_without_pretty_exc
 ) -> None:
     """Text tracebacks suit their output stream without leaking exception secrets."""
     monkeypatch.delenv("MINDROOM_LOG_FORMAT", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(sys.stderr, "isatty", lambda: is_terminal)
     setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
     capsys.readouterr()
