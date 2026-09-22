@@ -1113,6 +1113,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks.sender",
     "mindroom.matrix.client_room_admin",
+    "mindroom.requester_identity",
 ]
 
 [[modules]]
@@ -3835,6 +3836,7 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.scheduling_executor",
     "mindroom.recurring_schedule",
+    "mindroom.requester_identity",
 ]
 
 [[modules]]
