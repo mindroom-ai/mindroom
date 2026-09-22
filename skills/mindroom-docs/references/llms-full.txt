@@ -15022,7 +15022,7 @@ Agent-facing OAuth tools return the same structured `reset_required` signal and 
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the browser-openable `authorize` URL before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
 When an agent-targeted OAuth request resolves to shared or unscoped credentials, the authenticated requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
-A verified Matrix requester with current responder access can manage their own `user` or `user_agent` OAuth connection on a non-private agent definition, including when the provider requires requester-only storage.
+For Connections portal routes and dashboard credential targeting, a verified Matrix requester with current responder access can manage their own `user` or `user_agent` OAuth connection on a non-private agent definition, including when the provider requires requester-only storage.
 An authenticated requester may also manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
 These personal permissions do not grant general dashboard access or authority over shared credentials.
 With the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal) enabled, eligible users use its dedicated `/api/connections/...` routes with signed Matrix authentication, while ordinary dashboard routes require administrator authority.
@@ -15033,7 +15033,9 @@ Conversation OAuth links use an additional opaque, time-limited, single-use conn
 The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
 Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
 Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
-MindRoom rechecks the requester's permission to manage the selected connection at authorization and callback, and rejects a link if its credential generation changed after issuance.
+MindRoom rechecks the conversation link requester's agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
+For a non-private agent, this link flow requires an administrator or configured credential manager even when the connection uses requester-only storage; responder access alone is insufficient.
+The requester-private-agent exception still applies to its isolated connection.
 Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
 Requester-scoped reset links still require the original authenticated browser user.
 Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.
