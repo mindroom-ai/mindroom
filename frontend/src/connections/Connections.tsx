@@ -61,6 +61,15 @@ export function Connections() {
             Loading MCP selection…
           </p>
         )}
+        {mcp.selection?.unavailable_reason === "account_required" && (
+          <Alert>
+            <AlertDescription>
+              MCP access isn't enabled for your account. You can still manage
+              your MindRoom connections below. Ask an administrator to enable
+              access from external apps.
+            </AlertDescription>
+          </Alert>
+        )}
         {mcp.error && (
           <Alert variant="destructive">
             <AlertDescription>{mcp.error}</AlertDescription>
