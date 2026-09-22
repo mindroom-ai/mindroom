@@ -3069,7 +3069,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         resume = asyncio.create_task(runner._resume_approval_source("$source"))
         await asyncio.wait_for(resume_entered.wait(), timeout=1.0)
 
-        pending_human_messages = set({message.event_id for message in queued_signal.pending_message_snapshot()})
+        pending_human_messages = {message.event_id for message in queued_signal.pending_message_snapshot()}
         run_approval_continuation.assert_not_awaited()
         release_follow_up.set()
         assert await asyncio.wait_for(follow_up, timeout=1.0) == "$follow-up-response"

@@ -2333,23 +2333,13 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
 
     async def scheduled_operation(_target: MessageTarget) -> str:
         observed_scheduled_pending.append(
-            set(
-                {
-                    message.event_id
-                    for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()
-                },
-            ),
+            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
         )
         return "$scheduled-response"
 
     async def human_operation(_target: MessageTarget) -> str:
         observed_human_pending.append(
-            set(
-                {
-                    message.event_id
-                    for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()
-                },
-            ),
+            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
         )
         return "$human-response"
 
