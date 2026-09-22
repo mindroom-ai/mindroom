@@ -398,3 +398,5 @@ session_status  # FastAPI Computer endpoint
 stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
+
+_.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically.

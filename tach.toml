@@ -6622,3 +6622,12 @@ visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.res
 path = "mindroom.mid_turn_judgment"
 depends_on = ["mindroom.judgment.evaluator", "mindroom.mid_turn"]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.custom_tools.agno_compat_moviepy"
+depends_on = []
+visibility = ["mindroom.tools.moviepy_video_tools"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_moviepy"]
+expose = ["MindRoomMoviePyVideoTools"]

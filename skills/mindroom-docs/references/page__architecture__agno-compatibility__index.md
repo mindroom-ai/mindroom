@@ -50,6 +50,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| MoviePy caption rendering ignores the four advertised style arguments and always derives text size from frame height. | Forward colors and outline controls and expose an explicit font size; no matching upstream issue or PR identified. | `custom_tools/agno_compat_moviepy.py`; rendering-input regressions in `tests/test_moviepy_video_tools.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
@@ -88,6 +89,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
+| `custom_tools/agno_compat_moviepy.py` | Copied caption embedding and word-clip creation with explicit style forwarding; SDK parsing and temporary-file helpers remain shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; upstream output publication, rendering settings, and cleanup behavior remain intact. |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
 | `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
