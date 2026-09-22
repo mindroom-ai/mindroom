@@ -8082,7 +8082,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Tool names workflow participants may call without per-call user approval. Use \"*\" to pre-approve every granted tool. System-mutating tools (claude_agent, config_manager, scheduler) always require per-call approval and cannot be pre-approved.",
+          "description": "Toolkit names receiving automatic approval grants after operator rules. Use \"*\" for all eligible granted toolkits. claude_agent, config_manager, and scheduler receive no generated grant; explicit operator rules can authorize otherwise eligible functions. Functions requiring approval or native confirmation remain unavailable.",
           "label": "Pre-approved participant tools",
           "name": "allowed_tools",
           "options": null,
@@ -11271,7 +11271,7 @@
       "dependencies": [
         "ddgs"
       ],
-      "description": "Search Google for web results using the WebSearch backend",
+      "description": "Search web and news through DDGS with a requested Google backend and automatic fallback",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/websearch",
       "function_names": [

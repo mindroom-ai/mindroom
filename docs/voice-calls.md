@@ -20,7 +20,12 @@ When a call starts in a room, the configured agent:
 
 The voice agent is the same agent you chat with.
 Realtime carries the agent's rendered prompt and effective tools into OpenAI Realtime.
-Live receives the normal agent's full rendered system prompt, including its configured context files and caller-specific workspace, followed by voice delivery and delegation guidance. It can answer from that context directly and delegates requests needing tools, research, additional memory, or actions to the normal MindRoom agent. Tool schemas and execution remain in the delegated agent. The prompt is prepared before the first greeting, and the prepared agent is reused for delegated turns.
+Live receives the normal agent's full rendered system prompt, including its configured context files and caller-specific workspace, plus voice delivery and delegation guidance when the combined instructions fit MindRoom's local budget of 16,000 estimated `o200k_base` tokens.
+When the full context fits, Live can answer from that context directly and is instructed to delegate requests needing tools, research, additional memory, or actions to the normal MindRoom agent.
+When the combined instructions exceed that budget, Live instead receives brief instructions to delegate every substantive request, including questions about identity and preferences, to the normal agent retaining the full caller-bound context.
+This is MindRoom's local estimate, not a provider tokenizer or context-limit guarantee.
+Tool schemas and execution remain in the delegated agent.
+The prompt is prepared before the first greeting, and the prepared agent is reused for delegated turns.
 The voice model relays the agent's results conversationally.
 Cascaded sends each finalized transcript through the normal MindRoom agent response path, preserving model resolution, the rendered system prompt, instructions, knowledge, skills, hooks, tools, requester identity, history storage, and tool execution behavior.
 A cascaded profile may explicitly override the resolved LLM while preserving all other agent behavior.
@@ -272,7 +277,7 @@ Your Matrix deployment needs the standard Element Call backend:
 }
 ```
 
-Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
+Element's [self-hosting guide](https://github.com/element-hq/element-call/blob/main/docs/self_hosting.md) covers the full setup, and [matrix-docker-ansible-deploy](https://github.com/spantaleev/matrix-docker-ansible-deploy) enables all of it with `matrix_rtc_enabled: true`.
 
 MindRoom joins only calls whose oldest membership advertises the locally configured or discovered MatrixRTC focus.
 It does not connect the server-hosted agent to participant-selected remote focuses; remaining participants may still inherit and advertise the trusted local focus after the original founder leaves.

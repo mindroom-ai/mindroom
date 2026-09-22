@@ -97,7 +97,11 @@ Reusable triggers use Ed25519 signatures and caller-chosen stable event IDs.
 
 Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record UID for replay protection.
 
-Single-use triggers are consumed only after Matrix delivery succeeds, so a failed delivery can be retried without minting a new callback.
+Single-use triggers are consumed after Matrix delivery succeeds and local replay state is recorded, so a failed delivery can be retried without minting a new callback.
+
+A failed HTTP request can occur after Matrix accepted the message but before local replay state or trigger consumption was saved.
+If the trigger remains unconsumed, a retry after its 24-hour replay claim expires can deliver the message again.
+Single-use capability consumption is not an exactly-once delivery guarantee.
 
 The public external trigger manager creates reusable triggers, while `callback_manager.mint_callback` creates single-use triggers bound to the current agent, room, and thread.
 

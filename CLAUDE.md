@@ -530,17 +530,24 @@ Design migrations around that assumption rather than adding machinery to coordin
 Use this when you want a full local Matrix stack with the Python backend running on the host (not in Docker).
 
 1) Start/refresh Matrix (Synapse + Postgres + Redis)
+Stop the host backend before resetting.
+The optional reset deletes this Compose project's containers, networks, and volumes, including local accounts, rooms, messages, and media; it also removes the selected runtime's `matrix_state.yaml` and repository `tmp/`.
 ```bash
-# Optional if switching between remote and local homeservers
+# Optional destructive reset of the local development homeserver
 just local-matrix-reset
 just local-matrix-up
 curl -s http://localhost:8008/_matrix/client/versions | head -c 200
 ```
 
-2) If you see login errors (M_FORBIDDEN) or changed homeserver, clear local Matrix state
+Reset uses the same config discovery and storage resolver as `mindroom run`, including `MINDROOM_CONFIG_PATH`, `MINDROOM_STORAGE_PATH`, and the selected config's `.env`.
+If the backend uses `--config` or `--storage-path`, supply the matching `MINDROOM_CONFIG_PATH` or `MINDROOM_STORAGE_PATH` when resetting.
+Run these commands from the repository root; relative environment paths use that directory, while a relative storage path in `.env` uses the selected config directory.
+
+2) If you see login errors (M_FORBIDDEN) or changed homeserver, stop the backend and clear the selected runtime's Matrix state
 ```bash
-rm -f mindroom_data/matrix_state.yaml
+uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
 ```
+This uses the same environment selection as the reset; a hardcoded `mindroom_data/matrix_state.yaml` only covers default storage beside the repository's config.
 
 3) Ensure local OpenAI-compatible server is running on port 9292
 ```bash
@@ -619,18 +626,29 @@ bun install && bun run dev
 ```
 
 #### Deployment
+Run these commands from the repository root.
+For staging, copy the example values and fill in the Supabase, Stripe, and provisioner credentials before running Helm.
+This chart-managed Secret workflow also stores credentials in Helm release history; restrict access to the release Secrets as well as the populated values file.
+See [Platform Deployment](docs/deployment/kubernetes.md#platform-deployment) for credential retention and the existing external-Secret option.
+The `domain` value selects ingress hosts; the namespace alone does not select staging domains.
+For a fresh staging install, store Helm release records in `staging`; the chart creates application resources in `mindroom-staging`, matching the Terraform namespace layout.
+For an existing release, retain its original release name and namespace.
+
 ```bash
 # Set kubeconfig path
 export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
-# Deploy platform
-helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values.yaml --namespace mindroom-staging
+# Prepare staging values (keep the populated file private)
+cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
+# Fill in credentials before deploying
+helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values-staging.yaml --namespace staging --create-namespace
 
-# Deploy instance - ALWAYS use the provisioner API:
-./cluster/scripts/mindroom-cli.sh provision 1
+# Create customer instances through the portal or authenticated POST /my/instances/provision.
+# See docs/deployment/kubernetes.md for the customer and operator API flows.
+# The CLI provision <id> command sends fixed test metadata; use only with existing test fixtures.
 
-# The provisioner handles everything:
-# - Creates database records
+# The provisioner:
+# - Creates new database records or updates an existing instance
 # - Manages secrets securely
 # - Deploys via Helm with proper values
 # - Tracks status
@@ -695,6 +713,7 @@ just local-matrix-up              # Boot Synapse + Postgres dev stack
 just local-platform-compose-up    # Full SaaS sandbox
 
 # Testing (IMPORTANT: enter the Node.js 24 `nix-shell shell.nix` first on NixOS hosts)
+# Recipe regression tests require just; shell.nix and CI install it.
 # If `uv run pytest` fails with 'module mindroom has no attribute bot',
 # use the repo dev shell so `libstdc++.so.6` is available:
 nix-shell shell.nix
@@ -795,7 +814,9 @@ matty thread-reply "test_room" t1 "@research find information about X"
 - **Message handles**: Use m1, m2, m3 to reference messages
 - **Thread IDs**: Use t1, t2, t3 to reference threads (persistent across sessions)
 - **Output formats**: Add `--format json` for machine-readable output
-- **Streaming responses**: If you see "⋯" in agent messages, they're still typing. Agents stream responses by editing messages, which may take 10+ seconds to complete. Re-check the thread after waiting.
+- **Streaming responses**: Agents stream responses by editing messages, which may take 10+ seconds to complete.
+  Inspect the latest `io.mindroom.stream_status` in a client or event view that exposes it: `pending` and `streaming` indicate progress, and `completed` confirms successful completion.
+  Record `cancelled` or `error` as terminal outcomes; body ellipses are not a completion signal.
 
 ## 5. Quick Reference
 

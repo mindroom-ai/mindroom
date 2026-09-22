@@ -4,14 +4,15 @@ MindRoom keeps room invitations, conversation access, Matrix power, platform adm
 
 ## Authority at a glance
 
-MindRoom answers five authority questions independently.
+MindRoom answers six authority questions independently.
 
 | Question | Owner |
 | --- | --- |
 | Who may make a router, agent, or team join a room? | That entity's `accept_invites` policy |
 | Who may interact with a responder? | That responder's `access` policy |
 | Whose state and credentials does an interaction use? | State follows the canonical requester and agent private policy; credentials follow the effective requester, requester-agent, shared-agent, or global scope |
-| Who may administer platform or credential configuration? | Platform configuration uses `administrators`; shared-agent credentials use `administrators` or `agents.<name>.credential_managers`; authenticated requesters may manage their own requester-private OAuth connections |
+| Who may read or change dashboard configuration? | Deployment authentication; trusted upstream users additionally require `administrators` when Connections is enabled |
+| Who may run administrative Matrix commands or manage credentials? | Matrix administrative commands and deployment-global OAuth client configuration use `administrators`; managing an agent's shared credentials uses `administrators` or `agents.<name>.credential_managers`; authorized requesters may manage their own requester-scoped OAuth connections |
 | Who may execute one sensitive tool action? | Tool availability plus any applicable tool approval policy |
 
 No answer grants another authority.
@@ -72,7 +73,7 @@ Each field has one responsibility.
 
 | Field | Responsibility |
 | --- | --- |
-| `administrators` | Platform configuration and credential authority plus a responder-policy bypass |
+| `administrators` | Matrix administrative commands, credential authority, and a responder-policy bypass; also dashboard access for trusted upstream users when Connections is enabled |
 | `room_defaults` | Default desired Matrix state for managed rooms |
 | `rooms.<key>.invite_users` | Automatic invitations for one managed room |
 | `rooms.<key>.admins` | Matrix power level 100 for one managed room |
@@ -141,11 +142,25 @@ The same responder gate covers text, media, calls, reactions, approval actors, e
 
 MindRoom resolves a trusted inbound requester through `authorization.aliases` before selecting requester-owned state.
 The raw authenticated Matrix sender remains transport provenance and is not used as a second downstream ownership decision.
-One canonical requester therefore owns the same requester-scoped conversations, state, requester-scoped credentials, approvals, triggers, scripts, attachments, and usage when arriving through a configured bridge alias.
+One canonical requester therefore owns the same requester-scoped conversations, state, requester-scoped credentials, approvals, triggers, scripts, and usage when arriving through a configured bridge alias.
 
 An agent's `private` field controls requester-private state placement.
 It does not authorize anyone to interact with the agent.
 MindRoom checks the agent's ordinary `access` policy before selecting a requester-private instance.
+
+## Dashboard configuration
+
+Dashboard configuration access follows deployment authentication.
+Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
+Without an API key, standalone dashboard and configuration API access is unauthenticated.
+Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
+These operator authentication checks are independent of the Matrix `administrators` list.
+
+With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.
+Restrict gateway admission to trusted operators in that mode.
+Enabling Connections adds the configured Matrix administrator check for ordinary dashboard pages and configuration APIs.
+Connections and state-bound OAuth completion routes retain their own access checks.
+See [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary) for deployment requirements.
 
 ## Platform and credential authority
 
@@ -157,7 +172,8 @@ A credential manager may manage only the named shared agent's credentials and OA
 Authenticated requesters may manage OAuth connections for their own requester-private agent scope without a static credential-manager entry.
 Deployment-global OAuth client configuration remains restricted to platform administrators.
 
-Shared-agent dashboard and OAuth requests return HTTP 403 before credentials are exposed or changed when the requester is neither an administrator nor a configured credential manager.
+Requests to read or change an agent's shared credentials return HTTP 403 when the requester is neither an administrator nor a configured credential manager.
+Connections may show shared connection availability to users with agent access, without exposing the connected account identity or granting shared credential management.
 Standalone deployments should set `MINDROOM_OWNER_USER_ID` so API-key dashboard requests resolve to the owner Matrix identity.
 
 `!config` remains disabled by default through `authorization.config_command_enabled`.
@@ -168,8 +184,10 @@ When enabled, `!config`, confirmation reactions, and `!reload-plugins` require a
 Conversation access allows a requester to ask a responder to act, but the responder must still have the tool and any configured approval must still succeed.
 Tool approval is bound to the canonical requester who initiated the action and rechecks current responder access.
 
-Schedules are room-managed resources, while external triggers, background scripts, attachments, requester-private workers, and requester-scoped credentials are requester-owned.
-These ownership rules do not create additional responder access.
+Schedules are room-managed resources, while external triggers, background scripts, requester-private workers, and requester-scoped credentials are requester-owned.
+Ordinary attachments are scoped to their room and thread context.
+Authorized response turns may inspect attachments available in that conversation, including uploads by other participants; the recorded sender is provenance.
+These scope and ownership rules do not create additional responder access.
 
 ## Bridge aliases
 

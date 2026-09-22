@@ -44,6 +44,7 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "pyobjc-framework-cocoa": "AppKit",
     "py-trello": "trello",
     "pygithub": "github",
+    "python-docx": "docx",
     "pyyaml": "yaml",
     "tavily-python": "tavily",
     "spider-client": "spider",

@@ -10,7 +10,12 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 ## Decision Table
 
 - Core dev against local Matrix + DB
-  - Commands: `just local-matrix-up`, `just local-matrix-down`, `just local-matrix-logs`, or `just local-matrix-reset`, then `mindroom run`
+  - Commands: `just local-matrix-up`, `just local-matrix-down`, or `just local-matrix-logs`, then `mindroom run`
+  - Destructive reset: stop the backend, run `just local-matrix-reset`, then `just local-matrix-up` and `mindroom run`.
+    Reset deletes this Compose project's containers, networks, and volumes (local accounts, rooms, messages, and media), the selected runtime's `matrix_state.yaml`, and repository `tmp/`.
+    It resolves storage like `mindroom run`: `MINDROOM_STORAGE_PATH` in the environment takes precedence over the selected config's `.env`, then storage defaults to `mindroom_data/` beside that config.
+    If the backend uses `--config` or `--storage-path`, supply the matching `MINDROOM_CONFIG_PATH` or `MINDROOM_STORAGE_PATH` environment value when resetting.
+    Relative environment paths are resolved from the repository root; relative storage paths in `.env` are resolved from the selected config directory.
   - `mindroom run` serves the bundled dashboard on `http://localhost:8765`
   - Optional frontend-only dev server for UI iteration: `run-frontend.sh`
   - Compose files: `local/matrix/docker-compose.yml`, assets in `local/matrix/docker/`

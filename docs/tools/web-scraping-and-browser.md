@@ -423,6 +423,7 @@ agents:
     tools:
       - scrapegraph:
           enable_searchscraper: true
+          enable_markdownify: true
 ```
 
 ```python
@@ -571,15 +572,15 @@ search_amazon_products("ergonomic keyboard", domain_code="com")
 
 `agentql` exposes `scrape_website(url)` and, when enabled, `custom_scrape_website(url)`.
 `scrape_website()` uses a built-in query that extracts generic page text.
-`custom_scrape_website()` only becomes useful when `agentql_query` is non-empty.
+`custom_scrape_website()` uses the configured `agentql_query` and returns JSON that preserves extracted values and nested lists and objects.
 The installed upstream toolkit registers the custom scrape function automatically when `agentql_query` is set, even if `enable_custom_scrape_website` is false.
-The current upstream implementation launches Playwright with `headless=False`, which matters on headless-only runtimes.
+The toolkit launches Playwright with `headless=False`, which matters on headless-only runtimes.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | AgentQL API key, with `AGENTQL_API_KEY` as the SDK fallback. |
+| `api_key` | `password` | `yes` | `null` | Stored AgentQL API key; falls back to `AGENTQL_API_KEY` when no key is supplied. |
 | `enable_scrape_website` | `boolean` | `no` | `true` | Enable `scrape_website()`. |
 | `enable_custom_scrape_website` | `boolean` | `no` | `false` | Enable `custom_scrape_website()` when `agentql_query` is also useful. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -606,7 +607,11 @@ custom_scrape_website("https://matrix.org/blog/")
 
 #### Notes
 
-- The installed upstream code launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- Each request uses the toolkit's resolved key without changing shared AgentQL SDK configuration or environment credentials.
+- AgentQL query API redirects are rejected before any follow-up request, so the resolved key stays with the configured API endpoint.
+- Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
+- AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
+- The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 
@@ -671,11 +676,12 @@ With `target="host"`, it manages named browser profiles on the MindRoom host or 
 To let the user watch this worker browser, use `chat_ui.open_panel(panel='computer')` after any desired browser navigation.
 The Computer request accepts no URL and reports only that the UI request was sent.
 With `target="desktop"`, it routes the supported action subset over pinned Matrix encryption to the official Playwright MCP extension in the user's existing local Chrome or Brave profile.
-The desktop target operates the current tab and rejects `targetId` and `focus`, because Playwright MCP exposes mutable numeric indices that can point at a different tab after the tab list changes.
-It creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
+The desktop target supports observations (`status`, `profiles`, `tabs`, `snapshot`, `screenshot`, and `console`) and the controls `start`, `stop`, and `open`.
+It rejects `targetId` and existing-page controls (`focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, and `act`) because Playwright MCP cannot bind these actions to a stable page identity.
+The host target creates tabs, records console entries, and resolves temporary element refs from `snapshot()` into later `act()` and `screenshot()` calls.
 The host target's `snapshot()` can return either `ai` or `aria` format, while the desktop target returns Playwright MCP's native accessibility snapshot.
-`act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
-The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge, the local extension option, and a local control lease for interactive actions.
+Host-target `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
+The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge and the local extension option, with a local control lease for `start`, `stop`, and `open`.
 Host screenshots return model-visible image content by default plus their retained path; `saveOnly=True` preserves an explicit save-only mode.
 Host captures and `view_file` use shared bounded image delivery, with any resizing or first-frame handling disclosed.
 Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without creating a separate plaintext attachment copy or uploading the encrypted media again.
@@ -683,7 +689,7 @@ Agno's normal agent-session persistence can retain model-visible screenshot pixe
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
 Safari and other unsupported browsers can still be operated through the separate accessibility-first `desktop` tool.
 For the host target, `output_dir` defaults to `<storage>/browser` for screenshots, PDFs, and other artifacts.
-The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files, retained PDFs, and upload inputs; the cloud tool's `output_dir` option does not change that local path.
+The local desktop bridge always uses `<storage>/desktop-browser` for its transient screenshot scratch files; the cloud tool's `output_dir` option does not change that local path.
 The runtime picks Chromium from `BROWSER_EXECUTABLE_PATH`, `chromium`, or `google-chrome-stable` when available.
 
 #### Configuration
@@ -712,9 +718,9 @@ agents:
 ```
 
 ```python
+browser_control(action="start", target="desktop")
 browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
 browser_control(action="snapshot", target="desktop")
-browser_control(action="act", target="desktop", request={"kind": "click", "ref": "e1"})
 browser_control(action="screenshot", target="desktop", fullPage=True)
 browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
