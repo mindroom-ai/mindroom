@@ -1053,7 +1053,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 ## Notes
 
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
-- A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
+- Keep `models.default` configured for built-in Matrix room topic generation, even when agents, teams, and the router select other models.
+- Automatic thread summaries also fall back to `models.default` unless `defaults.thread_summary_model` or an applicable room or entity entry in `room_thread_summary_models` selects another model.
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - Router, agent, and team `accept_invites` policies default to `true`; use `false` or `[]` to reject every invite, or a list of exact and wildcard Matrix user IDs matched after human-only alias resolution; non-human accounts retain their exact transport ID
 - Invitation acceptance is independent from conversation access, and accepted ad-hoc room IDs are persisted across restarts without adding them to the static `rooms` list
