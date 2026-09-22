@@ -19,6 +19,7 @@ log_warn() { echo -e "${YELLOW}⚠${NC} $1"; }
 
 # Forwarders run sequentially; retain only the process owned by this invocation.
 PORT_FORWARD_PID=""
+PORT_FORWARD_LOG=""
 cleanup_port_forward() {
     if [[ -n "$PORT_FORWARD_PID" ]]; then
         kill "$PORT_FORWARD_PID" 2>/dev/null || true
@@ -35,26 +36,42 @@ cleanup_port_forward() {
         wait "$PORT_FORWARD_PID" 2>/dev/null || true
         PORT_FORWARD_PID=""
     fi
+    if [[ -n "$PORT_FORWARD_LOG" ]]; then
+        rm -f -- "$PORT_FORWARD_LOG"
+        PORT_FORWARD_LOG=""
+    fi
 }
 trap cleanup_port_forward EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-check_port_forward() {
-    if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
-        log_error "Port-forward failed to start; the local port may already be in use."
-        cat "$1"
-        exit 1
-    fi
+start_port_forward() {
+    local namespace="$1" service="$2" mapping="$3"
+    local readiness="Forwarding from 127.0.0.1:${mapping%:*} -> ${mapping#*:}"
+    local deadline=$((SECONDS + 30))
+    PORT_FORWARD_LOG=$(mktemp "${TMPDIR:-/tmp}/mindroom-port-forward.XXXXXX")
+    kubectl --context kind-mindroom port-forward --address 127.0.0.1 -n "$namespace" "$service" "$mapping" > "$PORT_FORWARD_LOG" 2>&1 &
+    PORT_FORWARD_PID=$!
+    while kill -0 "$PORT_FORWARD_PID" 2>/dev/null; do
+        if grep -Fxq -- "$readiness" "$PORT_FORWARD_LOG" && kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
+            return
+        fi
+        if (( SECONDS >= deadline )); then
+            log_error "Timed out waiting for port-forward to listen on 127.0.0.1:${mapping%:*}."
+            cat "$PORT_FORWARD_LOG"
+            exit 1
+        fi
+        sleep 0.1
+    done
+    log_error "Port-forward failed to start; the local port may already be in use."
+    cat "$PORT_FORWARD_LOG"
+    exit 1
 }
 
 # Start port-forward for ingress
 echo "🔌 Starting ingress port-forward..."
-kubectl --context kind-mindroom port-forward --address 127.0.0.1 -n ingress-nginx svc/ingress-nginx-controller 8080:80 > /tmp/ingress-pf.log 2>&1 &
-PORT_FORWARD_PID=$!
-sleep 3
-check_port_forward /tmp/ingress-pf.log
+start_port_forward ingress-nginx svc/ingress-nginx-controller 8080:80
 
 # Test platform access
 echo ""
@@ -107,10 +124,7 @@ cleanup_port_forward
 
 # Platform frontend direct
 echo "Testing direct platform frontend access..."
-kubectl --context kind-mindroom port-forward --address 127.0.0.1 -n mindroom-staging svc/platform-frontend 3000:3000 > /tmp/pf-frontend.log 2>&1 &
-PORT_FORWARD_PID=$!
-sleep 3
-check_port_forward /tmp/pf-frontend.log
+start_port_forward mindroom-staging svc/platform-frontend 3000:3000
 
 if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000 | grep -q "200"; then
     log_info "Platform frontend direct: http://localhost:3000 ✓"
@@ -121,10 +135,7 @@ cleanup_port_forward
 
 # Platform backend direct
 echo "Testing direct platform backend access..."
-kubectl --context kind-mindroom port-forward --address 127.0.0.1 -n mindroom-staging svc/platform-backend 8000:8000 > /tmp/pf-backend.log 2>&1 &
-PORT_FORWARD_PID=$!
-sleep 3
-check_port_forward /tmp/pf-backend.log
+start_port_forward mindroom-staging svc/platform-backend 8000:8000
 
 if curl -s http://127.0.0.1:8000/health 2>/dev/null | grep -q "ok"; then
     log_info "Platform backend direct: http://localhost:8000 ✓"

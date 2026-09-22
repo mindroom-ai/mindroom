@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import socket
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import suppress
@@ -42,7 +44,7 @@ def access_helper(tmp_path: Path) -> Iterator[_AccessHelper]:
     assert real_sleep is not None
     binaries = tmp_path / "bin"
     binaries.mkdir()
-    for name in ("grep", "wc", "awk", "cat"):
+    for name in ("grep", "wc", "awk", "cat", "mktemp", "rm"):
         executable = shutil.which(name)
         assert executable is not None
         (binaries / name).symlink_to(executable)
@@ -62,6 +64,16 @@ case " $* " in
         fi
         echo "started $$" >> "$EVENTS"
         trap 'echo "stopped $$" >> "$EVENTS"; exit 0' TERM INT
+        if [[ "$*" == *"${DELAY_SERVICE:-never-match}"* ]]; then
+            echo "pending $$" >> "$EVENTS"
+            read -r startup < "$CONTROL_FIFO"
+            if [[ "$startup" == fail ]]; then
+                bind-port "$CONTROL_PORT"
+                exit 1
+            fi
+        fi
+        mapping="${!#}"
+        echo "Forwarding from 127.0.0.1:${mapping%:*} -> ${mapping#*:}"
         while :; do "$TEST_SLEEP" 0.02; done
         ;;
     *" get pods "*)
@@ -72,11 +84,29 @@ esac
 """,
     )
     _write_command(shell, binaries, "curl", 'echo "curl $*" >> "$EVENTS"\necho "200 ok"\n')
-    _write_command(shell, binaries, "sleep", '"$TEST_SLEEP" 0.15\n')
+    _write_command(shell, binaries, "sleep", 'echo "wait $*" >> "$EVENTS"\n"$TEST_SLEEP" 0.02\n')
+    bind_port = binaries / "bind-port"
+    bind_port.write_text(
+        f"#!{sys.executable}\n"
+        "import socket, sys\n"
+        "with socket.socket() as listener:\n"
+        "    try:\n"
+        "        listener.bind(('127.0.0.1', int(sys.argv[1])))\n"
+        "    except OSError as error:\n"
+        "        print(f'Unable to listen: {error}', file=sys.stderr)\n"
+        "        raise SystemExit(1) from error\n",
+    )
+    bind_port.chmod(0o755)
     # Model the dangerous command using only the unrelated fixture child.
     # Never invoke the system pkill or inspect the host process list.
     _write_command(shell, binaries, "pkill", 'echo "global-kill" >> "$EVENTS"\nkill -TERM "$UNRELATED_PID"\n')
-    environment = {**os.environ, "PATH": str(binaries), "EVENTS": str(events), "TEST_SLEEP": real_sleep}
+    environment = {
+        **os.environ,
+        "PATH": str(binaries),
+        "EVENTS": str(events),
+        "TEST_SLEEP": real_sleep,
+        "TMPDIR": str(tmp_path),
+    }
     unrelated = subprocess.Popen(
         [str(binaries / "kubectl"), "port-forward", "svc/unrelated", "9000:80"],
         env=environment,
@@ -88,10 +118,12 @@ esac
     environment["UNRELATED_PID"] = str(unrelated.pid)
     # Sandbox the original helper's fixed diagnostic log paths.
     script = tmp_path / "test-access.sh"
-    script.write_text(_SCRIPT.read_text().replace("/tmp/", f"{tmp_path}/"))  # noqa: S108 - redirect the helper's logs into the isolated fixture.
     processes = []
 
-    def launch(**overrides: str) -> subprocess.Popen[str]:
+    def launch(*, ingress_port: int = 8080, **overrides: str) -> subprocess.Popen[str]:
+        script.write_text(
+            _SCRIPT.read_text().replace("/tmp/", f"{tmp_path}/").replace("8080", str(ingress_port)),  # noqa: S108
+        )
         process = subprocess.Popen(
             [shell, str(script)],
             env={**environment, **overrides},
@@ -175,3 +207,77 @@ def test_access_binds_and_probes_same_loopback_address(access_helper: _AccessHel
         "http://127.0.0.1:8000/health",
     ]
     assert all("Host: platform.local" in line for line in probes[:2])
+
+
+@pytest.mark.parametrize(
+    ("service", "port"),
+    [("ingress-nginx-controller", 8080), ("platform-frontend", 3000), ("platform-backend", 8000)],
+)
+def test_access_waits_for_owned_listener(
+    access_helper: _AccessHelper,
+    tmp_path: Path,
+    service: str,
+    port: int,
+) -> None:
+    """A live child that has not announced its bind must not permit HTTP probes."""
+    launch, unrelated, events = access_helper
+    control = tmp_path / "startup"
+    os.mkfifo(control)
+    process = launch(DELAY_SERVICE=service, CONTROL_FIFO=str(control))
+    _wait_for(lambda: "pending " in events.read_text())
+    pending_lines = events.read_text().splitlines()
+    waits_before = sum(line.startswith("wait ") for line in pending_lines)
+
+    def probed_or_waited() -> bool:
+        lines = events.read_text().splitlines()
+        return any(line.startswith("curl ") and f":{port}" in line for line in lines) or (
+            sum(line.startswith("wait ") for line in lines) > waits_before
+        )
+
+    _wait_for(probed_or_waited)
+    assert not any(line.startswith("curl ") and f":{port}" in line for line in events.read_text().splitlines())
+    control.write_text("ready\n")
+    output, _ = process.communicate(timeout=10)
+    assert process.returncode == 0, output
+    assert any(line.startswith("curl ") and f":{port}" in line for line in events.read_text().splitlines())
+    assert unrelated.poll() is None
+
+
+def test_access_delayed_bind_failure_preserves_unrelated_listener(
+    access_helper: _AccessHelper,
+    tmp_path: Path,
+) -> None:
+    """A slow child must fail its actual bind before somebody else's port is probed."""
+    launch, unrelated, events = access_helper
+    control = tmp_path / "startup"
+    os.mkfifo(control)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        process = launch(
+            ingress_port=port,
+            DELAY_SERVICE="ingress-nginx-controller",
+            CONTROL_FIFO=str(control),
+            CONTROL_PORT=str(port),
+        )
+        _wait_for(lambda: "pending " in events.read_text())
+        waits_before = sum(line.startswith("wait ") for line in events.read_text().splitlines())
+
+        def probed_or_waited() -> bool:
+            lines = events.read_text().splitlines()
+            return any(line.startswith("curl ") for line in lines) or (
+                sum(line.startswith("wait ") for line in lines) > waits_before
+            )
+
+        _wait_for(probed_or_waited)
+        assert not any(line.startswith("curl ") for line in events.read_text().splitlines())
+        control.write_text("fail\n")
+        output, _ = process.communicate(timeout=10)
+        assert process.returncode != 0, output
+        assert "address already in use" in output.lower()
+        assert not any(line.startswith("curl ") for line in events.read_text().splitlines())
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            connection, _ = listener.accept()
+            connection.close()
+    assert unrelated.poll() is None

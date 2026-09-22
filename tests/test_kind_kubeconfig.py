@@ -24,6 +24,8 @@ if name == "kubectl":
     record = {"kubeconfig": os.environ.get("KUBECONFIG"), "args": args}
     (Path(os.environ["KIND_TEST_LOG_DIR"]) / f"{os.getpid()}.json").write_text(json.dumps(record))
     if "port-forward" in args:
+        local_port, remote_port = args[-1].split(":")
+        print(f"Forwarding from 127.0.0.1:{local_port} -> {remote_port}", flush=True)
         signal.pause()
     elif "get" in args and "pods" in args:
         print("platform-frontend 1/1 Running 0 1m")
@@ -59,7 +61,7 @@ def _run_diagnostic(tmp_path: Path, script: str, kubeconfig: str | None) -> list
         executable = bin_dir / name
         executable.write_text(f"#!{sys.executable}\n{_FAKE_TOOL}", encoding="utf-8")
         executable.chmod(0o755)
-    for name in ("grep", "wc", "awk", "cat"):
+    for name in ("grep", "wc", "awk", "cat", "mktemp", "rm"):
         resolved = shutil.which(name)
         assert resolved is not None, f"Required shell utility is missing: {name}"
         (bin_dir / name).symlink_to(resolved)
@@ -68,7 +70,7 @@ def _run_diagnostic(tmp_path: Path, script: str, kubeconfig: str | None) -> list
     source = (_REPOSITORY_ROOT / "cluster/k8s/kind" / script).read_text(encoding="utf-8")
     isolated_script = tmp_path / script
     isolated_script.write_text(source.replace("/tmp/", f"{tmp_path}/"), encoding="utf-8")  # noqa: S108 - redirect helper logs into the isolated fixture.
-    environment = {"PATH": str(bin_dir), "KIND_TEST_LOG_DIR": str(log_dir)}
+    environment = {"PATH": str(bin_dir), "KIND_TEST_LOG_DIR": str(log_dir), "TMPDIR": str(tmp_path)}
     if kubeconfig is not None:
         environment["KUBECONFIG"] = kubeconfig
     result = subprocess.run(
