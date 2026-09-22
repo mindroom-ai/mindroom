@@ -232,7 +232,8 @@ Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
 MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
-Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools unless you remove them or override `execution_env`.
+Proxied `shell` receives a filtered system environment plus explicitly allowed process-env passthrough; `python` receives only allowed runtime names from the process and config-adjacent `.env`.
+Neither inherits arbitrary `.env` values; see [Shell env and PATH](#shell-env-and-path) for explicit passthrough and request-environment controls.
 If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.
@@ -522,7 +523,7 @@ The runner sources this script with `bash` after applying the workspace home con
 
 **Filtering:**
 
-`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.).
+`.mindroom/worker-env.sh` is sourced by bash with the prepared request environment and applicable worker/workspace defaults, rather than the runner’s full process environment.
 To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export.
 After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook.
@@ -625,7 +626,7 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Use MindRoom's built-in default routing policy. Today that defaults to `coding`, `docker`, `file`, `python`, and `shell` when those tools are enabled for the agent |
+| `null` (omitted) | Inherit `defaults.worker_tools`; when both are omitted, use the runtime routing policy, including each toolkit’s metadata defaults |
 | `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 
