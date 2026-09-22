@@ -180,10 +180,23 @@ def test_view_file_without_override_keeps_worker_default(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path_kind", "view_status"),
+    [
+        ("relative", "ready"),
+        ("worker_absolute", "ready"),
+        ("primary_absolute", "ready"),
+        ("primary_internal_symlink", "ready"),
+        ("primary_traversal", "error"),
+        ("primary_external_symlink", "error"),
+    ],
+)
 async def test_view_file_transports_workspace_between_storage_mounts(
     routed_workspace: tuple[TestClient, ResolvedWorkerTarget, Path, Path],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    path_kind: str,
+    view_status: str,
 ) -> None:
     """One public tool call reads worker-only pixels and retains a reusable attachment."""
     client, target, shared_root, workspace = routed_workspace
@@ -210,16 +223,33 @@ async def test_view_file_transports_workspace_between_storage_mounts(
         worker_target=target,
         tool_output_workspace_root=primary_workspace,
     )
+    (workspace / "linked.png").symlink_to("sample.png")
+    outside = workspace.parent / "outside.png"
+    outside.write_bytes(_png_bytes())
+    (workspace / "escape.png").symlink_to(outside)
+    path = {
+        "relative": "sample.png",
+        "worker_absolute": str(workspace / "sample.png"),
+        "primary_absolute": str(primary_workspace / "sample.png"),
+        "primary_internal_symlink": str(primary_workspace / "linked.png"),
+        "primary_traversal": str(primary_workspace / ".." / "outside.png"),
+        "primary_external_symlink": str(primary_workspace / "escape.png"),
+    }[path_kind]
 
     with tool_runtime_context(context):
-        result = await tools.view_file(path="sample.png")
-        assert result.images, result.content
+        result = await tools.view_file(path=path)
         receipt = json.loads(result.content)
+        assert receipt["view_status"] == view_status, result.content
+        assert not primary_workspace.exists()
+        assert not context.client.room_send.called
+        if view_status == "error":
+            assert not result.images
+            return
+        assert result.images, result.content
         reopened = await tools.view_file(attachment_id=receipt["attachment_id"])
 
     assert result.images[0].content == _png_bytes()
     assert reopened.images
     assert reopened.images[0].content == _png_bytes()
-    assert receipt["view_status"] == "ready"
     assert not primary_workspace.exists()
     assert not context.client.room_send.called

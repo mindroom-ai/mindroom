@@ -682,6 +682,10 @@ def view_file_from_worker(
         )
         if tool_init_overrides:
             worker_payload["tool_init_overrides"] = tool_init_overrides
+        if workspace_root is not None:
+            # Translate the mount spelling only; resolve and authorize the path inside the worker.
+            with suppress(ValueError):
+                path = Path(path).relative_to(workspace_root).as_posix()
 
         data = post_worker_proxy_json(
             config=_worker_proxy_client_config(proxy_config),
