@@ -51,7 +51,7 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
-from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
@@ -397,6 +397,29 @@ def test_google_wrappers_load_provider_oauth_credentials(
 
     assert isinstance(tool, (GmailTools, GoogleCalendarTools, GoogleDocsTools, GoogleDriveTools, GoogleSheetsTools))
     assert tool._load_token_data() is not None
+
+
+def test_gmail_catalog_matches_default_registered_functions(runtime_paths: RuntimePaths, tmp_path: Path) -> None:
+    """The catalog must describe operations available through the default factory."""
+    credentials_manager = CredentialsManager(base_path=tmp_path / "credentials")
+    _save_scoped_oauth_credentials(
+        "google_gmail_oauth",
+        {
+            "token": "token",
+            "refresh_token": "refresh",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "client-id",
+            "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+            "expiry": "2100-01-01T00:00:00Z",
+            "_source": "oauth",
+        },
+        credentials_manager=credentials_manager,
+        worker_target=None,
+    )
+    tool = get_tool_by_name("gmail", runtime_paths, credentials_manager=credentials_manager, worker_target=None)
+    assert isinstance(tool, GmailTools)
+    exported = next(item for item in export_tools_metadata() if item["name"] == "gmail")
+    assert set(exported["function_names"]) == set(tool.functions)
 
 
 def test_scoped_oauth_client_structured_auth_failure_returns_oauth_required_json_string() -> None:
