@@ -277,6 +277,9 @@ The tool normalizes the target to the canonical thread root before sending a new
 Manual summaries are marked with `model_name="manual"` and pin the thread by default, which stops automatic summaries from overwriting the title.
 Pass `pin=False` to write a summary that later automatic summaries may replace; that also releases a thread pinned by an earlier call.
 A per-thread async lock prevents concurrent duplicate manual summaries from racing each other.
+Manual tool writes require complete projected thread history within the 2,000-message read window.
+If history is incomplete or unavailable, the tool returns an error before publishing the summary.
+A history read can be incomplete below that window limit.
 
 Manual edits from MindRoom Chat also pin the summary immediately using a version 1 `m.notice` with `model="manual"` and `pinned=true` in `io.mindroom.thread_summary` metadata.
 The sender must have responder access to the updating agent or another eligible responder in the room, so a shared thread title stays pinned across agents.
@@ -497,7 +500,12 @@ MindRoom always uses provider temperature defaults for Vertex Claude, Claude Opu
 The `thread_summary` tool complements that automatic behavior by letting an agent publish a manual summary immediately and advance the stored summary baseline.
 When no trusted prior summary exists, the first automatic summary is summary-only so a useful thread title appears early.
 The next scheduled refresh uses one structured model call to update the summary and produce up to three normalized topic tags, whether the prior summary was automatic or manual.
-The background task bypasses inherited per-turn history memoization so the model sees fresh authoritative full history including the delivered response.
+The background task reads fresh authoritative history for counting and includes the delivered response.
+The model prompt excludes trusted summary notices and messages with empty bodies.
+If more than 50 messages remain, it includes only the first three and last three plus an omission notice; at 50 or fewer, it includes all remaining messages.
+Automatic refreshes require complete projected thread history within the 2,000-message read window, just like manual tool writes.
+Incomplete or unavailable history skips an automatic refresh, and incompleteness can occur below the window limit.
+The read window counts projected messages, while prompt sampling counts body-bearing non-summary messages; neither is a raw Matrix event count.
 Existing tags win, including tags observed after the model call finishes.
 MindRoom serializes automatic and tool-driven tag mutations per thread within one running process, and persisted removal tombstones prevent a later automatic batch from repopulating a deliberately untagged thread.
 The initial tags use the same summary model, room override, temperature, prompt, lock, and background lifecycle as the refreshed summary.

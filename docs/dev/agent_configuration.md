@@ -348,7 +348,7 @@ matrix_space:
 ```
 
 Managed-room `invite_users` are invited to the root Space without receiving root Space admin power.
-Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+The runtime preserves existing Space admins without adding human admins; managing Space children in a Matrix client requires sufficient existing Matrix power in that Space.
 
 ## Defaults Configuration
 

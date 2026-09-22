@@ -912,7 +912,7 @@ Access migration fails without changing files or creating a backup when any `!in
 See [Authorization](https://docs.mindroom.chat/authorization/) for the current access model.
 
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
-Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+The runtime preserves existing Space admins without adding human admins; managing Space children in a Matrix client requires sufficient existing Matrix power in that Space.
 Demote stale Space admins manually in a Matrix client when needed.
 
 ## Event Journal
