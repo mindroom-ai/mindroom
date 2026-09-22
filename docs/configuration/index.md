@@ -319,6 +319,8 @@ tool_approval:
 | `MINDROOM_CREDENTIALS_ENCRYPTION_KEY` | Optional base64-encoded 32-byte key for encrypted-at-rest credential files | unset |
 | `LOG_LEVEL` | Logging level for `mindroom run` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `MINDROOM_LOGGER_LEVELS` | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING` | unset |
+| `MINDROOM_LOG_FORMAT` | `text` for readable logs or `json` for structured logs; file output never receives terminal styling | `text` |
+| `NO_COLOR` | Any nonempty value disables console colors and styled tracebacks, including in terminals; installed background services set this to `1` | unset |
 
 ### Matrix
 
