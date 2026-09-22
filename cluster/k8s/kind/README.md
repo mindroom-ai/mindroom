@@ -97,9 +97,8 @@ The chart passes this token to both MindRoom and the bundled sandbox runner.
 
 ```bash
 # Deploy instance using Helm
-kubectl create namespace mindroom-instances
 helm upgrade --install instance-1 cluster/k8s/instance \
-  --namespace mindroom-instances \
+  --namespace mindroom-instances --create-namespace \
   -f instance-secrets.yaml \
   --set customer=1 \
   --set baseDomain=local \
