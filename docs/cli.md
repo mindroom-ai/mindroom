@@ -1255,7 +1255,7 @@ mindroom connect \
 
 ## local-stack-setup
 
-Start local Synapse and the MindRoom Chat client container for development.
+Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
 By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
 
@@ -1280,9 +1280,9 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │ --synapse-dir                                 PATH                 Directory           │
 │                                                                    containing Synapse  │
 │                                                                    docker-compose.yml  │
-│                                                                    (from               │
-│                                                                    mindroom-stack      │
-│                                                                    settings).          │
+│                                                                    (core MindRoom      │
+│                                                                    repo:               │
+│                                                                    local/matrix).      │
 │                                                                    [default:           │
 │                                                                    local/matrix]       │
 │ --homeserver-url                              TEXT                 Homeserver URL that │
@@ -1487,10 +1487,12 @@ mindroom run --storage-path /data/mindroom
 mindroom connect --pair-code ABCD-EFGH
 ```
 
-### Start local Synapse + Cinny (default local setup)
+### Start local Synapse + MindRoom Chat (development)
+
+Use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 ```
 
 ### Start local stack without writing `.env`

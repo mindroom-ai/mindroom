@@ -117,23 +117,37 @@ See the [hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for f
 
 ### Self-hosted, from source
 
-Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv); the repo dev shell provides Node.js 24 with [bun](https://bun.sh/) for optionally building the web dashboard.
+Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
+For the dashboard in a fresh source checkout, install [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+The repository dev shell provides Node.js 24 and Bun.
 
 ```bash
 git clone https://github.com/mindroom-ai/mindroom
 cd mindroom
 uv sync
 
-# Point at your Matrix homeserver, or bootstrap a local Synapse + MindRoom Chat stack:
-#   mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
-export MATRIX_HOMESERVER=https://your-matrix.server
-export ANTHROPIC_API_KEY=your-key-here
+# Create a starter config with an Anthropic model and self-hosted Matrix settings.
+uv run mindroom config init --path ./config.local.yaml --matrix-server self-hosted --provider anthropic
 
-# Start MindRoom (agents + API + web dashboard)
-uv run mindroom run
+# Set MATRIX_HOMESERVER, ANTHROPIC_API_KEY, and any required registration credentials.
+$EDITOR .env
+# Replace each owner placeholder with your quoted Matrix user ID.
+$EDITOR config.local.yaml
+
+# Optional: bootstrap this checkout's local Synapse + MindRoom Chat stack.
+# MINDROOM_CONFIG_PATH=./config.local.yaml uv run mindroom local-stack-setup --synapse-dir local/matrix
+
+# Start MindRoom with the generated config.
+uv run mindroom run --config ./config.local.yaml
 ```
 
-The web dashboard is available at http://localhost:8765.
+The checked-in `config.yaml` is a development setup with local model endpoints.
+In `config.local.yaml`, replace every `__MINDROOM_OWNER_USER_ID_FROM_PAIRING__` with your quoted Matrix user ID, such as `"@alice:matrix.example.com"`.
+See the [manual configuration and account provisioning instructions](docs/getting-started.md#configuration) for homeserver setup.
+The starter creates the `Mind` agent in the `personal` room.
+
+With dashboard assets available, open http://localhost:8765.
+Without assets and Bun, the API is available at http://localhost:8765/api but the dashboard is unavailable.
 Matrix E2EE support is installed by default.
 
 ### macOS app
@@ -246,16 +260,17 @@ authorization:
   config_command_enabled: false
 ```
 
-Environment variables go in `.env` (or `~/.mindroom/.env` for the hosted path):
+Environment variables go in `.env` next to the selected config file (`~/.mindroom/.env` for the hosted path):
 
 ```bash
 MATRIX_HOMESERVER=https://your-matrix.server
 ANTHROPIC_API_KEY=your-key-here
 # Optional: protect dashboard API endpoints (recommended for non-localhost)
 # MINDROOM_API_KEY=your-secret-key
-# Optional: use a non-default config location
-# MINDROOM_CONFIG_PATH=/path/to/config.yaml
 ```
+
+Select another config with `mindroom run --config /path/to/config.yaml` or `export MINDROOM_CONFIG_PATH=/path/to/config.yaml` before running the CLI.
+MindRoom selects the config before loading the `.env` beside it.
 
 Teams, per-room models, context compaction, history controls, and memory backends are covered in the [configuration docs](docs/configuration/index.md) and at [docs.mindroom.chat](https://docs.mindroom.chat).
 

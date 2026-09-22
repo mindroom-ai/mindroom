@@ -71,10 +71,13 @@ Use this when you want everything local: the bundled MindRoom dashboard, Matrix 
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 cp .env.example .env
-$EDITOR .env  # add at least one AI provider key
+$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
 
 docker compose up -d
 ```
+
+The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
+To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
 
 Open:
 
@@ -144,10 +147,10 @@ OPENAI_API_KEY=your_api_key
 mindroom run
 ```
 
-For local development with a host-installed backend plus Dockerized Synapse + MindRoom Chat (Linux/macOS), you can bootstrap the local stack with:
+For local development with a host-installed backend plus Dockerized Synapse + MindRoom Chat (Linux/macOS), use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 mindroom run
 ```
 
@@ -382,8 +385,11 @@ cd mindroom-stack
 
 ```bash
 cp .env.example .env
-$EDITOR .env  # add at least one AI provider key
+$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
 ```
+
+The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
+To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
 
 ### 3. Start everything
 
@@ -433,6 +439,9 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
     uv sync
     source .venv/bin/activate
     ```
+
+    Install [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+    Without assets and Bun, the API is available but the dashboard is unavailable.
 
 ### Configuration
 
@@ -497,19 +506,21 @@ OPENAI_API_KEY=your_openai_key
 
 #### Optional: Bootstrap local Synapse + MindRoom Chat with Docker (Linux/macOS)
 
-If you want a local Matrix + client setup without running the full `mindroom-stack` app, use the helper command:
+Use the core [MindRoom repository](https://github.com/mindroom-ai/mindroom)'s `local/matrix` development Compose files with a host-installed backend:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 ```
 
 If you're running from source in this repo, use:
 
 ```bash
-uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+uv run mindroom local-stack-setup --synapse-dir local/matrix
 ```
 
-This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
+This starts Synapse from the core repository development Compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active config file.
+If you use a custom config path, export `MINDROOM_CONFIG_PATH` before running the helper so it updates the matching `.env`.
+The full `mindroom-stack` workflow above uses Tuwunel instead.
 
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent.
@@ -19907,10 +19918,13 @@ incus config device add mindroom repo disk source="$PWD" path=/mnt/repo shift=tr
 git clone https://github.com/mindroom-ai/mindroom-stack
 cd mindroom-stack
 cp .env.example .env
-$EDITOR .env  # add at least one AI provider key
+$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
 
 ./scripts/quickstart.py
 ```
+
+The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
+To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
 
 Raw `docker compose up -d` remains a manual fallback; the quickstart validates provider configuration, waits for readiness, and diagnoses common port and startup failures.
 
@@ -19926,10 +19940,10 @@ mindroom run --storage-path ./mindroom_data
 
 The config file path is set via `MINDROOM_CONFIG_PATH` and otherwise defaults to `./config.yaml`, then `~/.mindroom/config.yaml`.
 
-If you want local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use:
+For local Matrix + MindRoom Chat with a host-installed MindRoom runtime (Linux/macOS), use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 mindroom run --storage-path ./mindroom_data
 ```
 
@@ -21357,10 +21371,10 @@ The local Matrix stack includes:
 - **PostgreSQL**: Database backend
 - **Redis**: Caching layer
 
-If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
+For a host-installed backend, use `mindroom local-stack-setup` with the core MindRoom checkout's `local/matrix` directory to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 mindroom run
 ```
 
@@ -23940,7 +23954,7 @@ mindroom connect \
 
 ## local-stack-setup
 
-Start local Synapse and the MindRoom Chat client container for development.
+Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
 By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
 
@@ -23965,9 +23979,9 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │ --synapse-dir                                 PATH                 Directory           │
 │                                                                    containing Synapse  │
 │                                                                    docker-compose.yml  │
-│                                                                    (from               │
-│                                                                    mindroom-stack      │
-│                                                                    settings).          │
+│                                                                    (core MindRoom      │
+│                                                                    repo:               │
+│                                                                    local/matrix).      │
 │                                                                    [default:           │
 │                                                                    local/matrix]       │
 │ --homeserver-url                              TEXT                 Homeserver URL that │
@@ -24172,10 +24186,12 @@ mindroom run --storage-path /data/mindroom
 mindroom connect --pair-code ABCD-EFGH
 ```
 
-### Start local Synapse + Cinny (default local setup)
+### Start local Synapse + MindRoom Chat (development)
+
+Use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 ```
 
 ### Start local stack without writing `.env`
