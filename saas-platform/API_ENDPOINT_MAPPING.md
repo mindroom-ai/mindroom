@@ -1,14 +1,16 @@
 # API Endpoint Mapping: Backend to Frontend
 
-This document maps the platform application's registered method/path operations to their current callers.
-The source routers in `platform-backend/src/main.py` and the committed [OpenAPI schema](platform-backend/openapi.json) define the inventory.
+This document maps the platform application's OpenAPI method/path operations to their current callers.
+The committed [OpenAPI schema](platform-backend/openapi.json) defines the inventory; the source routers in `platform-backend/src/main.py` provide the implementations.
+The inventory excludes `/metrics`, which is registered outside the OpenAPI schema.
+Framework documentation and schema routes, enabled outside production, are also excluded.
 Backend filenames below are relative to `platform-backend/src/backend/routes/`; frontend paths are relative to `platform-frontend/`.
 
 ## Summary
 
-- **Registered operations**: 53, counting each HTTP method and path template once.
-- **Operations called by platform frontend code**: 32, including browser requests and server authentication checks.
-- **Operations without a direct platform frontend caller**: 21, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and eight other routes.
+- **OpenAPI operations**: 53, counting each HTTP method and path template once.
+- **OpenAPI operations called by platform frontend code**: 32, including browser requests and server authentication checks.
+- **OpenAPI operations without a direct platform frontend caller**: 21, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and eight other routes.
 
 Ordinary browser requests go directly to the configured platform API through `src/lib/api.ts`.
 The frontend also makes server-side authentication checks in `proxy.ts`, `src/lib/auth/admin.ts`, and `src/app/auth/callback/route.ts`.
