@@ -63,6 +63,14 @@ describe("connection popup", () => {
         status: "connected",
       },
     });
+    for (const data of [
+      null,
+      "connected",
+      { type: "other", provider: "mail", status: "connected" },
+      { type: "mindroom:oauth-complete", provider: "mail", status: "pending" },
+    ]) {
+      complete({ data });
+    }
     expect(popup.close).not.toHaveBeenCalled();
     expect(popup.location.href).toBe(authorization.auth_url);
     complete();
