@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, patch
@@ -11,10 +12,20 @@ import nio
 import pytest
 
 from mindroom import scheduling
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.event_journal import EventJournalStore
+from mindroom.matrix.conversation_hydration import ConversationHydrator
+from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.relation_lookup import RelationLookup
+from mindroom.message_target import MessageTarget
+from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
 from mindroom.scheduling_executor import ScheduledWorkflowOutcome
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_scheduling_runtime_from_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock
 from tests.identity_helpers import persist_entity_accounts
 
@@ -691,3 +702,131 @@ async def test_joined_alias_departure_cancels_schedule_before_next_fire(
     assert delivered == []
     assert state["status"] == "cancelled"
     assert scheduling.ScheduledWorkflow.model_validate_json(state["workflow"]).created_by == "@alice:server"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schedule_type", ["once", "cron"])
+@pytest.mark.parametrize("managed_runtime", [False, True], ids=["live-bot", "orchestrator"])
+async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schedule_type: Literal["once", "cron"],
+    *,
+    managed_runtime: bool,
+) -> None:
+    """A joined bridge identity loses schedule authority when its live alias grant is removed."""
+    client, workflow, state = _owner_schedule([{"membership": "leave"}], schedule_type=schedule_type)
+    config, runtime_paths = _alias_schedule_config(tmp_path)
+    config.agents["helper"].rooms = ["!test:server"]
+    config.agents["helper"].access = ResponderAccessConfig(users=["@alice:server"])
+    config.scheduler_catch_up_grace_seconds = 300
+    memberships: dict[str, object] = {_HUMAN_ALIAS: "join"}
+    _set_authoritative_alias_memberships(client, memberships)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False) if managed_runtime else None
+    if orchestrator is not None:
+        orchestrator.config = config
+    live_runtime = BotRuntimeState(
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        enable_streaming=False,
+        orchestrator=orchestrator,
+    )
+    alias_lookup_started = asyncio.Event()
+    finish_alias_lookup = asyncio.Event()
+    read_state = client.room_get_state_event.side_effect
+
+    async def read_membership_across_reload(room_id: str, event_type: str, state_key: str = "") -> object:
+        response = await read_state(room_id, event_type, state_key)
+        if event_type == "m.room.member" and state_key == _HUMAN_ALIAS:
+            alias_lookup_started.set()
+            await finish_alias_lookup.wait()
+        return response
+
+    client.room_get_state_event.side_effect = read_membership_across_reload
+    delivered_owners: list[str | None] = []
+
+    async def parsed_workflow(*_args: object, **_kwargs: object) -> scheduling.ScheduledWorkflow:
+        return workflow
+
+    async def deliver(
+        _client: object,
+        current: scheduling.ScheduledWorkflow,
+        *_args: object,
+        **_kwargs: object,
+    ) -> ScheduledWorkflowOutcome:
+        delivered_owners.append(current.created_by)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(scheduling, "_parse_workflow_schedule", parsed_workflow)
+    monkeypatch.setattr(scheduling.scheduling_executor, "execute_scheduled_workflow", deliver)
+    journal = EventJournalStore.open_sqlite(tmp_path / "schedule-journal.sqlite3")
+    principal = journal.principal("@router:server")
+    reader = ConversationReader(
+        store=principal,
+        hydrator=ConversationHydrator(store=principal, runtime=live_runtime, self_sender="@router:server"),
+    )
+    task: asyncio.Task | None = None
+    try:
+        context = ToolRuntimeContext(
+            agent_name="helper",
+            target=MessageTarget.resolve("!test:server", None, None),
+            requester_id="@alice:server",
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            conversation_reader=reader,
+            relations=RelationLookup(store=principal, runtime=live_runtime),
+            agent_reply_memberships=live_runtime.agent_reply_memberships,
+            room=nio.MatrixRoom("!test:server", "@router:server"),
+            config_provider=lambda: live_runtime.config,
+            orchestrator=orchestrator,
+        )
+        if schedule_type == "cron":
+            assert workflow.cron_schedule is not None
+            await scheduling.plan_recurring_occurrence(
+                runtime_paths,
+                homeserver=client.homeserver,
+                sender=client.user_id,
+                room_id="!test:server",
+                task_id="owner_task",
+                workflow_json=workflow.model_dump_json(),
+                cron=workflow.cron_schedule.to_cron_string(),
+                now=datetime.now(UTC) - timedelta(minutes=2),
+                grace_seconds=300,
+            )
+        task_id, response = await scheduling.schedule_task(
+            runtime=build_scheduling_runtime_from_tool_runtime_context(context),
+            room_id="!test:server",
+            thread_id=None,
+            scheduled_by="@alice:server",
+            full_text="Check the queue",
+            task_id="owner_task",
+        )
+        assert task_id == "owner_task", response
+        task = scheduling._running_tasks[task_id]
+        await asyncio.wait_for(alias_lookup_started.wait(), timeout=2)
+
+        updated_config = config.model_copy(deep=True)
+        updated_config.authorization.aliases = {}
+        if orchestrator is not None:
+            # A retired bot generation can retain its old local config while its schedules survive.
+            orchestrator.config = updated_config
+        else:
+            live_runtime.config = updated_config
+        finish_alias_lookup.set()
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+
+        assert memberships[_HUMAN_ALIAS] == "join"
+        assert config.authorization.aliases
+        assert delivered_owners == []
+        assert state["status"] == "cancelled"
+        assert scheduling.ScheduledWorkflow.model_validate_json(state["workflow"]).created_by == "@alice:server"
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        await journal.close()

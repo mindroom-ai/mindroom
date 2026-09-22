@@ -17381,7 +17381,7 @@ Schedules with a recorded creator are automatically canceled once live membershi
 Configured bot accounts and managed identities do not count as human aliases.
 The scheduler checks membership every 30 seconds while waiting and again before execution, including after a restart.
 A confirmed join for any equivalent human identity permits execution; otherwise, uncertain membership makes execution wait for a successful lookup.
-Each running schedule uses the alias configuration captured when its runner started; an authorization-only hot reload leaves that snapshot unchanged until the runner is recreated, such as after a restart.
+Membership checks use the runtime's current applied configuration, so revoking a human alias takes effect on the next check without recreating the runner.
 Legacy schedules without a recorded creator remain usable.
 
 ## Commands
