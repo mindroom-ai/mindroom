@@ -85,7 +85,7 @@ class ModelsLabCompletionTools(ModelsLabTools):
                 eta = float(eta)
             except ValueError:
                 eta = None
-        if self.file_type in (FileType.PNG, FileType.JPG, FileType.WAV):
+        if result.get("status") == "success" or self.file_type in (FileType.PNG, FileType.JPG, FileType.WAV):
             url_links = result.get("output") or result.get("future_links", [])
         else:
             url_links = result.get("future_links") or result.get("output", [])

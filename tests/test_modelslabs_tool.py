@@ -119,6 +119,38 @@ def test_queued_media_fetches_provider_job_id(
     assert "will be ready" not in result.content.lower()
 
 
+@pytest.mark.parametrize(
+    ("file_type", "media_field"),
+    [("png", "images"), ("jpg", "images"), ("gif", "images"), ("mp4", "videos"), ("mp3", "audios"), ("wav", "audios")],
+)
+def test_inline_success_uses_completed_urls(
+    provider: _ModelsLabTransport,
+    file_type: str,
+    media_field: str,
+) -> None:
+    """Immediate completion returns finished artifacts without polling queued links."""
+    completed = [f"https://media.example.test/completed-{index}.{file_type}" for index in range(2)]
+    provider.payloads = [
+        {
+            "status": "success",
+            "id": 74123,
+            "eta": 1,
+            "output": completed,
+            "future_links": [f"https://media.example.test/queued.{file_type}"],
+        },
+    ]
+    tool = modelslabs_tools()(api_key="test-api-key", file_type=file_type, wait_for_completion=True)
+
+    result = tool.generate_media("Make a test pattern")
+
+    media = {"images": result.images, "videos": result.videos, "audios": result.audios}[media_field]
+    assert media is not None
+    assert [item.url for item in media] == completed
+    assert "success" in result.content.lower()
+    assert len(provider.requests) == 1
+    assert provider.sleeps == []
+
+
 def test_queued_media_wait_timeout_does_not_claim_generation_success(provider: _ModelsLabTransport) -> None:
     """Exhausting a requested wait is not proof the provider job failed."""
     media_url = "https://media.example.test/result.gif"
