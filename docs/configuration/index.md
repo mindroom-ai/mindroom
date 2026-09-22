@@ -1118,6 +1118,25 @@ personal_rooms:
   avatar_from_requester: false
 ```
 
+The top-level `personal_rooms` type is an object or `null`, with default `null`.
+When enabled, its fields are:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `agent` | string | Required | Configured agent that owns and answers in personal rooms. |
+| `onboarding_rooms` | list of strings | Required | Nonempty list of configured onboarding rooms observed by the router. |
+| `commands` | list of strings | `[]` | Exact self-onboarding commands beginning with `!`, without whitespace or arguments. |
+| `alias_prefix` | string | `"personal"` | Lowercase alias prefix, matching `[a-z0-9_-]{1,40}`. |
+| `name` | string | `"Personal room for {user}"` | New room name template, up to 1,000 characters. |
+| `topic` | string | `"Private conversation with {agent}."` | New room topic template, up to 1,000 characters. |
+| `welcome` | string | `"Welcome {user}! This is your personal room with {agent}."` | Welcome template, up to 10,000 characters; empty disables new welcome intent. |
+| `welcome_dispatch` | boolean | `false` | Dispatch the welcome to the selected agent after the human joins; otherwise send a notice. |
+| `confirmation` | string | `""` | Optional once-only notice template in the original onboarding room, up to 10,000 characters. |
+| `backfill` | boolean | `false` | Also reconcile current eligible onboarding-room members on startup and config reload. |
+| `requester_admin` | boolean | `false` | Grant the human Matrix room administration. |
+| `avatar` | string or `null` | `null` | Room avatar file, relative to the configuration; fills only an empty avatar. |
+| `avatar_from_requester` | boolean | `false` | Copy the human's profile avatar into an empty room avatar when no avatar file is configured. |
+
 Omit the section to disable onboarding.
 Trigger rooms must already be configured.
 Commands are optional, exact messages in those rooms, and onboard only their authenticated human sender.
@@ -1140,6 +1159,8 @@ An optional avatar file uses the existing Matrix upload service; `avatar_from_re
 Both policies fill only an empty room avatar, with an explicit file taking priority.
 An optional `confirmation` template sends one durable notice in the original onboarding room after creation and invitation; its contents, including any room alias, are visible to that room.
 Pending confirmation and welcome text remain frozen across configuration changes.
+Welcome text and dispatch mode are saved before waiting for the human to join; changing the welcome template, including setting it to empty, does not replace pending intent.
+Disabling `personal_rooms` or revoking the human's access prevents pending welcome dispatch.
 No tools or workspace reset behavior are added.
 
 ### Operator-seeded Existing Rooms

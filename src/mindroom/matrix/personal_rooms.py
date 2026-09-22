@@ -260,16 +260,11 @@ class PersonalRoomService:
             await self._set_avatar(record, settings)
             record.avatar_done = True
             await run_blocking_until_complete(write_personal_room, path, record)
-        if record.welcome_completed or record.welcome_event_id is not None or not settings.welcome:
-            return
-        dispatch = (
-            record.welcome_content.get(SOURCE_KIND_KEY) == HOOK_DISPATCH_SOURCE_KIND
-            if record.welcome_content is not None
-            else settings.welcome_dispatch
-        )
-        if dispatch and (not human_joined or not self._allowed(record.user_id, record.room_id)):
+        if record.welcome_completed or record.welcome_event_id is not None:
             return
         if record.welcome_content is None:
+            if not settings.welcome:
+                return
             content = build_message_content(
                 settings.welcome.format(**self._template_values(record)),
                 mentioned_user_ids=[client.user_id] if settings.welcome_dispatch else None,
@@ -287,6 +282,11 @@ class PersonalRoomService:
             record.welcome_content = content
             record.welcome_device_id = client.device_id
             await run_blocking_until_complete(write_personal_room, path, record)
+        dispatch = record.welcome_content.get(SOURCE_KIND_KEY) == HOOK_DISPATCH_SOURCE_KIND
+        if self._settings() is None or (
+            dispatch and (not human_joined or not self._allowed(record.user_id, record.room_id))
+        ):
+            return
         if record.welcome_device_id != client.device_id or not client.device_id:
             msg = "Personal-room pending welcome belongs to a different Matrix device"
             raise RuntimeError(msg)
@@ -365,16 +365,15 @@ class PersonalRoomService:
 
     async def member_joined(self, room_id: str, user_id: str) -> None:
         """Finish a deferred welcome only for this room's recorded human owner."""
-        settings = self._settings()
-        if settings is None or not self._allowed(user_id, room_id):
+        if self._settings() is None:
             return
         path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
         async with async_exclusive_file_lock(path.with_suffix(".lock")):
-            settings = self._settings()
-            if settings is None or not self._allowed(user_id, room_id):
-                return
             record = await run_blocking_until_complete(read_personal_room, path)
             if record is None or record.room_id != room_id:
+                return
+            settings = self._settings()
+            if settings is None or not self._allowed(user_id, room_id):
                 return
             roster = await self._validate_room(record)
             await self._finish(record, path, settings, human_joined=roster.get(user_id) == "join")
