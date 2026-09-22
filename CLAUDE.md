@@ -198,7 +198,8 @@ Matrix sync callback
 | `matrix/message_builder.py` | Message content building helpers |
 | `matrix/provisioning.py` | Hosted provisioning client flow used for local pairing and server-side agent registration |
 | `matrix/image_handler.py` | Image message download, decryption, and AI processing |
-| `matrix/media.py` | Shared Matrix media download and decryption helpers |
+| `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
+| `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
 | `matrix/room_cleanup.py` | Orphaned bot cleanup from rooms |
 | `matrix/event_info.py` | Event metadata parsing |
 | `matrix/reply_chain.py` | Reply chain context management |

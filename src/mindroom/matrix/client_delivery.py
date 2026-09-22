@@ -17,7 +17,7 @@ from nio.exceptions import OlmTrustError
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
-from mindroom.matrix.media import upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content
 from mindroom.timing import emit_timing_event
 
@@ -615,40 +615,22 @@ async def _upload_media_bytes_as_mxc(
     mimetype: str,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Upload an in-memory Matrix media payload as MXC, encrypting for encrypted rooms."""
-    info: dict[str, Any] = {"size": len(media_bytes), "mimetype": mimetype}
     room_encrypted = await resolve_room_encryption_for_delivery(client, room_id, operation="upload_media_bytes")
     if room_encrypted is None:
         return None, None
-    upload_bytes = media_bytes
-    encrypted_file_payload: dict[str, Any] | None = None
-    upload_mimetype = mimetype
-    upload_name = filename
-
-    if room_encrypted:
-        try:
-            encrypted_bytes, encryption_keys = crypto.attachments.encrypt_attachment(media_bytes)
-        except Exception:
-            logger.exception("Failed to encrypt Matrix media upload", filename=filename)
-            return None, None
-        upload_bytes = encrypted_bytes
-        upload_mimetype = "application/octet-stream"
-        upload_name = f"{filename}.enc"
-        encrypted_file_payload = {
-            "url": "",
-            "key": encryption_keys["key"],
-            "iv": encryption_keys["iv"],
-            "hashes": encryption_keys["hashes"],
-            "v": "v2",
-            "mimetype": mimetype,
-            "size": len(media_bytes),
-        }
+    try:
+        prepared = prepare_media_upload(media_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
+    except Exception:
+        logger.exception("Failed to encrypt Matrix media upload", filename=filename)
+        return None, None
+    encrypted_file_payload = prepared.encrypted_file_content()
 
     try:
         upload_response = await upload_media_bytes(
             client,
-            upload_bytes,
-            content_type=upload_mimetype,
-            filename=upload_name,
+            prepared.data,
+            content_type=prepared.content_type,
+            filename=prepared.filename,
         )
     except Exception:
         logger.exception("Failed uploading Matrix media", filename=filename)
@@ -659,7 +641,7 @@ async def _upload_media_bytes_as_mxc(
         logger.error("Failed Matrix media upload response", filename=filename, response=str(upload_response))
         return None, None
 
-    upload_payload: dict[str, Any] = {"info": info}
+    upload_payload: dict[str, Any] = {"info": prepared.info}
     if encrypted_file_payload is not None:
         encrypted_file_payload["url"] = mxc_uri
         upload_payload["file"] = encrypted_file_payload
