@@ -625,6 +625,8 @@ def _launched_services(commands: list[str]) -> list[str]:
         "ldap_crypt",
         "ldap_argon2",
         "ldap_both",
+        "binary",
+        "binary_ldap",
     ],
 )
 def test_authelia_launch_rejects_enabled_public_credentials(
@@ -658,6 +660,9 @@ def test_authelia_launch_rejects_enabled_public_credentials(
         database["users"]["operator"] = database["users"].pop("admin")
     elif example_state == "enabled_by_default":
         del database["users"]["admin"]["disabled"]
+    elif example_state in {"binary", "binary_ldap"}:
+        encoded_hash = "{CRYPT}" + public_hash + "\n" if example_state == "binary_ldap" else public_hash
+        database["users"]["admin"]["password"] = encoded_hash.encode("utf-8")
     elif example_state in equivalent_hashes:
         database["users"]["admin"]["password"] = equivalent_hashes[example_state]
     if example_state == "literal_block":
@@ -681,7 +686,7 @@ def test_authelia_launch_rejects_enabled_public_credentials(
     assert "public example" in text.lower()
     assert "password hash" in text.lower()
     assert "local/instances/deploy/README.md" in text
-    assert database["users"][next(iter(database["users"]))]["password"] not in text
+    assert str(database["users"][next(iter(database["users"]))]["password"]) not in text
     assert public_hash not in text
 
 
@@ -711,6 +716,30 @@ def test_authelia_launch_rejects_colliding_yaml_usernames(
     assert instance.status == deploy.InstanceStatus.RUNNING
     assert "Invalid Authelia users database" in normalize_console_output(console.export_text())
     assert public_hash not in console.export_text()
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize("field", ["password", "disabled"])
+def test_authelia_launch_rejects_binary_account_field_keys(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+    field: str,
+) -> None:
+    """Go decodes binary struct keys as strings; ambiguous Python keys must fail closed."""
+    _instance, users_file, commands, console = authelia_launch
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    user = database["users"]["admin"]
+    user[field.encode("utf-8")] = user.pop(field)
+    users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+    before = users_file.read_bytes()
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia(command)
+
+    assert exc.value.exit_code == 1
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    assert users_file.read_bytes() == before
+    assert "Invalid Authelia users database" in normalize_console_output(console.export_text())
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])

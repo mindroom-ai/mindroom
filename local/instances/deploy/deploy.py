@@ -656,6 +656,12 @@ def _resolve_authelia_users_file(instance: Instance) -> Path:
 
 def _argon2_hash_identity(value: object) -> tuple[str, int, int, int, bytes, bytes] | None:  # noqa: PLR0911
     """Compare Argon2 inputs using Authelia's go-crypt decoder semantics."""
+    if isinstance(value, bytes):
+        # Authelia's YAML decoder accepts binary scalars in password strings.
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
     if not isinstance(value, str):
         return None
     parts = value.removeprefix("{CRYPT}").removeprefix("{ARGON2}").split("$")
@@ -710,7 +716,8 @@ def _require_authelia_account_setup(instance: Instance) -> None:
 
     users = database.get("users") if isinstance(database, dict) else None
     if not isinstance(users, dict) or any(
-        not isinstance(username, str) or not isinstance(user, dict) for username, user in users.items()
+        not isinstance(username, str) or not isinstance(user, dict) or any(not isinstance(field, str) for field in user)
+        for username, user in users.items()
     ):
         console.print(f"[red]✗[/red] Invalid Authelia users database: {users_file}")
         console.print("  Configure users as described in local/instances/deploy/README.md before starting.")
