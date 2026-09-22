@@ -447,7 +447,7 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to make trusted tools eligible for embedded participants.
+Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to add automatic approval grants for embedded participants after operator-authored approval rules.
 
 ```yaml
 agents:
@@ -458,10 +458,15 @@ agents:
           allowed_tools: [duckduckgo, website]
 ```
 
-Use `allowed_tools: ["*"]` to make every granted non-system-mutating tool eligible.
-Tools outside `allowed_tools` are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
-Operator-authored approval rules retain precedence, so a matching `require_approval` rule still makes that function unavailable.
-System-mutating tools (`claude_agent`, `config_manager`, `scheduler`) are always unavailable to embedded participants.
+Use `allowed_tools: ["*"]` to generate automatic approval grants for all otherwise eligible granted toolkits.
+Operator-authored rules remain first and use the normal first-match function-name policy.
+A first matching `auto_approve` rule can authorize a function outside `allowed_tools`; a matching `require_approval` or script rule makes it unavailable to embedded participants.
+Unmatched functions default to requiring approval and are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
+`claude_agent`, `config_manager`, and `scheduler` receive no generated grant from `allowed_tools`, including `"*"`, but an explicit operator rule can authorize otherwise eligible functions from those toolkits.
+Native-confirming functions remain unavailable even under an operator auto-approval rule.
+Agent-infrastructure toolkits (`compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `invite_router`, `memory`, and `self_config`) are always excluded.
+Participant tools must still be granted in the workflow's `permissions.tools`, resolve through the caller's tool routing, and satisfy their runtime authority checks.
+A function name shared by several granted toolkits receives a generated grant only when every owner is eligible.
 
 ### Notes
 

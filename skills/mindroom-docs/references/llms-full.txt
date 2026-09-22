@@ -1311,6 +1311,7 @@ See [MCP](https://docs.mindroom.chat/mcp/) for transport-specific config, tool n
 
 Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations.
 Rules are evaluated in order and the first matching rule wins.
+`match` is a case-sensitive glob over exposed function names, not toolkit identifiers.
 Each rule must set exactly one of `action` or `script`.
 Use `action: require_approval` to always pause the tool call and send a Matrix approval card.
 Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`.
@@ -1345,12 +1346,17 @@ If an entity account was removed, the router posts a related terminal notice bec
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
+This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
+It does not gate every Slack operation, and the same function names in other toolkits also match.
+
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: slack_*
+    - match: send_message*
+      action: require_approval
+    - match: upload_file
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
@@ -11287,7 +11293,7 @@ get_workflow_run("brief-report", "run_...")
 
 ### Allowing participant tools
 
-Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to make trusted tools eligible for embedded participants.
+Configure `allowed_tools` on the calling agent's `dynamic_workflow` tool entry to add automatic approval grants for embedded participants after operator-authored approval rules.
 
 ```yaml
 agents:
@@ -11298,10 +11304,15 @@ agents:
           allowed_tools: [duckduckgo, website]
 ```
 
-Use `allowed_tools: ["*"]` to make every granted non-system-mutating tool eligible.
-Tools outside `allowed_tools` are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
-Operator-authored approval rules retain precedence, so a matching `require_approval` rule still makes that function unavailable.
-System-mutating tools (`claude_agent`, `config_manager`, `scheduler`) are always unavailable to embedded participants.
+Use `allowed_tools: ["*"]` to generate automatic approval grants for all otherwise eligible granted toolkits.
+Operator-authored rules remain first and use the normal first-match function-name policy.
+A first matching `auto_approve` rule can authorize a function outside `allowed_tools`; a matching `require_approval` or script rule makes it unavailable to embedded participants.
+Unmatched functions default to requiring approval and are rejected because Dynamic Workflow has no resumable Matrix approval lifecycle.
+`claude_agent`, `config_manager`, and `scheduler` receive no generated grant from `allowed_tools`, including `"*"`, but an explicit operator rule can authorize otherwise eligible functions from those toolkits.
+Native-confirming functions remain unavailable even under an operator auto-approval rule.
+Agent-infrastructure toolkits (`compact_context`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `invite_router`, `memory`, and `self_config`) are always excluded.
+Participant tools must still be granted in the workflow's `permissions.tools`, resolve through the caller's tool routing, and satisfy their runtime authority checks.
+A function name shared by several granted toolkits receives a generated grant only when every owner is eligible.
 
 ### Notes
 
