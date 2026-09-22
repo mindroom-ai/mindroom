@@ -36,13 +36,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="optional_params",
-            label="Optional Params",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="enable_search",
             label="Enable Search",
             type="boolean",

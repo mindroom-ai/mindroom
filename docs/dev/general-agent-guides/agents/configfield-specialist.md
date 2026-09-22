@@ -14,5 +14,5 @@ Recreate the `.claude/agents/configfield-generator.md` flow without project-spec
 6. Create `tools/<tool>.py` (or equivalent) that registers via the official decorator.
 7. Expose the module in the registry `__init__`.
 8. Add required dependencies with comments explaining which tool needs them.
-9. Run the verification helper (e.g., `verify_tool_configfields('<tool>', ToolClass)`).
+9. Run the project's focused registered-tool contract test so it checks the constructor signature, managed inputs, and ConfigFields together.
 10. Report the command and result.

@@ -197,6 +197,7 @@ class CommandTurnExecutor:
             responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
             controller_identity=self.deps.controller_identity,
             agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
+            config_provider=lambda: orchestrator.config if orchestrator is not None else self.deps.runtime.config,
         )
         await handle_command(
             context=context,

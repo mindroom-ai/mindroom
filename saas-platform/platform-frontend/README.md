@@ -13,7 +13,7 @@ Customer-facing web application providing:
 ## Architecture
 
 ### Tech Stack
-- **Framework**: Next.js 14 with App Router
+- **Framework**: Next.js 16 with App Router (see `package.json` for the version)
 - **Language**: TypeScript
 - **Styling**: Tailwind CSS
 - **UI Components**: Custom components with shadcn/ui patterns
@@ -29,7 +29,7 @@ Customer-facing web application providing:
 - Instance health monitoring
 
 **Admin Dashboard**
-- React Admin integration
+- Custom Next.js and React admin components
 - Customer management interface
 - Instance lifecycle control
 - Platform metrics and monitoring
@@ -37,9 +37,9 @@ Customer-facing web application providing:
 ### Project Structure
 
 ```
-app/                  # Next.js app router pages
-components/           # Reusable React components
-lib/                 # Utilities and client libraries
+src/app/             # App Router pages, auth callback, and CSP-report route
+src/components/      # Reusable React components
+src/lib/             # API, runtime configuration, and authentication helpers
 public/              # Static assets
 ```
 
@@ -47,7 +47,8 @@ public/              # Static assets
 
 - JWT-based authentication via Supabase
 - Server-side session validation
-- Protected API routes with middleware
+- Admin page guards in `proxy.ts` and `src/app/admin/layout.tsx`
+- Independent authentication and authorization dependencies in the platform backend
 - Environment variable separation for secrets
 
 ## Development
@@ -56,15 +57,22 @@ Runs on port 3000 by default with hot module replacement.
 
 ### Typed API client
 
+Ordinary browser data requests use `src/lib/api.ts` to call the configured platform API directly with the current session's bearer token.
+The Next.js server also handles session validation, admin page guards, the authentication callback, and CSP reports.
 `src/lib/api.ts` is a thin typed fetch wrapper whose request and response types come from `src/lib/api.generated.ts`, generated with `openapi-typescript` from the backend's OpenAPI schema (`../platform-backend/openapi.json`).
 After changing backend routes or response models, regenerate both files with `just saas-openapi` from the repo root (exports the schema, then runs `bun run generate:api` here) and commit the result.
 `bun run check:api` fails when `api.generated.ts` is stale relative to the committed schema; run it in CI or before pushing backend-facing changes.
 
 ## Environment Variables
 
-Required for runtime:
+Required for authentication and request handling:
+
 - `SUPABASE_URL` - Supabase project URL
 - `SUPABASE_ANON_KEY` - Public anon key
-- `SUPABASE_SERVICE_KEY` - Service key for server-side operations
-- `STRIPE_SECRET_KEY` - Stripe API key
-- `PLATFORM_BACKEND_URL` - Backend service URL
+
+Optional runtime configuration:
+
+- `PLATFORM_DOMAIN` - Derives the API origin as `https://api.<domain>`; when unset or empty, the API origin is `http://localhost:8000`.
+
+The runtime configuration is serialized into the browser by the root layout.
+The request proxy and authentication helpers require the Supabase URL and anon key.
