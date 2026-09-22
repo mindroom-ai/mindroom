@@ -41,6 +41,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
   }, [userId, authLoading])
 
   useEffect(() => {
+    if (authLoading || !userId) return
     // Poll for updates while provisioning or restarting
     if (instance?.status === 'provisioning' || instance?.status === 'restarting') {
       const interval = setInterval(() => {
@@ -49,7 +50,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
 
       return () => clearInterval(interval)
     }
-  }, [instance?.status])
+  }, [instance?.status, userId, authLoading])
 
   const fetchInstance = async (silent = false) => {
     if (authLoading || !userId) return

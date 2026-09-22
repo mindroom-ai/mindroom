@@ -25,11 +25,15 @@ export type PricingConfig = SuccessJson<'/pricing/config', 'get'>
 
 export async function apiCall(
   endpoint: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  expectedUserId?: string
 ): Promise<Response> {
   const apiUrl = resolveApiUrl()
   const supabase = createClient()
   const { data: { session } } = await supabase.auth.getSession()
+  if (expectedUserId !== undefined && session?.user.id !== expectedUserId) {
+    throw new Error('Authenticated account changed')
+  }
 
   const url = `${apiUrl}${endpoint}`
   const headers = {
@@ -60,9 +64,10 @@ export async function apiCall(
 async function request<T>(
   endpoint: string,
   fallbackError: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  expectedUserId?: string
 ): Promise<T> {
-  const response = await apiCall(endpoint, options)
+  const response = await apiCall(endpoint, options, expectedUserId)
   if (!response.ok) {
     let detail = ''
     try {
@@ -111,8 +116,8 @@ export async function updateConsent(marketing: boolean, analytics: boolean): Pro
 }
 
 // Instance Management
-export async function listInstances(): Promise<Instances> {
-  return request('/my/instances', 'Failed to fetch instances')
+export async function listInstances(expectedUserId?: string): Promise<Instances> {
+  return request('/my/instances', 'Failed to fetch instances', {}, expectedUserId)
 }
 
 export async function provisionInstance(): Promise<Provision> {

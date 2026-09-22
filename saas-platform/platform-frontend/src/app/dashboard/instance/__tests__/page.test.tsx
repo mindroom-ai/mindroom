@@ -249,4 +249,20 @@ describe('InstancePage', () => {
     expect(hook.result.current.loading).toBe(false)
   })
 
+  it('starts transitional polling when authentication becomes ready without a status change', async () => {
+    jest.useFakeTimers()
+    const provisioning: Instance = { ...instanceWithMissingSubdomain, status: 'provisioning' }
+    cacheInstance('user-1', provisioning)
+    ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: true })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [provisioning] })
+    const page = render(<InstancePage />)
+    expect(listInstances).not.toHaveBeenCalled()
+
+    ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
+    await act(async () => { page.rerender(<InstancePage />) })
+    expect(listInstances).toHaveBeenCalledTimes(1)
+    await act(async () => { jest.advanceTimersByTime(5000) })
+    expect(listInstances).toHaveBeenCalledTimes(2)
+  })
+
 })

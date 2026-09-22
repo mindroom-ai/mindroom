@@ -23,7 +23,7 @@ export async function loadInstance(userId: string): Promise<Instance | null> {
   const request = Symbol()
   pendingLoads.set(userId, request)
   try {
-    const data = await listInstances()
+    const data = await listInstances(userId)
     const instance = data.instances?.[0] ?? null
     if (pendingLoads.get(userId) === request) cacheInstance(userId, instance)
     return instance
