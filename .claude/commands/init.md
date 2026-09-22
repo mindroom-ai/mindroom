@@ -72,7 +72,7 @@ Read and understand the MindRoom project structure:
 
 4. **Architecture**
    - Multi-agent system with separate Matrix accounts
-   - Agents respond in threads, not main room
+   - Agents default to thread replies; room mode replies in the main room, with per-turn and trusted automation exceptions
    - Mindroom's custom commands in chat are prefixed with "!" (e.g., "!help", "!schedule")
    - Asyncio for concurrent operations
    - Per-thread memory and conversation tracking
@@ -93,6 +93,7 @@ Read and understand the MindRoom project structure:
 6. **Testing with Matty CLI**
    - Matty is pre-installed in the project
    - Use `matty` commands to interact with agents during testing
-   - Agents respond in threads - always check threads after sending messages
+   - Check `!thread_mode show` and configured `thread_mode` / `room_thread_modes`, then inspect replies and continue in the matching room or thread
+   - The room override wins over configured modes; inspect actual event relations for per-turn and trusted automation exceptions
    - Use @mentions to get agent attention
    - See CLAUDE.md section 4 for detailed Matty usage
