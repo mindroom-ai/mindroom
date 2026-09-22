@@ -25,6 +25,7 @@ from mindroom.api import config_lifecycle, main
 from mindroom.cli.config import validate_config_source_quiet
 from mindroom.config.legacy_access import AccessMigrationError
 from mindroom.config.main import load_config
+from mindroom.custom_tools.config_manager import ConfigManagerTools
 
 SPLIT_TOP_SOURCE = (
     "agents: !include_dir_merge_named agents/\nmodels: !include models.yaml\ndefaults:\n  markdown: true\n"
@@ -127,6 +128,137 @@ def empty_include_runtime_paths(tmp_path: Path, request: pytest.FixtureRequest) 
 
 class TestEmptyDirectoryIncludes:
     """Include topology survives even when a directory contributes no files."""
+
+    @pytest.mark.parametrize("operation", ["inspect", "dry-run", "save"])
+    def test_self_config_preserves_empty_include_with_stale_api_snapshot(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        monkeypatch: pytest.MonkeyPatch,
+        operation: str,
+    ) -> None:
+        """Self-config reads must honor include tags even before the API reloads."""
+        runtime_paths = empty_include_runtime_paths
+        path = runtime_paths.config_path
+        include_source = path.read_text(encoding="utf-8")
+        path.write_text(
+            include_source.replace("agents: !include_dir_merge_named entries/", "agents: {}"),
+            encoding="utf-8",
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        before = _snapshot(api_app)
+        assert before.uses_includes is False
+        path.write_text(include_source, encoding="utf-8")
+        monkeypatch.setattr(
+            ConfigManagerTools,
+            "_configuration_mutation_authorization_error",
+            staticmethod(lambda _config: None),
+        )
+        manager = ConfigManagerTools(runtime_paths)
+
+        if operation == "inspect":
+            result = manager.manage_config(operation="inspect")
+            assert "structured patching is unavailable" in result
+        else:
+            result = manager.manage_config(
+                operation="patch",
+                changes=[{"op": "add", "path": "/timezone", "value": "Europe/Amsterdam"}],
+                dry_run=operation == "dry-run",
+            )
+            assert result.startswith("Error:")
+            assert "!include" in result
+
+        assert path.read_text(encoding="utf-8") == include_source
+        assert _snapshot(api_app) is before
+
+    @pytest.mark.parametrize("adds_include", [True, False], ids=["add-include", "remove-include"])
+    @pytest.mark.parametrize("includes_file", [False, True], ids=["directory", "file"])
+    def test_same_config_publication_retains_newer_raw_source_metadata(  # noqa: PLR0915 - exercise one complete publication/write interleaving.
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        monkeypatch: pytest.MonkeyPatch,
+        adds_include: bool,
+        includes_file: bool,
+    ) -> None:
+        """A same-payload publisher may advance runtime state without reverting source metadata."""
+        runtime_paths = empty_include_runtime_paths
+        path = runtime_paths.config_path
+        include_source = path.read_text(encoding="utf-8")
+        monolith_source = include_source.replace("agents: !include_dir_merge_named entries/", "agents: {}")
+        models_path = path.with_name("models.yaml")
+        if includes_file:
+            models_path.write_text(MODELS_SOURCE, encoding="utf-8")
+            include_source = "models: !include models.yaml\nagents: {}\n"
+        initial_source = monolith_source if adds_include else include_source
+        replacement_source = include_source if adds_include else monolith_source
+        path.write_text(initial_source, encoding="utf-8")
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        previous = _snapshot(api_app)
+        assert previous.runtime_config is not None
+        fingerprint_for_publish = config_lifecycle._source_fingerprint_for_published_runtime_config
+        raw_commits: list[config_lifecycle.ApiSnapshot] = []
+
+        def commit_raw_after_source_observation(
+            paths: constants.RuntimePaths,
+            payload: dict[str, Any],
+        ) -> tuple[str, frozenset[Path] | None, bool | None]:
+            observed = fingerprint_for_publish(paths, payload)
+            config_lifecycle.replace_raw_config_source(
+                _request_for(api_app),
+                replacement_source,
+                error_prefix="Failed to save raw configuration",
+            )
+            raw_commits.append(_snapshot(api_app))
+            assert raw_commits[-1].config_data == previous.config_data
+            return observed
+
+        monkeypatch.setattr(
+            config_lifecycle,
+            "_source_fingerprint_for_published_runtime_config",
+            commit_raw_after_source_observation,
+        )
+
+        assert config_lifecycle._publish_runtime_config_into_app(previous.runtime_config, runtime_paths, api_app)
+
+        committed = raw_commits[0]
+        published = _snapshot(api_app)
+        assert published.runtime_config is previous.runtime_config
+        assert published.revision == committed.revision + 1
+        assert published.generation == committed.generation
+        assert published.source_fingerprint == committed.source_fingerprint
+        assert published.source_files == committed.source_files
+        expected_source_files = {path.resolve()}
+        if includes_file:
+            assert committed.source_files != previous.source_files
+            if adds_include:
+                expected_source_files.add(models_path.resolve())
+        assert published.source_files == frozenset(expected_source_files)
+        assert published.uses_includes is adds_include
+        assert published.config_load_result is not None
+        assert published.config_load_result.uses_includes is adds_include
+        assert path.read_text(encoding="utf-8") == replacement_source
+
+        payload = copy.deepcopy(published.config_data)
+        payload["timezone"] = "Europe/Amsterdam"
+        if adds_include:
+            with pytest.raises(HTTPException) as exc_info:
+                config_lifecycle.replace_committed_config(
+                    _request_for(api_app),
+                    payload,
+                    error_prefix="Failed to save configuration",
+                )
+            assert exc_info.value.status_code == 409
+            assert exc_info.value.detail["code"] == "config_composed_from_includes"
+            assert path.read_text(encoding="utf-8") == replacement_source
+            assert _snapshot(api_app) is published
+        else:
+            config_lifecycle.replace_committed_config(
+                _request_for(api_app),
+                payload,
+                error_prefix="Failed to save configuration",
+            )
+            assert yaml.safe_load(path.read_text(encoding="utf-8"))["timezone"] == "Europe/Amsterdam"
 
     @pytest.mark.parametrize(
         "include_source",

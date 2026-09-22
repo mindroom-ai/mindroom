@@ -906,7 +906,14 @@ def _publish_runtime_config_into_app(
                 publish_config_path=str(runtime_paths.config_path),
             )
             return False
-        same_source = source_fingerprint == current.source_fingerprint
+        published_source_fingerprint: str | None = source_fingerprint
+        if current.revision != snapshot.revision:
+            # Equal payloads still permit runtime publication, but a newer
+            # commit owns the source metadata observed after this read began.
+            published_source_fingerprint = current.source_fingerprint
+            source_files = current.source_files
+            uses_includes = current.uses_includes
+        same_source = published_source_fingerprint == current.source_fingerprint
         published_uses_includes = uses_includes if uses_includes is not None else current.uses_includes
         current_state.snapshot = _published_snapshot(
             current,
@@ -914,7 +921,7 @@ def _publish_runtime_config_into_app(
             config_data=validated_payload,
             runtime_config=runtime_config,
             config_load_result=ConfigLoadResult(success=True, uses_includes=published_uses_includes),
-            source_fingerprint=source_fingerprint,
+            source_fingerprint=published_source_fingerprint,
             # A publish that cannot be tied to disk keeps the last known source
             # set so the watcher still covers the previous include files.
             source_files=source_files if source_files is not None else current.source_files,
