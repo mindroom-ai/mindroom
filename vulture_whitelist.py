@@ -146,7 +146,7 @@ _.validate_thread_key  # Pydantic field validator (src/mindroom/external_trigger
 _.validate_auth  # unused method (src/mindroom/external_triggers/store.py)
 post_external_trigger  # unused function (src/mindroom/api/external_triggers.py)
 _.validate_team_agents  # unused method (src/mindroom/config/main.py)
-_.validate_agent_participation  # Pydantic model validator (src/mindroom/config/main.py)
+_.validate_agent_judgments  # Pydantic model validator (src/mindroom/config/main.py)
 _.handle_endtag  # unused method (src/mindroom/matrix/message_builder.py)
 _._normalize_set_at  # unused method (src/mindroom/thread_tags.py)
 _._normalize_data  # unused method (src/mindroom/thread_tags.py)
@@ -398,3 +398,8 @@ session_status  # FastAPI Computer endpoint
 stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
+
+# AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.
+_.scrape_website
+_.custom_scrape_website
+_._execute_query

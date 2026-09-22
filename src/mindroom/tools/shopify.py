@@ -53,7 +53,13 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.agno.com/tools/toolkits/others/shopify",
-    helper_text="Create a custom app in your [Shopify Admin](https://admin.shopify.com/) to get an access token",
+    helper_text=(
+        "Create and install new apps through the [Dev Dashboard]"
+        "(https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard), "
+        "then follow its authentication steps and store the Admin API access token here. "
+        "Existing legacy custom apps can keep their token setup. "
+        "This tool does not issue or refresh tokens."
+    ),
     function_names=(
         "get_average_order_value",
         "get_customer_order_history",

@@ -422,8 +422,8 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
             raise ValueError(msg)
         return _get_matrix_services(instance.matrix_type).strip()
 
-    # Start full stack: MindRoom + matrix + auth
-    services = ["mindroom"]
+    # Start full stack: MindRoom + sandbox runner + matrix + auth
+    services = ["mindroom", "sandbox-runner"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
         services.extend(["postgres", "redis", "synapse", "wellknown"])
@@ -630,9 +630,33 @@ def _get_build_flag(
     return "--build"
 
 
+def _resolve_authelia_users_file(instance: Instance) -> Path:
+    """Resolve the users database from the configuration Compose will mount."""
+    compose = _get_docker_compose_files(instance)
+    cmd = f"{compose} -p {shlex.quote(instance.name)} config --format json --no-env-resolution"
+    result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        console.print(f"[red]✗[/red] Cannot resolve Authelia data directory for instance '{instance.name}'.")
+        console.print("  Check the instance environment and Docker Compose configuration before starting.")
+        raise typer.Exit(1)
+
+    try:
+        model = json.loads(result.stdout)
+        mounts = [mount for mount in model["services"]["authelia"]["volumes"] if mount["target"] == "/config"]
+        source = mounts[0]["source"] if len(mounts) == 1 and mounts[0]["type"] == "bind" else None
+    except (KeyError, TypeError, ValueError):
+        source = None
+    if not isinstance(source, str) or not Path(source).is_absolute():
+        console.print(f"[red]✗[/red] Cannot resolve Authelia users database for instance '{instance.name}'.")
+        raise typer.Exit(1)
+
+    # Compose escapes dollar signs when rendering an interpolated model.
+    return Path(source.replace("$$", "$")) / "users_database.yml"
+
+
 def _require_authelia_account_setup(instance: Instance) -> None:
     """Reject enabled accounts that still use the shipped public password hash."""
-    users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
+    users_file = _resolve_authelia_users_file(instance)
     try:
         database = yaml.safe_load(users_file.read_text())
     except (OSError, yaml.YAMLError) as error:

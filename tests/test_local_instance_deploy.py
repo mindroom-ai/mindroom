@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -14,6 +16,7 @@ from rich.console import Console
 
 from tests.conftest import normalize_console_output
 
+_REAL_SUBPROCESS_RUN = subprocess.run
 _SCRIPT_PATH = Path("local/instances/deploy/deploy.py")
 _MODULE_SPEC = importlib.util.spec_from_file_location("mindroom_local_instance_deploy", _SCRIPT_PATH)
 assert _MODULE_SPEC is not None
@@ -529,7 +532,7 @@ def authelia_launch(
     registry = deploy.Registry(instances={"alpha": instance})
     env_dir = tmp_path / "envs"
     env_dir.mkdir()
-    (env_dir / "alpha.env").write_text("INSTANCE_NAME=alpha\n")
+    (env_dir / "alpha.env").write_text(f"INSTANCE_NAME=alpha\nDATA_DIR={instance.data_dir}\n")
     users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
     users_file.parent.mkdir(parents=True)
     users_file.write_text((deploy.SCRIPT_DIR / "templates" / "authelia" / "users_database.yml").read_text())
@@ -538,6 +541,27 @@ def authelia_launch(
 
     def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
         commands.append(cmd)
+        if cmd.endswith(" config --format json --no-env-resolution"):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "services": {
+                            "authelia": {
+                                "volumes": [
+                                    {
+                                        "type": "bind",
+                                        "source": str(users_file.parent).replace("$", "$$"),
+                                        "target": "/config",
+                                        "bind": {"create_host_path": True},
+                                    },
+                                ],
+                            },
+                        },
+                    },
+                ),
+                stderr="",
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(deploy, "console", console)
@@ -602,7 +626,8 @@ def test_authelia_launch_rejects_enabled_public_credentials(
         _launch_authelia(command, use_registry=True)
 
     assert exc.value.exit_code == 1
-    assert commands == []
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
     assert users_file.read_bytes() == before
     assert (deploy.ENV_DIR / "alpha.env").read_bytes() == env_before
     assert instance.status == deploy.InstanceStatus.RUNNING
@@ -672,6 +697,7 @@ def test_authelia_matrix_only_launch_does_not_require_users(
     assert instance.status == deploy.InstanceStatus.PARTIAL
     assert not users_file.exists()
     assert _launched_services(commands) == ["tuwunel", "wellknown"]
+    assert not any(" config --format json" in cmd for cmd in commands)
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
@@ -691,6 +717,7 @@ def test_launch_without_authelia_does_not_require_users(
     services = _launched_services(commands)
     assert services.count("sandbox-runner") <= 1
     assert [service for service in services if service != "sandbox-runner"] == ["mindroom", "tuwunel", "wellknown"]
+    assert not any(" config --format json" in cmd for cmd in commands)
 
 
 @pytest.mark.parametrize("contents", [None, "users: [", "users: []", "users:\n  admin: null\n"])
@@ -709,7 +736,8 @@ def test_authelia_launch_rejects_unreadable_user_database(
         _launch_authelia("start")
 
     assert exc.value.exit_code == 1
-    assert commands == []
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
     assert str(users_file) in normalize_console_output(console.export_text())
 
 
@@ -782,7 +810,8 @@ def test_rejected_authelia_start_preserves_existing_instance_data(
     assert credential_file.read_text() == '{"api_key": "synthetic-test-value"}\n'
     assert not deploy.REGISTRY_FILE.exists()
     assert instance.status == deploy.InstanceStatus.RUNNING
-    assert commands == []
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
 
 
 def test_matrix_only_authelia_start_keeps_real_setup_and_existing_data(
@@ -806,3 +835,248 @@ def test_matrix_only_authelia_start_keeps_real_setup_and_existing_data(
     assert not users_file.exists()
     assert instance.status == deploy.InstanceStatus.PARTIAL
     assert any(" up -d" in command for command in commands)
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize("case", ["env_public", "shell_public", "shell_configured", "env_configured"])
+def test_authelia_launch_checks_compose_selected_database(  # noqa: PLR0915
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    case: str,
+) -> None:
+    """Validate the mounted database with real Compose interpolation before launch effects."""
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose is required for interpolation coverage")
+    version = _REAL_SUBPROCESS_RUN(
+        ["docker", "compose", "version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if version.returncode:
+        pytest.skip("Docker Compose is required for interpolation coverage")
+
+    instance, registry_users, commands, console = authelia_launch
+    public_text = registry_users.read_text()
+    configured = yaml.safe_load(public_text)
+    configured["users"]["admin"]["disabled"] = True
+    configured_text = yaml.safe_dump(configured)
+    registry_users.write_text(configured_text)
+    public_root = tmp_path / "public $literal $$double"
+    configured_root = tmp_path / "configured $literal $$double"
+    for root, text in [(public_root, public_text), (configured_root, configured_text)]:
+        users_file = root / "authelia" / "users_database.yml"
+        users_file.parent.mkdir(parents=True)
+        users_file.write_text(text)
+
+    env_root = public_root if case in {"env_public", "shell_configured"} else configured_root
+    (deploy.ENV_DIR / "alpha.env").write_text(
+        f"INSTANCE_NAME=alpha\nINSTANCE_DOMAIN=alpha.localhost\n"
+        f"DATA_DIR='{env_root}'\nMATRIX_SERVER_NAME=m-previous.localhost\n",
+    )
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    monkeypatch.delenv("INSTANCE_ENV_FILE", raising=False)
+    if case == "shell_public":
+        monkeypatch.setenv("DATA_DIR", str(public_root))
+    elif case == "shell_configured":
+        monkeypatch.setenv("DATA_DIR", str(configured_root))
+    elif case == "env_configured":
+        registry_users.write_text(public_text)
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{tmp_path / 'unused-docker.sock'}")
+
+    # Rejected starts must not reach real setup or clear the old Matrix database.
+    matrix_dir = Path(instance.data_dir) / "tuwunel"
+    matrix_dir.mkdir()
+    (matrix_dir / "database-marker").write_text("existing Matrix data\n")
+    deploy.REPO_ROOT.mkdir()
+    (deploy.REPO_ROOT / "config.yaml").write_text("agents: {}\n")
+    source_credentials = Path.home() / ".mindroom" / "credentials"
+    source_credentials.mkdir(parents=True)
+    (source_credentials / "synthetic.json").write_text('{"api_key": "synthetic-test-value"}\n')
+    fake_run = deploy.subprocess.run
+
+    def _run(cmd: str, **kwargs: object) -> subprocess.CompletedProcess[str] | SimpleNamespace:
+        if cmd.endswith(" config --format json --no-env-resolution"):
+            commands.append(cmd)
+            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+        return fake_run(cmd, **kwargs)
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+    before = {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    if case in {"env_public", "shell_public"}:
+        with pytest.raises(deploy.typer.Exit) as exc:
+            _launch_authelia(command, use_registry=True)
+        assert exc.value.exit_code == 1
+        assert commands
+        assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+        assert {
+            path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")
+        } == before
+        assert instance.status == deploy.InstanceStatus.RUNNING
+        text = normalize_console_output(console.export_text())
+        assert str(public_root / "authelia" / "users_database.yml") in text
+        assert "public example" in text
+    else:
+        _launch_authelia(command)
+        assert "authelia" in _launched_services(commands)
+    assert (public_root / "authelia" / "users_database.yml").read_text() == public_text
+    assert (configured_root / "authelia" / "users_database.yml").read_text() == configured_text
+
+
+@pytest.mark.parametrize("failure", ["command", "json", "missing_mount", "named_volume", "relative_source"])
+def test_authelia_launch_rejects_unresolved_compose_database(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """An unresolved mount must not fall back to a configured registry database."""
+    instance, users_file, commands, console = authelia_launch
+    configured = yaml.safe_load(users_file.read_text())
+    configured["users"]["admin"]["disabled"] = True
+    users_file.write_text(yaml.safe_dump(configured))
+    mount = {"type": "bind", "source": str(users_file.parent), "target": "/config"}
+    if failure == "missing_mount":
+        mount["target"] = "/other"
+    elif failure == "named_volume":
+        mount["type"] = "volume"
+    elif failure == "relative_source":
+        mount["source"] = "relative/authelia"
+    stdout = json.dumps({"services": {"authelia": {"volumes": [mount]}}})
+    if failure == "json":
+        stdout = "synthetic-credential-in-invalid-output"
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(
+            returncode=1 if failure == "command" else 0,
+            stdout=stdout,
+            stderr="synthetic-credential-in-error-output",
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+    before = {path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia("start", use_registry=True)
+    assert exc.value.exit_code == 1
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    assert {
+        path.relative_to(tmp_path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")
+    } == before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert "synthetic-credential" not in console.export_text()
+
+
+@pytest.mark.parametrize("matrix_type", [None, deploy.MatrixType.TUWUNEL, deploy.MatrixType.SYNAPSE])
+@pytest.mark.parametrize("auth_type", [None, deploy.AuthType.AUTHELIA])
+def test_full_stack_starts_its_configured_sandbox_runner(
+    tmp_path: Path,
+    matrix_type: deploy.MatrixType | None,
+    auth_type: deploy.AuthType | None,
+) -> None:
+    """Fresh full stacks select the worker endpoint configured for their execution tools."""
+    instance = _instance("alpha", matrix_type=matrix_type, data_root=tmp_path)
+    instance.auth_type = auth_type
+    selected = set(deploy._get_services_to_start(instance).split())
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    proxy_url = next(
+        value
+        for value in compose["services"]["mindroom"]["environment"]
+        if value.startswith("MINDROOM_SANDBOX_PROXY_URL=")
+    )
+    assert "sandbox-runner" in proxy_url
+    assert "sandbox-runner" in compose["services"]
+    assert "mindroom" in selected
+    assert "sandbox-runner" in selected
+
+
+@pytest.mark.parametrize("matrix_type", [deploy.MatrixType.TUWUNEL, deploy.MatrixType.SYNAPSE])
+def test_matrix_only_start_excludes_runtime_and_sandbox(
+    tmp_path: Path,
+    matrix_type: deploy.MatrixType,
+) -> None:
+    """Starting only the homeserver must not start either execution runtime."""
+    instance = _instance("alpha", matrix_type=matrix_type, data_root=tmp_path)
+    instance.auth_type = deploy.AuthType.AUTHELIA
+    selected = set(deploy._get_services_to_start(instance, only_matrix=True).split())
+    assert matrix_type.value in selected
+    assert selected.isdisjoint({"mindroom", "sandbox-runner", "authelia"})
+
+
+def test_sandbox_runner_waits_for_workspace_ownership() -> None:
+    """The configured non-root runner must wait for isolated volume initialization."""
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    services = compose["services"]
+    runner = services["sandbox-runner"]
+
+    assert runner.get("depends_on", {}).get("sandbox-workspace-init") == {
+        "condition": "service_completed_successfully",
+    }
+    initializer = services["sandbox-workspace-init"]
+    assert initializer["user"] == "0:0"
+    assert initializer["command"] == ["chown", "-R", "${UID:-1000}:${GID:-1000}", "/app/workspace"]
+    assert runner["user"] == "${UID:-1000}:${GID:-1000}"
+    assert initializer["volumes"] == runner["volumes"] == ["sandbox-workspace:/app/workspace"]
+    assert initializer["image"] == runner["image"]
+    assert initializer["build"] == runner["build"]
+    assert initializer["restart"] == "no"
+    assert initializer["network_mode"] == "none"
+    assert "env_file" not in initializer
+
+
+@pytest.mark.parametrize("force_recreate", [False, True], ids=["start", "restart"])
+def test_failed_sandbox_initialization_preserves_instance_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_recreate: bool,
+) -> None:
+    """A failed Compose initialization must not publish the instance as running."""
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    (env_dir / "alpha.env").write_text("INSTANCE_NAME=alpha\n")
+    registry_file = tmp_path / "instances.json"
+    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
+    monkeypatch.setattr(deploy, "REGISTRY_FILE", registry_file)
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    instance.status = deploy.InstanceStatus.STOPPED
+    registry = deploy.Registry(instances={"alpha": instance})
+    deploy.save_registry(registry)
+    original_registry = registry_file.read_bytes()
+    commands: list[str] = []
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        if cmd == "docker network inspect mynetwork" or cmd.startswith("docker ps --filter network=mynetwork "):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert " up -d" in cmd
+        assert cmd.endswith(" mindroom sandbox-runner")
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr='service "sandbox-workspace-init" did not complete successfully: exit 1',
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    with pytest.raises(deploy.typer.Exit) as exc_info:
+        deploy._bring_up_instance(
+            "alpha",
+            instance,
+            registry,
+            only_matrix=False,
+            use_registry=False,
+            registry_url=deploy.DEFAULT_REGISTRY,
+            no_build=True,
+            status_message="Starting instance...",
+            success_verb="started",
+            force_recreate=force_recreate,
+        )
+
+    assert exc_info.value.exit_code == 1
+    assert len(commands) == 3
+    assert (" --force-recreate " in commands[-1]) is force_recreate
+    assert instance.status == deploy.InstanceStatus.STOPPED
+    assert registry_file.read_bytes() == original_registry

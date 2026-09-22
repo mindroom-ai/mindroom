@@ -620,7 +620,7 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
         assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
-        assert "CLOUD_ML_REGION=us-central1" in env_content
+        assert "CLOUD_ML_REGION=global" in env_content
         assert "gcloud auth application-default login" in env_content
         assert "\nOPENAI_API_KEY=" not in env_content
         assert "\nOPENROUTER_API_KEY=" not in env_content
@@ -1407,7 +1407,7 @@ class TestConfigInit:
 
         env_content = (tmp_path / ".env").read_text()
         assert "ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id" in env_content
-        assert "CLOUD_ML_REGION=us-central1" in env_content
+        assert "CLOUD_ML_REGION=global" in env_content
 
 
 # ---------------------------------------------------------------------------

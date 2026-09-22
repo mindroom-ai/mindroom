@@ -533,7 +533,7 @@ export function WorkspaceDirectory() {
         </div>
         <Button variant="outline" size="sm" onClick={exportConfiguration}>
           <Download className="mr-1.5 h-4 w-4" aria-hidden="true" />
-          Export config
+          Export summary
         </Button>
       </header>
 

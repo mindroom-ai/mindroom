@@ -25,6 +25,7 @@ from mindroom.config.access import (
 from mindroom.config.knowledge import KnowledgeGitConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_agent_fields
 from mindroom.config.memory import AgentMemorySearchConfig, MemoryBackend  # noqa: TC001
+from mindroom.config.mid_turn import MidTurnConfig  # noqa: TC001
 from mindroom.config.models import (
     AgentLearningMode,
     CompactionOverrideConfig,
@@ -225,6 +226,10 @@ class AgentConfig(BaseModel):
     participation: ParticipationConfig | None = Field(
         default=None,
         description="Opt-in adaptive participation in existing multi-human threads across all rooms",
+    )
+    mid_turn: MidTurnConfig | None = Field(
+        default=None,
+        description="Opt-in judgments for messages queued during this agent's response across all rooms",
     )
     access: ResponderAccessConfig | None = Field(
         default=None,
