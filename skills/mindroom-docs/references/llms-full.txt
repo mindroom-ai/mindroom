@@ -10258,7 +10258,7 @@ add_comment("PROJ-123", "Reviewed and ready for testing.")
 
 `linear` exposes `get_user_details()`, `get_teams_details()`, `get_issue_details()`, `create_issue()`, `update_issue()`, `get_user_assigned_issues()`, `get_workflow_issues()`, and `get_high_priority_issues()`.
 All calls go to `https://api.linear.app/graphql`, and the tool expects a Linear API key in either `api_key` or `LINEAR_API_KEY`.
-Use the read methods to discover team, assignee, or workflow-state IDs needed for issue creation and updates.
+For `create_issue()`, obtain a `team_id` with `get_teams_details()` and, to assign the issue to yourself, use the current-user ID from `get_user_details()` as `assignee_id`.
 
 ### Configuration
 
