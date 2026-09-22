@@ -49,7 +49,22 @@ Registered agents, the internal service account, and configured `bot_accounts` d
 The pause defaults to three seconds and accepts finite values from zero to thirty seconds.
 A burst from one sender becomes one turn after the pause; explicit agent or human mentions bypass adaptive selection and end that sender's pending pause immediately.
 Single-human conversations keep their usual response behavior.
-A decision to stay silent produces no visible reply and does not record a completed assistant response.
+A decision to stay silent produces no text reply and does not record a completed assistant response.
+To acknowledge a deliberate decline, set `decline_reaction` to a reaction such as `"👍"` or `"👀"`:
+
+```yaml
+room_participation:
+  lobby:
+    decline_reaction: "👍"
+```
+
+Omit `decline_reaction` or set it to `null` to keep declines invisible.
+The reaction must be a nonblank string of at most 64 characters; composite emoji are supported.
+Each declining agent reacts once to the latest message in the coalesced turn, using the same behavior for all judgment backends.
+Failed checks, preparation errors, and cancellation do not trigger a decline reaction.
+Reaction delivery is best effort: failed sends are logged without generating an error reply, and replays use a stable Matrix transaction ID.
+Choose an emoji appropriate for the room: 👍 can imply agreement with the message.
+
 By default, the replying agent's own model makes the decision using its prepared conversation and tool definitions, with tool execution disabled.
 If that same-model check fails, the agent stays quiet.
 The following provider restrictions apply to this same-model check; a valid decision from a separate judgment backend bypasses the check.

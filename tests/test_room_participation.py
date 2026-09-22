@@ -75,6 +75,20 @@ def test_typesafe_requires_room_opt_in() -> None:
     assert room.judgment.threshold == 0.9
 
 
+@pytest.mark.parametrize("reaction", [None, "👍", "👀", "👍🏽"])
+def test_decline_reaction_is_optional(reaction: str | None) -> None:
+    """Rooms can retain silence or select a reaction, including composite emoji."""
+    assert RoomParticipationConfig().decline_reaction is None
+    assert RoomParticipationConfig.model_validate({"decline_reaction": reaction}).decline_reaction == reaction
+
+
+@pytest.mark.parametrize("reaction", ["", "   ", "\n", "x" * 65, 123])
+def test_decline_reaction_rejects_invalid_keys(reaction: object) -> None:
+    """Reaction keys must be nonblank, bounded strings."""
+    with pytest.raises(ValidationError):
+        RoomParticipationConfig.model_validate({"decline_reaction": reaction})
+
+
 @pytest.mark.parametrize(
     "settings",
     [

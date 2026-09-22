@@ -34,7 +34,7 @@ class ParticipationDecision(BaseModel):
     """Validated, immutable participation outcome."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    action: Literal["respond", "stay_silent"]
+    action: Literal["respond", "stay_silent", "error"]
     reason: str = Field(min_length=1, max_length=500)
 
 
@@ -58,17 +58,22 @@ class ParticipationGate:
 
     @property
     def approved(self) -> bool:
-        """Whether the turn may produce visible activity and execute tools."""
+        """Whether the turn may generate a reply and execute tools."""
         return self.decision is not None and self.decision.action == "respond"
 
     @property
     def is_silent(self) -> bool:
-        """Whether a completed check declined participation."""
+        """Whether a settled turn must not generate a reply, including failed checks."""
+        return self.decision is not None and self.decision.action != "respond"
+
+    @property
+    def is_declined(self) -> bool:
+        """Whether a valid judgment deliberately chose not to reply."""
         return self.decision is not None and self.decision.action == "stay_silent"
 
     def decline(self, reason: str) -> bool:
-        """Settle quietly unless already approved; return whether the turn is silent."""
-        self._settle(ParticipationDecision(action="stay_silent", reason=reason))
+        """Settle a failed turn quietly unless already decided; never authorize a reaction."""
+        self._settle(ParticipationDecision(action="error", reason=reason))
         return self.is_silent
 
     def approve_existing_response(self) -> None:

@@ -12,4 +12,5 @@ class RoomParticipationConfig(BaseModel):
 
     debounce_seconds: float = Field(default=3.0, ge=0.0, le=30.0, allow_inf_nan=False)
     instructions: str = ""
+    decline_reaction: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"\S")
     judgment: JudgmentConfig | None = None

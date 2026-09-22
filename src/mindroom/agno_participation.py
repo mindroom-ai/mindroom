@@ -56,7 +56,11 @@ def _parse_decision(content: str) -> ParticipationDecision:
     if len(values) != 1:
         msg = "Participation decision must contain exactly one JSON object"
         raise ValueError(msg)
-    return ParticipationDecision.model_validate(values[0])
+    decision = ParticipationDecision.model_validate(values[0])
+    if decision.action == "error":
+        msg = "Participation model must choose respond or stay_silent"
+        raise ValueError(msg)
+    return decision
 
 
 def _external_decision_messages(messages: list[Message]) -> tuple[JudgmentMessage, ...] | None:
@@ -113,11 +117,11 @@ async def _request_decision(
         if run_response is not None and run_response.metrics is not None and response.response_usage is not None:
             accumulate_model_metrics(response, model, model.model_type, run_response.metrics)
         if response.tool_calls or not isinstance(response.content, str):
-            return ParticipationDecision(action="stay_silent", reason="invalid_decision")
+            return ParticipationDecision(action="error", reason="invalid_decision")
         return _parse_decision(response.content)
     except Exception as error:
         logger.exception("Participation decision failed", error_type=type(error).__name__)
-        return ParticipationDecision(action="stay_silent", reason="decision_failed")
+        return ParticipationDecision(action="error", reason="decision_failed")
 
 
 @contextmanager

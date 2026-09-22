@@ -242,6 +242,65 @@ def _response_recovery_bot(journal_store: EventJournalStore, turn_store: TurnSto
     return bot
 
 
+async def test_decline_reaction_reuses_transaction_across_gateway_restarts(tmp_path: Path) -> None:
+    """Replaying an acknowledgement must use the same transaction, even if its configured emoji changes."""
+    sent: list[dict[str, object]] = []
+
+    async def send(**kwargs: object) -> nio.RoomSendResponse:
+        sent.append(kwargs)
+        return nio.RoomSendResponse.from_dict({"event_id": "$reaction"}, _ROOM_ID)
+
+    for emoji in ("👍", "👀"):
+        gateway = _gateway(tmp_path)
+        gateway.deps.runtime.client.room_send = send
+        await gateway.send_decline_reaction(
+            identity=_identity(),
+            room_id=_ROOM_ID,
+            event_id="$latest",
+            key=emoji,
+        )
+    assert len(sent) == 2
+    assert sent[0]["tx_id"] == sent[1]["tx_id"]
+    assert sent[0]["message_type"] == "m.reaction"
+    assert sent[0]["content"] == {
+        "m.relates_to": {"rel_type": "m.annotation", "event_id": "$latest", "key": "👍"},
+    }
+    await gateway.send_decline_reaction(
+        identity=_identity(),
+        room_id=_ROOM_ID,
+        event_id="$another",
+        key="👍",
+    )
+    assert sent[2]["tx_id"] != sent[0]["tx_id"]
+
+
+async def test_decline_reaction_respects_retired_membership(tmp_path: Path) -> None:
+    """An agent that lost this turn's room membership must not leave an acknowledgement."""
+    outbox = FakeOutbox()
+    outbox.ended_membership_turn_ids.add("$cause")
+    gateway = _gateway(tmp_path, outbox=outbox)
+    await gateway.send_decline_reaction(identity=_identity(), room_id=_ROOM_ID, event_id="$cause", key="👍")
+    gateway.deps.runtime.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("offline"), nio.RoomSendError("denied", "M_FORBIDDEN")])
+async def test_decline_reaction_delivery_failure_is_best_effort(tmp_path: Path, failure: object) -> None:
+    """Transport errors are logged without reopening a declined response."""
+    gateway = _gateway(tmp_path)
+    gateway.deps.runtime.client.room_send.side_effect = failure if isinstance(failure, Exception) else None
+    gateway.deps.runtime.client.room_send.return_value = failure
+    await gateway.send_decline_reaction(identity=_identity(), room_id=_ROOM_ID, event_id="$cause", key="👍")
+    gateway.deps.logger.warning.assert_called_once()
+
+
+async def test_decline_reaction_preserves_cancellation(tmp_path: Path) -> None:
+    """Stopping a reaction send must still cancel its owning response turn."""
+    gateway = _gateway(tmp_path)
+    gateway.deps.runtime.client.room_send.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.send_decline_reaction(identity=_identity(), room_id=_ROOM_ID, event_id="$cause", key="👍")
+
+
 class TestTurnDeliveryGoesThroughTheOutbox:
     """A send that belongs to a turn is durable before it is attempted."""
 

@@ -60,10 +60,11 @@ from mindroom.matrix.client_delivery import (
     resolve_room_encryption_outcome,
     send_message_outcome,
     send_message_result,
+    send_room_event_result,
 )
 from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
 from mindroom.matrix.mentions import format_message_with_mentions
-from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.message_builder import build_message_content, build_reaction_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
@@ -522,6 +523,33 @@ class DeliveryGateway:
             msg = "Matrix client is not ready for response delivery"
             raise RuntimeError(msg)
         return client
+
+    async def send_decline_reaction(
+        self,
+        *,
+        identity: ResponseIdentity,
+        room_id: str,
+        event_id: str,
+        key: str,
+    ) -> None:
+        """Best-effort acknowledgement of a deliberate decline, stable across replays."""
+        if not await self._visible_notice_is_current(identity, room_id):
+            return
+        client = self._client()
+        # Exclude the emoji so a config reload cannot duplicate a replayed reaction.
+        transaction_id = str(
+            uuid5(NAMESPACE_URL, json.dumps(["mindroom-participation-decline", client.user_id, room_id, event_id])),
+        )
+        result = await send_room_event_result(
+            client,
+            room_id,
+            "m.reaction",
+            build_reaction_content(event_id, key),
+            transaction_id=transaction_id,
+            operation="participation_decline_reaction",
+        )
+        if not isinstance(result, nio.RoomSendResponse):
+            self.deps.logger.warning("Participation decline reaction failed", room_id=room_id, event_id=event_id)
 
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
