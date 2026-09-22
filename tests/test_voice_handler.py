@@ -713,14 +713,27 @@ class TestVoiceHandler:
         assert result == "turn on the lights"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run"])
+    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run", "timeout", "empty"])
+    @pytest.mark.parametrize("unavailable_mention", [False, True])
     async def test_cleanup_failure_preserves_recognized_transcript(
         self,
         failure_stage: str,
+        unavailable_mention: bool,
     ) -> None:
-        """Optional cleanup failures never replace recognized speech with diagnostics."""
-        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        """Cleanup fallback retains recognized speech and room-scoped mention filtering."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "helper": AgentConfig(display_name="Helper", role="Help"),
+                    "private": AgentConfig(display_name="Private", role="Help privately"),
+                },
+                voice=VoiceConfig(enabled=True),
+            ),
+        )
         transcript = "Please remind me about tomorrow's appointment."
+        if unavailable_mention:
+            transcript = "@helper please ask @private about tomorrow's appointment."
+        expected = transcript.replace("@private", "private")
 
         class CleanupAgent:
             def __init__(self, **_kwargs: object) -> None:
@@ -729,6 +742,10 @@ class TestVoiceHandler:
                     raise RuntimeError(message)
 
             async def arun(self, *_args: object, **_kwargs: object) -> None:
+                if failure_stage == "empty":
+                    return
+                if failure_stage == "timeout":
+                    raise TimeoutError
                 message = "cleanup provider failed"
                 raise RuntimeError(message)
 
@@ -739,9 +756,14 @@ class TestVoiceHandler:
             ),
             patch("mindroom.voice_handler.Agent", CleanupAgent),
         ):
-            result = await _process_transcription(transcript, config)
+            result = await _process_transcription(
+                transcript,
+                config,
+                available_agent_names=["helper"],
+                available_team_names=[],
+            )
 
-        assert result == transcript
+        assert result == expected
 
     @pytest.mark.asyncio
     async def test_cleanup_cancellation_propagates(self) -> None:
