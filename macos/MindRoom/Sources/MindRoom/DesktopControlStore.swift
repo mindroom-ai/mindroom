@@ -39,6 +39,7 @@ final class DesktopControlStore: ObservableObject {
     private var observedConfigRevision = 0
     private var observedBrowserConfiguration: DesktopBrowserStatus?
     private var addedApplicationURLs = Set<URL>()
+    private var didHydrateSession = false
     private var pendingOperationCount = 0
 
     init(helper: DesktopBridgeProcess? = nil) {
@@ -306,6 +307,13 @@ final class DesktopControlStore: ObservableObject {
     }
 
     func hydrateConfiguration(from value: DesktopStatus) {
+        if !didHydrateSession, value.pairing.sessionState == .ready {
+            didHydrateSession = true
+            if matrixUserID.isEmpty, homeserver == "https://mindroom.chat" {
+                homeserver = value.pairing.homeserver ?? homeserver
+                matrixUserID = value.pairing.userID ?? ""
+            }
+        }
         let shouldHydrateConfiguration = value.config.state == "ready" && observedConfigRevision != value.config.revision
         if observedConfigRevision != value.config.revision {
             confirmedIdentity = nil

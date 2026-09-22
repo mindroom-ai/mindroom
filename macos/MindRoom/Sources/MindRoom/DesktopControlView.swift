@@ -6,6 +6,7 @@ struct DesktopControlView: View {
   @State private var isBrowserExpanded = false
   @State private var isDiagnosticsExpanded = false
   @State private var isGrantConfirmationPresented = false
+  @State private var isReplaceSessionConfirmationPresented = false
   @State private var didChooseInitialSetupState = false
 
   var body: some View {
@@ -35,6 +36,18 @@ struct DesktopControlView: View {
       Button("Cancel", role: .cancel) {}
     } message: {
       Text(savedControlSummary)
+    }
+    .confirmationDialog(
+      "Replace the saved Matrix session?",
+      isPresented: $isReplaceSessionConfirmationPresented,
+      titleVisibility: .visible
+    ) {
+      Button("Sign In and Replace Session", role: .destructive) { store.login(replace: true) }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(
+        "Sign in to \(store.homeserver)\(store.matrixUserID.isEmpty ? "" : " as \(store.matrixUserID)"). This creates a new Matrix device and replaces the saved login on this Mac. You will need to pair the new device again. Cancel to keep using the saved session."
+      )
     }
   }
 
@@ -141,10 +154,24 @@ struct DesktopControlView: View {
             text: $store.matrixPassword
           )
           HStack {
-            Button("Sign In") { store.login() }
-              .disabled(store.isBusy || store.accessGatewayRequired)
-            Text(store.status.pairing.deviceID.map { "Device \($0)" } ?? "No local Matrix device")
-              .foregroundStyle(.secondary)
+            if store.status.pairing.sessionState == .missing {
+              Button("Sign In") { store.login() }
+            } else {
+              Button("Replace Session…") { isReplaceSessionConfirmationPresented = true }
+            }
+          }
+          .disabled(store.isBusy || store.accessGatewayRequired || store.status.canStopBridge)
+          if store.status.pairing.sessionState == .ready {
+            Text("Saved device \(store.status.pairing.deviceID ?? "")")
+            Text("\(store.status.pairing.userID ?? "") · \(store.status.pairing.homeserver ?? "")")
+              .font(.callout).foregroundStyle(.secondary)
+            Text("Use this saved device to finish pairing. You do not need to sign in again.")
+              .font(.callout).foregroundStyle(.secondary)
+          } else if store.status.pairing.sessionState == .invalid {
+            Text("The saved Matrix session cannot be read. Check its file permissions or restore it before continuing, or replace it by signing in again.")
+              .font(.callout).foregroundStyle(.orange)
+          } else {
+            Text("No local Matrix device").foregroundStyle(.secondary)
           }
 
           Divider()

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -106,6 +107,61 @@ def test_session_missing_path_has_setup_instruction(tmp_path: Path) -> None:
         load_desktop_session(tmp_path / "missing.json")
 
 
+def test_session_rejects_directory_before_reading(tmp_path: Path) -> None:
+    """Every consumer rejects non-regular session paths."""
+    path = tmp_path / "matrix_session.json"
+    path.mkdir(mode=0o700)
+
+    with pytest.raises(DesktopSessionError, match="regular file"):
+        load_desktop_session(path)
+
+
+def test_session_save_never_copies_token_into_directory(tmp_path: Path) -> None:
+    """A failed publication must not move the secret to an unintended path."""
+    path = tmp_path / "matrix_session.json"
+    path.mkdir(mode=0o700)
+    try:
+        with pytest.raises(IsADirectoryError):
+            save_desktop_session(path, _session())
+    finally:
+        path.chmod(0o700)
+    assert list(path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix descriptor and FIFO semantics")
+def test_session_reads_validated_descriptor_when_path_is_swapped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path swap cannot redirect the read after the opened file is checked."""
+    path = tmp_path / "matrix_session.json"
+    save_desktop_session(path, _session())
+    fstat = os.fstat
+
+    def swap_after_inspection(descriptor: int) -> os.stat_result:
+        result = fstat(descriptor)
+        path.unlink()
+        os.mkfifo(path, 0o600)
+        return result
+
+    monkeypatch.setattr(os, "fstat", swap_after_inspection)
+
+    assert load_desktop_session(path) == _session()
+    assert stat.S_ISFIFO(path.stat().st_mode)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix no-follow semantics")
+def test_session_refuses_symlink(tmp_path: Path) -> None:
+    """The saved session path must name the credential file itself."""
+    target = tmp_path / "target.json"
+    save_desktop_session(target, _session())
+    path = tmp_path / "matrix_session.json"
+    path.symlink_to(target)
+
+    with pytest.raises(OSError, match="Too many levels of symbolic links"):
+        load_desktop_session(path)
+
+
 def test_session_preserves_unexpected_filesystem_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -119,7 +175,7 @@ def test_session_preserves_unexpected_filesystem_errors(
         message = "test permission failure"
         raise PermissionError(message)
 
-    monkeypatch.setattr(path.__class__, "read_text", denied)
+    monkeypatch.setattr(os, "open", denied)
 
     with pytest.raises(PermissionError, match="test permission failure"):
         load_desktop_session(path)
