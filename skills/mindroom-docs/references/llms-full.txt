@@ -20304,18 +20304,20 @@ Rotate the Google OAuth client in response to observed client abuse or as an ope
 
 ## Trust Model (Hosted Server vs Message Privacy)
 
-For message *content*, this setup can be effectively zero-trust toward the homeserver operator when rooms are end-to-end encrypted.
+In end-to-end encrypted rooms, the homeserver stores message bodies as ciphertext.
+The local `mindroom run` process holds your agent account keys and performs decryption locally.
+Content privacy depends on authentic recipient devices and trusted clients.
 
-- In E2EE rooms, the homeserver stores ciphertext and cannot read message bodies.
-- The local `mindroom run` process holds your agent account keys and performs decryption locally.
+MindRoom currently shares outbound encryption keys with unverified devices belonging to room members; it does not require recipient-device verification before sending.
+An actively malicious homeserver that advertises an attacker-controlled device for a participating account can therefore receive keys when MindRoom next shares an outbound session with that device.
+This limits protection against an active homeserver operator; it does not imply access to arbitrary stored history.
+See the [Matrix E2EE implementation guide](https://matrix.org/docs/matrix-concepts/end-to-end-encryption/) for device discovery, session sharing, and verification.
 
 Important limits:
 
 - This does **not** hide metadata (room membership, timestamps, event IDs, sender IDs, traffic patterns).
 - If a room is not encrypted, the homeserver can read plaintext.
 - Any model/tool providers you send content to can still see the prompts/data you send to them.
-
-So the precise claim is: encrypted Matrix message content is protected from the hosted homeserver, not that every part of the system is universally invisible.
 
 ## If You Self-Host Later
 
