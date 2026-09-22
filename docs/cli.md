@@ -169,39 +169,32 @@ Start MindRoom with your configuration.
  - Manages agent room memberships
  - Starts the bundled dashboard/API server (disable with --no-api)
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --log-level                -l              TEXT     Set the logging level    │
-│                                                     (DEBUG, INFO, WARNING,   │
-│                                                     ERROR)                   │
-│                                                     [env var: LOG_LEVEL]     │
-│                                                     [default: INFO]          │
-│ --config                   -c              PATH     Use this config file     │
-│                                                     path. Defaults the       │
-│                                                     storage location to the  │
-│                                                     selected config          │
-│                                                     directory unless         │
-│                                                     --storage-path is set.   │
-│ --storage-path             -s              PATH     Base directory for       │
-│                                                     persistent MindRoom data │
-│                                                     (state, sessions,        │
-│                                                     tracking)                │
-│ --bootstrap-config-bundle                  PATH     Initialize the selected  │
-│                                                     config directory from    │
-│                                                     this bundle only when    │
-│                                                     the directory is absent. │
-│ --api                          --no-api             Start the bundled        │
-│                                                     dashboard/API server     │
-│                                                     alongside the bot        │
-│                                                     [default: api]           │
-│ --api-port                                 INTEGER  Port for the bundled     │
-│                                                     dashboard/API server     │
-│                                                     [default: 8765]          │
-│ --api-host                                 TEXT     Host for the bundled     │
-│                                                     dashboard/API server     │
-│                                                     [default: 0.0.0.0]       │
-│ --help                     -h                       Show this message and    │
-│                                                     exit.                    │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --log-level                -l              TEXT     Set the logging level (DEBUG,      │
+│                                                     INFO, WARNING, ERROR)              │
+│                                                     [env var: LOG_LEVEL]               │
+│                                                     [default: INFO]                    │
+│ --config                   -c              PATH     Use this config file path.         │
+│                                                     Defaults the storage location to   │
+│                                                     the selected config directory      │
+│                                                     unless --storage-path is set.      │
+│ --storage-path             -s              PATH     Base directory for persistent      │
+│                                                     MindRoom data (state, sessions,    │
+│                                                     tracking)                          │
+│ --bootstrap-config-bundle                  PATH     Initialize the selected config     │
+│                                                     directory from this bundle only    │
+│                                                     when the directory is absent.      │
+│ --api                          --no-api             Start the bundled dashboard/API    │
+│                                                     server alongside the bot           │
+│                                                     [default: api]                     │
+│ --api-port                                 INTEGER  Port for the bundled dashboard/API │
+│                                                     server                             │
+│                                                     [default: 8765]                    │
+│ --api-host                                 TEXT     Host for the bundled dashboard/API │
+│                                                     server                             │
+│                                                     [default: 0.0.0.0]                 │
+│ --help                     -h                       Show this message and exit.        │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
@@ -1065,26 +1058,24 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 
  Manage MindRoom configuration files.
 
-╭─ Options ────────────────────────────────────────────────────────────────────╮
-│ --help  -h        Show this message and exit.                                │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Commands ───────────────────────────────────────────────────────────────────╮
-│ init             Create a starter config.yaml with a personal agent and      │
-│                  model.                                                      │
-│ show             Display the current config file with syntax highlighting.   │
-│ edit             Open config.yaml in your default editor.                    │
-│ validate         Validate config.yaml and check for common issues.           │
-│ resolve          Print the fully merged config YAML with all !include tags   │
-│                  resolved.                                                   │
-│ path             Show the resolved config file path and search locations.    │
-│ migrate          Migrate config.yaml to membership access settings.          │
-│ fingerprint      Print the config source SHA-256, including all transitively │
-│                  included files.                                             │
-│ install-bundle   Validate and install a complete tree; use check-applied to  │
-│                  confirm runtime reload.                                     │
-│ check-applied    Confirm config application; exit 0 applied, 1               │
-│                  pending/mismatch, 2 failed/restart-required/unavailable.    │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
+│ --help  -h        Show this message and exit.                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
+│ init             Create a starter config.yaml with a personal agent and model.         │
+│ show             Display the current config file with syntax highlighting.             │
+│ edit             Open config.yaml in your default editor.                              │
+│ validate         Validate config.yaml and check for common issues.                     │
+│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
+│ path             Show the resolved config file path and search locations.              │
+│ migrate          Migrate config.yaml to membership access settings.                    │
+│ fingerprint      Print the config source SHA-256, including all transitively included  │
+│                  files.                                                                │
+│ install-bundle   Validate and install a complete tree; use check-applied to confirm    │
+│                  runtime reload.                                                       │
+│ check-applied    Confirm config application; exit 0 applied, 1 pending/mismatch, 2     │
+│                  failed/restart-required/unavailable.                                  │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
 ```
