@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="googlesearch",
     display_name="Google Search",
-    description="Search Google for web results using the WebSearch backend",
+    description="Search web and news through DDGS with a requested Google backend and automatic fallback",
     category=ToolCategory.RESEARCH,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,

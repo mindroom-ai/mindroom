@@ -60,7 +60,7 @@ Before starting ANY test, you MUST understand these fundamental rules from the M
 - In thread mode, the agent replies in a thread; continue with `matty thread-reply`
 - In room mode, read `matty messages` and continue with `matty send` in the room
 - A persisted room override takes precedence over configured modes; per-turn overrides and trusted automation can change the delivery target, so inspect actual event relations
-- Agents stream responses by editing messages (may show "⋯" while typing)
+- Agents stream responses by editing messages; `io.mindroom.stream_status` records progress and completion.
 - Responses can take 10-30+ seconds to complete
 
 ## Testing Methodology
@@ -86,7 +86,7 @@ Use the [Response Time Measurement Protocol](#response-time-measurement-protocol
 
 For EVERY agent interaction:
 1. Record the send timestamp, sent event ID, expected sender, room, and effective room/thread mode.
-2. Observe the matching response and its edits until a terminal outcome or the declared deadline.
+2. Observe the matching response and its edits until a terminal outcome or the declared deadline, inspecting the latest `io.mindroom.stream_status` through a client or event view that exposes it.
 3. Record first-response and terminal-response observation times separately.
 4. Record errors, cancellations, interruptions, and timeouts explicitly; only `completed` is successful completion.
 5. Verify the expected answer and tool outputs before marking the test successful.
@@ -651,7 +651,7 @@ After each testing session, create a comprehensive report:
 
 ## Important Reminders
 
-- ALWAYS observe a terminal response or record the declared timeout
+- ALWAYS observe a terminal response or record the declared timeout; for streaming responses, verify the latest `io.mindroom.stream_status` before checking the full response.
 - Continue conversations in the effective room or thread
 - ALWAYS document unexpected behaviors
 - ALWAYS test both success and failure cases

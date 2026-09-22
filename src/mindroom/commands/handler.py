@@ -86,6 +86,7 @@ def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) ->
         matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.agent_reply_memberships,
         responder_candidates_for_room=context.responder_candidates_for_room,
+        config_provider=context.config_provider,
     )
 
 
@@ -135,6 +136,7 @@ class CommandHandlerContext:
     reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
     matrix_admin: HookMatrixAdmin | None = None
     controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
+    config_provider: Callable[[], Config | None] | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config) -> str:

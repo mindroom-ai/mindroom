@@ -18,9 +18,15 @@ Room membership is not the authorization boundary either, because two bots joine
 
 `EventJournalStore.principal()` hands out a `PrincipalStore` with the principal bound into the object.
 
-No operational method on that view takes a `principal_id` argument, so reading or settling another bot's rows is not something a caller can express rather than something it is trusted not to do.
+Ordinary event, conversation, membership, and delivery operations take their principal from that bound view rather than accepting another bot's principal as an argument.
 
-Turn records are the one deliberate exception, scoped to the agent name alone.
+Internal approval coordination is an explicit exception: the router owns Matrix approval cards, while the responding entity owns the paused continuation.
+Card reservation accepts the continuation's principal and validates its waiting state, generation, publication claim, complete exact-call set, and the card owner's membership epoch.
+A decision follows the persisted card-to-continuation relationship to update that owner's exact call.
+The runtime decision path also checks trusted card identity and transport sender, the expected human approver, and current responder access.
+This is a privileged in-process coordination boundary, not an API for ordinary conversation readers to select another principal.
+
+Turn records use a separate ownership rule, scoped to the agent name alone.
 
 A turn record is the proof that a message was already answered, which stays true across a re-login, and scoping it per principal would make a bot that reauthenticates under a new Matrix ID answer every outstanding message a second time.
 
@@ -28,7 +34,9 @@ That record still holds conversation-derived text in `record_json`, so it is con
 
 Both backends run the same schema statements.
 
-PostgreSQL is not partitioned into per-principal namespaces: separation is the same `principal_id` predicate SQLite uses, applied in every statement, and a query that omitted it would cross principals rather than fail.
+PostgreSQL is not partitioned into per-principal namespaces.
+Both backends use principal-bound predicates for ordinary reads and mutations, while approval coordination validates persisted domain relationships that can cross the card and continuation owners.
+The shared database is not a separate database namespace or connection per principal.
 
 ## Where durable plaintext lives
 
@@ -46,10 +54,11 @@ Unreadable live and recovered ciphertext remains Nio's recovery responsibility a
 
 `visible_messages.content_json` holds the current visible body of one logical message and is the general long-lived conversation-body projection.
 
-The projection keeps no edit history, so an edit overwrites the body and the previous text is gone.
+The projection keeps no edit history, so an edit overwrites the body in that projection; other tables can retain the copies described below.
 
-`interactive_questions.question_json` duplicates the active question text and options while its visible-message row survives.
-It is deleted when the current question revision is cleared, and its foreign key also cascades when the visible message is deleted.
+`interactive_questions.question_json` stores immutable per-revision question text and options, including superseded revisions needed for source replay and consumption proof.
+Changing the visible revision can deactivate a prompt without erasing its stored revision.
+Redacting a question revision deletes its row; deleting the logical visible message, including membership cleanup, cascades to all of its question revisions.
 
 `turn_records.record_json` retains durable turn identity, outcome, and regeneration content.
 
@@ -63,6 +72,12 @@ Records with other unfinished turn facts retain the existing recovery protection
 Redacting the held edit itself clears its payload immediately but retains its identity and ordering until the target arrives, so the target requests a refetch for any earlier surviving revision.
 
 `matrix_delivery_outbox.payload_json` holds each ordinary response or tool-approval event frozen before it is sent.
+`matrix_delivery_outbox.result_json` stores local completion and recovery facts separately from Matrix wire content.
+Those facts can include source prompts inside a serialized prepared edit turn record, plus final response text and interactive metadata.
+
+Acknowledgement does not clear ordinary delivery payload or result columns, and projection redaction or membership cleanup does not by itself remove those copies.
+Ordinary acknowledged and retired rows currently have no general TTL or payload-pruning path.
+Specialized approval cleanup and withdrawal of a superseded, unattempted `INITIAL` delivery are separate cases; they do not provide general ordinary-response pruning.
 
 `approval_cards` retains only the durable delivery reference, exact continuation and tool-call identity, and membership epoch while a card is actionable.
 
@@ -184,7 +199,8 @@ The one-time upgrade resets pre-durable membership tenures and converts v2/v3 co
 
 ## Storage and connections
 
-SQLite stores the journal at `mindroom_data/tracking/event_journal.db`, and PostgreSQL is selected by configuring a database URL instead.
+SQLite stores the journal at `<storage>/tracking/event_journal.db`, which is `mindroom_data/tracking/event_journal.db` with the default storage root.
+PostgreSQL requires `event_journal.backend: postgres` and a connection URL; see [Event Journal configuration](../configuration/index.md#event-journal) for URL resolution and restart requirements.
 
 That URL carries a password, so it is excluded from the backend's dataclass representation, which would otherwise reach logs and tracebacks without anyone choosing to print it.
 

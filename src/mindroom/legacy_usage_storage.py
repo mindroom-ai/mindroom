@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
 # LEGACY_COMPAT: Usage derived from disposable conversation rows and session blobs.
 # Legacy format: Agno 3 run_data rows and retained Agno 2 single/double-encoded runs blobs.
-# Last legacy release: Schema-based recovery; all releases through v2026.9.186 lack the usage table.
-# Replacement: Unreleased independent usage snapshots; no historical billing completeness is inferred.
-# Handling: Seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
+# Last legacy release: v2026.9.190, the last verified native writer without an independent usage table.
+# Replacement: v2026.9.191 introduced independent usage snapshots; no historical billing completeness is inferred.
+# Handling: Detect by schema; seed once transactionally, prefer current rows, retain unknown dates and content-free gaps.
 # Coverage: tests/test_legacy_usage_storage.py.
 def migrate_usage_database(path: Path, session_table: str) -> None:
     """Seed an existing database once; publication and all imported records commit together."""

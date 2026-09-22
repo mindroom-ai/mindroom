@@ -87,6 +87,8 @@ It controls the returned tool output, not where the Matrix message is delivered.
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit the sending account's messages.
 `read` returns message event IDs; thread reads also include edit options for editable messages.
+Room-timeline reads decrypt encrypted messages with the agent's available keys and omit messages they cannot decrypt.
+The room read limit counts fetched events, so edits and unreadable messages can leave fewer visible messages than `limit`.
 Room access checks apply before cross-room operations.
 Calls are rate limited to 12 actions per 30 seconds per agent, room, and requester; each file costs one additional action.
 

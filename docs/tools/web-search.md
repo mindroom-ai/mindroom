@@ -14,7 +14,7 @@ Use these tools when you need general web discovery, current-events search, answ
 ## Tools On This Page
 
 - [`duckduckgo`] - No-key DuckDuckGo-backed web and news search through the shared DDGS backend.
-- [`googlesearch`] - No-key Google-backed web and news search through the shared DDGS backend.
+- [`googlesearch`] - No-key DDGS web and news search with a requested Google backend and automatic fallback.
 - [`baidusearch`] - No-key Baidu search tuned for Chinese-language discovery.
 - [`tavily`] - API-backed current-information search with optional answer, context, and URL extraction modes.
 - [`exa`] - API-backed research search with content fetching, similar-page lookup, answers, and deep research tasks.
@@ -84,12 +84,11 @@ search_news("Matrix ecosystem", max_results=5)
 ### Notes
 
 - Pick `duckduckgo` when you want the lowest-friction no-key option for general web and news search.
-- Pick `googlesearch` instead when you want Google-style ranking but still do not want a paid API.
 - Pick `tavily`, `exa`, `serper`, or `serpapi` when you need provider-backed APIs, answer generation, or more vertical-specific search behavior.
 
 ## [`googlesearch`]
 
-`googlesearch` uses the same DDGS-powered search surface as `duckduckgo`, but it hardwires the backend to Google.
+`googlesearch` uses the same DDGS-powered search surface as `duckduckgo` and requests the Google backend.
 
 ### What It Does
 
@@ -97,6 +96,8 @@ MindRoom registers `googlesearch` as a custom wrapper around Agno's `WebSearchTo
 It exposes `web_search(query, max_results=5)` and `search_news(query, max_results=5)`.
 Runtime behavior matches the `duckduckgo` tool surface, including `modifier`, `fixed_max_results`, `proxy`, `timeout`, and `verify_ssl`.
 This is still a DDGS-backed scraper-style search path rather than an official Google paid search API.
+The pinned DDGS 9.14.1 disables its Google text engine and has no Google news engine, so both methods fall back to automatic engine selection on a cache miss.
+A shared DDGS result-cache hit can return before engine selection, so the requested backend does not guarantee Google results or ranking.
 
 ### Configuration
 
@@ -130,8 +131,8 @@ search_news("open source Matrix news", max_results=5)
 
 ### Notes
 
-- Pick `googlesearch` when you want Google-backed ranking without introducing an API key dependency.
-- If you need a first-party paid Google SERP API with more predictable structure, use `serper` or `serpapi` instead.
+- Use `googlesearch` for no-key web and news search through DDGS.
+- If you need a paid Google SERP API with more predictable structure, use `serper` or `serpapi` instead.
 - The current MindRoom wrapper makes this tool available without dedicated dashboard integration or OAuth.
 
 ## [`baidusearch`]
@@ -150,7 +151,7 @@ The returned payload is a JSON array with `title`, `url`, `abstract`, and `rank`
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `fixed_max_results` | `number` | `no` | `null` | Caps result count for every call. |
-| `fixed_language` | `text` | `no` | `null` | Forces a default search language, with `zh` as the upstream fallback. |
+| `fixed_language` | `text` | `no` | `null` | Overrides local language normalization and logging only; does not control request language. |
 | `headers` | `text` | `no` | `null` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `proxy` | `url` | `no` | `null` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
 | `timeout` | `number` | `no` | `10` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to `search()`. |
@@ -165,18 +166,18 @@ agents:
   cn_research:
     tools:
       - baidusearch:
-          fixed_language: zh
           fixed_max_results: 8
 ```
 
 ```python
-baidu_search("Matrix 协议 新闻", max_results=5, language="zh")
+baidu_search("Matrix 协议 新闻", max_results=5)
 ```
 
 ### Notes
 
-- Pick `baidusearch` when Chinese-language search quality matters more than Google-style ranking.
+- Pick `baidusearch` when you need Baidu-indexed results.
 - Use `duckduckgo` or `googlesearch` for simpler English-centric general search defaults.
+- `fixed_language` and per-call `language` affect local normalization and logging only; neither value reaches the search request.
 - The current installed upstream `baidu_search()` path only forwards keyword and result count, so `headers`, `proxy`, `timeout`, and `debug` are best treated as placeholders until the wrapper or upstream call path is tightened.
 
 ## [`tavily`]
@@ -242,7 +243,7 @@ extract_url_content("https://matrix.org/blog/")
 
 `exa` can expose `search_exa(query, num_results=5, category=None)`, `get_contents(urls)`, `find_similar(url, num_results=5)`, `exa_answer(query, text=False)`, and `research(instructions, output_schema=None)`.
 Search results can include title, author, published date, URL, and truncated page text.
-The toolkit supports domain allowlists and denylists, crawl-date and publish-date filters, category and type filters, answer-model selection, and a separate `research_model` for long-running research tasks.
+The toolkit supports domain allowlists and denylists, publication-date filters, content categories, search modes, answer-model selection, and a separate `research_model` for long-running research tasks.
 `enable_research` is off by default, so deep research is opt-in even when the rest of the toolkit is enabled.
 
 ### Configuration
@@ -261,14 +262,14 @@ The toolkit supports domain allowlists and denylists, crawl-date and publish-dat
 | `api_key` | `password` | `yes` | `null` | Exa API key. The upstream SDK also checks `EXA_API_KEY`. |
 | `num_results` | `number` | `no` | `null` | Default result count override. |
 | `livecrawl` | `text` | `no` | `always` | Exposed in MindRoom metadata, but the current installed upstream call path on this branch does not pass it through to search requests. |
-| `start_crawl_date` | `text` | `no` | `null` | Include results crawled on or after this date. |
-| `end_crawl_date` | `text` | `no` | `null` | Include results crawled on or before this date. |
-| `start_published_date` | `text` | `no` | `null` | Include results published on or after this date. |
-| `end_published_date` | `text` | `no` | `null` | Include results published on or before this date. |
-| `type` | `text` | `no` | `null` | Optional content type filter such as article, blog, or video. |
-| `category` | `text` | `no` | `null` | Optional category filter such as `news`, `github`, or `research paper`. |
-| `include_domains` | `string[]` | `no` | `null` | Domain allowlist. The current registry metadata exposes this as a text field, but runtime expects a list of domains. |
-| `exclude_domains` | `string[]` | `no` | `null` | Domain denylist. The current registry metadata exposes this as a text field, but runtime expects a list of domains. |
+| `start_crawl_date` | `text` | `no` | `null` | Deprecated and ignored by Exa's search endpoint. |
+| `end_crawl_date` | `text` | `no` | `null` | Deprecated and ignored by Exa's search endpoint. |
+| `start_published_date` | `text` | `no` | `null` | Lower publication-date bound in ISO8601 format. |
+| `end_published_date` | `text` | `no` | `null` | Upper publication-date bound in ISO8601 format. |
+| `type` | `text` | `no` | `null` | Exa search mode, such as `auto`; separate from the content category. |
+| `category` | `text` | `no` | `null` | Optional content category, such as `news`. |
+| `include_domains` | `string[]` | `no` | `null` | Domain allowlist as a list of strings. |
+| `exclude_domains` | `string[]` | `no` | `null` | Domain denylist as a list of strings. |
 | `show_results` | `boolean` | `no` | `false` | Emit debug logs with raw parsed results. |
 | `model` | `text` | `no` | `null` | Answer model for `exa_answer()`, currently `exa` or `exa-pro`. |
 | `timeout` | `number` | `no` | `30` | Timeout in seconds for API operations. |
@@ -282,6 +283,7 @@ agents:
     tools:
       - exa:
           enable_research: true
+          type: auto
           category: news
           include_domains:
             - matrix.org
@@ -300,6 +302,8 @@ research("Compare hosted Matrix bridges for small teams.")
 
 - Pick `exa` when you need the richest research surface on this page rather than a simple search box.
 - `model` only affects `exa_answer()`, and `research_model` only affects `research()`.
+- For `search_exa()`, Exa's [search API](https://exa.ai/docs/reference/search) ignores the deprecated crawl-date fields even though the SDK forwards them.
+- Publication-date filters constrain publication time, not crawl freshness, and are unsupported with the `company` and `people` categories.
 - The current wrapper exposes `livecrawl`, but the installed upstream call path in this worktree does not apply that setting to the search requests, so do not rely on it yet for behavior changes.
 
 ## [`serpapi`]
@@ -410,7 +414,7 @@ If `engines` is set, the tool appends those engine names to the SearXNG request.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `host` | `url` | `yes` | `null` | Base URL for the SearXNG instance. Use the instance root, not a prebuilt `/search` URL. |
-| `engines` | `string[]` | `no` | `[]` | Optional engine allowlist. The current registry metadata exposes this as a text field, but runtime expects a list of engine names. |
+| `engines` | `string[]` | `no` | `[]` | Optional engine allowlist as a list of strings. |
 | `fixed_max_results` | `number` | `no` | `null` | Caps result count for all categories. |
 
 ### Example

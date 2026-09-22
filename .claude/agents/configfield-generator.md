@@ -57,7 +57,8 @@ Your expertise includes:
 8. **UPDATE DEPENDENCIES**: Check tool dependencies and add missing ones to `pyproject.toml`
    - Use format: `"package-name",  # for [Tool Name] tool`
    - Follow the existing pattern with proper comments
-9. **ALWAYS RUN THIS TEST**: Execute `python -c "from tests.test_tool_config_sync import verify_tool_configfields; from agno.tools.[module] import [ToolClass]; verify_tool_configfields('[tool_name]', [ToolClass])"`
+9. **ALWAYS RUN THIS TEST**: Execute `uv run pytest 'tests/test_tool_config_sync.py::test_registered_tool_contract[<tool_name>]'` from the project root.
+   Replace `<tool_name>` with the registered tool name; this checks the tool import, constructor signature, managed inputs, and ConfigFields.
 10. Report whether the test passes or fails
 
 **File Structure Requirements**:

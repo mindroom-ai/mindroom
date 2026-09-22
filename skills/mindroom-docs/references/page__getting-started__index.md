@@ -76,7 +76,7 @@ For hosted providers, set the credentials for the provider you selected:
 - `OPENROUTER_API_KEY=...`, or
 - For Codex CLI ChatGPT authentication: run `codex login`.
 - For Kimi Code CLI authentication: run `kimi` and `/login`.
-- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` and authenticate with `gcloud auth application-default login`.
+- For Vertex AI Claude: set `ANTHROPIC_VERTEX_PROJECT_ID`, keep `CLOUD_ML_REGION=global` for the starter's Sonnet 5 model (or choose `us` / `eu`), and authenticate with `gcloud auth application-default login`.
 Skip this step for `--provider ollama` or `--provider llama.cpp` unless you also add a remote provider.
 
 ### 3. Pair your local install from chat UI
@@ -148,8 +148,11 @@ cd mindroom-stack
 
 ```bash
 cp .env.example .env
-$EDITOR .env  # add at least one AI provider key
+$EDITOR .env  # set ANTHROPIC_API_KEY for the default stack config
 ```
+
+The default stack config uses Anthropic and requires `ANTHROPIC_API_KEY`.
+To use another provider, edit `config/config.yaml` and supply its matching credentials before starting the stack; see the [stack model configuration guide](https://github.com/mindroom-ai/mindroom-stack#configure-models).
 
 ### 3. Start everything
 
@@ -199,6 +202,9 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
     uv sync
     source .venv/bin/activate
     ```
+
+    Install Node.js 24 and [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+    Without assets and Bun, the API is available but the dashboard is unavailable.
 
 ### Configuration
 
@@ -263,19 +269,21 @@ OPENAI_API_KEY=your_openai_key
 
 #### Optional: Bootstrap local Synapse + MindRoom Chat with Docker (Linux/macOS)
 
-If you want a local Matrix + client setup without running the full `mindroom-stack` app, use the helper command:
+Use the core [MindRoom repository](https://github.com/mindroom-ai/mindroom)'s `local/matrix` development Compose files with a host-installed backend:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 ```
 
 If you're running from source in this repo, use:
 
 ```bash
-uv run mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+uv run mindroom local-stack-setup --synapse-dir local/matrix
 ```
 
-This starts Synapse from the `mindroom-stack` compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active `config.yaml`.
+This starts Synapse from the core repository development Compose files, starts a MindRoom Chat container, waits for both services to be healthy, and by default writes local Matrix settings to `.env` next to your active config file.
+If you use a custom config path, export `MINDROOM_CONFIG_PATH` before running the helper so it updates the matching `.env`.
+The full `mindroom-stack` workflow above uses Tuwunel instead.
 
 > [!NOTE]
 > MindRoom automatically creates Matrix user accounts for each agent.

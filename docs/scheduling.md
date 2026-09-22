@@ -9,9 +9,11 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
 The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire: each fire posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
 
-Schedules with a recorded creator are automatically canceled when that creator leaves or is removed from the room, including when account deactivation removes their room membership.
+Schedules with a recorded creator are automatically canceled once live membership checks confirm that neither the creator nor any permitted human alias is joined to the room.
+Configured bot accounts and managed identities do not count as human aliases.
 The scheduler checks membership every 30 seconds while waiting and again before execution, including after a restart.
-If membership cannot be verified, execution waits for a successful lookup.
+A confirmed join for any equivalent human identity permits execution; otherwise, uncertain membership makes execution wait for a successful lookup.
+Membership checks use the runtime's current applied configuration, so revoking a human alias takes effect on the next check without recreating the runner.
 Legacy schedules without a recorded creator remain usable.
 
 ## Commands
@@ -154,11 +156,15 @@ The option controls task execution; parsing the scheduling request still uses th
 
 ## Timezone
 
-Schedules use the timezone from `config.yaml` (defaults to UTC):
+The timezone in `config.yaml` controls natural-language time interpretation and displayed timestamps (defaults to UTC):
 
 ```yaml
 timezone: America/Los_Angeles
 ```
+
+Recurring schedules are stored and evaluated as UTC cron expressions.
+Their local execution time can shift when the timezone’s UTC offset changes, including daylight-saving transitions.
+Edit or recreate a recurring schedule after an offset change if it must keep the same local clock time.
 
 ## Limitations
 
