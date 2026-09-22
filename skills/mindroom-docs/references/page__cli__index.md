@@ -1221,9 +1221,12 @@ Automatic config migrations affect the staged copy only.
 `--initialize-only` without `--revision` preserves any existing target directory.
 It does not validate that existing tree and returns `initialized` with no fingerprint.
 With `--revision`, a matching revision stored in `.mindroom-bundle.json` preserves the active tree after recovery, including any later hot installs.
-A different or missing stored revision validates the candidate. An existing active tree must be owned and unedited, even when the candidate has identical content. Use ordinary installation with explicit `--force` to adopt an unmanaged tree or reset authored drift.
+A different or missing stored revision validates the candidate.
+An existing active tree must be owned and unedited, even when the candidate has identical content.
+Use ordinary installation with explicit `--force` to adopt an unmanaged tree or reset authored drift.
 The revision is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
-It changes only after successful validation and publication. If candidate content is identical, only metadata changes atomically; authored files and previous trees stay untouched.
+It changes only after successful validation and publication.
+If candidate content is identical, only metadata changes atomically; authored files and previous trees stay untouched.
 Ordinary installs without `--revision` carry the active revision forward and ignore revision metadata in the incoming bundle.
 Without this flag, unchanged trees return `unchanged`.
 Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation.

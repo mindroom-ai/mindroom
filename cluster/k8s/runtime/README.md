@@ -228,8 +228,10 @@ workers:
 
 `config.bootstrapBundlePath` is optional and disabled by default.
 It adds `--bootstrap-config-bundle` to `mindroom run`.
-`config.bootstrapBundleRevision` is optional and requires `bootstrapBundlePath`. It adds `--bootstrap-config-bundle-revision` to the runtime command.
-A matching stored revision preserves the active tree across restarts, including later hot updates and guarded rollbacks. A changed revision validates and installs the candidate under the native installer's non-force drift rules.
+`config.bootstrapBundleRevision` is optional and requires `bootstrapBundlePath`.
+It adds `--bootstrap-config-bundle-revision` to the runtime command.
+A matching stored revision preserves the active tree across restarts, including later hot updates and guarded rollbacks.
+A changed revision validates and installs the candidate under the native installer's non-force drift rules.
 The revision is an opaque, nonblank string of at most 128 UTF-8 bytes with no control characters.
 Native installation and validation run in the main runtime container, with its image, mounts, and environment, before runtime startup.
 The target directory and filename come from `config.path`; the source must contain that filename at its root.
