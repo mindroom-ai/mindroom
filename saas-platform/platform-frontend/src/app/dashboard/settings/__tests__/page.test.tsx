@@ -173,7 +173,7 @@ describe('SettingsPage', () => {
       fireEvent.click(deleteButton)
 
       expect(screen.getByText('Are you absolutely sure?')).toBeInTheDocument()
-      expect(screen.getByText(/schedule your account for deletion/i)).toBeInTheDocument()
+      expect(screen.getByText(/schedules your account for deletion/i)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /yes, delete my account/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
     })
@@ -208,7 +208,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(api.requestAccountDeletion).toHaveBeenCalledWith(true)
         expect(screen.getByText(/account deletion scheduled/i)).toBeInTheDocument()
-        expect(screen.getByText(/7 days to cancel/i)).toBeInTheDocument()
+        expect(screen.getByText(/Within 7 days, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
       })
 
       // Should sign out and redirect after 3 seconds
@@ -352,11 +352,11 @@ describe('SettingsPage', () => {
 
       // Now check for the specific retention policy texts
       expect(screen.getByText(/Personal data:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/Deleted immediately when you close your account/)).toBeInTheDocument()
-      expect(screen.getByText(/Payment info:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/We don't store payment details - Stripe handles this/)).toBeInTheDocument()
-      expect(screen.getByText(/Invoices:/, { exact: false })).toBeInTheDocument()
-      expect(screen.getByText(/Only invoice numbers kept \(anonymized\) for tax compliance/)).toBeInTheDocument()
+      expect(screen.getByText(/scheduled application-database cleanup attempts deletion when enabled; completion is not guaranteed/)).toBeInTheDocument()
+      expect(screen.getByText(/Payment records:/, { exact: false })).toBeInTheDocument()
+      expect(screen.getByText(/They are not removed by account cleanup and can prevent deletion/)).toBeInTheDocument()
+      expect(screen.getByText(/External data:/, { exact: false })).toBeInTheDocument()
+      expect(screen.getByText(/Account cleanup does not delete the authentication user, Stripe customer or subscription data, Matrix data, or persistent volumes/)).toBeInTheDocument()
     })
   })
 

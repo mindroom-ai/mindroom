@@ -140,7 +140,7 @@ export default function SettingsPage() {
       if (result.status === 'deletion_scheduled') {
         setMessage({
           type: 'info',
-          text: `Account deletion scheduled. You have ${result.grace_period_days} days to cancel this request.`
+          text: `Account deletion scheduled. Within ${result.grace_period_days} days, sign in and select Cancel Deletion Request in Settings. Signing in alone does not cancel deletion.`
         })
         setIsDeletionPending(true)
 
@@ -259,8 +259,9 @@ export default function SettingsPage() {
                 Account Deletion Pending
               </h3>
               <p className="text-red-700 dark:text-red-200 text-sm mb-4">
-                Your account is scheduled for deletion. All your data will be permanently removed after the grace period.
-                You can cancel this request if you change your mind.
+                Your account is scheduled for deletion with a 7-day recovery period.
+                After that, application-database cleanup runs when enabled, subject to the retention limits below.
+                Select Cancel Deletion Request within 7 days of your request to cancel it; signing in alone does not cancel deletion.
               </p>
               <button
                 onClick={handleCancelDeletion}
@@ -344,19 +345,19 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-green-600 dark:text-green-400" />
               <span className="text-gray-700 dark:text-gray-300">
-                <strong>Personal data:</strong> Deleted immediately when you close your account
+                <strong>Personal data:</strong> After a 7-day recovery period, scheduled application-database cleanup attempts deletion when enabled; completion is not guaranteed.
               </span>
             </div>
             <div className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-green-600 dark:text-green-400" />
               <span className="text-gray-700 dark:text-gray-300">
-                <strong>Payment info:</strong> We don't store payment details - Stripe handles this
+                <strong>Payment records:</strong> Payment and webhook records retain account references and payment identifiers. They are not removed by account cleanup and can prevent deletion.
               </span>
             </div>
             <div className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-green-600 dark:text-green-400" />
               <span className="text-gray-700 dark:text-gray-300">
-                <strong>Invoices:</strong> Only invoice numbers kept (anonymized) for tax compliance
+                <strong>External data:</strong> Account cleanup does not delete the authentication user, Stripe customer or subscription data, Matrix data, or persistent volumes. Separate processor and operator policies apply.
               </span>
             </div>
           </div>
@@ -371,8 +372,8 @@ export default function SettingsPage() {
           <div className="mt-6">
             <h3 className="font-semibold text-red-900 dark:text-red-100 mb-4">Delete Account</h3>
             <p className="text-red-700 dark:text-red-200 text-sm mb-4">
-              Once you delete your account, all your data will be permanently removed after a 7-day grace period.
-              This action cannot be undone after the grace period expires.
+              Requesting deletion starts a 7-day recovery period. After that, scheduled application-database cleanup
+              attempts deletion when enabled, subject to the retention limits above. Completed database deletion cannot be undone.
             </p>
 
             {showDeleteConfirm ? (
@@ -381,7 +382,7 @@ export default function SettingsPage() {
                   Are you absolutely sure?
                 </p>
                 <p className="text-red-700 dark:text-red-300 text-sm mb-4">
-                  This will schedule your account for deletion. You'll have 7 days to change your mind.
+                  This schedules your account for deletion. To cancel within 7 days, sign in and select Cancel Deletion Request in Settings. Signing in alone does not cancel deletion.
                 </p>
                 <div className="flex gap-3">
                   <button
