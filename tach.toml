@@ -36,6 +36,10 @@ path = "mindroom.chunking"
 depends_on = []
 
 [[modules]]
+path = "mindroom.bounded_bytes"
+depends_on = []
+
+[[modules]]
 path = "mindroom.embedding_factory"
 depends_on = [
     "mindroom.credentials_sync",
@@ -1091,6 +1095,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.external_triggers"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.external_triggers.auth",
@@ -1248,6 +1253,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.script_runs.broker",
     "mindroom.script_runs.models",
     "mindroom.script_runs.store",
@@ -1464,6 +1470,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_runner_scripts"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.path_confinement",
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
@@ -5607,7 +5614,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.api.mcp_scim"
-depends_on = ["mindroom.mcp_gateway.accounts", "mindroom.json_utils", "mindroom.logging_config"]
+depends_on = ["mindroom.bounded_bytes", "mindroom.mcp_gateway.accounts", "mindroom.json_utils", "mindroom.logging_config"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.accounts"
@@ -5628,7 +5635,7 @@ visibility = ["mindroom.mcp_gateway.store"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.server"
-depends_on = ["mindroom.logging_config", "mindroom.mcp_gateway.execution", "mindroom.mcp_gateway.types"]
+depends_on = ["mindroom.bounded_bytes", "mindroom.logging_config", "mindroom.mcp_gateway.execution", "mindroom.mcp_gateway.types"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.execution"
@@ -6192,6 +6199,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.worker_computer.auth"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.runtime_env_policy",
     "mindroom.constants",
     "mindroom.requester_identity",
@@ -6201,6 +6209,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.worker_computer.client"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.worker_computer.protocol",
     "mindroom.worker_computer.sessions",
 ]

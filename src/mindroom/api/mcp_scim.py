@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Never, Protocol
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.logging_config import get_logger
 from mindroom.mcp_gateway.accounts import (
@@ -129,11 +130,10 @@ async def _body(request: Request, schema: str) -> dict[str, Any]:
         "application/scim+json",
     }:
         raise _ScimError(415, "Use application/scim+json.")
-    body = bytearray()
-    async for chunk in request.stream():
-        if len(body) + len(chunk) > _MAX_BODY:
-            raise _ScimError(413, "Request body exceeds the supported limit.", "tooLarge")
-        body.extend(chunk)
+    try:
+        body = await collect_bounded_bytes(request.stream(), max_bytes=_MAX_BODY)
+    except ByteLimitExceededError as exc:
+        raise _ScimError(413, "Request body exceeds the supported limit.", "tooLarge") from exc
     try:
         value = json.loads(
             body.decode("utf-8"),

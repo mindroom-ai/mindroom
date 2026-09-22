@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from mindroom.api import config_lifecycle
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.external_triggers.auth import (
     TriggerAuthError,
     TriggerSignatureHeaders,
@@ -307,14 +308,10 @@ def _validate_snapshot_policy_and_auth(
 
 
 async def _read_bounded_body(request: Request, *, max_body_bytes: int) -> bytes:
-    body_chunks: list[bytes] = []
-    total_bytes = 0
-    async for chunk in request.stream():
-        total_bytes += len(chunk)
-        if total_bytes > max_body_bytes:
-            raise HTTPException(status_code=413, detail="External trigger body exceeds configured limit")
-        body_chunks.append(chunk)
-    return b"".join(body_chunks)
+    try:
+        return await collect_bounded_bytes(request.stream(), max_bytes=max_body_bytes)
+    except ByteLimitExceededError as exc:
+        raise HTTPException(status_code=413, detail="External trigger body exceeds configured limit") from exc
 
 
 def _authenticate_trigger_request(
