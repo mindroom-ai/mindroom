@@ -22,9 +22,18 @@ mindroom config validate --path /path/to/config.yaml
 
 By default, threads with multiple human participants require explicit agent mentions.
 Opt a room into adaptive participation to let agents already involved in a thread decide whether to respond to an untagged message or stay silent.
-Each eligible individual agent must have already replied in that thread and still have permission to reply to the sender.
+The check runs only when all of these conditions hold:
+
+- Participation is enabled for the room.
+- The message is in a thread with at least two human participants, including the current sender.
+- The message does not explicitly mention an agent or another human.
+- The particular individual agent has already replied in that thread and still has permission to reply to the sender.
+
+MindRoom must have the thread history available to establish these conditions.
 Agents that are merely present in the room do not judge or join the conversation.
 If several individual agents have replied in the thread, each makes its own participation decision.
+For example, with 50 agents in a room and two already involved in a thread, only those two are eligible to judge.
+Explicit agent mentions follow normal reply rules; an explicit human mention bypasses adaptive participation too.
 Room keys can be concrete room IDs, managed room keys, or persisted full aliases.
 
 ```yaml
@@ -40,8 +49,10 @@ Registered agents, the internal service account, and configured `bot_accounts` d
 The pause defaults to three seconds and accepts finite values from zero to thirty seconds.
 A burst from one sender becomes one turn after the pause; explicit agent or human mentions bypass adaptive selection and end that sender's pending pause immediately.
 Single-human conversations keep their usual response behavior.
-A declined or failed decision stays quiet and does not record a completed assistant response.
-The check reuses the prepared conversation and tool definitions, but cannot execute tools.
+A decision to stay silent produces no visible reply and does not record a completed assistant response.
+By default, the replying agent's own model makes the decision using its prepared conversation and tool definitions, with tool execution disabled.
+If that same-model check fails, the agent stays quiet.
+The following provider restrictions apply to this same-model check; a valid decision from a separate judgment backend bypasses the check.
 With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
 Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
@@ -103,7 +114,8 @@ Both backends share a process-wide limit of eight concurrent judgments and one p
 `timeout_seconds` accepts finite positive values up to thirty seconds; defaults are five seconds for LLMs and 1.5 seconds for TypeSafe.
 This is an additional deadline after participation debounce and includes model loading, inference, and parsing; it does not cover the fallback model call.
 There are no application-level judgment retries; configured LLM providers retain their SDK behavior within the deadline.
-Missing credentials, exhausted concurrency, timeout, provider errors, malformed output, or TypeSafe model drift fall back to the existing in-model decision and its quiet-on-failure behavior.
+Missing credentials, exhausted concurrency, timeout, provider errors, malformed output, or TypeSafe model drift fall back to the replying agent's own decision model.
+If that fallback also fails, the agent stays quiet.
 Cancellation propagates without starting a fallback call.
 Valid judgments bypass the reply provider's tool-free decision restrictions, so providers with automatic native tools can answer after approval.
 Only one decision settles per turn, including retries; recovery of an already-visible response retains its approval.

@@ -6051,7 +6051,7 @@ visibility = ["mindroom.ai"]
 [[modules]]
 path = "mindroom.json_utils"
 depends_on = []
-visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.private_instance_identity_store", "mindroom.api.mcp_scim"]
+visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.private_instance_identity_store", "mindroom.api.mcp_scim"]
 
 [[modules]]
 path = "mindroom.provider_tool_policy"
@@ -6534,7 +6534,7 @@ depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.judgment.client"
-depends_on = ["mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.judgment.state"]
+depends_on = ["mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.judgment.state"]
 
 [[modules]]
 path = "mindroom.participation_judgment"

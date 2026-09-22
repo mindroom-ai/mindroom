@@ -8,6 +8,7 @@ from typing import cast
 
 import httpx
 
+from mindroom.json_utils import DuplicateJSONKeyError, object_with_unique_keys
 from mindroom.judgment.answers import (
     JudgmentError,
     JudgmentResponse,
@@ -24,7 +25,7 @@ _MAX_RESPONSE_BYTES = 64 * 1024
 
 
 class _InvalidJudgmentResponseError(ValueError):
-    """The response did not match the exact participation contract."""
+    """The response did not match the requested judgment contract."""
 
 
 class _ResponseTooLargeError(ValueError):
@@ -32,22 +33,12 @@ class _ResponseTooLargeError(ValueError):
 
 
 class _JudgmentModelDriftError(_InvalidJudgmentResponseError):
-    """The provider returned a model other than the evaluated pin."""
+    """The provider returned a model other than the configured pin."""
 
 
 def _reject_constant(_value: str) -> object:
     msg = "response contains a non-finite number"
     raise _InvalidJudgmentResponseError(msg)
-
-
-def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            msg = "response contains a duplicate JSON key"
-            raise _InvalidJudgmentResponseError(msg)
-        result[key] = value
-    return result
 
 
 def _exact_keys(value: object, expected: set[str], label: str) -> dict[str, object]:
@@ -84,9 +75,12 @@ def _decode_envelope(body: bytes, *, expected_model: str) -> tuple[dict[str, obj
         msg = "response exceeds the byte limit"
         raise _InvalidJudgmentResponseError(msg)
     try:
-        parsed = json.loads(body, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+        parsed = json.loads(body, object_pairs_hook=object_with_unique_keys, parse_constant=_reject_constant)
     except _InvalidJudgmentResponseError:
         raise
+    except DuplicateJSONKeyError as exc:
+        msg = "response contains a duplicate JSON key"
+        raise _InvalidJudgmentResponseError(msg) from exc
     except (ValueError, RecursionError) as exc:
         msg = "response is not valid JSON"
         raise _InvalidJudgmentResponseError(msg) from exc
@@ -94,7 +88,7 @@ def _decode_envelope(body: bytes, *, expected_model: str) -> tuple[dict[str, obj
     root = _exact_keys(parsed, {"model", "answers", "usage"}, "body")
     model = root["model"]
     if not isinstance(model, str) or model != expected_model:
-        msg = "response model does not match the pinned evaluated model"
+        msg = "response model does not match the pinned model"
         raise _JudgmentModelDriftError(msg)
 
     usage = _exact_keys(root["usage"], {"input_tokens", "output_tokens"}, "usage")
@@ -106,10 +100,10 @@ def _decode_envelope(body: bytes, *, expected_model: str) -> tuple[dict[str, obj
 
 
 def _decode_response(body: bytes, *, expected_model: str, expected_question: str, threshold: float) -> JudgmentResponse:
-    """Accept only the requested participation probability, never a generated decision."""
+    """Accept only the requested judgment probability, never a generated decision."""
     root, usage = _decode_envelope(body, expected_model=expected_model)
     answers = _exact_keys(root["answers"], {expected_question}, "question map")
-    answer = _exact_keys(answers[expected_question], {"type", "noul"}, "participation answer")
+    answer = _exact_keys(answers[expected_question], {"type", "noul"}, "judgment answer")
     if answer["type"] != "noul":
         msg = "response answer type is not noul"
         raise _InvalidJudgmentResponseError(msg)
@@ -139,7 +133,7 @@ class SystemOneClient:
             msg = "a TypeSafe API key is required"
             raise ValueError(msg)
         if model != PINNED_MODEL:
-            msg = "the judgment client requires the pinned evaluated model"
+            msg = "the judgment client requires the pinned model"
             raise ValueError(msg)
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             msg = "the judgment timeout must be finite and positive"
