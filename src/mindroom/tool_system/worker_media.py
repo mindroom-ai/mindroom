@@ -51,26 +51,40 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
         pattern: None if proxy is None else _WorkerMediaProxyTransport(proxy=proxy)
         for pattern, proxy in get_environment_proxies().items()
     }
-    with (
-        httpx.Client(
-            transport=ServerFetchHTTPTransport(),
-            mounts=mounts,
-            trust_env=False,
-            follow_redirects=True,
-            max_redirects=5,
-            timeout=30,
-        ) as client,
-        client.stream("GET", url) as response,
-    ):
-        response.raise_for_status()
-        content = bytearray()
-        for chunk in response.iter_bytes(chunk_size=64 * 1024):
-            if len(content) + len(chunk) > limit:
-                msg = "Worker media exceeds the byte limit."
-                raise ValueError(msg)
-            content.extend(chunk)
-        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    return bytes(content), mime or None
+    with httpx.Client(
+        transport=ServerFetchHTTPTransport(),
+        mounts=mounts,
+        trust_env=False,
+        headers={"Accept-Encoding": "identity"},
+        follow_redirects=False,
+        max_redirects=5,
+        timeout=30,
+    ) as client:
+        request = client.build_request("GET", url)
+        for _ in range(client.max_redirects + 1):
+            response = client.send(request, stream=True)
+            try:
+                if response.next_request is not None:
+                    # HTTPX automatic redirects read the whole intermediate body.
+                    request = response.next_request
+                    continue
+                response.raise_for_status()
+                encoding = response.headers.get("content-encoding", "")
+                if any(value.strip().lower() not in {"", "identity"} for value in encoding.split(",")):
+                    msg = "Worker media requires identity content encoding."
+                    raise ValueError(msg)
+                content = bytearray()
+                for chunk in response.iter_raw(chunk_size=64 * 1024):
+                    if len(content) + len(chunk) > limit:
+                        msg = "Worker media exceeds the byte limit."
+                        raise ValueError(msg)
+                    content.extend(chunk)
+                mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                return bytes(content), mime or None
+            finally:
+                response.close()
+        msg = "Exceeded maximum allowed redirects."
+        raise httpx.TooManyRedirects(msg, request=request)
 
 
 def _resource_name(media: _Media) -> str:

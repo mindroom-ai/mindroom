@@ -653,6 +653,9 @@ With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, w
 
 Worker-routed media tools return typed images, audio, video, and files.
 The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result.
+Media downloads follow at most five redirects and close each intermediate response without reading its body.
+Downloads request `Accept-Encoding: identity`; a final response with another HTTP `Content-Encoding` fails as a tool error before its body is read.
+The final identity response is streamed within the media byte limits below.
 Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
 
 Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total.

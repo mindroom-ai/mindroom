@@ -330,3 +330,191 @@ def test_worker_media_proxy_denial_never_retries_direct(
 
     assert [(item.host, item.port) for item in connections] == [("10.0.0.10", 3128)]
     assert connections[0].stream.closed
+
+
+class _UnreadBodyStream(_RecordingStream):
+    """Fail before any body read from a response that should be closed unread."""
+
+    def __init__(self, headers: bytes) -> None:
+        super().__init__([headers])
+        self.read_calls = 0
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        """Expose header-only progress and reject any attempt to fetch the body."""
+        self.read_calls += 1
+        assert self.read_calls == 1, "Response body must remain unread"
+        return super().read(max_bytes, timeout=timeout)
+
+
+def _unread_redirect(location: str, framing: str = "Content-Length: 1000000000000") -> _UnreadBodyStream:
+    return _UnreadBodyStream(
+        (
+            "HTTP/1.1 302 Found\r\n"
+            f"Location: {location}\r\n"
+            f"{framing}\r\n"
+            "Content-Encoding: gzip\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii"),
+    )
+
+
+def _capture_scripted_connections(
+    monkeypatch: pytest.MonkeyPatch,
+    script: list[_Connection],
+) -> list[_Connection]:
+    connections: list[_Connection] = []
+
+    def connect(
+        _backend: httpcore.SyncBackend,
+        host: str,
+        port: int,
+        **_kwargs: object,
+    ) -> httpcore.NetworkStream:
+        assert len(connections) < len(script), "Unexpected request after the redirect limit"
+        expected = script[len(connections)]
+        assert (host, port) == (expected.host, expected.port)
+        assert all(item.stream.closed for item in connections), "Previous response remains open"
+        connections.append(expected)
+        return expected.stream
+
+    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", connect)
+    return connections
+
+
+@pytest.mark.parametrize("proxy", [False, True])
+@pytest.mark.parametrize("framing", ["Content-Length: 1000000000000", "Transfer-Encoding: chunked"])
+def test_worker_media_redirect_body_is_never_read(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy: bool,
+    framing: str,
+) -> None:
+    """Oversized or endless redirects close unread through real HTTPX transports."""
+    if proxy:
+        monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:3128")
+    host, port = ("10.0.0.10", 3128) if proxy else ("93.184.216.34", 80)
+    monkeypatch.setattr(media_transport, "MAX_MEDIA_BYTES", 4)
+    redirect = _unread_redirect("/final.txt", framing)
+    final = _RecordingStream([_response(body=b"done")])
+    script = [_Connection(host, port, redirect), _Connection(host, port, final)]
+    connections = _capture_scripted_connections(monkeypatch, script)
+
+    assert _inline_file("http://media.example/start.txt").content == b"done"
+
+    assert connections == script
+    assert redirect.read_calls == 1
+    assert all(item.stream.closed for item in connections)
+    assert all(b"accept-encoding: identity\r\n" in item.stream.written.lower() for item in connections)
+    assert b"/final.txt HTTP/1.1\r\n" in final.written
+
+
+@pytest.mark.parametrize(("redirect_count", "loop"), [(5, False), (6, False), (6, True)])
+def test_worker_media_manual_redirect_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    redirect_count: int,
+    loop: bool,
+) -> None:
+    """Five hops succeed; a sixth redirect or a loop fails without a seventh request."""
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:3128")
+    redirects = [_unread_redirect("/start.txt" if loop else f"/hop-{index}.txt") for index in range(redirect_count)]
+    streams: list[_RecordingStream] = list(redirects)
+    if redirect_count == 5:
+        streams.append(_RecordingStream([_response()]))
+    script = [_Connection("10.0.0.10", 3128, stream) for stream in streams]
+    connections = _capture_scripted_connections(monkeypatch, script)
+
+    if redirect_count == 5:
+        assert _inline_file("http://media.example/start.txt").content == b"media"
+    else:
+        with pytest.raises(ValueError, match="Unable to read worker media resource"):
+            _inline_file("http://media.example/start.txt")
+
+    assert connections == script
+    assert len(connections) == 6
+    assert all(stream.read_calls == 1 for stream in redirects)
+    assert all(stream.closed for stream in streams)
+
+
+def test_worker_media_redirect_final_body_remains_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skipping an oversized redirect does not relax the final media byte limit."""
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:3128")
+    monkeypatch.setattr(media_transport, "MAX_MEDIA_BYTES", 4)
+    redirect = _unread_redirect("/final.txt")
+    final = _RecordingStream([_response(body=b"12345")])
+    script = [_Connection("10.0.0.10", 3128, redirect), _Connection("10.0.0.10", 3128, final)]
+    connections = _capture_scripted_connections(monkeypatch, script)
+
+    with pytest.raises(ValueError, match="byte limit"):
+        _inline_file("http://media.example/start.txt")
+
+    assert connections == script
+    assert redirect.read_calls == 1
+    assert redirect.closed
+    assert final.closed
+
+
+@pytest.mark.parametrize("proxy", [False, True])
+def test_worker_media_unread_redirect_still_rejects_private_destination(
+    monkeypatch: pytest.MonkeyPatch,
+    proxy: bool,
+) -> None:
+    """Closing a redirect without reading it leaves the next destination guarded."""
+    if proxy:
+        monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:3128")
+    host, port = ("10.0.0.10", 3128) if proxy else ("93.184.216.34", 80)
+    redirect = _unread_redirect("http://private.example/private.txt")
+    script = [_Connection(host, port, redirect)]
+    connections = _capture_scripted_connections(monkeypatch, script)
+
+    with pytest.raises(ValueError, match="Unable to read worker media resource"):
+        _inline_file("http://media.example/start.txt")
+
+    assert connections == script
+    assert redirect.read_calls == 1
+    assert redirect.closed
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br", "zstd", "identity, gzip", "unknown"])
+def test_worker_media_encoded_final_body_is_never_read(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """Unsupported HTTP encodings fail before body collection or decompression."""
+    monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:3128")
+    final = _UnreadBodyStream(
+        (
+            "HTTP/1.1 200 OK\r\n"
+            f"Content-Encoding: {encoding}\r\n"
+            "Content-Length: 1000000000000\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii"),
+    )
+    script = [_Connection("10.0.0.10", 3128, final)]
+    connections = _capture_scripted_connections(monkeypatch, script)
+
+    with pytest.raises(ValueError, match="identity content encoding"):
+        _inline_file("http://media.example/media.txt")
+
+    assert connections == script
+    assert final.read_calls == 1
+    assert final.closed
+    assert b"accept-encoding: identity\r\n" in final.written.lower()
+
+
+@pytest.mark.parametrize("encoding", ["identity", "Identity", "identity, identity"])
+def test_worker_media_identity_encoding_keeps_content(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    """Explicit identity coding retains original bytes and MIME metadata."""
+    response = _response(body=b"media").replace(
+        b"\r\n\r\n",
+        f"\r\nContent-Encoding: {encoding}\r\n\r\n".encode("ascii"),
+        1,
+    )
+    connections = _capture_connections(monkeypatch, {"93.184.216.34": [response]})
+
+    result = _inline_file("http://media.example/media.txt")
+
+    assert result.content == b"media"
+    assert result.mime_type == "text/plain"
+    assert connections[0].stream.closed

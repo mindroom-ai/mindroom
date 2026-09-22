@@ -101,7 +101,7 @@ def test_document_name_and_type_survive_inlining(
     def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            content=b"document",
+            stream=httpx.ByteStream(b"document"),
             headers={"Content-Type": "application/octet-stream"},
             request=request,
         )
@@ -143,7 +143,7 @@ def test_media_source_type_survives_inlining(
     path.write_bytes(b"media-content")
 
     def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"media-content", request=request)
+        return httpx.Response(200, stream=httpx.ByteStream(b"media-content"), request=request)
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
     values: dict[str, Any] = {"filepath": path} if source == "file" else {"url": f"https://8.8.8.8/generated.{kind}"}
@@ -202,7 +202,7 @@ def test_unknown_file_type_remains_unset(monkeypatch: pytest.MonkeyPatch) -> Non
     def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            content=b"document",
+            stream=httpx.ByteStream(b"document"),
             headers={"Content-Type": "application/octet-stream"},
             request=request,
         )
@@ -230,7 +230,12 @@ def test_worker_url_result_becomes_inline_bytes(monkeypatch: pytest.MonkeyPatch)
 
     def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
         assert str(request.url) == "https://8.8.8.8/generated.png"
-        return httpx.Response(200, content=b"remote-image", headers={"Content-Type": "image/png"}, request=request)
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(b"remote-image"),
+            headers={"Content-Type": "image/png"},
+            request=request,
+        )
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
     result = ToolResult(content="Generated image", images=[Image(url="https://8.8.8.8/generated.png")])
@@ -285,7 +290,7 @@ def test_worker_resource_read_obeys_media_byte_limit(
     path.write_bytes(b"12345")
 
     def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"12345", request=request)
+        return httpx.Response(200, stream=httpx.ByteStream(b"12345"), request=request)
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
     image = Image(filepath=path) if source == "file" else Image(url="https://8.8.8.8/media")
