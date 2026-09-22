@@ -1960,6 +1960,7 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
         change_membership=change_membership,
     )
     bot.change_local_membership = change_membership  # type: ignore[method-assign]
+    bot.personal_rooms.change_membership = change_membership
     sync_bot_runtime_state(bot)
     return bot
 

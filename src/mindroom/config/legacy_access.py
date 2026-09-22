@@ -80,11 +80,11 @@ def access_config_needs_migration(data: dict[str, Any]) -> bool:
 
 def validate_access_migration_source(
     data: dict[str, Any],
-    source_files: frozenset[Path],
-    config_path: Path,
+    *,
+    uses_includes: bool,
 ) -> None:
-    """Reject a legacy access migration composed from more than one source file."""
-    if access_config_needs_migration(data) and source_files != frozenset({config_path.resolve()}):
+    """Reject a legacy access migration that would erase authored include tags."""
+    if access_config_needs_migration(data) and uses_includes:
         msg = "Automatic access migration does not support !include configurations"
         raise AccessMigrationError(msg)
 

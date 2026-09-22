@@ -347,6 +347,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
         )
         source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
+        uses_includes = current_snapshot.uses_includes if current_snapshot.runtime_paths == runtime_paths else None
         if current_snapshot.runtime_paths != runtime_paths:
             app_state.thread_export_runner = None
             app_state.leave_matrix_room = None
@@ -366,6 +367,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
             config_load_result=config_load_result,
             source_fingerprint=source_fingerprint,
             source_files=source_files,
+            uses_includes=uses_includes,
         )
     config_lifecycle.register_api_app(api_app)
 

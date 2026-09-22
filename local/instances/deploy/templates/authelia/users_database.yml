@@ -1,14 +1,16 @@
 ---
 # Authelia users database
-# Generate passwords with: docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password 'your-password'
+# Before starting, configure intended users and replace the public example
+# account password and email, or remove/disable that account.
+# Generate a new password hash interactively:
+# docker run --rm -it authelia/authelia:latest authelia crypto hash generate argon2
 
 users:
   # Example user - CHANGE THIS!
   admin:
     disabled: false
     displayname: "Admin User"
-    # Password: gSPZ9DPX2jA1ZF5OQRQo (CHANGE THIS FOR PRODUCTION!)
-    # Generated with: docker run --rm authelia/authelia:latest authelia crypto hash generate argon2 --password 'gSPZ9DPX2jA1ZF5OQRQo' -i 1 -m 1024 -p 8
+    # Public example hash: replace before starting or exposing the instance.
     password: "$argon2id$v=19$m=1024,t=1,p=8$rqwBHbPanMHvZzrpxxbhVQ$IZPHcoxceCmeRKIroLg14RZbcdamQ1MwKCFGfns8iqo"
     email: admin@example.com
     groups:

@@ -91,13 +91,24 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
         "payments": payments,
         "data_processing_purposes": [
             "Service provision and operation",
-            "Billing and payment processing (only during active subscription)",
+            "Billing and payment processing",
             "Security and fraud prevention",
         ],
         "data_retention_periods": {
-            "personal_data": "Deleted immediately when you close your account",
-            "payment_info": "We don't store payment details - Stripe handles this",
-            "invoices": "Invoice numbers only (anonymized) for tax compliance",
+            "personal_data": (
+                "Account deletion starts with a 7-day recovery period. After that, scheduled application-database "
+                "cleanup attempts deletion when enabled; completion is not guaranteed."
+            ),
+            "audit_logs": (
+                "After successful account deletion, a deletion audit record retains your account UUID. "
+                "Separate audit-log cleanup may remove it later."
+            ),
+            "payment_info": "Payment and webhook records retain account references and payment identifiers.",
+            "invoices": "Payment and webhook records are not removed by account cleanup and can prevent deletion.",
+            "external_data": (
+                "Account cleanup does not delete the authentication user, Stripe customer or subscription data, "
+                "Matrix data, or persistent volumes; separate processor and operator policies apply."
+            ),
         },
         "third_party_processors": [
             {
@@ -122,7 +133,12 @@ async def request_account_deletion(
         return {
             "status": "confirmation_required",
             "message": "Please confirm deletion by setting confirmation=true",
-            "warning": "This action cannot be undone. All your data will be permanently deleted.",
+            "warning": (
+                "Scheduled cleanup becomes eligible after 7 days. "
+                "You can request cancellation while your account is still pending deletion. "
+                "Completed application-database deletion cannot be undone; "
+                "retained and external data have separate limits."
+            ),
         }
 
     account_id = user["account_id"]
@@ -140,9 +156,8 @@ async def request_account_deletion(
         }
     ).execute()
 
-    # Use soft delete with SHORT grace period for accidental deletion recovery only
-    # After grace period, ALL personal data is permanently deleted
-    # Only anonymized invoice records kept for tax compliance
+    # Soft-delete now; the optional cleanup scheduler attempts database deletion after 7 days.
+    # Payment/webhook references can block cleanup; external data is outside this RPC.
     sb.rpc(
         "soft_delete_account", {"target_account_id": account_id, "reason": "gdpr_request", "requested_by": account_id}
     ).execute()
@@ -150,11 +165,26 @@ async def request_account_deletion(
     return {
         "status": "deletion_scheduled",
         "message": "Your account has been scheduled for deletion",
-        "grace_period_days": 7,  # Reduced from 30 - just enough for accident recovery
-        "deletion_date": "Account will be permanently deleted after 7 days",
-        "cancellation": "You can cancel this request by logging in within 7 days",
-        "data_deleted": "All personal data, instances, and usage history will be permanently deleted",
-        "data_retained": "Only anonymized invoice numbers retained for tax compliance (no personal info)",
+        "grace_period_days": 7,
+        "deletion_date": (
+            "Eligible for scheduled application-database cleanup after 7 days, when cleanup is enabled; "
+            "completion is not guaranteed"
+        ),
+        "cancellation": (
+            "While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings, "
+            "or call POST /my/gdpr/cancel-deletion. Signing in alone does not cancel deletion."
+        ),
+        "data_deleted": (
+            "Cleanup targets application-database account, subscription, instance, "
+            "existing account-linked audit-log, and subscription-linked usage records"
+        ),
+        "data_retained": (
+            "After successful account deletion, a deletion audit record retains your account UUID. "
+            "Separate audit-log cleanup may remove it later. "
+            "Payment and webhook records retain account references and can prevent cleanup. "
+            "Cleanup does not delete the authentication user, Stripe customer or subscription data, "
+            "Matrix data, or persistent volumes; separate processor and operator policies apply."
+        ),
     }
 
 

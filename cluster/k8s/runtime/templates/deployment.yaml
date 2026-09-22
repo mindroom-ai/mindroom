@@ -159,6 +159,10 @@ spec:
             - {{ .Values.runtime.apiHost | quote }}
             - --api-port
             - {{ .Values.runtime.apiPort | quote }}
+            {{- if .Values.config.bootstrapBundlePath }}
+            - --bootstrap-config-bundle
+            - {{ .Values.config.bootstrapBundlePath | quote }}
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.runtime.apiPort }}

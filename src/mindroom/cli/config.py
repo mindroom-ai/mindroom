@@ -745,12 +745,16 @@ def validate_config_source_quiet(
     from mindroom.config.yaml_includes import load_yaml_config_source_with_digests  # noqa: PLC0415
 
     def validate() -> Config:
-        data, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path, source=source)
+        data, source_digests, uses_includes = load_yaml_config_source_with_digests(
+            runtime_paths.config_path,
+            source=source,
+        )
         config, _source_digests = validate_loaded_config_source(
             data,
             source_digests,
             original,
             runtime_paths,
+            uses_includes=uses_includes,
             tolerate_plugin_load_errors=tolerate_plugin_load_errors,
         )
         return config

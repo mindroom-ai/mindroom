@@ -1563,6 +1563,27 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.matrix.personal_rooms"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+    "mindroom.matrix_identifiers",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
+path = "mindroom.personal_room_lifecycle"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.state",
+]
+visibility = ["mindroom.bot"]
+
+[[modules]]
 path = "mindroom.bot_room_lifecycle"
 depends_on = [
     "mindroom.commands.handler",
@@ -2751,6 +2772,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = []
 visibility = [
+    "mindroom.matrix.personal_rooms",
     "mindroom.custom_tools.matrix_message_idempotency",
     "mindroom.approval_transport",
     "mindroom.commands.config_confirmation",
@@ -2793,8 +2815,10 @@ depends_on = [
     "mindroom.thread_tags",
 ]
 visibility = [
+    "mindroom.matrix.personal_rooms",
     "mindroom.api.matrix_operations",
     "mindroom.bot",
+    "mindroom.personal_room_lifecycle",
     "mindroom.bot_room_lifecycle",
     "mindroom.commands.encryption_commands",
     "mindroom.commands.room_model_commands",
@@ -3486,6 +3510,7 @@ depends_on = [
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.event_info",
     "mindroom.matrix.journal_ingress",
+    "mindroom.matrix.personal_rooms",
     "mindroom.matrix.room_cleanup",
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
@@ -3495,6 +3520,7 @@ depends_on = [
     "mindroom.matrix.visible_body",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.memory",
+    "mindroom.personal_room_lifecycle",
     "mindroom.post_response_effects",
     "mindroom.reaction_dispatch",
     "mindroom.matrix_delivery",
@@ -3655,6 +3681,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
     "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
@@ -5919,6 +5946,14 @@ path = "mindroom.config_reload"
 depends_on = []
 
 [[modules]]
+path = "mindroom.config_bundle"
+depends_on = ["mindroom.config.main", "mindroom.constants", "mindroom.file_locks"]
+
+[[modules]]
+path = "mindroom.cli.config_bundle"
+depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bundle", "mindroom.constants"]
+
+[[modules]]
 path = "mindroom.api.config_reload"
 depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.config_reload", "mindroom.runtime_state"]
 
@@ -6670,3 +6705,20 @@ visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.res
 path = "mindroom.mid_turn_judgment"
 depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.constants", "mindroom.entity_resolution", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.matrix.thread_diagnostics", "mindroom.matrix.thread_history_result", "mindroom.mid_turn"]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.tools.moviepy_video_tools"
+depends_on = [
+    "mindroom.custom_tools.agno_compat_moviepy",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.agno_compat_moviepy"
+depends_on = []
+visibility = ["mindroom.tools.moviepy_video_tools"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_moviepy"]
+expose = ["MindRoomMoviePyVideoTools"]

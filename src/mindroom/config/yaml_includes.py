@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Never, cast
 
 import yaml
+from yaml.tokens import DirectiveToken, DocumentStartToken, TagToken
 
 from mindroom.yaml_io import SafeLoader
 
@@ -66,6 +67,7 @@ class _IncludeLoader(SafeLoader):  # ty: ignore[unsupported-base] - both safe lo
         self.files_read = files_read
         self.file_texts = file_texts
         self.include_chain = include_chain
+        self.uses_includes = False
 
     def construct_sequence(self, node: yaml.Node, deep: bool = False) -> list[Any]:
         """Construct a sequence, splicing only explicitly marked file expansions."""
@@ -110,6 +112,7 @@ def _resolve_include_path(loader: _IncludeLoader, node: yaml.Node) -> Path:
     if not resolved.is_relative_to(loader.root_dir):
         msg = f"{node.tag}: '{raw}' resolves outside the configuration directory"
         raise _include_error(msg, node)
+    loader.uses_includes = True
     return resolved
 
 
@@ -163,6 +166,29 @@ def _read_included_text(loader: _IncludeLoader, path: Path, node: yaml.Node) -> 
         raise _include_error(msg, node) from exc
 
 
+def _source_has_include_tags(source: str) -> bool | None:
+    """Return observed tag usage, or None when scanning cannot establish absence."""
+    default_prefixes = {"!": "!", "!!": "tag:yaml.org,2002:"}
+    tag_prefixes = default_prefixes
+    pending_prefixes: dict[str, str] = {}
+    try:
+        for token in yaml.scan(source, Loader=SafeLoader):
+            if isinstance(token, DirectiveToken) and token.name == "TAG":
+                handle, prefix = token.value
+                pending_prefixes[handle] = prefix
+            elif isinstance(token, DocumentStartToken):
+                tag_prefixes = default_prefixes | pending_prefixes
+                pending_prefixes = {}
+            elif isinstance(token, TagToken):
+                handle, suffix = token.value
+                tag = suffix if handle is None else tag_prefixes.get(handle, "") + suffix
+                if tag.startswith("!") and tag in _IncludeLoader.yaml_constructors:
+                    return True
+    except (yaml.YAMLError, UnicodeError):
+        return None
+    return False
+
+
 def _parse_yaml_file(
     path: Path,
     *,
@@ -171,8 +197,8 @@ def _parse_yaml_file(
     file_texts: dict[Path, str],
     include_chain: tuple[Path, ...],
     source: bytes | None = None,
-) -> object:
-    """Parse one YAML file with include support, recording it in ``files_read``."""
+) -> tuple[object, bool]:
+    """Parse one YAML file, recording its files and whether it resolves include tags."""
     text = _read_file_recording_digest(path, files_read, file_texts, source=source)
     loader = _IncludeLoader(
         text,
@@ -183,7 +209,14 @@ def _parse_yaml_file(
         include_chain=include_chain,
     )
     try:
-        return loader.get_single_data()
+        return loader.get_single_data(), loader.uses_includes
+    except (yaml.YAMLError, OSError, UnicodeError) as exc:
+        attach_partial_source_files(
+            exc,
+            frozenset(files_read),
+            uses_includes=loader.uses_includes or _source_has_include_tags(text),
+        )
+        raise
     finally:
         loader.dispose()
 
@@ -193,7 +226,7 @@ def _parse_included_yaml(loader: _IncludeLoader, path: Path, node: yaml.Node) ->
     _check_include_cycle(loader, path, node)
     _require_included_file(loader, path, node)
     try:
-        return _parse_yaml_file(
+        data, _uses_includes = _parse_yaml_file(
             path,
             root_dir=loader.root_dir,
             files_read=loader.files_read,
@@ -204,6 +237,7 @@ def _parse_included_yaml(loader: _IncludeLoader, path: Path, node: yaml.Node) ->
         display = _display_path(path, loader.root_dir)
         msg = f"{node.tag}: could not read '{display}': {exc}"
         raise _include_error(msg, node) from exc
+    return data
 
 
 def _included_dir_files(loader: _IncludeLoader, node: yaml.Node) -> list[Path]:
@@ -361,13 +395,20 @@ _IncludeLoader.add_constructor("!include_dir_merge_list", _construct_include_dir
 _IncludeLoader.add_constructor("!include_dir_merge_named", _construct_include_dir_merge_named)
 
 
-def attach_partial_source_files(exc: BaseException, files: frozenset[Path]) -> None:
+def attach_partial_source_files(
+    exc: BaseException,
+    files: frozenset[Path],
+    *,
+    uses_includes: bool | None = None,
+) -> None:
     """Record on ``exc`` the config files a failed load had read before raising.
 
     Reload watchers use this set to keep covering include files that a broken
     edit referenced, so fixing them still triggers a retry reload.
     """
     exc.partial_source_files = files  # ty: ignore[unresolved-attribute]
+    if uses_includes is not None:
+        exc.config_uses_includes = uses_includes  # ty: ignore[unresolved-attribute]
 
 
 def partial_source_files(exc: BaseException) -> frozenset[Path] | None:
@@ -376,22 +417,30 @@ def partial_source_files(exc: BaseException) -> frozenset[Path] | None:
     return files if isinstance(files, frozenset) else None
 
 
+def partial_source_uses_includes(exc: BaseException) -> bool | None:
+    """Return include usage observed before a failed parse, if recorded."""
+    uses_includes = getattr(exc, "config_uses_includes", None)
+    return uses_includes if isinstance(uses_includes, bool) else None
+
+
 def load_yaml_config_source_with_digests(
     path: Path,
     *,
     source: bytes | None = None,
-) -> tuple[dict[str, Any], dict[Path, str]]:
-    """Parse a config file, returning (data, sha256 hexdigest per file read).
+) -> tuple[dict[str, Any], dict[Path, str], bool]:
+    """Parse a config file, returning (data, sha256 per file read, uses_includes).
 
     ``source`` optionally supplies the top-level file's bytes so a caller that
     already read the file parses and fingerprints exactly those bytes.
-    Parse failures carry the files read so far via :func:`partial_source_files`.
+    Include usage is independent of the file count, including empty directories.
+    Parse failures carry the files read so far via :func:`partial_source_files`
+    and observed include usage via :func:`partial_source_uses_includes`.
     """
     top = path.resolve()
     files_read: dict[Path, str] = {}
     file_texts: dict[Path, str] = {}
     try:
-        data = _parse_yaml_file(
+        data, uses_includes = _parse_yaml_file(
             top,
             root_dir=top.parent,
             files_read=files_read,
@@ -402,7 +451,7 @@ def load_yaml_config_source_with_digests(
     except (yaml.YAMLError, OSError, UnicodeError) as exc:
         attach_partial_source_files(exc, frozenset(files_read))
         raise
-    return cast("dict[str, Any]", data or {}), files_read
+    return cast("dict[str, Any]", data or {}), files_read, uses_includes
 
 
 def load_yaml_config_source(path: Path) -> tuple[dict[str, Any], frozenset[Path]]:
@@ -411,7 +460,7 @@ def load_yaml_config_source(path: Path) -> tuple[dict[str, Any], frozenset[Path]
     ``all_files_read`` includes ``path`` itself plus every transitively included file.
     Include targets must stay inside the top-level config file's directory.
     """
-    data, files_read = load_yaml_config_source_with_digests(path)
+    data, files_read, _uses_includes = load_yaml_config_source_with_digests(path)
     return data, frozenset(files_read)
 
 

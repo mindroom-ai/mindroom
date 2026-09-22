@@ -469,7 +469,7 @@ class DockerProjectionManager:
             return copy.deepcopy(cached[2])
 
         try:
-            data, source_digests = load_yaml_config_source_with_digests(resolved_host_config_path)
+            data, source_digests, _uses_includes = load_yaml_config_source_with_digests(resolved_host_config_path)
         except (OSError, yaml.YAMLError, UnicodeError) as exc:
             msg = f"Failed to read Docker worker config file '{resolved_host_config_path}': {exc}"
             raise WorkerBackendError(msg) from exc

@@ -68,12 +68,35 @@ The CLI's `provision <id>` command uses fixed test metadata and is not the new-c
 
 ### Direct Helm Installation
 
-For debugging only:
+For debugging only, first create a private values file with a nonempty sandbox token from a trusted working directory:
+
+```bash
+(
+  set -eu
+  umask 077
+  test ! -d ./instance-secrets.yaml
+  instance_secrets_tmp="$(mktemp ./instance-secrets.yaml.XXXXXX)"
+  trap 'rm -f -- "$instance_secrets_tmp"' EXIT
+  instance_sandbox_token="$(openssl rand -hex 32)"
+  printf 'sandbox_proxy_token: "%s"\n' "$instance_sandbox_token" > "$instance_secrets_tmp"
+  mv -f -- "$instance_secrets_tmp" ./instance-secrets.yaml
+)
+```
+
+The private temporary file replaces `instance-secrets.yaml` atomically, without reusing an existing file's permissions or following a file symlink.
+Keep this file out of version control.
+With Helm's default Secret storage backend, the command below also retains supplied values and rendered Secrets in release history in `mindroom-instances`.
+Readers of those release Secrets can recover the sandbox token and other supplied credentials.
+Restrict access to both the instance Secret and every retained Helm release Secret, as well as this local values file.
+Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
+The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
+The provisioner supplies this token automatically, while a direct install must provide it.
 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --create-namespace \
+  -f instance-secrets.yaml \
   --set customer=1 \
   --set accountId="your-account-uuid" \
   --set baseDomain=mindroom.chat \
@@ -198,7 +221,16 @@ Shared, unscoped, and `user_agent` worker keys select their encoded agent, while
 Knowledge bases assigned to other agents and configured knowledge bases with no matching assignment are not mounted.
 
 For a source at `<shared-storage-root>/<relative-path>`, the worker-visible path is `<worker-storage-mount>/<relative-path>`.
-The default worker storage mount is `/app/worker`, so a source at `<shared-storage-root>/knowledge/reference` is visible at `/app/worker/knowledge/reference`.
+The effective default depends on the deployment:
+
+| Deployment | Worker storage mount | Visible path for `knowledge/reference` |
+| --- | --- | --- |
+| Runtime chart (`storage.mountPath`) | `/app/agent_data` | `/app/agent_data/knowledge/reference` |
+| Instance chart (`storagePath`) | `/mindroom_data` | `/mindroom_data/knowledge/reference` |
+| Direct backend without a mount override | `/app/worker` | `/app/worker/knowledge/reference` |
+
+Both charts set `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`; the direct-backend fallback applies when that environment override is absent.
+Custom chart values or runtime environment settings can select another root.
 The worker mounts that directory from the existing worker-storage PVC with `subPath: <relative-path>` and `readOnly: true`.
 The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
 MindRoom does not copy or clone the source per agent.

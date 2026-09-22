@@ -4,10 +4,19 @@ Service:
   {{ include "mindroom-runtime.fullname" . }}:{{ .Values.service.port }}
 
 Configuration:
+{{- if eq (include "mindroom-runtime.configSource" .) "file" }}
+  File: {{ include "mindroom-runtime.configPath" . }}
+{{- else }}
   ConfigMap: {{ include "mindroom-runtime.configMapName" . }}
+{{- end }}
   Storage PVC: {{ include "mindroom-runtime.storageClaimName" . }}
   Worker backend: {{ .Values.workers.backend }}
   Event cache: {{ .Values.eventCache.backend }}{{- if and (eq .Values.eventCache.backend "postgres") .Values.eventCache.postgres.create }} (chart-managed PostgreSQL: {{ include "mindroom-runtime.eventCachePostgresName" . }}){{- end }}
 
-For production use, provide Matrix settings, runtime secrets, and either an existing config ConfigMap or a chart-managed config value.
+For production use, provide Matrix settings and runtime secrets.
+{{- if eq (include "mindroom-runtime.configSource" .) "file" }}
+Supply the configuration file at {{ include "mindroom-runtime.configPath" . }}, for example with contentBundles.
+{{- else }}
+Provide either an existing config ConfigMap or a chart-managed config value.
+{{- end }}
 For externally managed PostgreSQL, set eventCache.databaseUrl.existingSecret.

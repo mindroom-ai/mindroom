@@ -84,6 +84,7 @@ serviceWorker:
   enabled: true
   # Root-relative sibling application paths that the PWA navigation fallback
   # must leave to the network. Requires client support for runtime exclusions.
+  # The client honors only the first eight distinct valid prefixes; later entries are ignored.
   navigationFallbackExcludePaths: []
 
 # Serve a cleanup service worker at the origin-root /sw.js.
