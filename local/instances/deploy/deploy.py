@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "jinja2"]
+# dependencies = ["typer", "rich", "pydantic", "jinja2", "pyyaml"]
 # ///
 """Docker MindRoom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -24,6 +24,7 @@ from enum import Enum
 from pathlib import Path
 
 import typer
+import yaml
 from jinja2 import Template
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -629,6 +630,31 @@ def _get_build_flag(
     return "--build"
 
 
+def _require_authelia_account_setup(instance: Instance) -> None:
+    """Reject enabled accounts that still use the shipped public password hash."""
+    users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
+    try:
+        database = yaml.safe_load(users_file.read_text())
+    except (OSError, yaml.YAMLError) as error:
+        console.print(f"[red]✗[/red] Cannot read Authelia users database: {users_file}")
+        console.print("  Configure users as described in local/instances/deploy/README.md before starting.")
+        raise typer.Exit(1) from error
+
+    users = database.get("users") if isinstance(database, dict) else None
+    if not isinstance(users, dict) or any(not isinstance(user, dict) for user in users.values()):
+        console.print(f"[red]✗[/red] Invalid Authelia users database: {users_file}")
+        console.print("  Configure users as described in local/instances/deploy/README.md before starting.")
+        raise typer.Exit(1)
+
+    template_file = SCRIPT_DIR / "templates" / "authelia" / "users_database.yml"
+    example_hash = yaml.safe_load(template_file.read_text())["users"]["admin"]["password"]
+    if any(user.get("disabled") is not True and user.get("password") == example_hash for user in users.values()):
+        console.print(f"[red]✗[/red] Enabled Authelia account uses the public example password hash: {users_file}")
+        console.print("  Replace the password hash and email, or remove/disable the example account before starting.")
+        console.print("  See local/instances/deploy/README.md for password hashing instructions.")
+        raise typer.Exit(1)
+
+
 def _bring_up_instance(
     name: str,
     instance: Instance,
@@ -644,6 +670,9 @@ def _bring_up_instance(
     force_recreate: bool = False,
 ) -> None:
     """Start or restart an instance using one shared compose-up path."""
+    if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
+        _require_authelia_account_setup(instance)
+
     env_file = _require_instance_env_file(name)
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)

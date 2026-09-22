@@ -515,3 +515,208 @@ def test_telegram_bridge_compose_renders_configured_image(
 
     overridden_compose = yaml.safe_load(compose_path.read_text())
     assert overridden_compose["services"]["telegram"]["image"] == "registry.example/telegram:compatible"
+
+
+@pytest.fixture
+def authelia_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[deploy.Instance, Path, list[str], Console]:
+    """Keep launch inputs synthetic and capture all Docker commands."""
+    instance = _instance("alpha", matrix_type=deploy.MatrixType.TUWUNEL, data_root=tmp_path)
+    instance.auth_type = deploy.AuthType.AUTHELIA
+    instance.status = deploy.InstanceStatus.RUNNING
+    registry = deploy.Registry(instances={"alpha": instance})
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    (env_dir / "alpha.env").write_text("INSTANCE_NAME=alpha\n")
+    users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
+    users_file.parent.mkdir(parents=True)
+    users_file.write_text((deploy.SCRIPT_DIR / "templates" / "authelia" / "users_database.yml").read_text())
+    console = Console(record=True, width=240)
+    commands: list[str] = []
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(deploy, "console", console)
+    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
+    monkeypatch.setattr(deploy, "REGISTRY_FILE", tmp_path / "instances.json")
+    monkeypatch.setattr(deploy, "load_registry", lambda: registry)
+    monkeypatch.setattr(deploy, "_create_instance_directories", lambda _instance: None)
+    monkeypatch.setattr(deploy, "_setup_tuwunel_directory", lambda _instance, _env_file: None)
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+    return instance, users_file, commands, console
+
+
+def _launch_authelia(command: str, *, only_matrix: bool = False, use_registry: bool = False) -> None:
+    if command == "start":
+        deploy.start(
+            "alpha",
+            only_matrix=only_matrix,
+            use_registry=use_registry,
+            registry_url=deploy.DEFAULT_REGISTRY,
+            no_build=True,
+        )
+    else:
+        deploy.restart(
+            name=None if command == "restart_all" else "alpha",
+            all_instances=command == "restart_all",
+            only_matrix=only_matrix,
+            use_registry=use_registry,
+            registry_url=deploy.DEFAULT_REGISTRY,
+            no_build=True,
+        )
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize("example_state", ["unchanged", "renamed", "enabled_by_default"])
+def test_authelia_launch_rejects_enabled_public_credentials(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+    example_state: str,
+) -> None:
+    """Reject the public hash before launch effects even after account edits."""
+    instance, users_file, commands, console = authelia_launch
+    database = yaml.safe_load(users_file.read_text())
+    if example_state == "renamed":
+        database["users"]["operator"] = database["users"].pop("admin")
+    elif example_state == "enabled_by_default":
+        del database["users"]["admin"]["disabled"]
+    users_file.write_text(yaml.safe_dump(database))
+    before = users_file.read_bytes()
+    env_before = (deploy.ENV_DIR / "alpha.env").read_bytes()
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia(command, use_registry=True)
+
+    assert exc.value.exit_code == 1
+    assert commands == []
+    assert users_file.read_bytes() == before
+    assert (deploy.ENV_DIR / "alpha.env").read_bytes() == env_before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    text = normalize_console_output(console.export_text())
+    assert str(users_file) in text
+    assert "public example" in text.lower()
+    assert "password hash" in text.lower()
+    assert "local/instances/deploy/README.md" in text
+    assert database["users"][next(iter(database["users"]))]["password"] not in text
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize("example_state", ["replaced", "removed", "disabled"])
+def test_authelia_launch_preserves_configured_users(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+    example_state: str,
+) -> None:
+    """Allow explicit setup without changing the operator's user database."""
+    instance, users_file, commands, _console = authelia_launch
+    database = yaml.safe_load(users_file.read_text())
+    configured = {
+        "disabled": False,
+        "displayname": "Configured User",
+        "password": (
+            "$argon2id$v=19$m=65536,t=3,p=4$MDEyMzQ1Njc4OWFiY2RlZg$e7rBJC02ad64LZ63hb15DFQ2CrfzMkABVvrIFNI6aZ8"
+        ),
+        "email": "operator@example.com",
+        "groups": ["users"],
+    }
+    if example_state == "replaced":
+        database["users"]["admin"] = configured
+    else:
+        database["users"]["operator"] = configured
+        if example_state == "removed":
+            del database["users"]["admin"]
+        else:
+            database["users"]["admin"]["disabled"] = True
+    users_file.write_text(yaml.safe_dump(database))
+    before = users_file.read_bytes()
+
+    _launch_authelia(command)
+
+    assert users_file.read_bytes() == before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert any(" up -d" in cmd and cmd.endswith(" mindroom tuwunel wellknown authelia") for cmd in commands)
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+def test_authelia_matrix_only_launch_does_not_require_users(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+) -> None:
+    """Matrix-only launches must not inspect the unused authentication database."""
+    instance, users_file, commands, _console = authelia_launch
+    users_file.unlink()
+
+    _launch_authelia(command, only_matrix=True)
+
+    assert instance.status == deploy.InstanceStatus.PARTIAL
+    assert not users_file.exists()
+    assert any(" up -d" in cmd and cmd.endswith(" tuwunel wellknown") for cmd in commands)
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+def test_launch_without_authelia_does_not_require_users(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+) -> None:
+    """Instances without Authelia must not gain an account setup requirement."""
+    instance, users_file, commands, _console = authelia_launch
+    instance.auth_type = None
+    users_file.unlink()
+
+    _launch_authelia(command)
+
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert not users_file.exists()
+    assert any(" up -d" in cmd and cmd.endswith(" mindroom tuwunel wellknown") for cmd in commands)
+
+
+@pytest.mark.parametrize("contents", [None, "users: [", "users: []", "users:\n  admin: null\n"])
+def test_authelia_launch_rejects_unreadable_user_database(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    contents: str | None,
+) -> None:
+    """An unreadable account database cannot bypass the launch check."""
+    _instance, users_file, commands, console = authelia_launch
+    if contents is None:
+        users_file.unlink()
+    else:
+        users_file.write_text(contents)
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia("start")
+
+    assert exc.value.exit_code == 1
+    assert commands == []
+    assert str(users_file) in normalize_console_output(console.export_text())
+
+
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_print_instance_info_authelia_setup_uses_actual_data_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    auth_enabled: bool,
+) -> None:
+    """Only Authelia instances should show setup guidance for their own database."""
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path / "custom-data")
+    auth_type = deploy.AuthType.AUTHELIA if auth_enabled else None
+    console = Console(record=True, width=240)
+    monkeypatch.setattr(deploy, "console", console)
+
+    deploy._print_instance_info(instance, None, auth_type)
+
+    text = normalize_console_output(console.export_text())
+    users_file = Path(instance.data_dir) / "authelia" / "users_database.yml"
+    if auth_enabled:
+        assert str(users_file) in text
+        assert "Before starting:" in text
+        assert "password hash and email" in text
+        assert "remove/disable" in text
+        assert "local/instances/deploy/README.md" in text
+    else:
+        assert "Authelia" not in text
+        assert str(users_file) not in text
+    assert "Default login:" not in text

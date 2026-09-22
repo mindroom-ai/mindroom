@@ -64,6 +64,8 @@ GOOGLE_API_KEY=...
 It does not generate a unique login password or prompt for user credentials.
 Before running `start` or exposing the instance, configure intended users there: replace the example `admin` password hash and email, or remove/disable that account (`disabled: true`) after adding your own user.
 Do not leave any enabled account using the public template credentials.
+Full-instance `start` and `restart` refuse to launch while any enabled account still uses the public example hash, even if the account was renamed.
+Matrix-only launches (`--only-matrix`) skip this check because they do not start Authelia.
 
 Generate a new password hash with the interactive prompt documented in [Authelia's password guide](https://www.authelia.com/reference/guides/passwords/):
 
