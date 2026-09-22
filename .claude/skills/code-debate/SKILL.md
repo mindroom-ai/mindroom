@@ -43,7 +43,7 @@ Do not ask the user which role to play.
 - After appending your section, only poll.
 - Append another turn only after consuming the expected signed peer turn, even if it arrived before polling started.
 - Without an unconsumed peer turn, keep polling until timeout or `## CONSENSUS`.
-- On timeout, append only a timeout `## CONSENSUS` from your own role.
+- On timeout, use `APPEND_TIMEOUT` to close any unfinished fence and publish only a timeout `## CONSENSUS` from your own role.
 
 ## Peer-turn readiness
 
@@ -62,7 +62,7 @@ Define this function before running the poll loop:
 
 ```bash
 TURN_STATE() {
-  awk -v expected="$EXPECTED" -v peer="$PEER" -v consumed="$LAST_CONSUMED" '
+  awk -v expected="$EXPECTED" -v peer="$PEER" -v consumed="$LAST_CONSUMED" -v action="${1:-state}" '
     {
       line = $0
       sub(/^ */, "", line)
@@ -96,7 +96,16 @@ TURN_STATE() {
         content = 1
     }
     END {
-      if (terminal) print "CONSENSUS"
+      if (action == "timeout") {
+        if (!terminal) {
+          if (fence != "") {
+            for (i = 0; i < fence_length; i++) printf "%s", fence
+            printf "\n\n"
+          }
+          print "## CONSENSUS\n\nAgent " (peer == "A" ? "B" : "A") " ended the debate after timing out waiting for Agent " peer "."
+        }
+      }
+      else if (terminal) print "CONSENSUS"
       else if (heading == expected && heading != consumed && content && signed && fence == "")
         print "PEER_TURN_READY"
       else print "WAIT"
@@ -107,6 +116,30 @@ TURN_STATE() {
 
 The closing signature and response text must belong to the expected section, so unfinished or empty appends cannot reuse the previous section's signature.
 After reading and processing a ready turn, set `LAST_CONSUMED=$EXPECTED` before appending your reply.
+
+## Timeout publication
+
+For either role, publish a timeout through `APPEND_TIMEOUT` instead of appending a raw consensus heading.
+`TURN_STATE timeout` uses the same parsed fence state to prepare a closing delimiter, when needed, followed by a timeout consensus from your own role.
+Closing an unfinished fence is only formatting recovery; never complete or sign the peer response.
+The leading newline separates the timeout publication from a partial final line.
+After each append, re-read the file: if the peer closed its fence between preparation and publication, repair the current fence state and retry until parsed consensus is visible.
+An existing parsed consensus makes the helper return without appending another timeout.
+If reading or appending fails, report that failure; do not claim timeout publication completed.
+
+```bash
+APPEND_TIMEOUT() {
+  local timeout_text
+  while true; do
+    timeout_text=$(TURN_STATE timeout) || return
+    if [ -z "$timeout_text" ]; then return; fi
+    printf '\n%s\n' "$timeout_text" >> DEBATE.md || return
+  done
+}
+```
+
+Define both functions before entering the polling flow.
+Only call `APPEND_TIMEOUT` for an existing `DEBATE.md`; Agent B must still stop without creating the file if its initial existence wait expires.
 
 ## Shell requirement
 
@@ -189,7 +222,7 @@ Once the turn is processed, set `LAST_CONSUMED=$EXPECTED` and append your reply 
    done
    ```
    This step is blocking and mandatory; do not exit the workflow before it finishes.
-5. If `CONSENSUS` → stop; if timed out → append `## CONSENSUS` noting the timeout and stop.
+5. If `CONSENSUS` → stop; if timed out → run `APPEND_TIMEOUT` and stop only after it succeeds.
 6. Read and process Agent B's expected signed reply, then set `LAST_CONSUMED=$EXPECTED`.
 7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
 8. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
@@ -209,7 +242,7 @@ Once the turn is processed, set `LAST_CONSUMED=$EXPECTED` and append your reply 
    Run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate.
 3. Run the same readiness loop as Agent A, checking the expected heading and signature immediately and on every poll.
    This step is blocking and mandatory; do not exit the workflow before it finishes.
-4. If `CONSENSUS` → stop; if timed out → append `## CONSENSUS` noting the timeout and stop.
+4. If `CONSENSUS` → stop; if timed out → run `APPEND_TIMEOUT` and stop only after it succeeds.
 5. Read and process Agent A's expected signed turn, then set `LAST_CONSUMED=$EXPECTED`.
 6. Using the consumed peer heading, set shell variable `N` to 1 after `## Opening` or one greater than the consumed follow-up number, and append `## Response N` with a point-by-point reply.
 7. Set `EXPECTED="## Follow-up $N"`, then return immediately to step 3 without resetting `LAST_CONSUMED`.
