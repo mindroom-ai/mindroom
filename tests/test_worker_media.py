@@ -296,3 +296,93 @@ def test_worker_resource_read_obeys_media_byte_limit(
     image = Image(filepath=path) if source == "file" else Image(url="https://8.8.8.8/media")
     with pytest.raises(ValueError, match="media"):
         serialize_worker_tool_result(ToolResult(content="Large", images=[image]))
+
+
+@pytest.mark.parametrize(
+    ("path", "header", "explicit_mime", "explicit_format", "expected_format"),
+    [
+        ("/download", "audio/mpeg", None, None, "mp3"),
+        ("/", "audio/mpeg", None, None, "mp3"),
+        ("/download.bin", "audio/mpeg", None, None, "mp3"),
+        ("/download.unknown", "audio/mpeg", None, None, "mp3"),
+        ("/download", "audio/mp3", None, None, "mp3"),
+        ("/download", "audio/wave", None, None, "wav"),
+        ("/download", "audio/x-wav", None, None, "wav"),
+        ("/download", " Audio/MPEG ; charset=binary", None, None, "mp3"),
+        ("/download", "audio/wav", "audio/mpeg", None, "mp3"),
+        ("/download", "audio/mpeg", "audio/wav", None, "wav"),
+        ("/download", "audio/mpeg", "audio/x-unknown", None, None),
+        ("/download.wav", "audio/wav", None, "mp3", "mp3"),
+        ("/download.mp3", "audio/wav", None, None, "mp3"),
+        ("/download.wav", "audio/mpeg", None, None, "wav"),
+        ("/download.ogg", "audio/mpeg", None, None, "ogg"),
+        ("/download.webm", "audio/mpeg", None, None, "webm"),
+        ("/download.unknown", "application/octet-stream", None, None, "unknown"),
+        ("/download.unknown", "audio/x-unknown", None, None, "unknown"),
+        ("/download", "audio/x-unknown", None, None, None),
+    ],
+)
+def test_worker_audio_mime_fallback_reaches_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    header: str,
+    explicit_mime: str | None,
+    explicit_format: str | None,
+    expected_format: str | None,
+) -> None:
+    """OpenAI sees the audio type after worker resource references disappear."""
+
+    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(b"audio-content"),
+            headers={"Content-Type": header},
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    source = Audio(
+        url=f"https://8.8.8.8{path}",
+        mime_type=explicit_mime,
+        format=explicit_format,
+    )
+
+    wire = json.dumps(serialize_worker_tool_result(ToolResult(content="Audio", audios=[source])))
+    decoded = decode_media_result(json.loads(wire))
+
+    assert isinstance(decoded, ToolResult)
+    assert decoded.audios
+    audio = decoded.audios[0]
+    assert audio.content == b"audio-content"
+    assert audio.url is None
+    assert audio.filepath is None
+    assert audio.media_reference is None
+    assert audio.format == expected_format
+    if explicit_mime is not None:
+        assert audio.mime_type == explicit_mime
+    assert audio_to_message([audio])[0]["input_audio"]["format"] == (expected_format or "wav")
+
+
+@pytest.mark.parametrize("source", ["file", "content"])
+def test_worker_audio_explicit_mime_supplies_missing_format(
+    tmp_path: Path,
+    source: str,
+) -> None:
+    """Explicit MIME also identifies extensionless files and existing inline bytes."""
+    path = tmp_path / "download"
+    path.write_bytes(b"mp3-content")
+    values: dict[str, Any] = {"filepath": path} if source == "file" else {"content": b"mp3-content"}
+    audio = Audio(**values, mime_type="audio/mpeg")
+
+    envelope = serialize_worker_tool_result(ToolResult(content="Audio", audios=[audio]))
+    path.unlink()
+    decoded = decode_media_result(json.loads(json.dumps(envelope)))
+
+    assert isinstance(decoded, ToolResult)
+    assert decoded.audios
+    item = decoded.audios[0]
+    assert item.content == b"mp3-content"
+    assert item.filepath is None
+    assert item.mime_type == "audio/mpeg"
+    assert item.format == "mp3"
+    assert audio_to_message([item])[0]["input_audio"]["format"] == "mp3"

@@ -20,6 +20,14 @@ from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
 
+_AUDIO_FORMAT_BY_MIME_TYPE = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/wave": "wav",
+    "audio/x-wav": "wav",
+}
+
 
 class _WorkerMediaProxyTransport(httpx.HTTPTransport):
     """Validate media destinations before forwarding through configured egress."""
@@ -109,6 +117,12 @@ def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]
         updates["mime_type"] = next((value for value in candidates if value and value.startswith(family)), None)
     if isinstance(media, (Audio, Video)) and media.format is None and name:
         updates["format"] = Path(name).suffix.removeprefix(".").lower() or None
+    if isinstance(media, Audio) and media.format is None:
+        suffix_mime = mimetypes.guess_type(name)[0] or ""
+        if updates.get("format") not in {"mp3", "wav", "ogg", "webm"} and not suffix_mime.startswith("audio/"):
+            mime = media.mime_type or updates.get("mime_type")
+            if audio_format := _AUDIO_FORMAT_BY_MIME_TYPE.get(mime or ""):
+                updates["format"] = audio_format
     return updates
 
 

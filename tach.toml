@@ -514,6 +514,7 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.matrix_agent_discovery",
     "mindroom.routing",
+    "mindroom.routing_judgment",
 ]
 
 [[modules]]
@@ -2302,6 +2303,7 @@ visibility = [
 [[modules]]
 path = "mindroom.routing"
 depends_on = [
+    "mindroom.routing_judgment",
     "mindroom.agent_descriptions",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -2367,6 +2369,7 @@ depends_on = ["mindroom.config.models", "mindroom.path_globs"]
 [[modules]]
 path = "mindroom.config.models"
 depends_on = [
+    "mindroom.config.judgment",
     "mindroom.config.access",
     "mindroom.config.legacy_fields",
     "mindroom.config.validation",
@@ -4023,6 +4026,14 @@ depends_on = []
 [[modules]]
 path = "mindroom.tool_system.registry_state"
 depends_on = ["mindroom.tool_system.plugin_imports"]
+
+[[modules]]
+path = "mindroom.tool_system.worker_arguments"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.worker_media"
+depends_on = ["mindroom.server_fetch_url", "mindroom.tool_system.media_transport", "mindroom.tool_system.worker_proxy_client"]
 
 [[modules]]
 path = "mindroom.tool_system.worker_routing"
@@ -6427,6 +6438,19 @@ path = "mindroom.custom_tools.browser_mcp"
 depends_on = ["mindroom.worker_computer.browser_proxy", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.mcp_provider"]
 
 [[modules]]
+path = "mindroom.tools.modelslabs"
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.tools.agno_compat_modelslabs"]
+
+[[modules]]
+path = "mindroom.tools.agno_compat_modelslabs"
+depends_on = []
+visibility = ["mindroom.tools.modelslabs"]
+
+[[interfaces]]
+from = ["mindroom.tools.agno_compat_modelslabs"]
+expose = ["ModelsLabCompletionTools"]
+
+[[modules]]
 path = "mindroom.tools.browser_mcp"
 depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration", "mindroom.worker_computer.mcp_catalog", "mindroom.custom_tools.browser_mcp"]
 
@@ -6696,12 +6720,9 @@ depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.c
 visibility = ["mindroom.response_runner"]
 
 [[modules]]
-path = "mindroom.tool_system.worker_arguments"
-depends_on = []
-
-[[modules]]
-path = "mindroom.tool_system.worker_media"
-depends_on = ["mindroom.server_fetch_url", "mindroom.tool_system.media_transport", "mindroom.tool_system.worker_proxy_client"]
+path = "mindroom.routing_judgment"
+depends_on = ["mindroom.agent_descriptions", "mindroom.judgment.evaluator", "mindroom.judgment.state"]
+visibility = ["mindroom.routing"]
 
 [[modules]]
 path = "mindroom.tools.moviepy_video_tools"
