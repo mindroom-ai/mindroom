@@ -642,6 +642,7 @@ def view_file_from_worker(
     runtime_paths: RuntimePaths,
     worker_target: ResolvedWorkerTarget | None,
     worker_tools_override: list[str] | None = None,
+    workspace_root: Path | None = None,
     path: str,
 ) -> ToolResult | None:
     """View one file in the selected worker, returning None when no worker endpoint exists."""
@@ -672,6 +673,15 @@ def view_file_from_worker(
         )
         if worker_handle is None and proxy_config.proxy_url is None:
             return None
+
+        worker_key = worker_payload.get("worker_key")
+        tool_init_overrides = _portable_tool_init_overrides(
+            {"base_dir": str(workspace_root)} if workspace_root is not None else None,
+            shared_storage_root_path=manager_context.storage_root,
+            worker_key=worker_key if isinstance(worker_key, str) else None,
+        )
+        if tool_init_overrides:
+            worker_payload["tool_init_overrides"] = tool_init_overrides
 
         data = post_worker_proxy_json(
             config=_worker_proxy_client_config(proxy_config),

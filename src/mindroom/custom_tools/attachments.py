@@ -480,6 +480,7 @@ class AttachmentTools(Toolkit):
                     runtime_paths=runtime_paths,
                     worker_target=self._worker_target,
                     worker_tools_override=self._worker_tools_override,
+                    workspace_root=self._tool_output_workspace_root,
                     path=path,
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
