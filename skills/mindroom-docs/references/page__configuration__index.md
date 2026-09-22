@@ -824,7 +824,9 @@ Demote stale Space admins manually in a Matrix client when needed.
 
 `event_journal.backend` defaults to `sqlite`, which stores the durable Matrix event journal at `<storage>/tracking/event_journal.db` (`mindroom_data/tracking/event_journal.db` with the default storage root).
 SQLite has no independent journal-path setting and ignores the PostgreSQL URL fields.
-To use PostgreSQL, select the backend explicitly and provide a connection URL:
+The PostgreSQL backend requires the `postgres` extra, which supplies `psycopg`.
+For a Python install, use `uvx --from 'mindroom[postgres]' mindroom run`, or include `--extra postgres` when syncing a source checkout.
+Then select the backend explicitly and provide a connection URL:
 
 ```yaml
 event_journal:
