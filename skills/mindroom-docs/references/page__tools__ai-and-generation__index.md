@@ -217,10 +217,13 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the upstream fallback. |
+| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the fallback. The resolved key is passed directly to the request client. |
 | `model` | `text` | `no` | `minimax/h3` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
+
+Stored `api_key` credentials take precedence over `REPLICATE_API_KEY`.
+`REPLICATE_API_TOKEN` alone does not configure this toolkit and cannot override its resolved key.
 
 ### Example
 

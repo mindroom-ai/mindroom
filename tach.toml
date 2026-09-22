@@ -6539,6 +6539,24 @@ from = ["mindroom.custom_tools.agno_compat_website_reader"]
 expose = ["queue_crawl_url", "crawl_with_callbacks"]
 
 [[modules]]
+path = "mindroom.tools.replicate"
+depends_on = [
+    "mindroom.model_defaults",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.custom_tools.agno_compat_replicate",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.agno_compat_replicate"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.tools.replicate"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_replicate"]
+expose = ["MindRoomReplicateTools"]
+
+[[modules]]
 path = "mindroom.custom_tools.agno_compat_github_errors"
 depends_on = []
 visibility = ["mindroom.custom_tools.github"]

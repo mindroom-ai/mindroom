@@ -7645,10 +7645,13 @@ Generated artifacts are attached by remote URL rather than downloaded into MindR
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the upstream fallback. |
+| `api_key` | `password` | `no` | `null` | Replicate API key, with `REPLICATE_API_KEY` as the fallback. The resolved key is passed directly to the request client. |
 | `model` | `text` | `no` | `minimax/h3` | Replicate model ref used by `generate_media()`. |
 | `enable_generate_media` | `boolean` | `no` | `true` | Enable `generate_media()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full toolkit, which is currently just `generate_media()`. |
+
+Stored `api_key` credentials take precedence over `REPLICATE_API_KEY`.
+`REPLICATE_API_TOKEN` alone does not configure this toolkit and cannot override its resolved key.
 
 ### Example
 
@@ -19998,6 +20001,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Google authentication requires private resolver and Function entrypoint replacement. | Propose injectable credential resolution and an entrypoint middleware hook. | `oauth/agno_compat_google_auth.py`. |
 | WebsiteReader does not expose fetch, redirect, and crawl-admission hooks. | Propose a replaceable fetch path and explicit crawl-policy callbacks. | `custom_tools/agno_compat_website_reader.py`. |
 | GithubTools serializes provider failures and logs provider detail through fixed message formats. | Expose typed errors; separately provide structured logging or a redaction hook. | `custom_tools/agno_compat_github_errors.py`. |
+| ReplicateTools checks its API key but calls an independent SDK default client. | Bind SDK requests to the toolkit key and expose client lifetime ownership while preserving media results. | `custom_tools/agno_compat_replicate.py`. |
 | AgentQLTools stores its resolved key without handing it to AgentQL queries. | Tracking gap: pass the resolved key through a per-request or per-page SDK credential API; no matching issue or PR identified. | `custom_tools/agno_compat_agentql.py`; concurrent stored-key requests and an unrelated SDK call in `tests/test_agentql_tools.py`. |
 | AgentQLTools custom scraping returns response keys and discards extracted values. | Tracking gap: preserve the complete JSON response, including nested collections; no matching issue or PR identified. | The independent custom-result formatter in `custom_tools/agno_compat_agentql.py` and nested-value coverage in `tests/test_agentql_tools.py`. |
 | Adapter media capabilities must be inferred from a private module-name table. | Expose accurate supported-input capabilities independently of provider error learning. | The small documented table in `provider_media_fallback.py`. |
@@ -20030,6 +20034,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_vertex_claude_tools.py` | Non-mutating removal of unsupported provider-level strict flags before Agno tool formatting. | `vertex_claude_compat.py` retains context fitting, token counting, and native checkpoint policy. |
 | `custom_tools/agno_compat_website_reader.py` | Private crawl queue, visited state and copied loop with owner callbacks. | `custom_tools/website.py` retains server-fetch and redirect validation, exact-host rules, extraction, budgets, results, and sanitized logging. |
 | `custom_tools/agno_compat_github_errors.py` | Capture of typed failures across serialized Agno results and prefix/logger binding. | `custom_tools/github.py` retains credential ownership and refresh, PyGithub requester policy, OAuth recovery, and sanitized output/log messages. |
+| `custom_tools/agno_compat_replicate.py` | Copied media-call boundary with a credential-bound Replicate client, inherited output parsing, and private SDK transport cleanup. | `tool_system/metadata.py` retains scoped credential resolution; `tools/replicate.py` retains lazy registration, and the adapter closes each request client after consuming outputs. |
 | `custom_tools/agno_compat_agentql.py` | AgentQL 1.18.1 private page/query dispatch with an explicit request key, plus lossless Agno custom-result formatting. | `tools/agentql.py` retains lazy registration and browser compatibility; `tool_system/metadata.py` retains scoped credential resolution. SDK page readiness, query parameters, HTTP failure and timeout mapping, and per-call browser cleanup remain intact. Redirect rejection and unwrapped successful-response JSON errors deliberately differ from AgentQL 1.18.1. |
 | `oauth/agno_compat_google_auth.py` | Private credential resolver, original resolver binding, and registered Function entrypoint adaptation. | `oauth/client.py` and Google tool owners retain credential state, refresh, service-account fallback, locking, scopes, and user prompts. |
 
