@@ -283,8 +283,10 @@ The sender must have responder access to the updating agent or another eligible 
 Human notices can establish a pin, but their message counts and enrichment markers are never trusted.
 Pins are recovered from thread history after restart and checked again before an in-flight automatic summary is delivered.
 Unavailable shared-responder authorization or a failed final history recheck defers automatic delivery; completed generation attempts keep the normal retry interval.
+Ad-hoc rooms defer an unproven pin decision until member discovery is complete; an already proven grant still pins immediately.
 Pin decisions follow Matrix event time, including the edit time when replacement content reasserts a pin, so a later human pin can override an older release that a cold client has not loaded.
-Summary generation timestamps break equal event-time ties and separately control title display ordering.
+MindRoom Chat orders displayed titles by Matrix event or edit time, with `generated_at` breaking equal-time ties.
+Older clients and cached summaries without event timestamps use `generated_at` ordering.
 Explicit tool writes and later automatic updates advance past authorized predecessor timestamps, including client clock skew.
 If an existing timestamp cannot be advanced within the supported date range, a manual write returns an error instead of silently failing to replace the title.
 

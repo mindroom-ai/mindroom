@@ -11,8 +11,9 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig
-from mindroom.entity_resolution import current_internal_sender_ids
+from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.matrix.conversation_reads import DeliveredResponse
+from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.thread_summary import (
     ThreadSummaryWriteError,
     _human_summary_authorizer,
@@ -136,15 +137,27 @@ async def test_authorized_human_pin_survives_restart(tmp_path: Path, sender: str
 @pytest.mark.asyncio
 @pytest.mark.parametrize("authorized", [True, False])
 @pytest.mark.parametrize("pin_source", ["history", "source"])
-async def test_human_pin_uses_responder_authority(tmp_path: Path, authorized: bool, pin_source: str) -> None:
+@pytest.mark.parametrize("configured_room", [False, True])
+async def test_human_pin_uses_responder_authority(
+    tmp_path: Path,
+    authorized: bool,
+    pin_source: str,
+    configured_room: bool,
+) -> None:
     """Source recheck honors allowed users and rejects spoofed unauthorized notices."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["!room:x"] if configured_room else [],
+        access={"users": ["@owner:example.com"]},
+    )
+    client = make_matrix_client_mock()
+    client.rooms["!room:x"].members_synced = not configured_room
     notice = _human_notice("@owner:example.com" if authorized else "@outsider:example.com")
     notice.content["io.mindroom.original_sender"] = "@owner:example.com"
     history = _make_thread_history(12)
     if pin_source == "history":
         history.append(notice)
-    client, generate = await _run_automatic_summary(config, history, [notice])
+    client, generate = await _run_automatic_summary(config, history, [notice], client=client)
     assert client.room_send.await_count == (0 if authorized else 1)
     assert generate.await_count == (0 if authorized and pin_source == "history" else 1)
 
@@ -245,7 +258,7 @@ async def test_membership_grant_authorizes_human_pin(tmp_path: Path) -> None:
 @pytest.mark.parametrize("authorized", [True, False])
 async def test_explicit_release_advances_past_authorized_future_pin(tmp_path: Path, authorized: bool) -> None:
     """Explicit tool writes beat skewed allowed predecessors, never outsider timestamps."""
-    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config = membership_config(tmp_path, agent_rooms=["!room:x"], access={"users": ["@owner:example.com"]})
     client = make_matrix_client_mock()
     client.room_send.return_value = nio.RoomSendResponse(event_id="$release", room_id="!room:x")
     reader = make_conversation_reader_mock()
@@ -358,6 +371,91 @@ async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path
         "other",
         AgentReplyMembershipIndex(),
     )(notice.sender)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pin_source", ["history", "source"])
+async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(tmp_path: Path, pin_source: str) -> None:
+    """An unseen joined responder cannot turn a valid human pin into a denial."""
+    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config.agents["other"] = AgentConfig(display_name="Other", access={"users": []})
+    runtime_paths = runtime_paths_for(config)
+    persist_entity_accounts(config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    client = make_matrix_client_mock(user_id=registry.current_id("other").full_id)
+    room = nio.MatrixRoom("!room:x", client.user_id)
+    room.add_member(client.user_id, None, None)
+    client.rooms = {room.room_id: room}
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(client.user_id, None, None),
+            nio.RoomMember("@owner:example.com", None, None),
+            nio.RoomMember(registry.current_id("talent").full_id, None, None),
+        ],
+        room_id=room.room_id,
+    )
+    notice = _human_notice()
+    history = _make_thread_history(12)
+    if pin_source == "history":
+        history.append(notice)
+
+    client, generate = await _run_automatic_summary(
+        config,
+        history,
+        [notice],
+        client=client,
+        entity_name="other",
+    )
+    client.room_send.assert_not_awaited()
+    assert generate.await_count == (0 if pin_source == "history" else 1)
+    assert _last_summary_counts.get("!room:x:$thread1") == (None if pin_source == "history" else 12)
+
+    assert await ensure_room_membership_synced(client, room, sender_id=notice.sender)
+    _last_summary_counts.clear()
+    client, generate = await _run_automatic_summary(
+        config,
+        [*_make_thread_history(12), notice],
+        [notice],
+        client=client,
+        entity_name="other",
+    )
+    generate.assert_not_awaited()
+    client.room_send.assert_not_awaited()
+    assert _last_summary_counts["!room:x:$thread1"] == 13
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_room", [False, True])
+async def test_partial_room_cache_preserves_proven_shared_pin_grant(tmp_path: Path, configured_room: bool) -> None:
+    """A known allowed responder proves a pin despite other uncached members."""
+    config = membership_config(
+        tmp_path,
+        agent_rooms=["!room:x"] if configured_room else [],
+        access={"users": ["@owner:example.com"]},
+    )
+    config.agents["other"] = AgentConfig(display_name="Other", access={"users": []})
+    runtime_paths = runtime_paths_for(config)
+    persist_entity_accounts(config, runtime_paths)
+    registry = entity_identity_registry(config, runtime_paths)
+    client = make_matrix_client_mock(user_id=registry.current_id("other").full_id)
+    room = nio.MatrixRoom("!room:x", client.user_id)
+    room.add_member(client.user_id, None, None)
+    if not configured_room:
+        room.add_member(registry.current_id("talent").full_id, None, None)
+    client.rooms = {room.room_id: room}
+    notice = _human_notice()
+
+    client, generate = await _run_automatic_summary(
+        config,
+        [*_make_thread_history(12), notice],
+        [notice],
+        client=client,
+        entity_name="other",
+    )
+
+    generate.assert_not_awaited()
+    client.room_send.assert_not_awaited()
+    assert _last_summary_counts["!room:x:$thread1"] == 13
 
 
 @pytest.mark.parametrize(

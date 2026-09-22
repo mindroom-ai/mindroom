@@ -438,6 +438,7 @@ def _human_summary_authorizer(
             config,
             runtime_paths,
             membership_index,
+            require_complete_discovery=True,
         )
         if candidates.allowed:
             return True

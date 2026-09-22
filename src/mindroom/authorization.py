@@ -18,7 +18,11 @@ from mindroom.entity_resolution import (
     entity_identity_registry,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.room_membership import cached_joined_member_ids, ensure_room_membership_synced
+from mindroom.matrix.room_membership import (
+    cached_joined_member_ids,
+    ensure_room_membership_synced,
+    room_membership_is_complete,
+)
 from mindroom.requester_identity import resolve_human_requester_alias
 
 if TYPE_CHECKING:
@@ -348,9 +352,15 @@ def classify_responder_candidates_from_cached_room(
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
+    *,
+    require_complete_discovery: bool = False,
 ) -> ResponderCandidatePermissions:
-    """Preserve membership uncertainty without deciding which candidates matter."""
+    """Classify known candidates, requiring complete discovery before strict denial.
+
+    A proven grant remains usable when an ad-hoc member snapshot is partial.
+    """
     responders = _configured_responder_entities_for_room(room, config, runtime_paths)
+    discovery_complete = responders is not None or room_membership_is_complete(room)
     if responders is None:
         responders = get_available_responders_in_room(room, config, runtime_paths)
     registry = entity_identity_registry(config, runtime_paths)
@@ -372,6 +382,8 @@ def classify_responder_candidates_from_cached_room(
             allowed.append(responder)
         elif decision is _ReplyAuthorizationDecision.PENDING:
             pending.append(responder)
+    if require_complete_discovery and not allowed and not discovery_complete:
+        raise ReplyMembershipPendingError
     return ResponderCandidatePermissions(allowed, pending)
 
 
