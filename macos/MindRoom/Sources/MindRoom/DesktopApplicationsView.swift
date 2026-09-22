@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct DesktopApplicationsView: View {
     @ObservedObject var store: DesktopControlStore
+    var showSetup: () -> Void
     @State private var search = ""
     @State private var showingAppPicker = false
     @State private var confirmingStop = false
@@ -60,26 +61,27 @@ struct DesktopApplicationsView: View {
                 }
                 Divider()
                 HStack {
-                    Button(store.status.canStopBridge ? "Stop and Save…" : "Save App Access") {
-                        if store.status.canStopBridge {
-                            confirmingStop = true
-                        } else {
-                            store.saveAllowedApplications()
+                    Button(store.status.appSelectionAction.title) {
+                        switch store.status.appSelectionAction {
+                        case .setup: showSetup()
+                        case .stopAndSave: confirmingStop = true
+                        case .save: store.saveAllowedApplications()
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(store.status.config.state != "ready" || !store.hasAppSelectionChanges)
+                    .disabled(store.status.appSelectionAction != .setup && !store.hasAppSelectionChanges)
                     Button("Discard Changes") { store.discardAppSelectionChanges() }
                         .disabled(!store.hasAppSelectionChanges)
                     Spacer()
                     if store.hasAppSelectionChanges {
-                        Text("Unsaved changes").foregroundStyle(.orange)
+                        Text(store.status.config.state == "ready" ? "Unsaved changes" : "Not saved yet")
+                            .foregroundStyle(.orange)
                     } else if store.status.config.state == "ready" {
                         Text("Saved").foregroundStyle(.secondary)
                     }
                 }
                 if store.status.config.state != "ready" {
-                    Text("Choose your apps here, then complete connection setup below and select Save Setup.")
+                    Text("Continue setup to save these selections. Your selected apps will be included when you select Save Setup.")
                         .font(.callout).foregroundStyle(.secondary)
                 } else if store.status.canStopBridge {
                     Text("Saving stops observation and control. Start Observe Only again when you are ready.")
