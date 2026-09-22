@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="cartesia",
+    worker_inert_agent_functions=("text_to_speech",),
     display_name="Cartesia",
     description="Voice AI services including text-to-speech and voice localization",
     category=ToolCategory.DEVELOPMENT,  # others/ → DEVELOPMENT according to mapping

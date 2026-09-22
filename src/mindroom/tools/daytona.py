@@ -29,6 +29,7 @@ def _parse_string_mapping(value: dict[str, str] | str | None, *, field_name: str
 
 @register_tool_with_metadata(
     name="daytona",
+    requires_primary_runtime=True,
     display_name="Daytona",
     description="Execute code in secure, remote sandbox environments",
     category=ToolCategory.DEVELOPMENT,  # others/ maps to DEVELOPMENT

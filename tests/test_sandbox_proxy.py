@@ -48,12 +48,12 @@ from mindroom.credentials import get_runtime_credentials_manager, save_scoped_cr
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.tool_system.declarations import ToolExecutionTarget
 from mindroom.tool_system.metadata import (
     TOOL_METADATA,
     TOOL_REGISTRY,
     ConfigField,
     ToolCategory,
-    ToolExecutionTarget,
     ToolInitOverrideError,
     ToolMetadata,
     ToolValidationInfo,
@@ -6036,9 +6036,14 @@ class TestWorkerToolsOverride:
         [
             "approved_egress",
             "attachments",
+            "browserbase",
             "callback_manager",
             "chat_ui",
+            "claude_agent",
+            "daytona",
             "desktop",
+            "duckdb",
+            "e2b",
             "external_trigger_manager",
             "github",
             "gmail",
@@ -6048,10 +6053,14 @@ class TestWorkerToolsOverride:
             "google_sheets",
             "homeassistant",
             "invite_router",
+            "mem0",
             "oauth_connections",
+            "reasoning",
             "script",
+            "slack",
             "todo",
             "usage_stats",
+            "zep",
         ],
     )
     def test_local_only_tools_never_proxy(
@@ -6510,7 +6519,7 @@ def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
 
 @pytest.mark.parametrize("tool_name", ["browser_mcp", "browser", "shell"])
 @pytest.mark.parametrize("valid", [True, False])
-def test_proxy_composition_decodes_only_native_browser_results(
+def test_proxy_composition_decodes_typed_media_for_every_tool(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     valid: bool,
@@ -6519,9 +6528,12 @@ def test_proxy_composition_decodes_only_native_browser_results(
     from agno.tools.function import ToolResult  # noqa: PLC0415
 
     envelope = {
-        "mindroom_browser_mcp_result": {
+        "mindroom_tool_result": {
             "version": 1 if valid else 999,
             "kind": "tool_result",
+            "audios": [],
+            "videos": [],
+            "files": [],
             "content": "screen",
             "images": [{"mime_type": "image/png", "data_base64": "cG5n"}],
         },
@@ -6546,14 +6558,12 @@ def test_proxy_composition_decodes_only_native_browser_results(
             credentials_manager=None,
         )
 
-    if tool_name in {"browser_mcp", "browser"} and not valid:
-        with pytest.raises(ValueError, match="browser MCP result"):
+    if not valid:
+        with pytest.raises(ValueError, match="worker tool result"):
             call()
-    elif tool_name in {"browser_mcp", "browser"}:
+    else:
         result = call()
         assert isinstance(result, ToolResult)
         assert result.content == "screen"
         assert result.images is not None
         assert result.images[0].content == b"png"
-    else:
-        assert call() == envelope

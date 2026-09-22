@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="giphy",
+    worker_inert_agent_functions=("search_gifs",),
     display_name="Giphy",
     description="GIF search and integration",
     category=ToolCategory.DEVELOPMENT,

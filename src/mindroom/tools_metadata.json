@@ -597,6 +597,7 @@
       "icon": "SiSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2182,6 +2183,7 @@
       "icon": "Bot",
       "icon_color": "text-orange-500",
       "name": "claude_agent",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2733,6 +2735,7 @@
       "icon": "FaTerminal",
       "icon_color": "text-blue-600",
       "name": "daytona",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -2897,6 +2900,7 @@
       "icon": "Terminal",
       "icon_color": "text-blue-600",
       "name": "e2b",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -5610,6 +5614,7 @@
       "icon": "FaBrain",
       "icon_color": "text-purple-500",
       "name": "reasoning",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -8043,6 +8048,7 @@
       "icon": "Database",
       "icon_color": "text-yellow-600",
       "name": "duckdb",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -8504,6 +8510,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "mem0",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -9461,6 +9468,7 @@
       "icon": "Brain",
       "icon_color": "text-purple-600",
       "name": "zep",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -10340,6 +10348,7 @@
       "icon": "FaChrome",
       "icon_color": "text-blue-600",
       "name": "browserbase",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"

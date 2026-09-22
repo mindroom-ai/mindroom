@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="brightdata",
+    worker_inert_agent_functions=("get_screenshot",),
     display_name="BrightData",
     description="Web scraping, search engine queries, screenshots, and structured data extraction",
     category=ToolCategory.RESEARCH,

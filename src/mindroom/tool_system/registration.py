@@ -48,6 +48,7 @@ def register_tool_with_metadata(
     docs_url: str | None = None,
     helper_text: str | None = None,
     function_names: tuple[str, ...] = (),
+    worker_inert_agent_functions: tuple[str, ...] = (),
     managed_init_args: tuple[ToolManagedInitArg, ...] = (),
     supports_toolkit_filters: bool = True,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
@@ -85,6 +86,7 @@ def register_tool_with_metadata(
             docs_url=docs_url,
             helper_text=helper_text,
             function_names=function_names,
+            worker_inert_agent_functions=worker_inert_agent_functions,
             managed_init_args=managed_init_args,
             supports_toolkit_filters=supports_toolkit_filters,
             factory=factory,

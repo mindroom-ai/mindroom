@@ -1430,6 +1430,7 @@ path = "mindroom.api.sandbox_runner"
 depends_on = [
     "mindroom.path_confinement",
     "mindroom.media_delivery",
+    "mindroom.tool_system.worker_media",
     "mindroom.tool_system.media_transport",
     "mindroom.api.computer_browser_binding",
     "mindroom.worker_browser",
@@ -4043,6 +4044,7 @@ depends_on = [
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.tool_system.worker_arguments",
     "mindroom.tool_system.worker_proxy_client",
 ]
 
@@ -4057,6 +4059,7 @@ depends_on = [
 visibility = [
     "mindroom.mcp_gateway.tools",
     "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_media",
 ]
 
 [[modules]]
@@ -5192,7 +5195,6 @@ expose = [
     "ToolMetadataValidationError",
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
-    "default_worker_routed_tools",
     "clear_resolved_tool_state_cache",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",
@@ -5233,7 +5235,6 @@ expose = [
     "apply_authored_overrides",
     "authored_tool_overrides_to_runtime",
     "clear_resolved_tool_state_cache",
-    "default_worker_routed_tools",
     "deserialize_tool_validation_snapshot",
     "ensure_tool_registry_loaded",
     "export_tools_metadata",
@@ -6657,3 +6658,11 @@ visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.res
 path = "mindroom.mid_turn_judgment"
 depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.constants", "mindroom.entity_resolution", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.matrix.thread_diagnostics", "mindroom.matrix.thread_history_result", "mindroom.mid_turn"]
 visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.tool_system.worker_arguments"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tool_system.worker_media"
+depends_on = ["mindroom.server_fetch_url", "mindroom.tool_system.media_transport", "mindroom.tool_system.worker_proxy_client"]

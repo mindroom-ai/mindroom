@@ -7,7 +7,9 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.run import RunContext
 from agno.tools.calculator import CalculatorTools
+from agno.tools.function import FunctionCall
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agents import create_agent
@@ -158,6 +160,50 @@ async def test_omitted_worker_tools_honors_environment(
     assert await _invoke(agent, "add", a=1, b=2) == expected[1]
     if expected == ("local:shell", "local:calculator"):
         assert "No tools use a worker runtime." in (agent.role or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("proxy_targets")
+@pytest.mark.parametrize("backend", ["docker", "kubernetes"])
+@pytest.mark.parametrize("with_static_url", [False, True])
+async def test_dedicated_defaults_ignore_static_runner_url(
+    tmp_path: Path,
+    backend: str,
+    with_static_url: bool,
+) -> None:
+    """An unused static URL must not change the dedicated backend's tool policy."""
+    process_env = {"MINDROOM_WORKER_BACKEND": backend}
+    if with_static_url:
+        process_env["MINDROOM_SANDBOX_PROXY_URL"] = "http://unused-static.invalid"
+    agent = _create_routing_agent(tmp_path, process_env)
+
+    assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith("worker:shell")
+    assert await _invoke(agent, "add", a=1, b=2) == "local:calculator"
+
+
+@pytest.mark.parametrize("worker_tools", [None, ["reasoning"]])
+def test_reasoning_retains_primary_run_state(
+    tmp_path: Path,
+    proxy_targets: list[ResolvedWorkerTarget | None],
+    worker_tools: list[str] | None,
+) -> None:
+    """Broad or explicit routing must preserve the caller's reasoning scratchpad."""
+    agent = _create_routing_agent(
+        tmp_path,
+        {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+        agent_settings={"tools": ["reasoning"], "worker_tools": worker_tools},
+    )
+    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "think" in tool.functions)
+    function = toolkit.functions["think"]
+    context = RunContext(run_id="reasoning-run", session_id="reasoning-session", session_state={})
+    function._run_context = context
+    result = FunctionCall(function=function, arguments={"title": "Step", "thought": "Preserve run state"}).execute()
+
+    assert result.status == "success"
+    assert context.session_state is not None
+    assert context.session_state["reasoning_steps"]
+    assert proxy_targets == []
+    assert "No tools use a worker runtime." in (agent.role or "")
 
 
 @pytest.mark.asyncio

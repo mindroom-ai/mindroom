@@ -246,7 +246,12 @@ def _read_proxy_tools(
 ) -> set[str] | None:
     default = (
         "*"
-        if execution_mode in _SANDBOX_ALL_EXECUTION_MODES or (execution_mode is None and proxy_url is not None)
+        if execution_mode in _SANDBOX_ALL_EXECUTION_MODES
+        or (
+            execution_mode is None
+            and proxy_url is not None
+            and primary_worker_backend_name(runtime_paths) == "static_runner"
+        )
         else ""
     )
     raw_value = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default) or default).strip()
@@ -884,6 +889,7 @@ def _call_proxy_sync(
     args: tuple[object, ...],
     kwargs: dict[str, object],
     credentials_manager: CredentialsManager | None,
+    function_entrypoint: Callable[..., object] | None = None,
     shared_storage_root_path: Path | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
@@ -891,6 +897,15 @@ def _call_proxy_sync(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
 ) -> object:
+    from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments  # noqa: PLC0415
+
+    metadata = TOOL_METADATA.get(tool_name)
+    wire_args, wire_kwargs = prepare_worker_call_arguments(
+        args,
+        kwargs,
+        entrypoint=function_entrypoint,
+        inert_agent=metadata is not None and function_name in metadata.worker_inert_agent_functions,
+    )
     proxy_config = sandbox_proxy_config(runtime_paths)
     pump = get_worker_progress_pump()
     progress_sink = (
@@ -905,8 +920,8 @@ def _call_proxy_sync(
     payload: dict[str, object] = {
         "tool_name": tool_name,
         "function_name": function_name,
-        "args": [to_json_compatible(arg) for arg in args],
-        "kwargs": {key: to_json_compatible(value) for key, value in kwargs.items()},
+        "args": wire_args,
+        "kwargs": wire_kwargs,
     }
     manager_context = _primary_worker_manager_context(runtime_paths)
     with lease_primary_worker_manager(
@@ -952,15 +967,14 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
             client_factory=httpx.Client,
         )
-        if tool_name in {"browser_mcp", "browser"}:
-            from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
-            from mindroom.tool_system.media_transport import (  # noqa: PLC0415
-                decode_media_result,
-                is_media_result_envelope,
-            )
+        from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
+        from mindroom.tool_system.media_transport import (  # noqa: PLC0415
+            decode_media_result,
+            is_media_result_envelope,
+        )
 
-            if tool_name == "browser_mcp" or is_media_result_envelope(result):
-                return finalize_tool_media(decode_media_result(result))
+        if tool_name == "browser_mcp" or is_media_result_envelope(result):
+            return finalize_tool_media(decode_media_result(result))
         return result
 
 
@@ -991,6 +1005,7 @@ def _wrap_sync_function(
     @functools.wraps(function.entrypoint)
     def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         return _call_proxy_sync(
+            function_entrypoint=function.entrypoint,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
@@ -1031,6 +1046,7 @@ def _wrap_async_function(
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         call = functools.partial(
             _call_proxy_sync,
+            function_entrypoint=function.entrypoint,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,

@@ -157,17 +157,17 @@ def test_image_result_roundtrip() -> None:
 
 def test_json_receipt_is_opaque() -> None:
     """Nested marker-shaped ordinary results are never recursively interpreted."""
-    value = {"mindroom_browser_mcp_result": {"version": 777}}
+    value = {"mindroom_tool_result": {"version": 777}}
     assert decode_media_result(encode_media_result(value)) == value
 
 
 @pytest.mark.parametrize(
     "payload",
-    [None, "old worker", {}, {"mindroom_browser_mcp_result": {"version": True, "kind": "json", "value": 1}}],
+    [None, "old worker", {}, {"mindroom_tool_result": {"version": True, "kind": "json", "value": 1}}],
 )
 def test_malformed_envelopes_fail(payload: object) -> None:
     """Missing and malformed wire envelopes produce bounded protocol errors."""
-    with pytest.raises(ValueError, match="browser MCP result"):
+    with pytest.raises(ValueError, match="worker tool result"):
         decode_media_result(payload)
 
 
@@ -178,14 +178,17 @@ def test_malformed_envelopes_fail(payload: object) -> None:
 def test_invalid_images_fail(mime: str, data: str) -> None:
     """Only strict canonical inline screenshot bytes cross the boundary."""
     payload = {
-        "mindroom_browser_mcp_result": {
+        "mindroom_tool_result": {
             "version": 1,
             "kind": "tool_result",
+            "audios": [],
+            "videos": [],
+            "files": [],
             "content": "",
             "images": [{"mime_type": mime, "data_base64": data}],
         },
     }
-    with pytest.raises(ValueError, match="browser MCP result"):
+    with pytest.raises(ValueError, match="worker tool result"):
         decode_media_result(payload)
 
 
@@ -343,22 +346,25 @@ def test_codec_bounds_before_image_decode(monkeypatch: pytest.MonkeyPatch) -> No
     """Oversized payloads fail before base64 allocates decoded bytes."""
     monkeypatch.setattr(media_transport, "_MAX_ENCODED_BYTES", 4)
     payload = {
-        "mindroom_browser_mcp_result": {
+        "mindroom_tool_result": {
             "version": 1,
             "kind": "tool_result",
+            "audios": [],
+            "videos": [],
+            "files": [],
             "content": "",
             "images": [{"mime_type": "image/png", "data_base64": "aW1hZ2U="}],
         },
     }
-    with pytest.raises(ValueError, match="browser MCP result"):
+    with pytest.raises(ValueError, match="worker tool result"):
         decode_media_result(payload)
 
 
 @pytest.fixture
 def small_image_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise padding and byte limits with tiny independent image payloads."""
-    monkeypatch.setattr(media_transport, "_MAX_IMAGE_BYTES", 4)
-    monkeypatch.setattr(media_transport, "_MAX_TOTAL_BYTES", 8)
+    monkeypatch.setattr(media_transport, "MAX_MEDIA_BYTES", 4)
+    monkeypatch.setattr(media_transport, "MAX_TOTAL_MEDIA_BYTES", 8)
     monkeypatch.setattr(media_transport, "_MAX_ENCODED_BYTES", 8)
 
 
@@ -381,13 +387,16 @@ def test_image_limits_reject_oversized_or_empty_images(contents: list[bytes], op
     """Padding allowance never widens raw aggregate, per-image or count limits."""
     result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
     if operation == "encode":
-        with pytest.raises(ValueError, match="browser MCP result"):
+        with pytest.raises(ValueError, match="worker tool result"):
             encode_media_result(result)
     else:
         payload = {
-            "mindroom_browser_mcp_result": {
+            "mindroom_tool_result": {
                 "version": 1,
                 "kind": "tool_result",
+                "audios": [],
+                "videos": [],
+                "files": [],
                 "content": "screens",
                 "images": [
                     {"mime_type": "image/png", "data_base64": base64.b64encode(data).decode("ascii")}
@@ -395,5 +404,5 @@ def test_image_limits_reject_oversized_or_empty_images(contents: list[bytes], op
                 ],
             },
         }
-        with pytest.raises(ValueError, match="browser MCP result"):
+        with pytest.raises(ValueError, match="worker tool result"):
             decode_media_result(payload)

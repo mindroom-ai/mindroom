@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="lumalabs",
+    worker_inert_agent_functions=("image_to_video", "generate_video"),
     display_name="Luma Labs",
     description="3D content creation and video generation using Luma AI Dream Machine",
     category=ToolCategory.DEVELOPMENT,  # others/ category maps to DEVELOPMENT

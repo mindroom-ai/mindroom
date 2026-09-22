@@ -159,6 +159,8 @@ class ToolMetadata:
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
+    # SDK functions that accept, but never use, an injected Agent or Team.
+    worker_inert_agent_functions: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
     supports_toolkit_filters: bool = False
     factory: Callable[[], type] | None = None

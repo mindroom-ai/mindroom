@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="openai",
+    worker_inert_agent_functions=("generate_speech",),
     display_name="OpenAI",
     description="AI-powered tools for transcription, image generation, and speech synthesis",
     category=ToolCategory.DEVELOPMENT,
