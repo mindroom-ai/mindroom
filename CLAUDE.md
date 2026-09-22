@@ -702,8 +702,9 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 
 ### Step 6: Viewing the Widget
 
-- **Taking Screenshots**: To view the dashboard without Jupyter, use `uv run python frontend/take_screenshot.py` from the project root.
-- **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `bun run screenshot` in another terminal.
+- **Taking Screenshots**: With the bundled dashboard running at `http://localhost:8765`, use `uv run python frontend/take_screenshot.py` from the project root.
+- **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `DEMO_URL=http://localhost:3003 bun run screenshot` in another terminal.
+  Replace `3003` with the configured `FRONTEND_PORT` when using a different development port.
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
 - **Use Cases**: This is helpful for visual verification, documentation, and sharing the dashboard appearance.
 
@@ -850,25 +851,23 @@ Inspect agent traces under `<session-storage-root>/agents/<agent>/sessions/<agen
 
 ## 6. Releases
 
-Use `gh release create` to create releases. The tag is created automatically.
+Pushes to `main` run `.github/workflows/calver-auto-release.yml`, except pushes that only change `macos/appcast.xml`.
+The workflow serializes CalVer release creation and dispatches publishers only after confirming that the release tag points to the run's commit.
+It dispatches these workflows from `main`, passing the release tag as `release_ref`:
+
+- `build-mindroom.yml`: MindRoom container images.
+- `build-platform.yml`: Platform container images.
+- `publish-helm-charts.yml`: Helm charts.
+- `release.yml`: Python package and macOS desktop artifacts.
+
+Check the release workflow and publisher runs before retrying a failed publication.
+To retry one publisher for an existing intended release tag, use its workflow filename and pass that same tag as `release_ref`:
 
 ```bash
-# IMPORTANT: Ensure you're on latest origin/main before releasing!
-git fetch origin
-git checkout origin/main
-
-# Check current version
-git tag --sort=-v:refname | head -1
-
-# Create release (minor version bump: v0.2.2 -> v0.3.0)
-gh release create v0.3.0 --title "v0.3.0" --notes "release notes here"
+gh workflow run build-mindroom.yml --ref main --field release_ref='<existing-release-tag>'
 ```
 
-Versioning:
-- **Patch** (v0.2.2 -> v0.2.3): Bug fixes
-- **Minor** (v0.2.3 -> v0.3.0): New features, non-breaking changes
-
-Write release notes manually describing what changed. Group by features and bug fixes.
+Replace the example workflow with the publisher that needs recovery and the placeholder with the existing release tag.
 
 # Important Instruction Reminders
 Do what has been asked; nothing more, nothing less.
