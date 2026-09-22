@@ -39,6 +39,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.entity_view import ResolvedEntityView
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
+from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
@@ -1864,10 +1865,11 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def validate_room_participation(self) -> Config:
-        """Require each room's designated responder to be an individual agent."""
+        """Validate dedicated judgment model aliases for opted-in rooms."""
         for room, participation in self.room_participation.items():
-            if participation.agent not in self.agents or participation.agent == ROUTER_AGENT_NAME:
-                msg = f"Room participation for {room!r} requires a configured individual agent: {participation.agent!r}"
+            judgment = participation.judgment
+            if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
+                msg = f"Unknown judgment model for room {room!r}: {judgment.model!r}"
                 raise ValueError(msg)
         return self
 

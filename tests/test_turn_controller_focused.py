@@ -4710,11 +4710,12 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
 ) -> None:
     """Actual two-human context delays text and reaches response execution as adaptive."""
     config.room_participation = {
-        _ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=30.0 if mention else 0.1),
+        _ROOM_ID: RoomParticipationConfig(debounce_seconds=30.0 if mention else 0.1),
     }
     history = thread_history_result(
         [
             make_visible_message(sender="@other:localhost", body="earlier", event_id=_THREAD_ROOT),
+            make_visible_message(sender=_entity_user_id(config, "general"), body="answer", event_id="$answer"),
         ],
         is_full_history=True,
     )
@@ -4735,7 +4736,7 @@ async def test_adaptive_text_admission_delays_then_passes_participation(
         assert harness.runner.requests[0].participation is None
         assert "my thought" in harness.runner.requests[0].prompt
     else:
-        assert harness.runner.requests[0].participation.agent == "general"
+        assert harness.runner.requests[0].participation is not None
     await harness.gate.drain_all()
 
 
@@ -4747,7 +4748,7 @@ async def test_opted_in_active_backlog_preserves_idle_dispatch_and_requesters(
     mode: str,
 ) -> None:
     """Active backlogs keep one ordered turn, selecting participation only for untagged multi-human context."""
-    config.room_participation = {_ROOM_ID: RoomParticipationConfig(agent="general", debounce_seconds=30)}
+    config.room_participation = {_ROOM_ID: RoomParticipationConfig(debounce_seconds=30)}
     first_sender = _SENDER if mode == "single_human" else "@other:localhost"
     history = thread_history_result(
         [

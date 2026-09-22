@@ -21,16 +21,26 @@ mindroom config validate --path /path/to/config.yaml
 ## Adaptive Room Participation
 
 By default, threads with multiple human participants require explicit agent mentions.
-Opt a room into adaptive participation to let one designated agent decide whether an untagged message needs a response or should be left unanswered.
-The designated agent must be a configured individual agent with permission to reply to the sender.
+Opt a room into adaptive participation to let agents already involved in a thread decide whether to respond to an untagged message or stay silent.
+The check runs only when all of these conditions hold:
+
+- Participation is enabled for the room.
+- The message is in a thread with at least two human participants, including the current sender.
+- The message does not explicitly mention an agent or another human.
+- The particular individual agent has already replied in that thread and still has permission to reply to the sender.
+
+MindRoom must have the thread history available to establish these conditions.
+Agents that are merely present in the room do not judge or join the conversation.
+If several individual agents have replied in the thread, each makes its own participation decision.
+For example, with 50 agents in a room and two already involved in a thread, only those two are eligible to judge.
+Explicit agent mentions follow normal reply rules; an explicit human mention bypasses adaptive participation too.
 Room keys can be concrete room IDs, managed room keys, or persisted full aliases.
 
 ```yaml
 room_participation:
   lobby:
-    agent: assistant
     debounce_seconds: 3.0
-    instructions: "Join when you can help; leave human conversation uninterrupted."
+    instructions: "Reply when you can help; leave human conversation uninterrupted."
 ```
 
 The pause applies only to eligible untagged text in threads with at least two human participants, including the current sender.
@@ -39,8 +49,10 @@ Registered agents, the internal service account, and configured `bot_accounts` d
 The pause defaults to three seconds and accepts finite values from zero to thirty seconds.
 A burst from one sender becomes one turn after the pause; explicit agent or human mentions bypass adaptive selection and end that sender's pending pause immediately.
 Single-human conversations keep their usual response behavior.
-A declined or failed decision stays quiet and does not record a completed assistant response.
-The check reuses the prepared conversation and tool definitions, but cannot execute tools.
+A decision to stay silent produces no visible reply and does not record a completed assistant response.
+By default, the replying agent's own model makes the decision using its prepared conversation and tool definitions, with tool execution disabled.
+If that same-model check fails, the agent stays quiet.
+The following provider restrictions apply to this same-model check; a valid decision from a separate judgment backend bypasses the check.
 With Claude tools, only the tool and system caches are reusable across the check and reply because disabling tool selection changes tool choice.
 Ollama omits tool schemas during the check because its API cannot disable tool selection while retaining them.
 Gemini native tools are omitted during the check; its explicit context caches, OpenAI Chat search-only requests, OpenRouter automatic web search, and Groq Compound systems cannot be checked safely and stay quiet.
@@ -48,6 +60,69 @@ Cancellation before approval does not create an interruption notice.
 If an interrupted turn already owns a visible response, recovery retains its approval and finishes that response.
 Commands and scheduled work do not opt into adaptive participation.
 Omit `room_participation` to keep the default behavior.
+
+### Participation judgment backends
+
+Participation can use a separate decision model while the configured agent model generates the reply.
+Set `judgment.provider` to `llm` for a configured model alias or `typesafe` for System One.
+Both backends receive the same participation question, criteria, room guidance, and minimized conversation context, and return a yes/no decision or abstain.
+Their predictions can differ; switching providers preserves the decision contract and response lifecycle, not identical judgments.
+
+For a dedicated LLM, reference an existing alias in your `models:` configuration:
+
+```yaml
+room_participation:
+  lobby:
+    instructions: "Reply when you can help; leave human conversation uninterrupted."
+    judgment:
+      provider: llm
+      model: fast
+      timeout_seconds: 5
+```
+
+The decision model uses that alias's normal provider credentials and can be cheaper than the replying agent's model.
+It receives no executable tools, agent system prompt, or agent memory.
+It must return a structured boolean decision; an explicit abstention or invalid response triggers the existing in-model fallback.
+No self-reported confidence score is requested or treated as a probability.
+Provider modes whose automatic native tools cannot be disabled are refused for decision calls.
+
+To switch to System One, change the judgment settings and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
+
+```yaml
+room_participation:
+  lobby:
+    instructions: "Reply when you can help; leave human conversation uninterrupted."
+    judgment:
+      provider: typesafe
+      threshold: 0.8
+      timeout_seconds: 1.5
+```
+
+The TypeSafe client pins `jev-1.13.0` and accepts only the requested question's documented [Noul probability response](https://docs.typesafe.ai/api).
+A probability at or above `threshold` approves participation; a lower value stays quiet.
+The threshold accepts finite values from zero to one and defaults to `0.8`; this default has not been calibrated against a representative participation corpus.
+`threshold` is specific to TypeSafe and is rejected for the LLM backend.
+
+Omitting `judgment` (or setting it to `null`) preserves the existing reply-model decision, even when a TypeSafe key is present.
+Selecting either backend authorizes sending room guidance and up to eight recent prepared user/assistant messages to that backend.
+System prompts, transient memory/hook context, tool definitions/results, and media are excluded; Matrix message metadata is replaced with request-local speaker aliases.
+Message bodies can still contain identifying or private text.
+Media, attachment references, compressed or non-text content, detected secrets, malformed Unicode, and oversized input trigger fallback without sending that context to the separate judge.
+Requests are bounded to 16 KB; TypeSafe responses are bounded while streaming, and LLM decision text is validated against a 64 KiB limit after the provider returns.
+
+Both backends share a process-wide limit of eight concurrent judgments and one per instance/agent owner, with no waiting queue.
+`timeout_seconds` accepts finite positive values up to thirty seconds; defaults are five seconds for LLMs and 1.5 seconds for TypeSafe.
+This is an additional deadline after participation debounce and includes model loading, inference, and parsing; it does not cover the fallback model call.
+There are no application-level judgment retries; configured LLM providers retain their SDK behavior within the deadline.
+Missing credentials, exhausted concurrency, timeout, provider errors, malformed output, or TypeSafe model drift fall back to the replying agent's own decision model.
+If that fallback also fails, the agent stays quiet.
+Cancellation propagates without starting a fallback call.
+Valid judgments bypass the reply provider's tool-free decision restrictions, so providers with automatic native tools can answer after approval.
+Only one decision settles per turn, including retries; recovery of an already-visible response retains its approval.
+
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category; TypeSafe also records probability and threshold.
+These outcome logs omit request text and credentials; separately enabled LLM request debug logging still follows the normal model configuration.
+Use these measurements alongside observed decision quality and provider pricing to compare backends; token counts alone do not establish cost or quality advantages.
 
 ## Splitting the Configuration Into Multiple Files
 
