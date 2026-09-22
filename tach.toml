@@ -3655,6 +3655,7 @@ visibility = ["mindroom.cli.main"]
 [[modules]]
 path = "mindroom.cli.main"
 depends_on = [
+    "mindroom.cli.config_bundle",
     "mindroom.cli.config_reload",
     "mindroom.cli.response_activity",
     "mindroom.cli.thread_export",
@@ -5917,6 +5918,14 @@ depends_on = ["mindroom.cli.api", "mindroom.cli.config", "mindroom.constants", "
 [[modules]]
 path = "mindroom.config_reload"
 depends_on = []
+
+[[modules]]
+path = "mindroom.config_bundle"
+depends_on = ["mindroom.config.main", "mindroom.constants", "mindroom.file_locks"]
+
+[[modules]]
+path = "mindroom.cli.config_bundle"
+depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bundle", "mindroom.constants"]
 
 [[modules]]
 path = "mindroom.api.config_reload"
