@@ -12,15 +12,19 @@ When a scoped token exists but cannot be decoded, status returns `reset_required
 Agent-facing OAuth tools return the same structured `reset_required` signal and direct the requester to the authenticated dashboard Integrations page, which supports every credential scope and avoids prescribing an unavailable agent tool or unusable connect link.
 Dashboard flows can call `connect` to receive an authorization URL, while conversation flows can show the browser-openable `authorize` URL before MindRoom redirects to the external provider.
 Dashboard OAuth state is opaque, time-limited, single-use, and bound to the authenticated MindRoom user plus the persisted agent execution scope resolved by the existing credentials target machinery.
-When an OAuth request targets a shared agent with `agent_name`, the authenticated dashboard requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
-An authenticated requester may manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
-Responder access and room membership never grant OAuth-management access.
+When an agent-targeted OAuth request resolves to shared or unscoped credentials, the authenticated requester must be a platform `administrator` or a concrete user in `agents.<name>.credential_managers`.
+A verified Matrix requester with current responder access can manage their own `user` or `user_agent` OAuth connection on a non-private agent definition, including when the provider requires requester-only storage.
+An authenticated requester may also manage their own isolated OAuth connection for a requester-private agent without a static credential-manager entry.
+These personal permissions do not grant general dashboard access or authority over shared credentials.
+With the [Connections portal](deployment/trusted-upstream-auth.md#connections-portal) enabled, eligible users use its dedicated `/api/connections/...` routes with signed Matrix authentication, while ordinary dashboard routes require administrator authority.
+Ordinary generic `/api/oauth/...` requests remain subject to deployment authentication and the Connections route restrictions; conversation capabilities use the separately checked flow below.
+For providers that follow agent scope, credential targets use saved configuration, and a different execution-scope override is rejected until that configuration is saved.
 Unauthorized agent-scoped OAuth connect, authorize, status, disconnect, and callback requests return HTTP 403 before credentials are exposed or changed.
 Conversation OAuth links use an additional opaque, time-limited, single-use connect token that binds the browser flow to the requester that produced the missing-credentials tool result.
 The token binds the exact provider, Matrix requester, worker target, and credential connection generation.
 Requester-scoped credentials require the browser to authenticate as that requester at authorization and callback, using the same identity check as requester-scoped resets.
 Shared-scope credentials permit delegation through the short-lived token without a dashboard login.
-MindRoom rechecks the requester's current agent credential-management permission at authorization and callback, and rejects a link if its credential generation changed after issuance.
+MindRoom rechecks the requester's permission to manage the selected connection at authorization and callback, and rejects a link if its credential generation changed after issuance.
 Shared-scope reset links use the same capability model for configured credential managers: the GET is non-mutating, the confirmation POST consumes the reset capability before deleting the scoped credential, and reconnection continues through a fresh single-use connect capability.
 Requester-scoped reset links still require the original authenticated browser user.
 Executions without a concrete requester cannot form a conversation capability; their links omit the connect token and use the existing dashboard-authenticated flow.
@@ -45,7 +49,11 @@ Legacy `<credential_service>_credentials.json` token documents and their sidecar
 An OAuth connection that exists only in JSON must be reconnected to publish current SQLite state.
 Providers can declare that credentials follow the requester independently of agent worker reuse.
 GitHub uses that policy, so its managed token always lands in the requester's `user` scope and can never fall back to a shared or global token store.
-For providers without that policy, private-agent tokens follow the authenticated requester and the agent's saved `worker_scope`, shared-scope agent tokens use a per-agent primary-runtime store, and unscoped agents use the global credential store.
+For providers without that policy, token placement follows the agent's saved effective execution scope: `private.per`, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise unscoped.
+Private agents use `private.per` and cannot also set `worker_scope`.
+A `user` connection follows the authenticated requester across user-scoped agents, while `user_agent` binds it to that requester and agent.
+A `shared` connection uses a per-agent primary-runtime store.
+Only agents with no private, per-agent, or inherited scope use the global credential store.
 Conversation capabilities reconstruct the bound requester and worker target from server-side state; invalid, expired, reused, unauthorized, or stale links fail closed and save no credentials.
 Credential placement and visibility policy is centralized in `src/mindroom/credential_policy.py`.
 That module owns service classification, OAuth token field filtering, local-only credential service names, and worker-grantable rejections.
