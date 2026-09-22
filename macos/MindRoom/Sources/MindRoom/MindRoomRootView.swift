@@ -19,7 +19,9 @@ struct MindRoomRootView: View {
                             case .localAgents:
                                 LocalAgentsView(runner: runner)
                             case .computerAccess:
-                                DesktopControlView(store: desktop).id(AppSection.computerAccess)
+                                DesktopControlView(store: desktop) { section in
+                                    withAnimation { proxy.scrollTo(section, anchor: .top) }
+                                }.id(AppSection.computerAccess)
                             case .settings:
                                 AppSettingsView(runner: runner)
                             }

@@ -260,7 +260,9 @@ describe("TeamEditor", () => {
     const modeSelect = screen.getByLabelText("Collaboration Mode");
     fireEvent.click(modeSelect);
 
-    const collaborateOption = await screen.findByText(/Collaborate \(Parallel/);
+    const collaborateOption = await screen.findByText(
+      /Collaborate \(All members/,
+    );
     fireEvent.click(collaborateOption);
 
     expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {

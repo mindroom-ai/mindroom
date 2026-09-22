@@ -22,14 +22,17 @@ When running from a source checkout, MindRoom will build the dashboard assets on
 
 ## Dashboard Tabs
 
-### Dashboard (Overview)
+### Home and Browse Workspace
 
-The main dashboard shows system stats and monitoring:
+Home shows recorded activity, upcoming schedules, and shortcuts to room and agent editors.
+Select **Browse workspace** for the workspace directory:
 
-- **Stats cards** - Agents (with status breakdown), rooms, teams, models, and voice status
-- **Network graph** - Visual representation of agent-room-team relationships (desktop only)
-- **Search and filter** - Filter by agents, rooms, or teams
-- **Export Config** - Download configuration as JSON
+- **Workspace counts** - Agents, rooms, teams, and configured models
+- **Search and type filters** - Find agents, rooms, or teams
+- **Item details** - Inspect an item and open its editor
+- **Export summary** - Download a JSON workspace summary with counts, agents, rooms, teams, and model configurations
+
+The export contains derived workspace information and is not a complete `config.yaml` backup.
 
 ### Usage
 
@@ -72,9 +75,11 @@ Configure AI agents:
 Configure multi-agent collaboration:
 
 - **Display name** and **Team purpose**
-- **Collaboration mode** - Coordinate (sequential) or Collaborate (parallel)
+- **Collaboration mode** - Coordinate (leader-directed delegation and synthesis) or Collaborate (send the task to all members)
 - **Team model** - Optional model override
 - **Team members** and **Team rooms**
+
+In Coordinate mode, the leader chooses delegations; independent tasks can run concurrently, so the mode does not guarantee serial execution.
 
 ### Rooms
 
@@ -246,7 +251,7 @@ The raw recovery editor keeps working on the top-level file's literal text; see 
 | POST | `/api/credentials/{service}` | Set credentials |
 | POST | `/api/credentials/{service}/api-key` | Set API key |
 | GET | `/api/credentials/{service}/api-key` | Get masked API key |
-| POST | `/api/credentials/{service}/test` | Test credentials validity |
+| POST | `/api/credentials/{service}/test` | Check stored credentials exist |
 | DELETE | `/api/credentials/{service}` | Delete credentials |
 | POST | `/api/credentials/{service}/copy-from/{source_service}` | Copy credentials from another service |
 
