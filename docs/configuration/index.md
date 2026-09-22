@@ -441,6 +441,9 @@ Set the API key for each provider you use in `config.yaml`:
 | `EMBEDDER_API_KEY` | Dedicated semantic-search embedder key (optional; falls back to the shared `OPENAI_API_KEY`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
 
+For `provider: openai` models, `OPENAI_BASE_URL` can come from the config-adjacent `.env` or the exported process environment; the exported value takes precedence.
+A model's `extra_kwargs.base_url` overrides this environment setting, and `extra_kwargs.client_params.base_url` overrides the model endpoint when constructing SDK clients.
+
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
 See [Model Configuration — File-based Secrets](models.md#file-based-secrets) for details.
 
