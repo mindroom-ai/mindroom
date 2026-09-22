@@ -7,14 +7,16 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     var showWindow: (AppSection?) -> Void = { AppWindowController.shared.show(section: $0) }
 
-    private let runner = MindRoomCommandRunner.shared
-    private let desktop = DesktopControlStore.shared
+    private let runner: MindRoomCommandRunner
+    private let desktop: DesktopControlStore
     private let menu = NSMenu()
     private var statusItem: NSStatusItem?
     private var statusRefreshTimer: Timer?
     private var subscriptions = Set<AnyCancellable>()
 
-    private override init() {
+    init(runner: MindRoomCommandRunner = .shared, desktop: DesktopControlStore = .shared) {
+        self.runner = runner
+        self.desktop = desktop
         super.init()
         menu.delegate = self
         menu.autoenablesItems = false
@@ -48,10 +50,12 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         statusItem = nil
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) { refresh() }
-
     private func refresh() {
         statusItem?.button?.toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.desktopStatusLabel)"
+        menuNeedsUpdate(menu)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         menu.addItem(.sectionHeader(title: "MindRoom"))
         menu.addItem(actionItem("Open MindRoom…", symbol: "macwindow", action: #selector(openWindow)))
