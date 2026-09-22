@@ -433,3 +433,117 @@ def test_agentql_sdk_credentials_do_not_replace_missing_toolkit_key(
 
     assert agentql_boundary.browsers == []
     assert agentql_boundary.requests == []
+
+
+@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize(
+    "destination",
+    [
+        pytest.param("https://api.agentql.test/redirected", id="same-origin"),
+        pytest.param("https://other.agentql.test/redirected", id="cross-origin"),
+        pytest.param("http://api.agentql.test/redirected", id="https-downgrade"),
+    ],
+)
+def test_agentql_redirect_does_not_forward_scoped_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agentql_boundary: _AgentQLBoundary,
+    method: str,
+    status_code: int,
+    destination: str,
+) -> None:
+    """Reject redirect responses before Requests can send the scoped key elsewhere."""
+    source = "https://api.agentql.test/api/v2/query-data"
+    outbound: list[requests.PreparedRequest] = []
+
+    def send(_adapter: object, request: requests.PreparedRequest, **kwargs: object) -> requests.Response:
+        outbound.append(request)
+        if request.url == source:
+            response = agentql_boundary.respond(request, **kwargs)
+            response.status_code = status_code
+            response.headers["Location"] = destination
+        else:
+            assert request.url == destination
+            response = requests.Response()
+            response.status_code = 200
+            response.request = request
+            response.encoding = "utf-8"
+            response.headers["Content-Type"] = "application/json"
+            response._content = (
+                b'{"request_id":"redirect-destination","response":{"text_content":["forwarded"],"title":"forwarded"}}'
+            )
+        response.url = cast("str", request.url)
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+
+    result = getattr(_tool(tmp_path, "scoped-key"), method)(_URL)
+
+    assert [request for request in outbound if request.url == destination] == []
+    assert len(outbound) == 1
+    assert outbound[0].url == source
+    assert outbound[0].headers["X-API-Key"] == "scoped-key"
+    assert result.startswith("Error extracting text:")
+    assert "AgentQLServerError" in result
+    assert "redirect" in result.lower()
+    assert str(status_code) in result
+    assert all(browser.closed for browser in agentql_boundary.browsers)
+
+
+def test_agentql_malformed_success_retains_parse_error(
+    monkeypatch: pytest.MonkeyPatch,
+    agentql_boundary: _AgentQLBoundary,
+) -> None:
+    """Keep the SDK baseline while exposing the scoped response parsing failure."""
+    monkeypatch.setattr(agentql_boundary.sdk_config, "api_key", "ambient-sdk")
+
+    def send(_adapter: object, request: requests.PreparedRequest, **kwargs: object) -> requests.Response:
+        response = agentql_boundary.respond(request, **kwargs)
+        response._content = b"<html>provider returned HTML</html>"
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+    sdk = importlib.import_module("agentql")
+    compat = importlib.import_module("mindroom.custom_tools.agno_compat_agentql")
+    legacy_page = sdk.wrap(_BrowserPage(agentql_boundary))
+    legacy_page.goto(_URL)
+    scoped_page = compat._CredentialedPage.with_api_key(_BrowserPage(agentql_boundary), "scoped-key")
+    scoped_page.goto(_URL)
+
+    with pytest.raises(sdk.AgentQLServerError) as legacy_error:
+        legacy_page.query_data(_CUSTOM_QUERY)
+    with pytest.raises(requests.exceptions.JSONDecodeError, match="Expecting value") as scoped_error:
+        scoped_page.query_data(_CUSTOM_QUERY)
+
+    assert isinstance(legacy_error.value.__cause__, requests.exceptions.JSONDecodeError)
+    assert scoped_error.value.doc == "<html>provider returned HTML</html>"
+    assert scoped_error.value.pos == 0
+    assert [request.headers["X-API-Key"] for request in agentql_boundary.requests] == ["ambient-sdk", "scoped-key"]
+
+
+@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+def test_agentql_malformed_success_exposes_parse_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agentql_boundary: _AgentQLBoundary,
+    method: str,
+) -> None:
+    """A malformed successful provider response remains diagnosable to the tool caller."""
+
+    def send(_adapter: object, request: requests.PreparedRequest, **kwargs: object) -> requests.Response:
+        response = agentql_boundary.respond(request, **kwargs)
+        response._content = b"<html>provider returned HTML</html>"
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+
+    result = getattr(_tool(tmp_path, "scoped-key"), method)(_URL)
+
+    assert result.startswith("Error extracting text:")
+    assert "Expecting value" in result
+    assert "line 1 column 1" in result
+    assert "AgentQLServerError" not in result
+    assert len(agentql_boundary.requests) == 1
+    assert agentql_boundary.requests[0].headers["X-API-Key"] == "scoped-key"
+    assert all(browser.closed for browser in agentql_boundary.browsers)

@@ -607,6 +607,8 @@ custom_scrape_website("https://matrix.org/blog/")
 #### Notes
 
 - Each request uses the toolkit's resolved key without changing shared AgentQL SDK configuration or environment credentials.
+- AgentQL query API redirects are rejected before any follow-up request, so the resolved key stays with the configured API endpoint.
+- Malformed successful API responses return JSON parsing error details; HTTP failures and timeouts retain AgentQL's typed errors.
 - AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
 - The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.

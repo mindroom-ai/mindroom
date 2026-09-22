@@ -36,15 +36,20 @@ logger = get_logger(__name__)
 # Reason: Agno 3.0.9 stores api_key but AgentQL 1.18.1 resolves auth from shared
 # SDK, environment, or CLI-file state. Its Page has no per-call credential hook.
 # Keep the private page dispatch and HTTP boundary local to one toolkit key;
-# retain SDK parsing, readiness, query parameters, and typed failure behavior.
+# retain SDK query parsing, readiness, parameters, and typed transport failures.
+# Deliberately reject redirects and preserve parsing errors from malformed
+# successful responses instead of inheriting the SDK's generic server error.
 # Upstream issue: Tracking gap; a resolved-key handoff and a per-request or
 # per-page SDK authentication extension point are needed. No issue identified.
 # Upstream PR: None identified for this credential handoff.
 # Remove when: Agno forwards its resolved key through an isolated AgentQL SDK
-# request API; retain scoped-key precedence and concurrent-call isolation.
+# request API; retain scoped-key precedence, redirect rejection, parse diagnostics,
+# and concurrent-call isolation.
 # Coverage: tests/test_agentql_tools.py::test_agentql_resolved_key_reaches_request_without_shared_auth_mutation;
 # tests/test_agentql_tools.py::test_agentql_concurrent_scoped_calls_leave_unrelated_sdk_auth_untouched;
-# tests/test_agentql_tools.py::test_agentql_retains_sdk_query_errors_and_browser_cleanup.
+# tests/test_agentql_tools.py::test_agentql_retains_sdk_query_errors_and_browser_cleanup;
+# tests/test_agentql_tools.py::test_agentql_redirect_does_not_forward_scoped_request;
+# tests/test_agentql_tools.py::test_agentql_malformed_success_retains_parse_error.
 
 
 def _query_agentql_server(
@@ -59,7 +64,7 @@ def _query_agentql_server(
     experimental_query_elements_enabled: bool,
     **kwargs: object,
 ) -> dict[str, Any]:
-    """Keep AgentQL 1.18.1 request/error semantics with an explicitly bound key."""
+    """Send a scoped request, rejecting redirects and preserving JSON parsing failures."""
     if not api_key:
         raise APIKeyError(API_KEY_NOT_SET_MESSAGE)
 
@@ -82,12 +87,9 @@ def _query_agentql_server(
             json=request_data,
             headers={"X-API-Key": api_key},
             timeout=timeout,
-            allow_redirects=True,
+            allow_redirects=False,
         )
         response.raise_for_status()
-        payload = response.json()
-        logger.debug("AgentQL query completed", request_id=payload["request_id"])
-        return payload["response"]
     except requests.exceptions.RequestException as error:
         request_id = error.response.headers.get("X_REQUEST_ID") if error.response is not None else None
         if isinstance(error, requests.exceptions.ReadTimeout):
@@ -104,6 +106,13 @@ def _query_agentql_server(
             except ValueError:
                 raise AgentQLServerError(server_error, error_code, request_id) from error
         raise AgentQLServerError(server_error, error_code, request_id) from error
+
+    if 300 <= response.status_code < 400:
+        message = "AgentQL query endpoint returned an unexpected redirect."
+        raise AgentQLServerError(message, response.status_code, response.headers.get("X_REQUEST_ID"))
+    payload = response.json()
+    logger.debug("AgentQL query completed", request_id=payload["request_id"])
+    return payload["response"]
 
 
 class _CredentialedPage(AgentQLPage):
