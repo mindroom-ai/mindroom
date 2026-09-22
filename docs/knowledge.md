@@ -471,18 +471,20 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 
 ## Process isolation
 
-Published semantic searches and collection probes run in short-lived subprocesses.
+Published semantic searches run in short-lived subprocesses.
 Embedding credentials and provider health stay in the application; query vectors, filters, and document data cross the typed read boundary.
 Each child exits after one operation, releasing its native Chroma memory.
 At most four read children run at once.
 Async searches wait for shared read capacity without occupying executor threads, then start the child while the parent obtains the query embedding.
 Their single 30-second budget includes capacity waiting, child startup, embedding, and native execution.
-Synchronous searches and collection probes use the 30-second timeout for native execution and fail immediately as busy when all read slots are occupied.
+Synchronous semantic searches use the 30-second timeout for native execution and fail immediately as busy when all read slots are occupied.
 Queries spanning multiple bases search those bases sequentially so one query cannot exhaust the child limit.
 A timed-out child is killed and reaped; async cancellation or embedding failure also cleans up the child before releasing its slot.
 Providers without async embedding support run in a thread, which may continue after cancellation; the native child is still cleaned up immediately.
 Native database stalls therefore do not hold the application process's Python lock.
-Fresh processes add startup and index-loading cost to each read.
+Fresh processes add startup and index-loading cost to each semantic search.
+Collection-existence probes instead read SQLite publication metadata directly in the application, with a five-second database lock timeout and no subprocess read-slot admission.
+The probe does not initialize the native Chroma search engine; unavailable or corrupt metadata raises an error instead of being treated as a missing collection.
 
 Manual reindexing and scheduled refreshes share the existing refresh subprocess and its timeout and process-group cleanup.
 These boundaries also cover semantic file-memory knowledge overlays; the separate Mem0 backend is unchanged.
