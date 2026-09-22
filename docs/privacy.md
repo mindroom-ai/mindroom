@@ -111,12 +111,13 @@ Depending on the integrations you connect, this data can include your Google ide
 
 The MindRoom software uses this data only to provide the user-facing agent features that you request or configure, such as searching email, reading a Drive file, managing a calendar event, or reading and updating a spreadsheet.
 
-Google connections follow the selected agent's credential scope:
+Google connections follow the selected agent's saved effective execution scope.
+MindRoom uses `private.per` first, then `agents.<name>.worker_scope`, then `defaults.worker_scope`, otherwise no scope:
 
-- With `worker_scope: user`, the connection is isolated to the authenticated Matrix requester and can be used by that requester's user-scoped agents.
-- With `worker_scope: user_agent`, the connection is isolated to the authenticated Matrix requester and the selected agent.
-- With `worker_scope: shared`, the connection belongs to the selected shared agent, so any user authorized to invoke that agent can cause it to access the connected Google Account and may receive Google data in the agent's response.
-- With no worker scope configured, the connection is stored at the installation level and is not isolated by requester.
+- With effective scope `user`, the connection is isolated to the authenticated Matrix requester and can be used by that requester's user-scoped agents.
+- With effective scope `user_agent`, the connection is isolated to the authenticated Matrix requester and the selected agent.
+- With effective scope `shared`, the connection belongs to the selected agent, so any user authorized to invoke that agent can cause it to access the connected Google Account and may receive Google data in the agent's response.
+- With no private, per-agent, or inherited scope, the connection is stored at the installation level and is not isolated by requester.
 
 Relevant Google data is sent to the AI model provider that you configure for inference so the agent can complete your request.
 

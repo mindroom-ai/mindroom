@@ -47,8 +47,10 @@ Persisted memory IDs and file-backed `file:<path>:<line>` IDs can be used with `
 Semantic file-memory matches use `semantic:<source_file>:<rank>` read-only locators that cannot be passed to the CRUD functions.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
 For file-backed memory, `search_memories()` follows `memory.search.mode`.
-Keyword mode scans `MEMORY.md` and `memory/**/*.md` directly.
-Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to the fixed keyword corpus when embeddings are unavailable.
+Keyword mode searches structured entries with persisted IDs in `MEMORY.md` and both structured entries and eligible plain-text snippets in `memory/**/*.md`.
+Ordinary `MEMORY.md` prose is preloaded into the prompt instead of searched as keyword snippets.
+For prose omitted by the preload limit, read the file directly or use semantic search with `include_entrypoint: true` and a ready index.
+Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to those keyword entries and snippets when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
 File memory is already searchable on demand through `search_memories()`.
 When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.

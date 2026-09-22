@@ -151,6 +151,82 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 These outcome logs omit request text and credentials; separately enabled LLM request debug logging still follows the normal model configuration.
 Use these measurements alongside observed decision quality and provider pricing to compare backends; token counts alone do not establish cost or quality advantages.
 
+## Mid-Turn Coalescing
+
+When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
+Opt-in `agents.<name>.mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
+This is separate from participation eligibility and the debounce used to group incoming messages.
+Each agent can configure a required `judgment` object, optional `instructions` string (default `""`), and optional `defer_reaction` (default `null`).
+The `llm` judgment requires `provider: llm` and a `model` string naming an existing alias; its numeric `timeout_seconds` defaults to `5.0`.
+The `typesafe` judgment requires `provider: typesafe`; its numeric `threshold` defaults to `0.8` (range `0`–`1`) and `timeout_seconds` to `1.5`.
+Both backends require a positive timeout of at most `30` seconds and reject unknown fields.
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
+      defer_reaction: "👀"
+      judgment:
+        provider: llm
+        model: fast  # An existing alias under models
+        timeout_seconds: 5
+```
+
+To use TypeSafe instead, configure the same agent with:
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      judgment:
+        provider: typesafe
+        threshold: 0.8
+        timeout_seconds: 1.5
+```
+
+TypeSafe also requires `TYPESAFE_API_KEY`.
+The setting follows the agent's Matrix user across every authorized room, including ad hoc rooms, just like participation.
+Omitting `mid_turn` or setting it to `null` preserves the normal unconditional wrap-up notice.
+There are no room overrides; the retired `room_mid_turn` configuration is rejected.
+Set `defer_reaction` to acknowledge queued messages when the judge lets the active task finish first.
+For example, `"👀"` means the message was seen and deferred; it remains queued for a later turn.
+Omit the setting or use `null` to keep deferrals invisible.
+Like participation's `decline_reaction`, the key must be a nonblank string of at most 64 characters.
+Each message is acknowledged at most once per active response, and stable Matrix transaction IDs prevent duplicate reactions on replay.
+Negative, failed, timed-out, cancelled, or superseded judgments do not trigger the reaction.
+Reaction delivery is best effort; failures do not change the judgment, and a correction arriving during delivery still requests wrap-up.
+
+The question is whether the active task may finish before the queued messages are handled.
+Only an affirmative answer suppresses the notice; a negative answer, abstention, timeout, missing credentials, exhausted capacity, or backend error keeps the normal wrap-up behavior.
+The TypeSafe threshold defaults to `0.8` and has not been calibrated for this task.
+The LLM returns a boolean rather than a confidence score.
+Judgments reuse the shared participation concurrency limits and backend deadlines.
+
+The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
+It receives the active request text, up to eight pending human messages, and the configured guidance.
+For interactive selections, the active request includes the original question and selected option.
+Each pending message includes a snapshot of the active reply text last acknowledged by Matrix when that message entered the queue.
+That snapshot includes published partial text and tool names when those names appear in the visible reply, but excludes buffered text and later edits.
+It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
+Earlier conversation history, private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
+The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
+Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
+An existing reply whose visible text is unavailable retains wrap-up until a new Matrix update is acknowledged.
+Missing request text, unavailable progress, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.
+Message text can still contain identifying or private information.
+
+A finish decision is reused for the same pending messages within the active response.
+Subsequent streaming updates do not replace those messages' frozen progress snapshots.
+A later queued message requires a new decision, and a queue change during inference cannot inherit approval for unseen input.
+Once a wrap-up notice is sent, later messages cannot reverse that handoff.
+The queued messages remain queued and are handled through the existing dispatch path after the active response releases its lock.
+The notice requests a handoff from the model; it does not forcibly cancel tools, abort a response, or inject the queued text into the running model.
+Explicit stop handling and tool-approval requirements remain unchanged.
+Teams retain the normal wrap-up behavior and do not inherit a member agent's mid-turn settings.
+
 ## Splitting the Configuration Into Multiple Files
 
 Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.
@@ -268,6 +344,7 @@ See [MCP](https://docs.mindroom.chat/mcp/) for transport-specific config, tool n
 
 Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations.
 Rules are evaluated in order and the first matching rule wins.
+`match` is a case-sensitive glob over exposed function names, not toolkit identifiers.
 Each rule must set exactly one of `action` or `script`.
 Use `action: require_approval` to always pause the tool call and send a Matrix approval card.
 Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`.
@@ -302,12 +379,17 @@ If an entity account was removed, the router posts a related terminal notice bec
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
+This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
+It does not gate every Slack operation, and the same function names in other toolkits also match.
+
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: slack_*
+    - match: send_message*
+      action: require_approval
+    - match: upload_file
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
@@ -329,6 +411,10 @@ tool_approval:
 | `MINDROOM_LOGGER_LEVELS` | Optional comma- or semicolon-separated logger level overrides, for example `mindroom:DEBUG,httpx:WARNING,httpcore:WARNING,anthropic:INFO,nio:WARNING` | unset |
 | `MINDROOM_LOG_FORMAT` | `text` for readable logs or `json` for structured logs; file output never receives terminal styling | `text` |
 | `NO_COLOR` | Any nonempty value disables console colors and styled tracebacks, including in terminals; installed background services set this to `1` | unset |
+
+For native startup, export `LOG_LEVEL`, `MINDROOM_LOGGER_LEVELS`, `MINDROOM_LOG_FORMAT`, and `NO_COLOR` in the process environment; the config-adjacent `.env` does not supply these logging controls.
+The `mindroom run --log-level` option takes precedence over `LOG_LEVEL`.
+Container `env_file`/`--env-file` injection supplies process variables and can therefore set these controls.
 
 ### Matrix
 
@@ -562,6 +648,7 @@ defaults:
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
+  auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: false     # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
@@ -800,6 +887,10 @@ matrix_sync:
   max_response_bytes: 16777216      # Per-session HTTP response limit: 16 MiB
   max_pending_bytes: 67108864       # Per-session encoded pending output limit: 64 MiB
 
+# Durable Matrix event journal (optional; effective store changes require restart)
+event_journal:
+  backend: sqlite                 # Default: sqlite; uses <storage>/tracking/event_journal.db
+
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 scheduler_catch_up_grace_seconds: 3600  # Recurring catch-up window; 0 disables it
@@ -814,6 +905,38 @@ See [Authorization](https://docs.mindroom.chat/authorization/) for the current a
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
 Demote stale Space admins manually in a Matrix client when needed.
+
+## Event Journal
+
+`event_journal.backend` defaults to `sqlite`, which stores the durable Matrix event journal at `<storage>/tracking/event_journal.db` (`mindroom_data/tracking/event_journal.db` with the default storage root).
+SQLite has no independent journal-path setting and ignores the PostgreSQL URL fields.
+The PostgreSQL backend requires the `postgres` extra, which supplies `psycopg`.
+For a Python install, use `uvx --from 'mindroom[postgres]' mindroom run`, or include `--extra postgres` when syncing a source checkout.
+Then select the backend explicitly and provide a connection URL:
+
+```yaml
+event_journal:
+  backend: postgres
+  database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL
+```
+
+`MINDROOM_EVENT_CACHE_DATABASE_URL` is the default environment variable name.
+Set it in the exported process environment or the config-adjacent `.env`; an exported value takes precedence over `.env`.
+Alternatively, `event_journal.database_url` supplies an inline URL, and a nonblank inline value takes precedence over environment lookup.
+Custom nonblank `database_url_env` names must be `DATABASE_URL` or end in `_DATABASE_URL` so runtime secret filters recognize them.
+PostgreSQL requires a nonblank URL; supplying a URL alone does not switch a SQLite journal to PostgreSQL.
+
+Changes to the effective store apply after restarting MindRoom.
+Changing URL fields while the backend remains `sqlite` does not change the opened file or require a journal restart.
+See the [journal binding and migration commands](https://docs.mindroom.chat/cli/#journal) before moving, restoring, or adopting a journal.
+
+## Automatic Restart Resumption
+
+`defaults.auto_resume_after_restart` defaults to `true` and permits visible router resume prompts for eligible interrupted threaded conversations after startup or runtime replacement.
+Set it to `false` to suppress those automatic prompts and resume the work manually.
+Resumption still depends on current recovery ownership, room membership, a resolved original requester, and fresh history checks that reject superseded work.
+This setting does not globally disable ordinary durable event replay or stale-response cleanup.
+See [runtime recovery](https://docs.mindroom.chat/architecture/bot-runtime/) for the surrounding lifecycle.
 
 ## Matrix Sync Limits
 
@@ -890,7 +1013,14 @@ Those records include prompts, messages, the final provider-prepared tool array 
 The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
 Tool-call rows include a `timing` object with result-ready, before-hook, and tool-body durations when those phases are measured.
-Set `MINDROOM_TIMING=1` to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
+Export `MINDROOM_TIMING=1` before native process startup to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
+The config-adjacent `.env` does not enable this flag, and timing decorators read it when modules load.
+For example:
+
+```bash
+LOG_LEVEL=DEBUG MINDROOM_LOG_FORMAT=json MINDROOM_TIMING=1 mindroom run
+```
+
 The same flag emits one `Dispatch pipeline timing` summary per turn at INFO level, including `time_to_model_request_ms` from message handling through local preparation to the first Agno run invocation (not the provider SDK's HTTP-send boundary), plus separate context, queue, payload, agent-build, and model timing spans when available.
 Audit logging remains enabled.
 Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted.
@@ -977,7 +1107,8 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 ## Notes
 
 - All top-level sections are optional with sensible defaults, but at least one agent is recommended for Matrix interactions
-- A model named `default` is required unless agents, teams, and the router all specify explicit non-`default` models
+- Keep `models.default` configured for built-in Matrix room topic generation, even when agents, teams, and the router select other models.
+- Automatic thread summaries also fall back to `models.default` unless `defaults.thread_summary_model` or an applicable room or entity entry in `room_thread_summary_models` selects another model.
 - Agents can set `knowledge_bases`, but each entry must exist in the top-level `knowledge_bases` section
 - Router, agent, and team `accept_invites` policies default to `true`; use `false` or `[]` to reject every invite, or a list of exact and wildcard Matrix user IDs matched after human-only alias resolution; non-human accounts retain their exact transport ID
 - Invitation acceptance is independent from conversation access, and accepted ad-hoc room IDs are persisted across restarts without adding them to the static `rooms` list
@@ -995,7 +1126,7 @@ Run `mindroom avatars sync --force` to replace existing Matrix room or root-spac
 - `administrators`, room invitations, responder access, Matrix power, and `credential_managers` are independent capabilities
 - `authorization.config_command_enabled` defaults to `false`; when set to `true`, `!config` requires a platform administrator
 - Responder `access` can match static users, current-room members, or members of configured managed rooms
-- Responder access and room membership never grant dashboard credential or OAuth management
+- Responder access and room membership do not grant general dashboard or shared-credential management; eligible requesters may manage [their own OAuth connections](https://docs.mindroom.chat/oauth-framework/)
 - `authorization.aliases` maps bridge bot user IDs to canonical users so bridged messages inherit the same permissions (see [Authorization](https://docs.mindroom.chat/authorization/))
 - `room_defaults` and `rooms.<key>` own join policy, directory visibility, invitations, encryption, and Matrix admins
 - Monolithic configurations with retired access fields migrate automatically; configurations using `!include` must be migrated manually

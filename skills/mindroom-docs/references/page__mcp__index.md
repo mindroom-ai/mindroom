@@ -63,7 +63,7 @@ Use `sse` for MCP servers that expose a Server-Sent Events endpoint.
 mcp_servers:
   remote_sse:
     transport: sse
-    url: http://127.0.0.1:9000/sse
+    url: https://mcp.example.com/sse
     headers:
       Authorization: Bearer ${MCP_API_TOKEN}
 ```
@@ -80,7 +80,7 @@ Use `streamable-http` for MCP servers that expose the newer streamable HTTP endp
 mcp_servers:
   remote_http:
     transport: streamable-http
-    url: http://127.0.0.1:9000/mcp
+    url: https://mcp.example.com/mcp
     headers:
       Authorization: Bearer ${MCP_API_TOKEN}
 ```
@@ -88,6 +88,9 @@ mcp_servers:
 For `streamable-http` servers, `url` is required.
 `headers` are optional.
 `command`, `args`, `cwd`, and `env` are not allowed on this transport.
+
+Both remote transports reject loopback and private-network destinations.
+Use `stdio` for local subprocess servers.
 
 `env` and `headers` values support `${ENV_VAR}` interpolation.
 MindRoom resolves those placeholders from the current runtime environment when it opens the MCP transport.
@@ -119,7 +122,7 @@ Use `worker_scope: shared` when one connected account belongs to the agent and e
 | `startup_timeout_seconds` | float | `20.0` | Maximum time to open the transport, initialize, and discover tools |
 | `call_timeout_seconds` | float | `120.0` | Default timeout for each tool call |
 | `max_concurrent_calls` | int | `1` | Maximum concurrent tool calls for that server |
-| `auto_reconnect` | bool | `true` | Retry once after connection or timeout failures during a call |
+| `auto_reconnect` | bool | `true` | Refresh the connection for future calls after eligible connection or timeout failures; never replay an ambiguous call automatically |
 
 `tool_prefix` must use only letters, numbers, and underscores.
 `include_tools` and `exclude_tools` are matched against the remote MCP tool names, not the MindRoom-prefixed function names.
@@ -286,6 +289,7 @@ mcp_servers:
 
 OAuth discovery requires HTTPS by default and does not follow redirects.
 For local development, set `MINDROOM_MCP_OAUTH_ALLOW_INSECURE_DISCOVERY=1` to allow non-HTTPS discovery URLs, and set `MINDROOM_MCP_OAUTH_ALLOW_PRIVATE_DISCOVERY=1` to allow loopback or private-network discovery hosts.
+These options affect OAuth discovery only; they do not relax the address checks for SSE or streamable HTTP transport requests.
 
 ## Tool Naming
 
@@ -440,12 +444,14 @@ agents:
       - mcp_mempalace
 ```
 
-Before the MCP server can return results, initialize and seed the palace:
+Before the MCP server can return results, initialize and seed the same palace directory configured above:
 
 ```bash
-uvx mempalace init /path/to/content
-uvx mempalace mine /path/to/content
+uvx mempalace --palace /path/to/.mempalace/palace init /path/to/content
+uvx mempalace --palace /path/to/.mempalace/palace mine /path/to/content
 ```
+
+The positional directory supplies content to scan or mine; `--palace` selects the destination store (see the [MemPalace CLI reference](https://mempalaceofficial.com/reference/cli)).
 
 Agents can also add memories on the fly via the `mempalace_add_drawer` tool.
 The palace enforces deduplication at a 0.9 similarity threshold.
@@ -467,9 +473,11 @@ Set `required: true` on a server to restore hard-fail behavior, where dependent 
 During tool execution, explicit MCP tool failures are surfaced as tool errors.
 Those explicit server-side errors are not retried automatically.
 
-Connection drops and timeouts are treated differently.
-When `auto_reconnect: true`, MindRoom refreshes the server connection and retries the tool call once.
-If reconnect also fails, the error is surfaced to the caller.
+A connection drop or timeout after dispatch can leave the remote action's outcome unknown.
+When `auto_reconnect: true`, MindRoom can refresh the connection and catalog for future calls, but it does not replay the failed action.
+The caller receives an error even if reconnection succeeds.
+Check whether a potentially mutating action completed before explicitly retrying it.
+Retries during authorization or catalog preparation before dispatch do not replay a tool invocation.
 
 If an MCP server sends a `tools/list_changed` notification, MindRoom refreshes that server's catalog.
 If the catalog changed, MindRoom restarts the agents and teams that reference that server so they pick up the updated tool list.

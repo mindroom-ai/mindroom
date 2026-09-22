@@ -141,6 +141,8 @@ def fake_clock() -> Iterator[None]:
 async def _run_stream(
     config: Config,
     response_stream: AsyncIterator[object],
+    *,
+    visible_progress_callback: Callable[[str], None] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
         client=make_matrix_client_mock(user_id="@mindroom_helper:localhost"),
@@ -148,6 +150,7 @@ async def _run_stream(
         config=config,
         runtime_paths=runtime_paths_for(config),
         response_stream=response_stream,
+        visible_progress_callback=visible_progress_callback,
     )
 
 
@@ -297,6 +300,89 @@ async def test_placeholder_progressive_edits_and_final_tool_trace(config: Config
     assert outcome.visible_body_state == "visible_body"
     assert outcome.visible_event_id == "$stream_1"
     assert outcome.visible_body_text == final.display_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_visible_progress_waits_for_matrix_acknowledgement(config: Config, *, accepted: bool) -> None:
+    """Only acknowledged plain text reaches progress observers, never buffered text or trace details."""
+    visible: list[str] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    gateway = _FakeGateway()
+
+    async def delayed_send(
+        client: object,
+        room_id: str,
+        content: dict[str, Any],
+        *,
+        retry_sync_recovery: bool = False,
+    ) -> DeliveredMatrixEvent | None:
+        entered.set()
+        await release.wait()
+        if not accepted:
+            return None
+        return await gateway.send(client, room_id, content, retry_sync_recovery=retry_sync_recovery)
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        visible_progress_callback=visible.append,
+    )
+    streaming.tool_trace = [ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")]
+    client = make_matrix_client_mock(user_id="@mindroom_helper:localhost")
+    with patch("mindroom.streaming.send_message_result", new=delayed_send):
+        delivery = asyncio.create_task(streaming.update_content("Published reply", client))
+        try:
+            await entered.wait()
+            assert visible == []
+            streaming.accumulated_text += " buffered later"
+            release.set()
+            if accepted:
+                await delivery
+            else:
+                with pytest.raises(RuntimeError, match="Failed to send initial streaming message"):
+                    await delivery
+        finally:
+            release.set()
+            if not delivery.done():
+                delivery.cancel()
+                await asyncio.gather(delivery, return_exceptions=True)
+    assert visible == (["Published reply"] if accepted else [])
+    if accepted:
+        assert visible == [gateway.ops[0].content["body"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fake_clock")
+async def test_stream_driver_publishes_only_visible_text_to_progress_callback(config: Config) -> None:
+    """The stream driver forwards its observer without forwarding rich tool arguments."""
+    visible: list[str] = []
+    published = asyncio.Event()
+    gateway = _FakeGateway()
+
+    def note_progress(text: str) -> None:
+        visible.append(text)
+        published.set()
+
+    async def stream() -> AsyncIterator[object]:
+        yield StructuredStreamChunk(
+            content="I found the file.\n🔧 `read_file` [1] ⏳",
+            tool_trace=[ToolTraceEntry("tool_call_started", "read_file", args_preview="private path")],
+        )
+        await published.wait()
+
+    with (
+        patch("mindroom.streaming.send_message_result", new=gateway.send),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
+        await _run_stream(config, stream(), visible_progress_callback=note_progress)
+    assert visible
+    assert "I found the file" in visible[0]
+    assert "read_file" in visible[0]
+    assert "private path" not in "\n".join(visible)
 
 
 @pytest.mark.asyncio
