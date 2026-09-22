@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -36,13 +37,22 @@ if TYPE_CHECKING:
 
 @pytest.mark.parametrize("team", [False, True])
 @pytest.mark.parametrize("cancelled", [False, True])
-def test_terminal_snapshot_keeps_requests_after_checkpoint(tmp_path: Path, *, team: bool, cancelled: bool) -> None:
+@pytest.mark.parametrize("current", ["requests", "transient", "empty"])
+def test_terminal_snapshot_keeps_requests_after_checkpoint(
+    tmp_path: Path,
+    *,
+    team: bool,
+    cancelled: bool,
+    current: str,
+) -> None:
     """A stale checkpoint must not hide later requests or persist transient messages."""
     storage = create_state_storage("status", tmp_path, subdir="sessions", session_table="status_sessions")
     first = Message(role="assistant", content="Checking", metrics=MessageMetrics(input_tokens=10))
     second = Message(role="assistant", content="Checked", metrics=MessageMetrics(input_tokens=20))
     transient = Message(role="user", content="Transient", add_to_agent_memory=False)
-    messages = RunMessages(messages=[first, transient, second])
+    messages = RunMessages(
+        messages={"requests": [first, transient, second], "transient": [transient], "empty": []}[current],
+    )
     run_type = TeamRunOutput if team else RunOutput
     run = run_type(messages=[first], metrics=RunMetrics(input_tokens=30))
     try:
@@ -57,11 +67,62 @@ def test_terminal_snapshot_keeps_requests_after_checkpoint(tmp_path: Path, *, te
             team_run.flush_in_flight_messages_on_error_team(run, messages)
         else:
             agent_run.flush_in_flight_messages_on_error(run, messages)
-        assert run.messages == [first, second]
+        assert (run.messages or []) == ([first, second] if current == "requests" else [])
         usage = project_usage(run.to_dict())
-        assert [request["metrics"]["input_tokens"] for request in usage["requests"]] == [10, 20]
+        assert [request["metrics"]["input_tokens"] for request in usage.get("requests", [])] == (
+            [10, 20] if current == "requests" else []
+        )
     finally:
         storage.close()
+
+
+def test_installation_preserves_existing_stream_wrappers() -> None:
+    """Deferred installation must retain wrappers installed after module import."""
+    code = """
+import asyncio
+
+from agno.agent import Agent
+from agno.models.base import Model
+from mindroom import agno_compat_run_messages as patch
+from tests.history_helpers import RecordingModel
+
+events = []
+process = Model.process_response_stream
+aprocess = Model.aprocess_response_stream
+
+def existing_stream(*args, **kwargs):
+    events.append("sync-before")
+    yield from process(*args, **kwargs)
+    events.append("sync-after")
+
+async def existing_astream(*args, **kwargs):
+    events.append("async-before")
+    async for event in aprocess(*args, **kwargs):
+        yield event
+    events.append("async-after")
+
+Model.process_response_stream = existing_stream
+Model.aprocess_response_stream = existing_astream
+patch.install_patch()
+patch.install_patch()
+
+agent = Agent(model=RecordingModel(id="test-model", provider="test-provider"), telemetry=False)
+assert "".join(event.content or "" for event in agent.run("Hello", stream=True)) == "ok"
+
+async def consume():
+    return "".join([event.content or "" async for event in agent.arun("Hello", stream=True)])
+
+assert asyncio.run(consume()) == "ok"
+assert events == ["sync-before", "sync-after", "async-before", "async-after"], events
+"""
+    result = subprocess.run(
+        ["uv", "run", "python", "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @dataclass

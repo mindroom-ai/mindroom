@@ -24,8 +24,6 @@ if TYPE_CHECKING:
 
 _PATCHED = False
 _LOCK = threading.Lock()
-_PROCESS_STREAM = cast("Callable[..., Iterator[ModelResponse]]", Model.process_response_stream)
-_APROCESS_STREAM = cast("Callable[..., AsyncIterator[ModelResponse]]", Model.aprocess_response_stream)
 
 
 # AGNO_COMPAT: Terminal cleanup retains stale checkpoint or continuation messages.
@@ -37,7 +35,7 @@ _APROCESS_STREAM = cast("Callable[..., AsyncIterator[ModelResponse]]", Model.apr
 # messages, including resumed runs, while respecting add_to_agent_memory.
 # Coverage: tests/test_agno_compat_run_messages.py.
 def _flush_messages(run_response: RunOutput | TeamRunOutput, run_messages: RunMessages | None) -> None:
-    if run_messages is not None and run_messages.messages:
+    if run_messages is not None:
         run_response.messages = [message for message in run_messages.messages if message.add_to_agent_memory]
 
 
@@ -50,7 +48,7 @@ def _with_current_messages(original: Callable[..., Any]) -> Callable[..., Any]:
         *args: object,
         **kwargs: object,
     ) -> RunOutput | TeamRunOutput:
-        if run_messages is not None and any(message.add_to_agent_memory for message in run_messages.messages):
+        if run_messages is not None:
             # Let Agno retain its partial-content, approval, and member cleanup.
             run_response.messages = None
         return original(run_response, error, run_messages, *args, **kwargs)
@@ -77,35 +75,45 @@ def _retain_metered_message(messages: list[Message], assistant_message: Message)
         messages.append(assistant_message)
 
 
-@wraps(_PROCESS_STREAM)
-def _process_stream(
-    model: Model,
-    messages: list[Message],
-    assistant_message: Message,
-    *args: object,
-    **kwargs: object,
-) -> Iterator[ModelResponse]:
-    try:
-        yield from _PROCESS_STREAM(model, messages, assistant_message, *args, **kwargs)
-    except BaseException:
-        _retain_metered_message(messages, assistant_message)
-        raise
+def _with_metered_messages(
+    original: Callable[..., Iterator[ModelResponse]],
+) -> Callable[..., Iterator[ModelResponse]]:
+    @wraps(original)
+    def stream(
+        model: Model,
+        messages: list[Message],
+        assistant_message: Message,
+        *args: object,
+        **kwargs: object,
+    ) -> Iterator[ModelResponse]:
+        try:
+            yield from original(model, messages, assistant_message, *args, **kwargs)
+        except BaseException:
+            _retain_metered_message(messages, assistant_message)
+            raise
+
+    return stream
 
 
-@wraps(_APROCESS_STREAM)
-async def _aprocess_stream(
-    model: Model,
-    messages: list[Message],
-    assistant_message: Message,
-    *args: object,
-    **kwargs: object,
-) -> AsyncIterator[ModelResponse]:
-    try:
-        async for response in _APROCESS_STREAM(model, messages, assistant_message, *args, **kwargs):
-            yield response
-    except BaseException:
-        _retain_metered_message(messages, assistant_message)
-        raise
+def _with_metered_messages_async(
+    original: Callable[..., AsyncIterator[ModelResponse]],
+) -> Callable[..., AsyncIterator[ModelResponse]]:
+    @wraps(original)
+    async def stream(
+        model: Model,
+        messages: list[Message],
+        assistant_message: Message,
+        *args: object,
+        **kwargs: object,
+    ) -> AsyncIterator[ModelResponse]:
+        try:
+            async for response in original(model, messages, assistant_message, *args, **kwargs):
+                yield response
+        except BaseException:
+            _retain_metered_message(messages, assistant_message)
+            raise
+
+    return stream
 
 
 def install_patch() -> None:
@@ -124,6 +132,6 @@ def install_patch() -> None:
             "Any",
             _with_current_messages(team_run._handle_team_run_cancellation),
         )
-        Model.process_response_stream = cast("Any", _process_stream)
-        Model.aprocess_response_stream = cast("Any", _aprocess_stream)
+        Model.process_response_stream = cast("Any", _with_metered_messages(Model.process_response_stream))
+        Model.aprocess_response_stream = cast("Any", _with_metered_messages_async(Model.aprocess_response_stream))
         _PATCHED = True
