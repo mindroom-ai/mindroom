@@ -28,10 +28,11 @@ register_builtin_tool_metadata(
                 required=False,
                 default=None,
                 description=(
-                    "Tool names workflow participants may call without per-call user approval. "
-                    'Use "*" to pre-approve every granted tool. '
-                    "System-mutating tools (claude_agent, config_manager, scheduler) "
-                    "always require per-call approval and cannot be pre-approved."
+                    "Toolkit names receiving automatic approval grants after operator rules. "
+                    'Use "*" for all eligible granted toolkits. '
+                    "claude_agent, config_manager, and scheduler receive no generated grant; "
+                    "explicit operator rules can authorize otherwise eligible functions. "
+                    "Functions requiring approval or native confirmation remain unavailable."
                 ),
             ),
         ],

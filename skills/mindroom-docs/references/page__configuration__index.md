@@ -344,6 +344,7 @@ See [MCP](https://docs.mindroom.chat/mcp/) for transport-specific config, tool n
 
 Use the top-level `tool_approval` block to gate tool calls behind human approval in Matrix conversations.
 Rules are evaluated in order and the first matching rule wins.
+`match` is a case-sensitive glob over exposed function names, not toolkit identifiers.
 Each rule must set exactly one of `action` or `script`.
 Use `action: require_approval` to always pause the tool call and send a Matrix approval card.
 Use `script: ./approval_scripts/review.py` to run `check(tool_name, arguments, agent_name) -> bool` and require approval only when it returns `True`.
@@ -378,12 +379,17 @@ If an entity account was removed, the router posts a related terminal notice bec
 Agent-authored, system-authored, and configured bridge-bot-authored tool calls are denied instead of entering the approval flow.
 OpenAI-compatible `/v1/chat/completions` has no approval transport, so any tool function that matches a required-approval rule, including script-based rules, is hidden from the `/v1` tool schema instead of being exposed and blocked later.
 
+This partial example gates Slack message sending and file uploads, plus shell calls selected by the review script.
+It does not gate every Slack operation, and the same function names in other toolkits also match.
+
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: slack_*
+    - match: send_message*
+      action: require_approval
+    - match: upload_file
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
