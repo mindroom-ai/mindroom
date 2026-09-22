@@ -713,6 +713,49 @@ class TestVoiceHandler:
         assert result == "turn on the lights"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run"])
+    async def test_cleanup_failure_preserves_recognized_transcript(
+        self,
+        failure_stage: str,
+    ) -> None:
+        """Optional cleanup failures never replace recognized speech with diagnostics."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        transcript = "Please remind me about tomorrow's appointment."
+
+        class CleanupAgent:
+            def __init__(self, **_kwargs: object) -> None:
+                if failure_stage == "constructor":
+                    message = "cleanup construction failed"
+                    raise RuntimeError(message)
+
+            async def arun(self, *_args: object, **_kwargs: object) -> None:
+                message = "cleanup provider failed"
+                raise RuntimeError(message)
+
+        with (
+            patch(
+                "mindroom.voice_handler.model_loading.get_model_instance",
+                side_effect=RuntimeError("cleanup model unavailable") if failure_stage == "model" else None,
+            ),
+            patch("mindroom.voice_handler.Agent", CleanupAgent),
+        ):
+            result = await _process_transcription(transcript, config)
+
+        assert result == transcript
+
+    @pytest.mark.asyncio
+    async def test_cleanup_cancellation_propagates(self) -> None:
+        """Cancellation remains control flow instead of becoming a transcript fallback."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        with (
+            patch("mindroom.voice_handler.model_loading.get_model_instance"),
+            patch("mindroom.voice_handler.Agent") as agent_class,
+        ):
+            agent_class.return_value.arun = AsyncMock(side_effect=asyncio.CancelledError)
+            with pytest.raises(asyncio.CancelledError):
+                await _process_transcription("recognized speech", config)
+
+    @pytest.mark.asyncio
     async def test_normalize_voice_message_fails_when_normalization_hangs(
         self,
         monkeypatch: pytest.MonkeyPatch,

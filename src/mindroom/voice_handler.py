@@ -642,12 +642,9 @@ async def _process_transcription(
                 runtime_paths=runtime_paths,
             )
 
-    except Exception as e:
+    except Exception:
         logger.exception("Error processing transcription")
-        # Return error message so user knows what happened
-        from mindroom.error_handling import get_user_friendly_error_message  # noqa: PLC0415
-
-        return get_user_friendly_error_message(e, "VoiceProcessor")
+        return transcription
     else:
         # Return original transcription if no valid response from model
         return transcription
