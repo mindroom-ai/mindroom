@@ -165,7 +165,10 @@ get_average_order_value(group_by="day", created_after="2026-03-01", created_befo
 
 ### Notes
 
-- Create a custom app in Shopify Admin and grant the scopes you need before generating the access token.
+- Create and install new custom apps through the [Shopify Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard), select the required scopes, and obtain an Admin API access token using Shopify's authentication flow.
+- For stores in your own organization, follow Shopify's [client credentials grant](https://shopify.dev/docs/apps/build/authentication-authorization/client-credentials-grant); these tokens expire after 24 hours.
+- Store the resulting token in `access_token` through the dashboard or credential store, and replace it when needed; this toolkit consumes supplied tokens and does not issue or refresh them.
+- [Existing legacy custom apps remain supported](https://changelog.shopify.com/posts/legacy-custom-apps-can-t-be-created-after-january-1-2026), but new apps cannot be created through Shopify Admin.
 - The upstream toolkit explicitly expects `read_orders`, `read_products`, `read_customers`, and `read_analytics` for its full analytics surface.
 - `shop_name` and `access_token` can also come from `SHOPIFY_SHOP_NAME` and `SHOPIFY_ACCESS_TOKEN`, but MindRoom's documented configuration path is stored tool credentials.
 

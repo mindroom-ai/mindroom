@@ -1565,11 +1565,11 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Bitbucket username",
+          "description": "Atlassian account email for Bitbucket Cloud; Basic-auth username for other deployments",
           "label": "Username",
           "name": "username",
           "options": null,
-          "placeholder": "Bitbucket username",
+          "placeholder": "you@example.com",
           "required": true,
           "type": "text",
           "validation": null
@@ -1577,8 +1577,8 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "App password. Use either this or token.",
-          "label": "App Password",
+          "description": "Basic-auth password for deployments that support it; use token for Bitbucket Cloud.",
+          "label": "Password",
           "name": "password",
           "options": null,
           "placeholder": null,
@@ -1589,7 +1589,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Access token. Use either this or password.",
+          "description": "Scoped Bitbucket Cloud API token; takes precedence over password.",
           "label": "Token",
           "name": "token",
           "options": null,
@@ -1677,7 +1677,7 @@
         "list_repositories",
         "list_repository_commits"
       ],
-      "helper_text": "Create an app password at [Bitbucket Settings](https://bitbucket.org/account/settings/app-passwords/)",
+      "helper_text": "For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in Token, with your Atlassian account email in Username. Other deployments must accept the supplied credentials through Basic authentication.",
       "icon": "SiBitbucket",
       "icon_color": "text-blue-600",
       "name": "bitbucket",
@@ -7633,7 +7633,7 @@
         "get_shop_info",
         "get_top_selling_products"
       ],
-      "helper_text": "Create a custom app in your [Shopify Admin](https://admin.shopify.com/) to get an access token",
+      "helper_text": "Create and install new apps through the [Dev Dashboard](https://shopify.dev/docs/apps/build/dev-dashboard/create-apps-using-dev-dashboard), then follow its authentication steps and store the Admin API access token here. Existing legacy custom apps can keep their token setup. This tool does not issue or refresh tokens.",
       "icon": "SiShopify",
       "icon_color": "text-green-600",
       "name": "shopify",

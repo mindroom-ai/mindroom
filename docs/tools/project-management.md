@@ -153,16 +153,17 @@ apply_template("mindroom-dev", {"ISSUE_REF": "ISSUE-123", "REPO": "mindroom"})
 ### What It Does
 
 `bitbucket` exposes `list_repositories()`, `get_repository_details()`, `create_repository()`, `list_repository_commits()`, `list_all_pull_requests()`, `get_pull_request_details()`, `get_pull_request_changes()`, and `list_issues()`.
-The tool always authenticates with a configured `username` plus either `password` or `token`, and it scopes most operations to the configured `workspace` and `repo_slug`.
+The tool always uses HTTP Basic authentication with `username` and either `token` or `password`, with `token` taking precedence.
+It scopes most operations to the configured `workspace` and `repo_slug`.
 If `server_url` has no scheme, the upstream tool normalizes it to `https://<server_url>/<api_version>`.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `username` | `text` | `yes` | `null` | Bitbucket username. |
-| `password` | `password` | `no` | `null` | App password, used when `token` is not supplied. |
-| `token` | `password` | `no` | `null` | Access token, used instead of `password` when present. |
+| `username` | `text` | `yes` | `null` | Atlassian account email for Bitbucket Cloud; the deployment's Basic-auth username otherwise. |
+| `password` | `password` | `no` | `null` | Basic-auth password for deployments that support it, used when `token` is not supplied. |
+| `token` | `password` | `no` | `null` | Scoped Bitbucket Cloud API token, stored through the dashboard or credential store. |
 | `workspace` | `text` | `yes` | `null` | Bitbucket workspace name. |
 | `repo_slug` | `text` | `yes` | `null` | Repository slug used by most repository-scoped calls. |
 | `server_url` | `url` | `no` | `api.bitbucket.org` | Bitbucket host or full base URL. |
@@ -175,7 +176,8 @@ agents:
   maintainer:
     tools:
       - bitbucket:
-          username: buildbot
+          username: buildbot@example.com
+          # Store the scoped API token in the token credential field.
           workspace: mindroom
           repo_slug: docs
 ```
@@ -188,7 +190,8 @@ list_repository_commits(count=10)
 
 ### Notes
 
-- Provide either `password` or `token`, and use an app password for Bitbucket Cloud unless you have a reason to use token-based auth.
+- For Bitbucket Cloud, [create a scoped API token](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/) and store it in `token`, with your Atlassian account email in `username`, following [Atlassian's REST API authentication instructions](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/).
+- For a non-Cloud deployment, use credentials accepted by that deployment's Basic-auth API; this toolkit does not implement a separate bearer-token flow.
 - `repo_slug` is not just a default, because most methods are hard-scoped to that repository and the current `create_repository()` call path also posts through the configured `repo_slug` endpoint on this branch.
 - `list_repositories()` is the workspace-wide overview method, while the pull-request, commit, and issue methods all use the configured repository context.
 
@@ -249,7 +252,7 @@ add_comment("PROJ-123", "Reviewed and ready for testing.")
 
 `linear` exposes `get_user_details()`, `get_teams_details()`, `get_issue_details()`, `create_issue()`, `update_issue()`, `get_user_assigned_issues()`, `get_workflow_issues()`, and `get_high_priority_issues()`.
 All calls go to `https://api.linear.app/graphql`, and the tool expects a Linear API key in either `api_key` or `LINEAR_API_KEY`.
-The read methods are useful for discovering the IDs you need before calling `create_issue()` or `update_issue()`.
+Use the read methods to discover team, assignee, or workflow-state IDs needed for issue creation and updates.
 
 ### Configuration
 
@@ -269,13 +272,14 @@ agents:
 ```python
 get_user_details()
 get_teams_details()
+get_issue_details("BLA-123")
 get_high_priority_issues()
 ```
 
 ### Notes
 
 - `api_key` is marked optional in metadata, but the upstream client raises if neither `api_key` nor `LINEAR_API_KEY` is present.
-- `get_issue_details()` takes a Linear issue ID rather than an issue key, so use `get_teams_details()` or other Linear discovery steps first when you only know the human-readable issue key from the UI.
+- `get_issue_details(issue_id)` accepts an issue UUID or a human-readable issue key such as `BLA-123`, matching [Linear's issue query](https://linear.app/developers/graphql).
 - `linear` is the best fit on this page when your workflow is already centered on Linear IDs, teams, and workflow states rather than repository-native pull requests.
 
 ## [`clickup`]
