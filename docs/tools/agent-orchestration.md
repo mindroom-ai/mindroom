@@ -384,11 +384,11 @@ The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `partici
 `inputs` supports an object schema with `required`, `properties`, property `type`, property `description`, and property `enum`.
 Participants can be `ephemeral_agent` or `room_agent`.
 An `ephemeral_agent` can declare `id`, `name`, `role`, `description`, `model`, `tools`, and `instructions`.
-Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`).
+Ephemeral participant `tools` may grant any registered tool except agent-infrastructure tools (`memory`, `delegate`, `self_config`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`).
 Every participant tool must also be listed in `permissions.tools`.
 Dynamic Workflow participants cannot suspend and resume a model run for human approval.
 A participant grant is rejected when any exposed function would require approval under the operator's `tool_approval` policy and the caller's `dynamic_workflow` `allowed_tools` config.
-Setting `allowed_tools` to `["*"]` makes every granted tool eligible except system-mutating tools and functions still gated by an operator-authored approval rule.
+The [participant approval rules below](#allowing-participant-tools) describe operator-rule precedence, automatic grants, and tool eligibility.
 A `room_agent` can declare `id`, `agent`, and an empty `tools` list.
 Room-agent participants must already be available to the requester in the current room, use their configured model, and run without tools, skills, knowledge, durable state, or preloaded context files.
 Step types are `transform_step`, `agent_step`, and `report_step`.
