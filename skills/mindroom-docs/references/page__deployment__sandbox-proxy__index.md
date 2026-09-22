@@ -613,7 +613,7 @@ agents:
     # inherits worker_tools from defaults → shell and file proxied
 
   research:
-    tools: [web_search, calculator]
+    tools: [duckduckgo, calculator]
     worker_tools: []                 # explicitly no proxying
 
   untrusted:

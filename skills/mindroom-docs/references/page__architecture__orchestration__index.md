@@ -209,7 +209,8 @@ When no agent or team is mentioned, routing selects the appropriate agent or tea
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
 **Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, lets one remaining candidate answer directly, and uses `suggest_responder_for_message()` only when multiple candidates remain.
-In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required.
+In threads where multiple humans have posted, the router stays silent and explicit targeting is the default.
+Authorized, materializable individual agents that already replied may opt into [Adaptive Participation](https://docs.mindroom.chat/configuration/agents/#adaptive-participation) for untagged turns; an approved decision can produce an individual reply, without automatic team formation.
 Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency
