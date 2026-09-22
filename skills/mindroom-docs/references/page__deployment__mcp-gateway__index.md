@@ -337,6 +337,9 @@ Do not share the provisioning secret with MCP clients or browser applications.
 The provisioning routes do not allow browser CORS access.
 
 The endpoint implements a restricted SCIM 2.0 User lifecycle profile: create, list, read, replace, PATCH, and delete, plus service-provider/schema discovery.
+User create and replacement requests may declare the standard Enterprise User extension alongside the required core User schema, in either order.
+Enterprise metadata is ignored, not stored or returned; discovery continues to advertise only the supported core profile.
+Other extensions, duplicate declarations, and extension-only requests are rejected; PATCH still requires only the PatchOp message schema.
 User names match verified email exactly, including case; schema discovery advertises this case-sensitive policy.
 This differs from the general SCIM core userName case-insensitive convention, so check connector matching behavior during enrollment.
 Configure the connector's `userName` attribute to the email verified by browser identity in built-in mode or the signed MCP credential in external mode; provisioning does not authenticate the browser or grant tool permissions.
@@ -348,6 +351,11 @@ PATCH supports the top-level attributes `userName`, `active`, `displayName`, `ex
 Update email entries through the whole `emails` attribute; dotted email subattributes and filtered paths such as `emails[type eq "work"].value` are unsupported and return `400 invalidPath`.
 An unsupported operation rolls back the entire PATCH, including any accompanying deactivation.
 Configure and test the connector's actual update and deactivation payloads against this profile before relying on provisioning for offboarding.
+
+Rejected schema declarations emit a `SCIM schema validation failed` warning with the expected schema, submitted value type and count, recognized standard schemas, and counts of unknown strings and non-string values.
+Only allowlisted public schema identifiers are logged; arbitrary schema strings, profile data, account identifiers, and credentials are omitted.
+Use these diagnostics to distinguish a missing or malformed `schemas` value from a SCIM 1.1 declaration, a wrong operation schema, or unsupported extra schemas.
+Diagnostics do not change which requests the restricted lifecycle profile accepts.
 
 Use the base URL `https://assistant.example.org/mcp/scim/v2` with the dedicated bearer token in a compatible custom SCIM connector.
 In built-in mode, provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.

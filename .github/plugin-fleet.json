@@ -4,6 +4,7 @@
   "mindroom-ai/location-enrich-plugin",
   "mindroom-ai/openviking-plugin",
   "mindroom-ai/ping-hook-plugin",
+  "mindroom-ai/response-audit-jev-plugin",
   "mindroom-ai/restart-resume-plugin",
   "mindroom-ai/shell-guard-plugin",
   "mindroom-ai/thread-goal-plugin",

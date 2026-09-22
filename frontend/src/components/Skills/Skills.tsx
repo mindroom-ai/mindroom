@@ -244,7 +244,6 @@ export function Skills() {
           icon={FileCode}
           items={listItems}
           selectedId={selectedName || undefined}
-          onItemSelect={handleSelect}
           renderItem={renderSkill}
           showSearch={true}
           searchPlaceholder="Search skills..."
