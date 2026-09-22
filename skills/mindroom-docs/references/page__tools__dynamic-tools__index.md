@@ -32,8 +32,10 @@ No flags means the tool is eager and appears in every request.
 
 ## Native Server-Side Tool Search
 
-Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers, and GPT models 5.4 or newer on first-party `openai`, `codex`, and `openai_codex` endpoints, use the provider's server-side tool search automatically.
-An `openai` model configured with `extra_kwargs.base_url` or a non-official `OPENAI_BASE_URL` uses MindRoom's runtime gating instead.
+Claude models since Opus 4.5 / Sonnet 4.5 / Haiku 4.5 on the `anthropic` and `vertexai_claude` providers use the provider's server-side tool search automatically.
+GPT models 5.4 or newer on `openai`, `codex`, and `openai_codex` use native search on their first-party Responses endpoints; an explicit `api: chat_completions` selects MindRoom's runtime gating instead.
+For `openai`, the effective base URL is the non-empty `extra_kwargs.base_url` value, falling back to `OPENAI_BASE_URL` when that override is absent or empty.
+A non-official effective base URL uses runtime gating; an unset URL or an explicit `https://api.openai.com/v1` (with optional trailing slashes) remains eligible for native search.
 On this path every deferred tool ships in every request tagged `defer_loading: true` together with the provider's tool-search entry, so deferred schemas stay out of the model's rendered context until the model searches for them.
 Tool discovery never invalidates the prompt cache: Anthropic expands discovered tool references inline in the message stream, and OpenAI loads discovered tools at the end of the context window.
 The `dynamic_tools` manager, its prompt blocks, and session loaded-tool state are not used on this path; all deferred toolkits are attached at agent build, so discovered calls execute directly.
