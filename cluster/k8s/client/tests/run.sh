@@ -77,6 +77,24 @@ render "$work_dir/max-timeout.yaml" \
   --set authenticationRecovery.enabled=true \
   --set authenticationRecovery.timeoutMs=30000
 
+for setting in probeUrl navigationUrl; do
+  for suffix in '?return=/../room' '?return=%2Froom%5Cthread' '#/../room' '#%2Froom%5Cthread'; do
+    render "$work_dir/query-fragment.yaml" \
+      --set authenticationRecovery.enabled=true \
+      --set-string "authenticationRecovery.$setting=/probe$suffix"
+  done
+  for url in '/probe/../room?return=/room' '/%2froom?return=/room' '/%5croom#room' '/%2e%2e/room'; do
+    expect_render_failure "authenticationRecovery.$setting must be a safe same-origin root-relative URL" \
+      --set authenticationRecovery.enabled=true \
+      --set-string "authenticationRecovery.$setting=$url"
+  done
+  for url in '/probe?return=$request_uri' '/probe?return=%0a' '/probe#%7f'; do
+    expect_render_failure "authenticationRecovery.$setting must be a safe same-origin root-relative URL" \
+      --set authenticationRecovery.enabled=true \
+      --set-string "authenticationRecovery.$setting=$url"
+  done
+done
+
 expect_render_failure "authenticationRecovery requires the chart-managed nginx config" \
   --set authenticationRecovery.enabled=true \
   --set nginx.existingConfigMap=custom-nginx
