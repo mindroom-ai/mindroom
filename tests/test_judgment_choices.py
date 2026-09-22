@@ -1,4 +1,4 @@
-"""Choice judgments validate one bounded comparative decision across backends."""
+"""System One choice judgments validate one bounded comparative decision."""
 
 from __future__ import annotations
 
@@ -7,20 +7,11 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from agno.models.response import ModelResponse
 
-from mindroom import model_loading
-from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.config.main import Config
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
-from mindroom.judgment.llm import judge_choice_with_llm
 from mindroom.judgment.state import ChoiceQuestion, JudgmentMessage, build_judgment_request
-from tests.conftest import test_runtime_paths
-from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.judgment.answers import ChoiceDecision, JudgmentResult
     from mindroom.judgment.state import JudgmentRequest
 
@@ -126,45 +117,6 @@ async def test_uncertain_choices_abstain(answer: dict) -> None:
     result = await _judge(answer)
     assert result.failure is None
     assert result.decision is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("content", "expected", "failure"),
-    [
-        ('{"decision":"code"}', "code", None),
-        ('{"decision":"no_fit"}', "no_fit", None),
-        ('{"decision":null}', None, None),
-        ('{"decision":true}', None, "invalid_response"),
-        ('{"decision":"unknown"}', None, "invalid_response"),
-        ('{"decision":"code","confidence":0.9}', None, "invalid_response"),
-        ('{"decision":"code","decision":"research"}', None, "invalid_response"),
-    ],
-)
-async def test_llm_choice_is_allowlisted_without_invented_confidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    content: str,
-    expected: str | None,
-    failure: str | None,
-) -> None:
-    """Llm choice is allowlisted without invented confidence."""
-    model = ParticipationModel(ModelResponse(content=content))
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: model)
-    result = await judge_choice_with_llm(
-        _request(),
-        LLMJudgmentConfig(provider="llm", model="default"),
-        Config(),
-        test_runtime_paths(tmp_path),
-        owner="router",
-    )
-    assert result.failure == failure
-    assert (result.decision.option if result.decision else None) == expected
-    if result.decision:
-        assert result.decision.confidence is None
-        assert result.decision.probabilities == ()
-    assert model.requests[0]["tools"] == []
-    assert model.requests[0]["tool_choice"] == "none"
 
 
 @pytest.mark.parametrize(

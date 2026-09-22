@@ -1,4 +1,4 @@
-"""Interchangeable backends for bounded boolean and choice judgments."""
+"""Backend settings for boolean judgments and System One choices."""
 
 from typing import Annotated, Literal
 

@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
-from mindroom.config.judgment import JudgmentConfig  # noqa: TC001
+from mindroom.config.judgment import TypeSafeJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.constants import (
@@ -669,7 +669,10 @@ class RouterConfig(BaseModel):
     """Configuration for the router system."""
 
     model: str = Field(default="default", description="Model to use for routing decisions")
-    judgment: JudgmentConfig | None = Field(default=None, description="Optional choice backend for responder selection")
+    judgment: TypeSafeJudgmentConfig | None = Field(
+        default=None,
+        description="Optional JEV responder selection before the LLM router",
+    )
     accept_invites: InviteAcceptancePolicy = Field(
         default=True,
         description="Whether the router accepts all, no, or matching inviter room invites",

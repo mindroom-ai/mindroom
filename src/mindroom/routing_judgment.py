@@ -1,4 +1,4 @@
-"""Opt-in comparative judgments over the router's already eligible responders."""
+"""Optional JEV selection over the router's already eligible responders."""
 
 from __future__ import annotations
 
@@ -58,7 +58,6 @@ async def judge_responder(
     request = build_judgment_request(question, tuple(messages), instructions="Select only a supplied option.")
     evaluate = create_choice_evaluator(
         settings,
-        config,
         runtime_paths,
         owner=f"{runtime_paths.storage_root}:router",
         question_id=question.id,

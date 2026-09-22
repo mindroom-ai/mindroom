@@ -42,8 +42,8 @@ class ChoiceDecision:
     """One allowlisted option, with provider probabilities when available."""
 
     option: str
-    confidence: float | None = None
-    probabilities: tuple[tuple[str, float], ...] = ()
+    confidence: float
+    probabilities: tuple[tuple[str, float], ...]
 
 
 @dataclass(frozen=True, slots=True)

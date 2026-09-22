@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from tests.conftest import seed_session
-from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -49,13 +48,14 @@ from mindroom.api.openai_compat import (
 )
 from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
-from mindroom.config.judgment import LLMJudgmentConfig
+from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.history.session_context import ScopeSessionContext, open_bound_scope_session_context
 from mindroom.history.types import CompactionDecision, HistoryScope, PreparedHistoryState, ResolvedReplayPlan
+from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.indexing_config import IndexingSettings
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
@@ -2728,9 +2728,36 @@ class TestAutoRouting:
         stream: bool,
     ) -> None:
         """An accepted no-fit returns an error before invoking any response agent."""
-        test_config.router.judgment = LLMJudgmentConfig(provider="llm", model="default")
-        judge = ParticipationModel(ModelResponse(content='{"decision":"no_fit"}'))
-        monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_: judge)
+        test_config.router.judgment = TypeSafeJudgmentConfig(provider="typesafe")
+        posted = []
+        original_env_value = RuntimePaths.env_value
+
+        def env_value(paths: RuntimePaths, key: str, *args: object, **kwargs: object) -> str | None:
+            return "synthetic" if key == "TYPESAFE_API_KEY" else original_env_value(paths, key, *args, **kwargs)
+
+        async def post(_self: SystemOneClient, body: bytes) -> bytes:
+            payload = json.loads(body)
+            posted.append(payload)
+            return json.dumps(
+                {
+                    "model": PINNED_MODEL,
+                    "answers": {
+                        "responder_selection": {
+                            "type": "choice",
+                            "choice": "no_fit",
+                            "confidence": 1,
+                            "probabilities": {
+                                key: int(key == "no_fit")
+                                for key in payload["questions"]["responder_selection"]["criteria"]
+                            },
+                        },
+                    },
+                    "usage": {"input_tokens": 42, "output_tokens": 1},
+                },
+            ).encode()
+
+        monkeypatch.setattr(RuntimePaths, "env_value", env_value)
+        monkeypatch.setattr(SystemOneClient, "_post", post)
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as response_agent:
             response = app_client.post(
                 "/v1/chat/completions",
@@ -2742,7 +2769,7 @@ class TestAutoRouting:
             )
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "no_suitable_responder"
-        assert len(judge.requests) == 1
+        assert len(posted) == 1
         response_agent.assert_not_called()
 
     def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:

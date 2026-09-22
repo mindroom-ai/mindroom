@@ -158,7 +158,7 @@ Matrix sync callback
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
-| `routing_judgment.py` | Opt-in bounded responder selection through LLM or System One choices, with explicit no-fit outcomes and ordinary routing fallback |
+| `routing_judgment.py` | Opt-in bounded System One responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |

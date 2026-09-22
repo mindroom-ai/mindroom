@@ -24,7 +24,7 @@ The router supports these configuration options:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for ordinary routing and judgment fallback |
-| `judgment` | object or null | `null` | Optional LLM or TypeSafe choice backend for responder selection |
+| `judgment` | object or null | `null` | Optional JEV (TypeSafe) responder selection before the LLM router |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted room IDs are persisted, rejoined after restart, and preserved during room cleanup |
 
 Invitation patterns are matched after identity alias resolution and use the same case-sensitive wildcard semantics as responder `access.users`.
@@ -53,18 +53,15 @@ Set `router.judgment` to make one bounded choice among the already eligible agen
 This is optional; omitting it or setting it to `null` preserves existing behavior, even when a TypeSafe API key is present.
 Explicit mentions, existing thread participation rules, authorization, and deterministic single-candidate routing are unchanged.
 
-Use a configured model alias for an LLM judgment.
+LLM routing uses the existing `router.model` setting. To use a cheap LLM, point it at a configured model alias.
 
 ```yaml
 router:
-  model: default
-  judgment:
-    provider: llm
-    model: cheap_judge  # Must exist under models
-    timeout_seconds: 5.0
+  model: cheap_router  # Must exist under models
 ```
 
-Or use System One with `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`.
+To try JEV (System One), set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env` and enable the judgment.
+There is one LLM routing implementation: it handles ordinary routing and fallback when JEV cannot decide.
 
 ```yaml
 router:
@@ -75,8 +72,8 @@ router:
     timeout_seconds: 1.5
 ```
 
-Both backends receive the same question and candidate descriptions: roles, available tools, delegation capabilities, and the brief instructions used by ordinary routing.
-They see the current request text and the last three complete visible message bodies, with sender fields replaced by speaker aliases.
+JEV receives candidate descriptions: roles, available tools, delegation capabilities, and the brief instructions used by ordinary routing.
+It sees the current request text and the last three complete visible message bodies, with sender fields replaced by speaker aliases.
 This is a text-only view: no system prompt, private tool results, attachment contents, or full conversation history is added.
 Messages are not cut off to fit: sensitive or oversized input uses ordinary routing instead.
 The complete judgment request is limited to 16,000 UTF-8 bytes and at most 253 candidate responders (plus two special choices).
@@ -86,15 +83,14 @@ A confident `no_fit` produces the existing Matrix message asking the user to men
 For OpenAI-compatible `model: auto` requests, it returns HTTP 400 with error code `no_suitable_responder` instead of selecting the first agent.
 The `multiple` choice means no single candidate can cover the request; it falls back to ordinary single-responder routing and does not launch several agents.
 Low confidence, abstention, invalid output, missing credentials, capacity exhaustion, or a timeout also falls back to ordinary routing using the existing runtime model resolution.
-The judgment's configured model alias is independent of room/thread model overrides; those overrides still apply to the fallback router.
+The LLM router retains its configured prompts, `router.model`, and room/thread model overrides.
+Its existing context window includes up to three previous messages truncated to 100 characters each.
 
 System One returns a distribution and confidence; both the selected option's probability and confidence must meet `threshold`, and tied winners abstain.
-LLMs return an allowlisted option or abstain without inventing a confidence score.
-Their predictions may differ; switching backends preserves the decision contract, not identical selections.
 The dedicated rubric does not use the ordinary router prompt overrides; those still apply to fallback routing.
 
 Judgments share the same process-wide capacity limits as participation and mid-turn checks: eight concurrent calls and one per instance/router owner, without a waiting queue.
-There are no application-level retries; the configured deadline includes model loading and inference.
+There are no application-level retries; the configured deadline bounds the JEV request.
 Logs record the backend, decision, probability when available, latency, token usage, and failure category without logging the request text.
 
 ## Router Responsibilities
