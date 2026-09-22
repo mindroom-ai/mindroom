@@ -221,6 +221,78 @@ class TestWebhookEndpoints:
         assert data["received"] is True
         assert data["error"] is None
 
+    @pytest.mark.parametrize("event_kind", ["created", "updated"])
+    @pytest.mark.parametrize("period_timestamp", [None, 0, 1700000000])
+    def test_subscription_projection_preserves_event_fields(
+        self,
+        client: TestClient,
+        mock_stripe_signature: Mock,
+        mock_supabase: MagicMock,
+        event_kind: str,
+        period_timestamp: int | None,
+    ):
+        """Common projection retains timestamp omission and event-specific fields."""
+        subscription = self._create_subscription_data(tier="pro")
+        subscription["current_period_start"] = period_timestamp
+        subscription["current_period_end"] = period_timestamp
+        subscription["trial_end"] = 0
+        subscription["canceled_at"] = 0
+        mock_stripe_signature.return_value = self._create_stripe_event(
+            f"customer.subscription.{event_kind}", subscription
+        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
+        mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
+
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
+
+        assert response.status_code == 200
+        assert response.json() == {"received": True, "error": None}
+        writes = (
+            mock_supabase.table().insert.call_args_list
+            if event_kind == "created"
+            else mock_supabase.table().update.call_args_list
+        )
+        payload = next(
+            call_.args[0]
+            for call_ in writes
+            if call_.args and call_.args[0].get("stripe_subscription_id") == "sub_test_123"
+        )
+        expected = {
+            "stripe_subscription_id": "sub_test_123",
+            "stripe_price_id": "price_pro_monthly",
+            "tier": "pro",
+            "status": "active",
+            "max_agents": 999999,
+            "max_messages_per_day": 999999,
+            "trial_ends_at": "1970-01-01T00:00:00+00:00",
+        }
+        if event_kind == "created":
+            expected["account_id"] = "account_123"
+        else:
+            expected["cancelled_at"] = "1970-01-01T00:00:00+00:00"
+        if period_timestamp:
+            expected["current_period_start"] = "2023-11-14T22:13:20+00:00"
+            expected["current_period_end"] = "2023-11-14T22:13:20+00:00"
+        assert payload["updated_at"]
+        assert {key: value for key, value in payload.items() if key != "updated_at"} == expected
+
+    @pytest.mark.parametrize("event_kind", ["created", "updated"])
+    def test_subscription_requires_billing_cycle(
+        self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock, event_kind: str
+    ):
+        """Both events reject a price that has a tier but no billing cycle."""
+        subscription = self._create_subscription_data()
+        subscription["items"]["data"][0]["price"]["metadata"] = {"tier": "byok"}
+        mock_stripe_signature.return_value = self._create_stripe_event(
+            f"customer.subscription.{event_kind}", subscription
+        )
+        mock_supabase.table().select().eq().single().execute.return_value = Mock(data={"id": "account_123"})
+
+        response = client.post("/webhooks/stripe", content=b"test body", headers={"Stripe-Signature": "valid_sig"})
+
+        assert response.status_code == 200
+        assert "Unable to determine billing cycle" in response.json()["error"]
+
     def test_subscription_deleted_not_found(
         self, client: TestClient, mock_stripe_signature: Mock, mock_supabase: MagicMock
     ):
