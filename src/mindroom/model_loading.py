@@ -302,6 +302,8 @@ def _create_model_for_provider(  # noqa: C901, PLR0911, PLR0912, PLR0915
         from mindroom.openai_tool_search import openai_native_tool_search_supported  # noqa: PLC0415
 
         base_url = extra_kwargs.get("base_url") or runtime_paths.env_value("OPENAI_BASE_URL")
+        if base_url:
+            extra_kwargs["base_url"] = base_url
         if model_config.api == "responses" or (
             model_config.api is None
             and openai_native_tool_search_supported(canonical_provider_key, model_id, base_url=base_url)
