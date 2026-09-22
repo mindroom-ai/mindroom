@@ -153,6 +153,7 @@ agents:
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
+| `mid_turn` | object or null | `null` | Judge whether queued messages can wait until this agent finishes its active task; see [Mid-Turn Coalescing](#mid-turn-coalescing) |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
@@ -263,6 +264,21 @@ See [Adaptive Agent Participation](index.md#adaptive-agent-participation) for th
 
 The [judgment backend reference](index.md#participation-judgment-backends) documents provider-specific thresholds, timeouts, credentials, and fallback behavior.
 The retired top-level `room_participation` configuration is rejected; there are no room-level overrides.
+
+## Mid-Turn Coalescing
+
+Set `agents.<name>.mid_turn` to let a judge decide whether a queued message can wait for this agent's active task to finish.
+Like participation, the setting follows the agent's Matrix user across all authorized rooms, including ad hoc rooms.
+It is separate from participation eligibility and message debounce.
+Omitting the setting or using `null` keeps the normal wrap-up notice; teams do not inherit it from their members.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `judgment` | object | Required | Shared LLM model alias or TypeSafe backend |
+| `instructions` | string | `""` | Extra guidance for the finish-or-wrap-up decision |
+| `defer_reaction` | string or null | `null` | Optional acknowledgement such as `"👀"` when a queued message can wait; the message remains queued |
+
+See [Mid-Turn Coalescing](index.md#mid-turn-coalescing) for backend configuration, context limits, and decision behavior.
 
 ## Per-Agent Tool Configuration
 

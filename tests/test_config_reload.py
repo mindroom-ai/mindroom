@@ -1751,6 +1751,32 @@ def test_participation_changes_restart_only_owning_agent(
     assert _get_changed_agents(configs[0], configs[1], agent_bots={}) == {"helper"}
 
 
+@pytest.mark.parametrize(
+    ("old_settings", "new_settings"),
+    [(None, {}), ({}, None), ({}, {"defer_reaction": "👍"}), ({}, {"instructions": "Continue for thanks"})],
+)
+def test_mid_turn_changes_restart_only_owning_agent(
+    old_settings: dict[str, object] | None,
+    new_settings: dict[str, object] | None,
+) -> None:
+    """Enabling, disabling, and tuning mid_turn must refresh the owning agent."""
+    configs = [
+        Config.model_validate(
+            {
+                "agents": {
+                    "helper": {
+                        "display_name": "Helper",
+                        "mid_turn": None if settings is None else {"judgment": {"provider": "typesafe"}, **settings},
+                    },
+                    "other": {"display_name": "Other"},
+                },
+            },
+        )
+        for settings in (old_settings, new_settings)
+    ]
+    assert _get_changed_agents(configs[0], configs[1], agent_bots={}) == {"helper"}
+
+
 def test_get_changed_agents_detects_tool_override_updates() -> None:
     """Agent restarts should trigger when authored tool overrides change."""
     old_config = _runtime_bound_config(

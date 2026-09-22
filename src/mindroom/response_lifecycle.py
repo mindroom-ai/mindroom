@@ -14,6 +14,7 @@ from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
 from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.message_target import ResponseLifecycleKey
+from mindroom.mid_turn import QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
 from mindroom.tool_system.runtime_context import resolve_tool_runtime_hook_bindings
 
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import MessageEnvelope
     from mindroom.message_target import MessageTarget
+    from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -139,7 +141,8 @@ def response_lifecycle_reservation_context(
 class _QueuedMessageState:
     """Track queued human ingress while one response lifecycle holds the lock."""
 
-    pending_human_message_event_ids: set[str] = field(default_factory=set)
+    _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
+    mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -147,10 +150,14 @@ class _QueuedMessageState:
     def __post_init__(self) -> None:
         self._idle_event.set()
 
+    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Snapshot queued text in admission order without consuming any event."""
+        return tuple(self._pending_messages.values())
+
     @property
     def pending_human_messages(self) -> int:
         """Return the number of distinct queued human events."""
-        return len(self.pending_human_message_event_ids)
+        return len(self._pending_messages)
 
     def begin_response_turn(self) -> bool:
         existing_turn = self._active_response_turns > 0
@@ -165,16 +172,18 @@ class _QueuedMessageState:
         if self._active_response_turns == 0:
             self._idle_event.set()
 
-    def add_waiting_human_message(self, source_event_id: str) -> bool:
-        previous_count = self.pending_human_messages
-        self.pending_human_message_event_ids.add(source_event_id)
+    def add_waiting_human_message(self, source_event_id: str, *, text: str | None = None) -> bool:
+        if source_event_id in self._pending_messages:
+            return False
+        progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
+        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
         self._event.set()
-        return self.pending_human_messages != previous_count
+        return True
 
     def consume_waiting_human_message(self, source_event_id: str) -> None:
-        if source_event_id not in self.pending_human_message_event_ids:
+        if source_event_id not in self._pending_messages:
             return
-        self.pending_human_message_event_ids.remove(source_event_id)
+        del self._pending_messages[source_event_id]
         if self.pending_human_messages == 0:
             self._event.clear()
 
@@ -323,6 +332,13 @@ class ResponseLifecycleCoordinator:
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
 
+    def visible_progress_callback(self, target: MessageTarget) -> Callable[[str], None] | None:
+        """Bind acknowledged Matrix text to the active response's opted-in judge."""
+        signal = self._thread_queued_signals.get(target.lifecycle_key)
+        if signal is None or signal.mid_turn_gate is None:
+            return None
+        return signal.mid_turn_gate.record_visible_response
+
     @staticmethod
     def _should_signal_queued_message(
         response_envelope: MessageEnvelope,
@@ -350,7 +366,10 @@ class ResponseLifecycleCoordinator:
         if not self._has_active_response_for_thread_key(target.lifecycle_key):
             return None
         queued_signal = self._get_or_create_queued_signal(target)
-        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+        if not queued_signal.add_waiting_human_message(
+            response_envelope.source_event_id,
+            text=message_text_for_judgment(response_envelope),
+        ):
             return None
         return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
 
@@ -369,7 +388,10 @@ class ResponseLifecycleCoordinator:
             return None
         if not self._should_signal_queued_message(response_envelope):
             return None
-        if not queued_signal.add_waiting_human_message(response_envelope.source_event_id):
+        if not queued_signal.add_waiting_human_message(
+            response_envelope.source_event_id,
+            text=message_text_for_judgment(response_envelope),
+        ):
             return None
         return response_envelope.source_event_id
 
@@ -456,6 +478,7 @@ class ResponseLifecycleCoordinator:
         pipeline_timing: DispatchPipelineTiming | None,
         locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
+        mid_turn_gate: MidTurnGate | None = None,
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
@@ -484,10 +507,12 @@ class ResponseLifecycleCoordinator:
                     notice=notice,
                     queued_signal=queued_signal,
                 )
-                with queued_message_signal_context(queued_signal) as notice_context:
+                queued_signal.mid_turn_gate = mid_turn_gate
+                with queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context:
                     try:
                         return await locked_operation(target)
                     finally:
+                        queued_signal.mid_turn_gate = None
                         await finalize_queued_notice_response_turn_async(notice_context)
             finally:
                 if lock_acquired:

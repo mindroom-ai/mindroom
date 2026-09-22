@@ -1194,6 +1194,82 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 These outcome logs omit request text and credentials; separately enabled LLM request debug logging still follows the normal model configuration.
 Use these measurements alongside observed decision quality and provider pricing to compare backends; token counts alone do not establish cost or quality advantages.
 
+## Mid-Turn Coalescing
+
+When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
+Opt-in `agents.<name>.mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
+This is separate from participation eligibility and the debounce used to group incoming messages.
+Each agent can configure a required `judgment` object, optional `instructions` string (default `""`), and optional `defer_reaction` (default `null`).
+The `llm` judgment requires `provider: llm` and a `model` string naming an existing alias; its numeric `timeout_seconds` defaults to `5.0`.
+The `typesafe` judgment requires `provider: typesafe`; its numeric `threshold` defaults to `0.8` (range `0`–`1`) and `timeout_seconds` to `1.5`.
+Both backends require a positive timeout of at most `30` seconds and reject unknown fields.
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
+      defer_reaction: "👀"
+      judgment:
+        provider: llm
+        model: fast  # An existing alias under models
+        timeout_seconds: 5
+```
+
+To use TypeSafe instead, configure the same agent with:
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      judgment:
+        provider: typesafe
+        threshold: 0.8
+        timeout_seconds: 1.5
+```
+
+TypeSafe also requires `TYPESAFE_API_KEY`.
+The setting follows the agent's Matrix user across every authorized room, including ad hoc rooms, just like participation.
+Omitting `mid_turn` or setting it to `null` preserves the normal unconditional wrap-up notice.
+There are no room overrides; the retired `room_mid_turn` configuration is rejected.
+Set `defer_reaction` to acknowledge queued messages when the judge lets the active task finish first.
+For example, `"👀"` means the message was seen and deferred; it remains queued for a later turn.
+Omit the setting or use `null` to keep deferrals invisible.
+Like participation's `decline_reaction`, the key must be a nonblank string of at most 64 characters.
+Each message is acknowledged at most once per active response, and stable Matrix transaction IDs prevent duplicate reactions on replay.
+Negative, failed, timed-out, cancelled, or superseded judgments do not trigger the reaction.
+Reaction delivery is best effort; failures do not change the judgment, and a correction arriving during delivery still requests wrap-up.
+
+The question is whether the active task may finish before the queued messages are handled.
+Only an affirmative answer suppresses the notice; a negative answer, abstention, timeout, missing credentials, exhausted capacity, or backend error keeps the normal wrap-up behavior.
+The TypeSafe threshold defaults to `0.8` and has not been calibrated for this task.
+The LLM returns a boolean rather than a confidence score.
+Judgments reuse the shared participation concurrency limits and backend deadlines.
+
+The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
+It receives the active request text, up to eight pending human messages, and the configured guidance.
+For interactive selections, the active request includes the original question and selected option.
+Each pending message includes a snapshot of the active reply text last acknowledged by Matrix when that message entered the queue.
+That snapshot includes published partial text and tool names when those names appear in the visible reply, but excludes buffered text and later edits.
+It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
+Earlier conversation history, private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
+The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
+Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
+An existing reply whose visible text is unavailable retains wrap-up until a new Matrix update is acknowledged.
+Missing request text, unavailable progress, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.
+Message text can still contain identifying or private information.
+
+A finish decision is reused for the same pending messages within the active response.
+Subsequent streaming updates do not replace those messages' frozen progress snapshots.
+A later queued message requires a new decision, and a queue change during inference cannot inherit approval for unseen input.
+Once a wrap-up notice is sent, later messages cannot reverse that handoff.
+The queued messages remain queued and are handled through the existing dispatch path after the active response releases its lock.
+The notice requests a handoff from the model; it does not forcibly cancel tools, abort a response, or inject the queued text into the running model.
+Explicit stop handling and tool-approval requirements remain unchanged.
+Teams retain the normal wrap-up behavior and do not inherit a member agent's mid-turn settings.
+
 ## Splitting the Configuration Into Multiple Files
 
 Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.
@@ -2198,6 +2274,7 @@ agents:
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
 | `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
+| `mid_turn` | object or null | `null` | Judge whether queued messages can wait until this agent finishes its active task; see [Mid-Turn Coalescing](#mid-turn-coalescing) |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
@@ -2308,6 +2385,21 @@ See [Adaptive Agent Participation](https://docs.mindroom.chat/configuration/#ada
 
 The [judgment backend reference](https://docs.mindroom.chat/configuration/#participation-judgment-backends) documents provider-specific thresholds, timeouts, credentials, and fallback behavior.
 The retired top-level `room_participation` configuration is rejected; there are no room-level overrides.
+
+## Mid-Turn Coalescing
+
+Set `agents.<name>.mid_turn` to let a judge decide whether a queued message can wait for this agent's active task to finish.
+Like participation, the setting follows the agent's Matrix user across all authorized rooms, including ad hoc rooms.
+It is separate from participation eligibility and message debounce.
+Omitting the setting or using `null` keeps the normal wrap-up notice; teams do not inherit it from their members.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `judgment` | object | Required | Shared LLM model alias or TypeSafe backend |
+| `instructions` | string | `""` | Extra guidance for the finish-or-wrap-up decision |
+| `defer_reaction` | string or null | `null` | Optional acknowledgement such as `"👀"` when a queued message can wait; the message remains queued |
+
+See [Mid-Turn Coalescing](https://docs.mindroom.chat/configuration/#mid-turn-coalescing) for backend configuration, context limits, and decision behavior.
 
 ## Per-Agent Tool Configuration
 
@@ -18510,6 +18602,8 @@ MindRoom's architecture consists of several key components working together.
 | `text_ingress_dispatch.py` | Text ingress dispatch path used by TurnController |
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
+| `mid_turn.py` / `mid_turn_judgment.py` | Per-response finish-or-wrap-up judgments for queued human messages, bound to interchangeable LLM or TypeSafe backends |
+| `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
 | `judgment/` | Backend-independent boolean questions, minimized context, shared execution limits, and LLM/System One adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM or TypeSafe judge and map its result to a participation decision |
@@ -19718,7 +19812,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_knowledge.py` | Search error propagation and private insertion/status plumbing with owner validation. | `strict_knowledge.py` retains shared-index scope and complete-embedding requirements; knowledge managers retain publication/lifecycle ownership. |
 | `agno_compat_openai_embedder.py` | Copied sync/async/batch request paths with explicit request/error/validation hooks. | `openai_embedder.py` retains input and dimensions policy, safe errors, response validation, health reporting, and the product sync-batch API. |
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
-| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
+| `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media, asynchronous post-batch checkpoint chaining, and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices and mid-turn judgments, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
 | `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners keep the newest four marked viewed images within a 10 MiB aggregate limit, disclose omissions without changing stored artifacts, and charge provider visual estimates or a conservative fallback in replay planning. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |

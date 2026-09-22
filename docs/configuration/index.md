@@ -155,6 +155,82 @@ Judgment outcome logs record backend, model, decision, latency, token usage, inp
 These outcome logs omit request text and credentials; separately enabled LLM request debug logging still follows the normal model configuration.
 Use these measurements alongside observed decision quality and provider pricing to compare backends; token counts alone do not establish cost or quality advantages.
 
+## Mid-Turn Coalescing
+
+When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
+Opt-in `agents.<name>.mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
+This is separate from participation eligibility and the debounce used to group incoming messages.
+Each agent can configure a required `judgment` object, optional `instructions` string (default `""`), and optional `defer_reaction` (default `null`).
+The `llm` judgment requires `provider: llm` and a `model` string naming an existing alias; its numeric `timeout_seconds` defaults to `5.0`.
+The `typesafe` judgment requires `provider: typesafe`; its numeric `threshold` defaults to `0.8` (range `0`–`1`) and `timeout_seconds` to `1.5`.
+Both backends require a positive timeout of at most `30` seconds and reject unknown fields.
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
+      defer_reaction: "👀"
+      judgment:
+        provider: llm
+        model: fast  # An existing alias under models
+        timeout_seconds: 5
+```
+
+To use TypeSafe instead, configure the same agent with:
+
+```yaml
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      judgment:
+        provider: typesafe
+        threshold: 0.8
+        timeout_seconds: 1.5
+```
+
+TypeSafe also requires `TYPESAFE_API_KEY`.
+The setting follows the agent's Matrix user across every authorized room, including ad hoc rooms, just like participation.
+Omitting `mid_turn` or setting it to `null` preserves the normal unconditional wrap-up notice.
+There are no room overrides; the retired `room_mid_turn` configuration is rejected.
+Set `defer_reaction` to acknowledge queued messages when the judge lets the active task finish first.
+For example, `"👀"` means the message was seen and deferred; it remains queued for a later turn.
+Omit the setting or use `null` to keep deferrals invisible.
+Like participation's `decline_reaction`, the key must be a nonblank string of at most 64 characters.
+Each message is acknowledged at most once per active response, and stable Matrix transaction IDs prevent duplicate reactions on replay.
+Negative, failed, timed-out, cancelled, or superseded judgments do not trigger the reaction.
+Reaction delivery is best effort; failures do not change the judgment, and a correction arriving during delivery still requests wrap-up.
+
+The question is whether the active task may finish before the queued messages are handled.
+Only an affirmative answer suppresses the notice; a negative answer, abstention, timeout, missing credentials, exhausted capacity, or backend error keeps the normal wrap-up behavior.
+The TypeSafe threshold defaults to `0.8` and has not been calibrated for this task.
+The LLM returns a boolean rather than a confidence score.
+Judgments reuse the shared participation concurrency limits and backend deadlines.
+
+The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
+It receives the active request text, up to eight pending human messages, and the configured guidance.
+For interactive selections, the active request includes the original question and selected option.
+Each pending message includes a snapshot of the active reply text last acknowledged by Matrix when that message entered the queue.
+That snapshot includes published partial text and tool names when those names appear in the visible reply, but excludes buffered text and later edits.
+It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
+Earlier conversation history, private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
+The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
+Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
+An existing reply whose visible text is unavailable retains wrap-up until a new Matrix update is acknowledged.
+Missing request text, unavailable progress, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.
+Message text can still contain identifying or private information.
+
+A finish decision is reused for the same pending messages within the active response.
+Subsequent streaming updates do not replace those messages' frozen progress snapshots.
+A later queued message requires a new decision, and a queue change during inference cannot inherit approval for unseen input.
+Once a wrap-up notice is sent, later messages cannot reverse that handoff.
+The queued messages remain queued and are handled through the existing dispatch path after the active response releases its lock.
+The notice requests a handoff from the model; it does not forcibly cancel tools, abort a response, or inject the queued text into the running model.
+Explicit stop handling and tool-approval requirements remain unchanged.
+Teams retain the normal wrap-up behavior and do not inherit a member agent's mid-turn settings.
+
 ## Splitting the Configuration Into Multiple Files
 
 Large configs can be split across multiple files with Home-Assistant-style include tags instead of keeping one monolithic `config.yaml`.

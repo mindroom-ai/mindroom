@@ -112,6 +112,9 @@ Matrix sync callback
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
 | `judgment/` | Backend-independent boolean questions, minimized context, shared execution limits, and LLM/System One adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM or TypeSafe judge and map its result to a participation decision |
+| `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
+| `mid_turn_judgment.py` | Bind the active request and agent settings to the shared LLM or TypeSafe judgment backend |
+| `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |

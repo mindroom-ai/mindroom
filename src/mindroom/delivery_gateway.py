@@ -433,6 +433,7 @@ class StreamingDeliveryRequest:
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     completed_edit_record: Callable[[], TurnRecord | None] | None = None
     allow_new_terminal_message: Callable[[], bool] | None = None
@@ -524,21 +525,22 @@ class DeliveryGateway:
             raise RuntimeError(msg)
         return client
 
-    async def send_decline_reaction(
+    async def send_judgment_reaction(
         self,
         *,
         identity: ResponseIdentity,
         room_id: str,
         event_id: str,
         key: str,
+        kind: Literal["participation_decline", "mid_turn_defer"],
     ) -> None:
-        """Best-effort acknowledgement of a deliberate decline, stable across replays."""
+        """Best-effort acknowledgement of a deliberate judgment, stable across replays."""
         if not await self._visible_notice_is_current(identity, room_id):
             return
         client = self._client()
         # Exclude the emoji so a config reload cannot duplicate a replayed reaction.
         transaction_id = str(
-            uuid5(NAMESPACE_URL, json.dumps(["mindroom-participation-decline", client.user_id, room_id, event_id])),
+            uuid5(NAMESPACE_URL, json.dumps([f"mindroom-{kind.replace('_', '-')}", client.user_id, room_id, event_id])),
         )
         result = await send_room_event_result(
             client,
@@ -546,10 +548,10 @@ class DeliveryGateway:
             "m.reaction",
             build_reaction_content(event_id, key),
             transaction_id=transaction_id,
-            operation="participation_decline_reaction",
+            operation=f"{kind}_reaction",
         )
         if not isinstance(result, nio.RoomSendResponse):
-            self.deps.logger.warning("Participation decline reaction failed", room_id=room_id, event_id=event_id)
+            self.deps.logger.warning("Judgment reaction failed", kind=kind, room_id=room_id, event_id=event_id)
 
     @staticmethod
     def _cancelled_error_failure_reason(error: asyncio.CancelledError) -> str:
@@ -2070,6 +2072,7 @@ class DeliveryGateway:
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
+            visible_progress_callback=request.visible_progress_callback,
             latest_thread_event_id=latest_thread_event_id,
             preserve_existing_visible_on_empty_terminal=(
                 request.preserve_existing_visible_on_empty_terminal
