@@ -544,8 +544,8 @@ def authelia_launch(
     monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
     monkeypatch.setattr(deploy, "REGISTRY_FILE", tmp_path / "instances.json")
     monkeypatch.setattr(deploy, "load_registry", lambda: registry)
-    monkeypatch.setattr(deploy, "_create_instance_directories", lambda _instance: None)
-    monkeypatch.setattr(deploy, "_setup_tuwunel_directory", lambda _instance, _env_file: None)
+    monkeypatch.setattr(deploy, "REPO_ROOT", tmp_path / "source")
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path / "home"))
     monkeypatch.setattr(deploy.subprocess, "run", _run)
     return instance, users_file, commands, console
 
@@ -568,6 +568,16 @@ def _launch_authelia(command: str, *, only_matrix: bool = False, use_registry: b
             registry_url=deploy.DEFAULT_REGISTRY,
             no_build=True,
         )
+
+
+def _launched_services(commands: list[str]) -> list[str]:
+    """Read the selected services from the single captured Compose launch."""
+    launches = [cmd.split(" up -d", 1)[1].split() for cmd in commands if " up -d" in cmd]
+    assert len(launches) == 1
+    services = launches[0]
+    if services and services[0] == "--force-recreate":
+        services = services[1:]
+    return services
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
@@ -638,7 +648,14 @@ def test_authelia_launch_preserves_configured_users(
 
     assert users_file.read_bytes() == before
     assert instance.status == deploy.InstanceStatus.RUNNING
-    assert any(" up -d" in cmd and cmd.endswith(" mindroom tuwunel wellknown authelia") for cmd in commands)
+    services = _launched_services(commands)
+    assert services.count("sandbox-runner") <= 1
+    assert [service for service in services if service != "sandbox-runner"] == [
+        "mindroom",
+        "tuwunel",
+        "wellknown",
+        "authelia",
+    ]
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
@@ -654,7 +671,7 @@ def test_authelia_matrix_only_launch_does_not_require_users(
 
     assert instance.status == deploy.InstanceStatus.PARTIAL
     assert not users_file.exists()
-    assert any(" up -d" in cmd and cmd.endswith(" tuwunel wellknown") for cmd in commands)
+    assert _launched_services(commands) == ["tuwunel", "wellknown"]
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
@@ -671,7 +688,9 @@ def test_launch_without_authelia_does_not_require_users(
 
     assert instance.status == deploy.InstanceStatus.RUNNING
     assert not users_file.exists()
-    assert any(" up -d" in cmd and cmd.endswith(" mindroom tuwunel wellknown") for cmd in commands)
+    services = _launched_services(commands)
+    assert services.count("sandbox-runner") <= 1
+    assert [service for service in services if service != "sandbox-runner"] == ["mindroom", "tuwunel", "wellknown"]
 
 
 @pytest.mark.parametrize("contents", [None, "users: [", "users: []", "users:\n  admin: null\n"])
@@ -720,3 +739,70 @@ def test_print_instance_info_authelia_setup_uses_actual_data_directory(
         assert "Authelia" not in text
         assert str(users_file) not in text
     assert "Default login:" not in text
+
+
+@pytest.mark.parametrize("account_state", ["public_example", "missing", "malformed"])
+def test_rejected_authelia_start_preserves_existing_instance_data(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    account_state: str,
+) -> None:
+    """Account rejection must precede real setup writes and Matrix database removal."""
+    instance, users_file, commands, _console = authelia_launch
+    data_dir = Path(instance.data_dir)
+    matrix_dir = data_dir / "tuwunel"
+    matrix_dir.mkdir()
+    (matrix_dir / "database-marker").write_bytes(b"existing Matrix data")
+    env_file = deploy.ENV_DIR / "alpha.env"
+    env_file.write_text("INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-previous.localhost\n")
+    env_before = env_file.read_bytes()
+
+    # Let the real setup helpers discover only synthetic config and credentials.
+    deploy.REPO_ROOT.mkdir()
+    source_config = deploy.REPO_ROOT / "config.yaml"
+    source_config.write_text("agents: {}\n")
+    source_credentials = Path.home() / ".mindroom" / "credentials"
+    source_credentials.mkdir(parents=True)
+    credential_file = source_credentials / "test-provider.json"
+    credential_file.write_text('{"api_key": "synthetic-test-value"}\n')
+    if account_state == "missing":
+        users_file.unlink()
+    elif account_state == "malformed":
+        users_file.write_text("users: [")
+    before = {path.relative_to(data_dir): path.read_bytes() if path.is_file() else None for path in data_dir.rglob("*")}
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia("start", use_registry=True)
+
+    assert exc.value.exit_code == 1
+    assert {
+        path.relative_to(data_dir): path.read_bytes() if path.is_file() else None for path in data_dir.rglob("*")
+    } == before
+    assert env_file.read_bytes() == env_before
+    assert source_config.read_text() == "agents: {}\n"
+    assert credential_file.read_text() == '{"api_key": "synthetic-test-value"}\n'
+    assert not deploy.REGISTRY_FILE.exists()
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert commands == []
+
+
+def test_matrix_only_authelia_start_keeps_real_setup_and_existing_data(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+) -> None:
+    """The account-check exemption must still prepare storage without clearing matching Matrix data."""
+    instance, users_file, commands, _console = authelia_launch
+    users_file.unlink()
+    data_dir = Path(instance.data_dir)
+    matrix_dir = data_dir / "tuwunel"
+    matrix_dir.mkdir()
+    marker = matrix_dir / "database-marker"
+    marker.write_bytes(b"existing Matrix data")
+    (deploy.ENV_DIR / "alpha.env").write_text("INSTANCE_NAME=alpha\nMATRIX_SERVER_NAME=m-alpha.localhost\n")
+
+    _launch_authelia("start", only_matrix=True)
+
+    assert marker.read_bytes() == b"existing Matrix data"
+    assert (data_dir / "config").is_dir()
+    assert (data_dir / "mindroom_data" / "tracking").is_dir()
+    assert not users_file.exists()
+    assert instance.status == deploy.InstanceStatus.PARTIAL
+    assert any(" up -d" in command for command in commands)

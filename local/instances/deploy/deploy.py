@@ -1060,6 +1060,8 @@ def start(
     instance = registry.instances[name]
     previous_status = instance.status
     env_file = _require_instance_env_file(name)
+    if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
+        _require_authelia_account_setup(instance)
 
     # Create data directories with proper permissions
     _create_instance_directories(instance)
