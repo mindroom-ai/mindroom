@@ -40,7 +40,8 @@ Coding model training data often lags recent releases, so never trust memorized 
 
 Model IDs were checked against provider catalogs on September 10, 2026.
 OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
-DeepSeek direct API aliases remain `deepseek-v4-flash` and `deepseek-v4-pro`; do not substitute the OpenRouter V4.1 ID on the direct API.
+For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
+The older `deepseek-v4-flash` name remains accepted as a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 
 For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
 Use `claude-fable-5-1` when you need Anthropic's highest available capability.
