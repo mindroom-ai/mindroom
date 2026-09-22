@@ -1074,7 +1074,8 @@ def test_authelia_launch_checks_compose_selected_database(  # noqa: PLR0915
         monkeypatch.setenv("DATA_DIR", str(configured_root))
     elif case == "env_configured":
         registry_users.write_text(public_text)
-    monkeypatch.setenv("DOCKER_HOST", f"unix://{tmp_path / 'unused-docker.sock'}")
+    # Older Compose validates socket path length even for daemon-free config commands.
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent-mindroom-test.sock")
 
     # Rejected starts must not reach real setup or clear the old Matrix database.
     matrix_dir = Path(instance.data_dir) / "tuwunel"
@@ -1090,7 +1091,9 @@ def test_authelia_launch_checks_compose_selected_database(  # noqa: PLR0915
     def _run(cmd: str, **kwargs: object) -> subprocess.CompletedProcess[str] | SimpleNamespace:
         if cmd.endswith(" config --format json --no-env-resolution"):
             commands.append(cmd)
-            return _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+            result = _REAL_SUBPROCESS_RUN(cmd, **kwargs)
+            assert result.returncode == 0, result.stderr
+            return result
         return fake_run(cmd, **kwargs)
 
     monkeypatch.setattr(deploy.subprocess, "run", _run)

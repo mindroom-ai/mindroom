@@ -633,8 +633,11 @@ def _get_build_flag(
 def _resolve_authelia_users_file(instance: Instance) -> Path:
     """Resolve the users database from the configuration Compose will mount."""
     compose = _get_docker_compose_files(instance)
-    cmd = f"{compose} -p {shlex.quote(instance.name)} config --format json --no-env-resolution"
-    result = subprocess.run(cmd, check=False, shell=True, capture_output=True, text=True)
+    cmd = f"{compose} -f - -p {shlex.quote(instance.name)} config --format json --no-env-resolution"
+    # Older Compose loads service env files despite --no-env-resolution. They do
+    # not affect the Authelia mount; omit them only from this read-only projection.
+    projection = "services:\n  mindroom:\n    env_file: !reset []\n"
+    result = subprocess.run(cmd, input=projection, check=False, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         console.print(f"[red]✗[/red] Cannot resolve Authelia data directory for instance '{instance.name}'.")
         console.print("  Check the instance environment and Docker Compose configuration before starting.")
