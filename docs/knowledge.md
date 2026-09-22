@@ -324,10 +324,11 @@ If a checkout already holds a credential-bearing remote from before this check e
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
 - When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
-- Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
-- Change detection for Git-backed bases is the tracked revision, not file contents: while the checkout stays on the revision the index was published from, MindRoom republishes the existing index without reading the corpus.
-- Consequently an out-of-band edit to a Git-backed checkout is not indexed while the revision is unchanged.
-- The checkout is MindRoom-owned; edit the repository and sync, or force a reindex, instead of editing the working tree.
+- When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
+- If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
+- Change detection for Git-backed bases uses the tracked revision, not file contents: an ordinary refresh can republish the compatible existing index without reading the corpus when its revision is unchanged.
+- A forced reindex bypasses index reuse and rebuilds from the current checkout, but does not force Git to repair an unchanged checkout.
+- The checkout is MindRoom-owned; edit the source repository and sync instead of editing the working tree.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 - Semantic refresh is resumable: an interrupted or failed build keeps its private candidate index and continues it on the next refresh instead of restarting from zero.
@@ -429,13 +430,14 @@ MindRoom never copies the token into the checkout config, credential store, refr
 
 ## Embedder Configuration
 
-Semantic knowledge bases use the same embedder configured in the `memory` section.
+Semantic knowledge bases use the embedder configured in the `memory` section.
+Semantic knowledge and file-memory indexes support `openai`, `ollama`, and `sentence_transformers`; the separate Mem0 backend also supports `huggingface`.
 File-mode knowledge bases do not use an embedder.
 
 ```yaml
 memory:
   embedder:
-    provider: openai        # or "ollama", "huggingface", or "sentence_transformers"
+    provider: openai        # or "ollama" or "sentence_transformers"
     config:
       model: text-embedding-3-small
       credentials_service: embedder # Optional strict credential binding
@@ -472,11 +474,11 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 Published semantic searches and collection probes run in short-lived subprocesses.
 Embedding credentials and provider health stay in the application; query vectors, filters, and document data cross the typed read boundary.
 Each child exits after one operation, releasing its native Chroma memory.
-At most four read children run at once, with a 30-second timeout.
-Async searches start the child while the parent obtains the query embedding, overlapping provider latency with child imports.
-Their deadline covers both embedding and native execution; synchronous searches and collection probes use the deadline for native execution.
+At most four read children run at once.
+Async searches wait for shared read capacity without occupying executor threads, then start the child while the parent obtains the query embedding.
+Their single 30-second budget includes capacity waiting, child startup, embedding, and native execution.
+Synchronous searches and collection probes use the 30-second timeout for native execution and fail immediately as busy when all read slots are occupied.
 Queries spanning multiple bases search those bases sequentially so one query cannot exhaust the child limit.
-Excess reads fail immediately as busy so waiting knowledge requests cannot fill the application's shared thread pool.
 A timed-out child is killed and reaped; async cancellation or embedding failure also cleans up the child before releasing its slot.
 Providers without async embedding support run in a thread, which may continue after cancellation; the native child is still cleaned up immediately.
 Native database stalls therefore do not hold the application process's Python lock.
