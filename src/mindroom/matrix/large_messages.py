@@ -11,7 +11,6 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 import nio
-from nio import crypto
 
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
@@ -35,7 +34,7 @@ from mindroom.constants import (
 from mindroom.legacy_delivery_payloads import DURABLE_FINAL_OUTCOME_KEY, without_inline_final_result
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
-from mindroom.matrix.media import upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
 
 if TYPE_CHECKING:
@@ -589,10 +588,6 @@ async def _upload_text_as_mxc(
 
     """
     text_bytes = text.encode("utf-8")
-    file_info = {
-        "size": len(text_bytes),
-        "mimetype": mimetype,
-    }
 
     if mimetype == "text/html":
         filename = "message.html"
@@ -604,36 +599,20 @@ async def _upload_text_as_mxc(
     if room_encrypted is None:
         room_encrypted = _room_is_encrypted(client, room_id)
 
-    if room_encrypted:
-        # Encrypt the content for E2EE room
-        try:
-            upload_data, encryption_keys = crypto.attachments.encrypt_attachment(text_bytes)
-
-            # Store encryption info for the file
-            file_info = {
-                "url": "",  # Will be set after upload
-                "key": encryption_keys["key"],
-                "iv": encryption_keys["iv"],
-                "hashes": encryption_keys["hashes"],
-                "v": "v2",
-                "mimetype": mimetype,
-                "size": len(text_bytes),
-            }
-        except Exception:
-            logger.exception("Failed to encrypt attachment")
-            return None, None
-    else:
-        upload_data = text_bytes
-
-    enc_filename = f"{filename}.enc" if room_encrypted else filename
+    try:
+        prepared = prepare_media_upload(text_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
+        file_info = prepared.encrypted_file_content() or prepared.info
+    except Exception:
+        logger.exception("Failed to encrypt attachment")
+        return None, None
 
     try:
         # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
         upload_result, _encryption_dict = await upload_media_bytes(
             client,
-            upload_data,
-            content_type="application/octet-stream" if room_encrypted else mimetype,
-            filename=enc_filename,
+            prepared.data,
+            content_type=prepared.content_type,
+            filename=prepared.filename,
         )
 
         # Check if upload was successful

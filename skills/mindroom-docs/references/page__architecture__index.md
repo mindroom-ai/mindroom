@@ -65,6 +65,8 @@ MindRoom's architecture consists of several key components working together.
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
 | `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
+| `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by desktop and runtime media |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |

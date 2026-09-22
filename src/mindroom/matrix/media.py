@@ -189,6 +189,51 @@ def media_payload_exceeds_limit(media_bytes: bytes | None) -> bool:
     return media_bytes is not None and len(media_bytes) > _matrix_media_max_bytes
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedMediaUpload:
+    """Upload bytes and metadata after the caller has resolved room encryption."""
+
+    data: bytes
+    content_type: str
+    filename: str
+    info: dict[str, Any]
+    encryption_keys: dict[str, Any] | None
+
+    def encrypted_file_content(self) -> dict[str, Any] | None:
+        """Build encrypted metadata separately so callers retain their error boundaries."""
+        if self.encryption_keys is None:
+            return None
+        return {
+            "url": "",
+            "key": self.encryption_keys["key"],
+            "iv": self.encryption_keys["iv"],
+            "hashes": self.encryption_keys["hashes"],
+            "v": "v2",
+            "mimetype": self.info["mimetype"],
+            "size": self.info["size"],
+        }
+
+
+def prepare_media_upload(
+    media_bytes: bytes,
+    *,
+    filename: str,
+    mimetype: str,
+    encrypt: bool,
+) -> _PreparedMediaUpload:
+    """Prepare media without discovering room state, uploading, or handling failures."""
+    upload_bytes, encryption_keys = (
+        crypto.attachments.encrypt_attachment(media_bytes) if encrypt else (media_bytes, None)
+    )
+    return _PreparedMediaUpload(
+        data=upload_bytes,
+        content_type="application/octet-stream" if encrypt else mimetype,
+        filename=f"{filename}.enc" if encrypt else filename,
+        info={"size": len(media_bytes), "mimetype": mimetype},
+        encryption_keys=encryption_keys,
+    )
+
+
 async def upload_media_bytes(
     client: nio.AsyncClient,
     upload_bytes: bytes,

@@ -159,6 +159,21 @@ def test_success_response_round_trip_includes_encrypted_media() -> None:
     )
 
     assert DesktopResponse.from_content(response.to_content()) == response
+    assert response.to_content()["screenshot"] == {
+        "url": "mxc://example.org/screenshot",
+        "key": {
+            "alg": "A256CTR",
+            "ext": True,
+            "k": "secret-key",
+            "key_ops": ["encrypt", "decrypt"],
+            "kty": "oct",
+        },
+        "iv": "initialization-vector",
+        "hashes": {"sha256": "ciphertext-hash"},
+        "v": "v2",
+        "mimetype": "image/jpeg",
+        "size": 123,
+    }
 
 
 @pytest.mark.parametrize(

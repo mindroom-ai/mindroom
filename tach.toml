@@ -2946,7 +2946,12 @@ visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.protocol"
-depends_on = [ "mindroom.desktop.input"]
+depends_on = ["mindroom.desktop.input", "mindroom.matrix.encrypted_file"]
+
+[[modules]]
+path = "mindroom.matrix.encrypted_file"
+depends_on = []
+visibility = ["mindroom.desktop.protocol", "mindroom.matrix.runtime_media"]
 
 [[modules]]
 path = "mindroom.desktop.accessibility"

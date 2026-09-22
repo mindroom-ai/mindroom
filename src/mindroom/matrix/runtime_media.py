@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mindroom.attachment_ids import normalize_attachment_id
+from mindroom.matrix.encrypted_file import encrypted_file_content
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,21 +44,14 @@ class RuntimeEncryptedMediaAttachment:
 
     def encrypted_file_content(self) -> dict[str, object]:
         """Return the Matrix encrypted-file object for an ``m.image`` or file event."""
-        return {
-            "url": self.url,
-            "key": {
-                "alg": "A256CTR",
-                "ext": True,
-                "k": self.key,
-                "key_ops": ["encrypt", "decrypt"],
-                "kty": "oct",
-            },
-            "iv": self.iv,
-            "hashes": {"sha256": self.sha256},
-            "v": "v2",
-            "mimetype": self.mime_type,
-            "size": self.size,
-        }
+        return encrypted_file_content(
+            url=self.url,
+            key=self.key,
+            iv=self.iv,
+            sha256=self.sha256,
+            mime_type=self.mime_type,
+            size=self.size,
+        )
 
     def tool_payload(self) -> dict[str, object]:
         """Describe the handle to a model without exposing decryption material."""
