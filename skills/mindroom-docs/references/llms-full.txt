@@ -18414,6 +18414,7 @@ MindRoom's architecture consists of several key components working together.
 
 | Module | Purpose |
 |--------|---------|
+| `bounded_bytes.py` | Shared asynchronous byte collection that rejects overflowing chunks before buffering them |
 | `knowledge/collection_lifetime.py` | Compatible publication selection, shared reader locks, and exclusive collection reclamation |
 | `orchestrator.py` | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |

@@ -7,6 +7,7 @@ from typing import Annotated, Protocol, cast
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
     ScriptCallPreparationPendingError,
@@ -137,13 +138,12 @@ async def _bounded_payload(request: Request) -> ScriptToolCallRequestModel:
         if declared_bytes > _MAX_REQUEST_BYTES:
             raise HTTPException(status_code=413, detail="Script call request is too large.")
 
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > _MAX_REQUEST_BYTES:
-            raise HTTPException(status_code=413, detail="Script call request is too large.")
     try:
-        return ScriptToolCallRequestModel.model_validate_json(bytes(body))
+        body = await collect_bounded_bytes(request.stream(), max_bytes=_MAX_REQUEST_BYTES)
+    except ByteLimitExceededError as exc:
+        raise HTTPException(status_code=413, detail="Script call request is too large.") from exc
+    try:
+        return ScriptToolCallRequestModel.model_validate_json(body)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors(include_url=False)) from exc
 

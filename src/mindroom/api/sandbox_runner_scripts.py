@@ -22,6 +22,7 @@ from mindroom.api.sandbox_runner import (
     resolve_script_state_workspace,
     validate_runner_token,
 )
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import CONTROL_STATE_PATH_ENV
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
@@ -96,11 +97,10 @@ async def _bounded_replay_request(request: Request) -> Request:
         if content_length > _MAX_REQUEST_BYTES:
             raise HTTPException(status_code=413, detail="Script worker request is too large.")
 
-    body = bytearray()
-    async for chunk in request.stream():
-        if len(chunk) > _MAX_REQUEST_BYTES - len(body):
-            raise HTTPException(status_code=413, detail="Script worker request is too large.")
-        body.extend(chunk)
+    try:
+        body = await collect_bounded_bytes(request.stream(), max_bytes=_MAX_REQUEST_BYTES)
+    except ByteLimitExceededError as exc:
+        raise HTTPException(status_code=413, detail="Script worker request is too large.") from exc
 
     original_receive = request.receive
     replayed = False
@@ -109,7 +109,7 @@ async def _bounded_replay_request(request: Request) -> Request:
         nonlocal replayed
         if not replayed:
             replayed = True
-            return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return {"type": "http.request", "body": body, "more_body": False}
         return await original_receive()
 
     return Request(request.scope, replay_receive)

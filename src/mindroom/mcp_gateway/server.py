@@ -20,6 +20,7 @@ from pydantic_core import PydanticSerializationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.logging_config import get_logger
 from mindroom.mcp_gateway.execution import ExecutionLease, execution_scope
 from mindroom.mcp_gateway.types import (
@@ -184,15 +185,11 @@ def _validate_early_response_headers(request: Request, payload: object) -> None:
 
 async def read_gateway_body(request: Request) -> bytes:
     """Read bounded client input before handing it to SDK protocol handlers."""
-    chunks: list[bytes] = []
-    size = 0
-    async with asyncio.timeout(10):
-        async for chunk in request.stream():
-            size += len(chunk)
-            if size > _MAX_REQUEST_BYTES:
-                raise HTTPException(413, "Gateway request exceeds the size limit")
-            chunks.append(chunk)
-    return b"".join(chunks)
+    try:
+        async with asyncio.timeout(10):
+            return await collect_bounded_bytes(request.stream(), max_bytes=_MAX_REQUEST_BYTES)
+    except ByteLimitExceededError as exc:
+        raise HTTPException(413, "Gateway request exceeds the size limit") from exc
 
 
 def replay_gateway_body(body: bytes, receive: Receive) -> Receive:
