@@ -7,6 +7,7 @@ import base64
 import binascii
 import functools
 import hashlib
+import inspect
 import json
 import os
 import secrets
@@ -21,7 +22,7 @@ import httpx
 
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, build_execution_tool_env
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.declarations import declare_tool_schema_source
+from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -1000,14 +1001,21 @@ def _wrap_sync_function(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    primary_placement: SupportsPrimaryCallPlacement | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
-    assert function.entrypoint is not None
+    entrypoint = function.entrypoint
+    assert entrypoint is not None
 
-    @functools.wraps(function.entrypoint)
+    @functools.wraps(entrypoint)
     def proxy_entrypoint(*args: object, **kwargs: object) -> object:
+        if primary_placement is not None and primary_placement.runs_on_primary(
+            function_name,
+            inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
+        ):
+            return entrypoint(*args, **kwargs)
         return _call_proxy_sync(
-            function_entrypoint=function.entrypoint,
+            function_entrypoint=entrypoint,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
@@ -1022,7 +1030,7 @@ def _wrap_sync_function(
             worker_target=worker_target,
         )
 
-    declare_tool_schema_source(proxy_entrypoint, function.entrypoint)
+    declare_tool_schema_source(proxy_entrypoint, entrypoint)
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
@@ -1040,15 +1048,22 @@ def _wrap_async_function(
     execution_env: dict[str, str] | None = None,
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
+    primary_placement: SupportsPrimaryCallPlacement | None = None,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
-    assert function.entrypoint is not None
+    entrypoint = function.entrypoint
+    assert entrypoint is not None
 
-    @functools.wraps(function.entrypoint)
+    @functools.wraps(entrypoint)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
+        if primary_placement is not None and primary_placement.runs_on_primary(
+            function_name,
+            inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
+        ):
+            return await entrypoint(*args, **kwargs)
         call = functools.partial(
             _call_proxy_sync,
-            function_entrypoint=function.entrypoint,
+            function_entrypoint=entrypoint,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
@@ -1064,7 +1079,7 @@ def _wrap_async_function(
         )
         return await _run_in_worker_proxy_executor(call)
 
-    declare_tool_schema_source(proxy_entrypoint, function.entrypoint)
+    declare_tool_schema_source(proxy_entrypoint, entrypoint)
     wrapped.entrypoint = proxy_entrypoint
     return wrapped
 
@@ -1099,6 +1114,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
         runtime_paths=runtime_paths,
         extra_env_passthrough=extra_env_passthrough,
     )
+    primary_placement = toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None
     original_functions = toolkit.functions
     original_async_functions = toolkit.async_functions
     toolkit.functions = {
@@ -1114,6 +1130,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            primary_placement=primary_placement,
         )
         for function_name, function in original_functions.items()
     }
@@ -1130,6 +1147,7 @@ def maybe_wrap_toolkit_for_sandbox_proxy(
             execution_env=execution_env,
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
+            primary_placement=primary_placement,
         )
         for function_name, function in original_async_functions.items()
     }

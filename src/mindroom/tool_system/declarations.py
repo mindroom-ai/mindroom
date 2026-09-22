@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 from weakref import ref
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 
 MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
@@ -36,6 +36,15 @@ def tool_schema_source(entrypoint: Callable[..., object]) -> Callable[..., objec
 def declare_tool_schema_source(wrapper: Callable[..., object], source: Callable[..., object]) -> None:
     """Declare the source definition used by an owned tool wrapper."""
     setattr(wrapper, _SCHEMA_SOURCE_ATTRIBUTE, _ToolSchemaSource(ref(wrapper), tool_schema_source(source)))
+
+
+@runtime_checkable
+class SupportsPrimaryCallPlacement(Protocol):
+    """Toolkit-owned placement for calls that need the live primary runtime."""
+
+    def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
+        """Return whether one bound call must keep its original primary entrypoint."""
+        ...
 
 
 class ToolAuthoredOverrideValidator(str, Enum):

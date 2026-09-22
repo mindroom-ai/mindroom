@@ -9379,8 +9379,9 @@ The Desktop tool can explain the trusted chat command, but the model cannot regi
 Use `!desktop rotate` to replace a device without dropping the current target before confirmation, or `!desktop disconnect confirm` to remove it.
 
 The `desktop` tool runs in the primary agent process because it needs that live agent's Matrix device and room requester identity.
-The `browser` tool remains worker-routable for host-browser isolation, but its Matrix desktop target requires the primary process's live Matrix context.
-Do not list `browser` in `worker_tools` for an agent that uses `target: desktop`; a worker-routed desktop call fails closed with a live-context error.
+The `browser` tool keeps calls resolving to `target: desktop` in the primary process, including when `default_target: desktop` is configured.
+Host-browser calls still follow the worker routing policy, even with a desktop default or configured desktop device.
+Listing `browser` in `worker_tools` therefore isolates its host calls while preserving desktop control through the live Matrix context.
 It is hidden from OpenAI-compatible API runs when approval policy requires Matrix approval because those runs have no Matrix approval transport.
 
 The separate `browser` tool can still target its Playwright extension transport through its own configuration:
@@ -22177,7 +22178,8 @@ A change to the browser configuration or prepared process environment closes the
 Cancellation and worker shutdown also clean up browser resources.
 
 Generic and unscoped runners continue to isolate browser calls in separate subprocesses.
-Browser tools configured to use a separate desktop retain their existing routing.
+The `browser` tool keeps calls resolving to its Matrix desktop target in the primary runtime, without allocating a worker.
+An explicit `target: host` still uses the configured worker even when `default_target: desktop` is set.
 For a visible browser and Chat viewer, use [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/).
 
 ## Environment variable reference
@@ -22512,6 +22514,9 @@ Tools whose catalog metadata sets `requires_primary_runtime=True` or `requires_r
 This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
 The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls.
 The generic worker runner creates a fresh toolkit for each request.
+`config_manager` stays primary to manage the authored configuration and live API snapshots; its roomless inspection functions remain available.
+`agent_vault_access` stays primary to read the owner token mounted for self-service Vault grants.
+The `browser` toolkit selects placement per call: desktop uses the primary Matrix context, while host follows the configured worker policy.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed, subject to the limited `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` fallback described above.
 The `off`, `local`, and `disabled` modes do not override an explicit YAML list.

@@ -5168,6 +5168,7 @@ expose = [
     "MATRIX_ROOM_RUNTIME_APPROVAL_TYPE",
     "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
+    "SupportsPrimaryCallPlacement",
     "ToolAuthoredOverrideValidator",
     "ToolCategory",
     "ToolExecutionTarget",

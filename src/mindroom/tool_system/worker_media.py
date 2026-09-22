@@ -12,12 +12,23 @@ from urllib.parse import unquote, urlsplit
 import httpx
 from agno.media import Audio, File, Image, Video
 from agno.tools.function import ToolResult
+from httpx._utils import get_environment_proxies
 
-from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError
+from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
+
+
+class _WorkerMediaProxyTransport(httpx.HTTPTransport):
+    """Validate media destinations before forwarding through configured egress."""
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Check every origin and redirect before sending it to the worker proxy."""
+        # The configured proxy owns its final connection and hostname grant policy.
+        validate_server_fetch_url(str(request.url))
+        return super().handle_request(request)
 
 
 def _read_file(path: str | Path, limit: int) -> bytes:
@@ -34,9 +45,16 @@ def _read_file(path: str | Path, limit: int) -> bytes:
 
 
 def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
+    # HTTPX disables environment proxy discovery with an explicit transport.
+    # Reuse its routing map so scheme selection and NO_PROXY keep their semantics.
+    mounts = {
+        pattern: None if proxy is None else _WorkerMediaProxyTransport(proxy=proxy)
+        for pattern, proxy in get_environment_proxies().items()
+    }
     with (
         httpx.Client(
             transport=ServerFetchHTTPTransport(),
+            mounts=mounts,
             trust_env=False,
             follow_redirects=True,
             max_redirects=5,

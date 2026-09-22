@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from agno.tools import Toolkit
@@ -56,6 +56,8 @@ from mindroom.worker_computer.browser_proxy import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from playwright.async_api import Download
 
     from mindroom.constants import RuntimePaths
@@ -582,6 +584,21 @@ class BrowserTools(Toolkit):
         self._startup_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._describe_browser_schema()
 
+    def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
+        """Keep Matrix desktop calls with their live context while isolating host calls."""
+        if function_name != "browser_control":
+            return False
+        action = cast("str", arguments["action"]).strip().lower()
+        if action in {"actions", "help"}:
+            return False
+        return (
+            self._resolve_target(
+                target=cast("str | None", arguments.get("target")),
+                node=cast("str | None", arguments.get("node")),
+            )
+            == "desktop"
+        )
+
     def bind_worker_display(self, display: str, workspace: Path) -> str:
         """Bind a fresh controller to its prepared workspace and return its config key."""
         return self._bind_worker_browser(display, workspace)
@@ -604,9 +621,6 @@ class BrowserTools(Toolkit):
     def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
         if self._profiles:
             msg = "Bind the worker display before starting browser profiles."
-            raise ValueError(msg)
-        if display is not None and self._default_target != "host":
-            msg = "Worker computer does not support default_target=desktop."
             raise ValueError(msg)
         workspace = workspace.resolve()
         output_dir = self._configured_output_dir or workspace / "browser"
@@ -1027,8 +1041,8 @@ class BrowserTools(Toolkit):
     def _resolve_target(self, *, target: str | None, node: str | None) -> str:
         self._validate_target(target=target, node=node)
         resolved = _clean_str(target) or self._default_target
-        if self._worker_display is not None and resolved != "host":
-            msg = "Worker computer does not support desktop browser routing."
+        if self._worker_workspace is not None and resolved != "host":
+            msg = "Worker browser does not support desktop routing."
             raise ValueError(msg)
         return resolved
 

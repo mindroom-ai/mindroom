@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
+    requires_primary_runtime=True,
     icon="Settings",
     icon_color="text-purple-500",
     config_fields=[],
