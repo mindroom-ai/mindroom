@@ -12512,16 +12512,16 @@ create_file("main.py", "print('ok')")
 
 ### What It Does
 
-The registered MindRoom tool instantiates `composio_agno.ComposioToolSet`.
-That upstream object does not expose a stable fixed method list like `aws_lambda` or `custom_api`.
-Instead, its main surface is `get_tools(actions=..., apps=..., tags=...)`, which wraps selected Composio actions into Agno `Toolkit` objects at runtime.
-The resulting callable tools therefore depend on your Composio workspace, connected accounts, and action selection rather than a static MindRoom-defined function list.
-MindRoom's current registry metadata on this branch documents the connection and workspace fields, but it does not expose separate per-agent app or action filter fields in `config.yaml`.
+MindRoom requires a nonempty `actions` list of Composio action IDs.
+Its adapter instantiates `composio_agno.ComposioToolSet`, calls `get_tools(actions=...)`, and exposes the resulting action functions through an Agno toolkit.
+The callable tools depend on your selected actions, Composio workspace, and connected accounts.
+The SDK's management methods, such as `get_tools` and `initiate_connection`, are not exposed as agent tools.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
+| `actions` | `string[]` | `yes` | `null` | Nonempty list of Composio action IDs to expose, such as `GITHUB_GET_THE_AUTHENTICATED_USER`. |
 | `api_key` | `password` | `no` | `null` | Composio API key. The SDK can also fall back to cached Composio user data or `COMPOSIO_API_KEY`. |
 | `base_url` | `url` | `no` | `null` | Optional Composio API base URL. |
 | `entity_id` | `text` | `no` | `default` | Composio entity identifier used when executing actions. |
@@ -12546,14 +12546,17 @@ agents:
   integrations:
     tools:
       - composio:
+          actions:
+            - GITHUB_GET_THE_AUTHENTICATED_USER
           entity_id: default
-          workspace_id: workspace_123
           logging_level: INFO
 ```
 
 ### Notes
 
-- The resulting callable actions are dynamic and depend on the Composio workspace rather than on fixed MindRoom-defined function names.
+- Configure the Composio API key and connect the selected app accounts for the chosen entity before loading the tool.
+- Callable names follow the SDK's lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
+- Omitting `actions` or supplying an empty list raises a configuration error.
 - `workspace_config`, `connected_account_ids`, `metadata`, and `processors` are advanced constructor inputs and are not the most ergonomic handwritten YAML fields in the current metadata model.
 - Use `composio` when you want one external platform to broker many app integrations instead of configuring each app-specific tool directly in MindRoom.
 
