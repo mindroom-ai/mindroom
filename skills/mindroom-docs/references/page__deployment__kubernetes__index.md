@@ -64,16 +64,27 @@ The CLI's `provision <id>` command uses fixed test metadata and is not the new-c
 
 ### Direct Helm Installation
 
-For debugging only, first create a private values file with a nonempty sandbox token:
+For debugging only, first create a private values file with a nonempty sandbox token from a trusted working directory:
 
 ```bash
-umask 077
-cat > instance-secrets.yaml <<EOF
-sandbox_proxy_token: "$(openssl rand -hex 32)"
-EOF
+(
+  set -eu
+  umask 077
+  test ! -d ./instance-secrets.yaml
+  instance_secrets_tmp="$(mktemp ./instance-secrets.yaml.XXXXXX)"
+  trap 'rm -f -- "$instance_secrets_tmp"' EXIT
+  instance_sandbox_token="$(openssl rand -hex 32)"
+  printf 'sandbox_proxy_token: "%s"\n' "$instance_sandbox_token" > "$instance_secrets_tmp"
+  mv -f -- "$instance_secrets_tmp" ./instance-secrets.yaml
+)
 ```
 
+The private temporary file replaces `instance-secrets.yaml` atomically, without reusing an existing file's permissions or following a file symlink.
 Keep this file out of version control.
+With Helm's default Secret storage backend, the command below also retains supplied values and rendered Secrets in release history in `mindroom-instances`.
+Readers of those release Secrets can recover the sandbox token and other supplied credentials.
+Restrict access to both the instance Secret and every retained Helm release Secret, as well as this local values file.
+Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
 The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
 The provisioner supplies this token automatically, while a direct install must provide it.
 
