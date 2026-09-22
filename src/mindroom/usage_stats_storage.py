@@ -17,7 +17,7 @@ from mindroom.constants import RuntimePaths, resolve_session_state_root
 from mindroom.legacy_private_storage_aliases import is_verified_private_instance_alias
 from mindroom.legacy_session_storage import decode_persisted_session_json
 from mindroom.private_instance_identity import PrivateInstanceIdentityError, load_private_instance_identity
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, worker_dir_name
 from mindroom.usage_storage import TOKEN_FIELDS, quote_identifier
@@ -207,14 +207,7 @@ def discover_private_usage_sources(
     runtime_paths: RuntimePaths,
 ) -> tuple[UsageStorageSource | UsageStorageDiagnostic, ...]:
     """Resolve existing private databases for this canonical requester and known aliases only."""
-    canonical = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    requester_ids = {canonical}
-    requester_ids.update(
-        alias
-        for aliases in config.authorization.aliases.values()
-        for alias in aliases
-        if resolve_human_requester_alias(alias, config, runtime_paths) == canonical
-    )
+    requester_ids = equivalent_requester_ids(requester_id, config, runtime_paths)
     sources: dict[str, UsageStorageSource | UsageStorageDiagnostic] = {}
     for agent_name, agent_config in config.agents.items():
         if agent_config.private is None:
