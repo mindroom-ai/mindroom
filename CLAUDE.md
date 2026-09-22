@@ -202,7 +202,7 @@ Matrix sync callback
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
 | `matrix/room_cleanup.py` | Orphaned bot cleanup from rooms |
 | `matrix/event_info.py` | Event metadata parsing |
-| `matrix/reply_chain.py` | Reply chain context management |
+| `matrix/thread_membership.py` | Canonical Matrix thread identity and transitive relation membership |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
 | `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |
@@ -277,8 +277,8 @@ Matrix sync callback
 
 **Persistent state** lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
 - `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `learning/` – Per-agent Agno Learning preference data
-- `chroma/` – ChromaDB storage backing the memory system
+- `agents/*/learning/` – Per-agent Agno Learning data when learning is enabled
+- `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
 - `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
 - `credentials/` – JSON secrets synchronized from `.env`
@@ -286,6 +286,9 @@ Matrix sync callback
 - `sync_continuity/` – Crash-atomic pending join/decrypt fences
 - `logs/` – Log files
 - `matrix_state.yaml` – Matrix sync state
+
+These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
+`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
 
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`

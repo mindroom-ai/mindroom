@@ -393,7 +393,9 @@ The old `prepare_after_lock` callback that ran payload building back inside `Tur
 
 Ordering identities are named types now: `ReceiptLaneKey` for receipt lanes, the `CoalescingOwner` union for batching, and `ResponseLifecycleKey` (via `MessageTarget.lifecycle_key`) for response serialization; no synthetic requester string or bare tuple crosses these boundaries.
 Ordinary ingress is normalized once at admission into the canonical `PreparedIngress`, which also owns the per-source evidence that used to travel in mutable parallel fields.
-`DeliveryGateway` is the sole constructor of `FinalDeliveryOutcome`, translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary, and the delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
+`DeliveryGateway` constructs `FinalDeliveryOutcome` values for its Matrix delivery operations and translates typed Matrix delivery failures (`MatrixDeliveryFailure`) into its failure vocabulary.
+`response_runner.py` also constructs these outcomes for participation suppression and approval lifecycle settlement.
+The delivery types own cancellation provenance (`resolved_cancel_source`) and final event-ID precedence.
 Agent and team outer settlement share extracted helpers for blocking cancellation, failed-turn persistence, delivery timing, and streamed finalization; the shared blocking and streaming drivers are unchanged.
 The router relay lives in `router_relay.py` behind the narrow `_RouterRelaySupport` protocol.
 

@@ -148,14 +148,17 @@ curl http://localhost:8765/api/health
 MindRoom stores data in the `mindroom_data` directory by default:
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
-- `chroma/` - ChromaDB vector store for agent/team memories
+- `agents/*/learning/` - Per-agent Agno Learning state when enabled (SQLite, persistent across restarts)
+- `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` - Knowledge base vector stores
 - `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
 - `credentials/` - Synchronized secrets from `.env`
 - `logs/` - Application logs
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
+
+These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
+`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
 
 Keep `tracking/` on persistent storage and include it in backups.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
