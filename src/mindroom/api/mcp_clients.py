@@ -11,7 +11,7 @@ from starlette.routing import Route
 
 from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS
-from mindroom.api.mcp_identity import GatewayAccountRequiredError, resolve_gateway_browser_owner
+from mindroom.api.mcp_identity import resolve_gateway_connections_owner
 from mindroom.mcp_gateway.server import read_gateway_body
 
 if TYPE_CHECKING:
@@ -85,11 +85,8 @@ async def _handle_clients(request: Request, runtime_for_request: Callable[[Reque
         if exc.status_code == 404 and request.method in {"GET", "HEAD"}:
             return JSONResponse({"enabled": False, "clients": []}, headers=CONNECTIONS_HEADERS)
         raise
-    try:
-        owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
-    except GatewayAccountRequiredError:
-        if request.method not in {"GET", "HEAD"}:
-            raise
+    owner = await resolve_gateway_connections_owner(request, user, runtime.provider)
+    if owner is None:
         return JSONResponse({"enabled": False, "clients": []}, headers=CONNECTIONS_HEADERS)
     if request.method in {"GET", "HEAD"}:
         return await _list_clients(request, runtime, owner)
