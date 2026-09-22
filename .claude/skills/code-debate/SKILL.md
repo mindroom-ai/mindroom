@@ -40,19 +40,38 @@ Do not ask the user which role to play.
 - Never use `spawn_agent`, `send_input`, tmux supervision, background shell automation, or any other tool to manufacture the missing peer.
 - Role is immutable for the run: once detected as Agent A or Agent B, keep that role until `## CONSENSUS`.
 - If you are about to write the opposite role, stop and report protocol violation instead of writing.
-- After appending your section, only poll. Do not append another turn unless checksum changed and turn order confirms it is now your turn.
-- If checksum does not change, keep polling until timeout or `## CONSENSUS`.
+- After appending your section, only poll.
+- Append another turn only after consuming the expected signed peer turn, even if it arrived before polling started.
+- Without an unconsumed peer turn, keep polling until timeout or `## CONSENSUS`.
 - On timeout, append only a timeout `## CONSENSUS` from your own role.
 
-## Checksum command
+## Peer-turn readiness
 
-Use a portable checksum. Pick the first available:
+Keep `LAST_CONSUMED` as the heading of the last peer turn you actually read and processed; initialize it to an empty string once per run.
+Retain it across waits, and never initialize it from an unread section already present in the file.
+Set `PEER` to the other role and `EXPECTED` to the exact next peer heading allowed by turn order.
+Check terminal state and that heading's signature before the first sleep and on every poll.
+A checksum change alone does not establish readiness, and an unchanged checksum does not rule out an unread turn.
+
+Define this function before running the poll loop:
 
 ```bash
-CKSUM() { { md5sum "$1" 2>/dev/null || md5 -q "$1" 2>/dev/null || shasum "$1"; } | awk '{print $1}'; }
+TURN_STATE() {
+  awk -v expected="$EXPECTED" -v peer="$PEER" -v consumed="$LAST_CONSUMED" '
+    /^## CONSENSUS([[:space:]]|$)/ { terminal = 1 }
+    /^## / { heading = $0; signed = 0 }
+    /^\*— Agent [AB]( \([^)]*\))?, .+\*$/ { signed = ($3 == peer || $3 == peer ",") }
+    END {
+      if (terminal) print "CONSENSUS"
+      else if (heading == expected && heading != consumed && signed) print "PEER_TURN_READY"
+      else print "WAIT"
+    }
+  ' DEBATE.md
+}
 ```
 
-Define this function before running the poll loop.
+The signature must belong to the expected section, so an unfinished append does not reuse the previous section's signature.
+After reading and processing a ready turn, set `LAST_CONSUMED=$EXPECTED` before appending your reply.
 
 ## Shell requirement
 
@@ -76,14 +95,14 @@ Before appending, also verify the last signature line role:
 ## Polling discipline (critical)
 
 - After starting a poll loop, keep polling until one of these happens:
-  - checksum changed
+  - the expected signed, unconsumed peer turn is ready
   - timeout reached
   - `## CONSENSUS` exists
 - Do not stop early just to report that polling started.
-- When checksum changes, immediately read `DEBATE.md` and continue the protocol.
+- When the expected peer turn is ready, immediately read `DEBATE.md` and continue the protocol.
 - Stop only when `## CONSENSUS` exists or timeout handling completes.
 - Polling is mandatory after every append. Do not return control to the user between append and poll completion.
-- After checksum change, do not ask the user what to do next. Immediately take the next protocol step for your role only.
+- After a peer turn is ready, do not ask the user what to do next. Immediately take the next protocol step for your role only.
 
 ## Hard Exit Gate (MUST)
 
@@ -103,7 +122,7 @@ Before appending, also verify the last signature line role:
 
 - After every append (`## Opening`, `## Response N`, `## Follow-up N`), run one blocking poll loop.
 - Do not return control early while polling.
-- Exit the loop only on checksum change, `## CONSENSUS`, or timeout.
+- Exit the loop only on an expected signed, unconsumed peer turn, `## CONSENSUS`, or timeout.
 
 ## Conflict Override
 
@@ -124,44 +143,44 @@ Before appending, also verify the last signature line role:
 ## Agent A (opener) flow
 
 1. The debate subject is: **$1** (the arguments after the role). Analyze it (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
-2. Write your analysis to `DEBATE.md` using the file format below.
-3. Compute the file's checksum using `CKSUM DEBATE.md`.
-4. Poll for changes (5-second interval, 10-minute timeout):
+2. Initialize `PEER=B` and `LAST_CONSUMED=''`, then write your analysis to `DEBATE.md` using the file format below.
+3. Set `EXPECTED='## Response 1'` after the opening, or `EXPECTED="## Response $((N + 1))"` after writing `## Follow-up N` (set shell variable `N` to that follow-up number).
+4. Poll for the expected signed peer turn (5-second interval, 10-minute timeout):
    ```bash
-   PREV=$(CKSUM DEBATE.md); SECONDS=0; while true; do sleep 5; if grep -q '^## CONSENSUS' DEBATE.md; then break; fi; NOW=$(CKSUM DEBATE.md); if [ "$NOW" != "$PREV" ]; then break; fi; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT"; break; fi; done
+   SECONDS=0
+   while true; do
+     STATE=$(TURN_STATE)
+     if [ "$STATE" != WAIT ]; then echo "$STATE"; break; fi
+     if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT"; break; fi
+     sleep 5
+   done
    ```
    This step is blocking and mandatory; do not exit the workflow before it finishes.
-5. If timed out → append `## CONSENSUS` noting the timeout and stop.
-6. Read Agent B's reply.
+5. If `CONSENSUS` → stop; if timed out → append `## CONSENSUS` noting the timeout and stop.
+6. Read and process Agent B's expected signed reply, then set `LAST_CONSUMED=$EXPECTED`.
 7. If all points are resolved → append a `## CONSENSUS` section summarizing agreed outcomes and stop.
 8. Otherwise append a `## Follow-up N` section addressing unresolved points, then go to step 3.
 9. Do not ask the user to choose between follow-up or consensus; Agent A must decide and append immediately.
 
 ## Agent B (responder) flow
 
-1. Ensure `DEBATE.md` exists before reading:
-   - If it exists, read it immediately.
-   - If it does not exist (for example, you were explicitly designated as Agent B), start polling and wait until it exists, then read it.
+1. Initialize `PEER=A`, `LAST_CONSUMED=''`, and `EXPECTED='## Opening'`, then ensure `DEBATE.md` exists before reading:
+   - If it exists, inspect it immediately.
+   - If it does not exist (for example, you were explicitly designated as Agent B), start polling and wait until it exists, then inspect it.
    - If timeout is reached before the file exists, stop with a timeout result. Do not create `DEBATE.md` as Agent B and do not start Agent A yourself.
    Example:
    ```bash
    SECONDS=0; while [ ! -f DEBATE.md ]; do sleep 5; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT waiting for DEBATE.md"; exit 0; fi; done
    ```
-2. The debate subject is: **$1** (the arguments after the role). Analyze it (run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate).
-3. Verify it is your turn (check the last `## ` heading). Example:
-   ```bash
-   LAST=$(grep -E '^## ' DEBATE.md | tail -n1)
-   ```
-   If not your turn, poll until it is.
-4. Append a `## Response N` section with a point-by-point reply.
-5. Compute the file's checksum.
-6. Poll for changes (same loop with 10-minute timeout).
+2. If the file contains `## CONSENSUS`, stop; otherwise analyze the debate subject: **$1** (the arguments after the role).
+   Run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate.
+3. Run the same readiness loop as Agent A, checking the expected heading and signature immediately and on every poll.
    This step is blocking and mandatory; do not exit the workflow before it finishes.
-7. If timed out → append `## CONSENSUS` noting the timeout and stop.
-8. Read Agent A's follow-up.
-9. If the file contains `## CONSENSUS` → stop, debate is over.
-10. Otherwise go to step 3.
-11. Do not ask the user whether to continue; continue automatically per turn order within Agent B only.
+4. If `CONSENSUS` → stop; if timed out → append `## CONSENSUS` noting the timeout and stop.
+5. Read and process Agent A's expected signed turn, then set `LAST_CONSUMED=$EXPECTED`.
+6. Verify turn order, set shell variable `N` to 1 after `## Opening` or one greater than the consumed follow-up number, and append `## Response N` with a point-by-point reply.
+7. Set `EXPECTED="## Follow-up $N"`, then return immediately to step 3 without resetting `LAST_CONSUMED`.
+8. Do not ask the user whether to continue; continue automatically per turn order within Agent B only.
 
 ## File format
 
