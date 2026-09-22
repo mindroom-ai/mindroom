@@ -648,6 +648,7 @@ defaults:
   max_preload_chars: 50000         # Hard cap for preloaded context from context_files
   tool_output_auto_save_threshold_bytes: 51200  # Auto-save supported tool outputs larger than 50 KiB
   show_stop_button: true           # Default: true (global only, cannot be overridden per-agent)
+  auto_resume_after_restart: true # Default: true (resume eligible interrupted threads after startup or replacement)
   num_history_runs: null           # Number of prior runs to include (null = all)
   num_history_messages: null       # Max messages from history (null = use num_history_runs)
   compress_tool_results: false     # Safer default; enabling can invalidate Anthropic/Vertex Claude prompt caches
@@ -886,6 +887,10 @@ matrix_sync:
   max_response_bytes: 16777216      # Per-session HTTP response limit: 16 MiB
   max_pending_bytes: 67108864       # Per-session encoded pending output limit: 64 MiB
 
+# Durable Matrix event journal (optional; effective store changes require restart)
+event_journal:
+  backend: sqlite                 # Default: sqlite; uses <storage>/tracking/event_journal.db
+
 # Timezone for scheduled tasks (optional)
 timezone: America/Los_Angeles      # Default: UTC
 scheduler_catch_up_grace_seconds: 3600  # Recurring catch-up window; 0 disables it
@@ -900,6 +905,38 @@ See [Authorization](../authorization.md) for the current access model.
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
 Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
 Demote stale Space admins manually in a Matrix client when needed.
+
+## Event Journal
+
+`event_journal.backend` defaults to `sqlite`, which stores the durable Matrix event journal at `<storage>/tracking/event_journal.db` (`mindroom_data/tracking/event_journal.db` with the default storage root).
+SQLite has no independent journal-path setting and ignores the PostgreSQL URL fields.
+The PostgreSQL backend requires the `postgres` extra, which supplies `psycopg`.
+For a Python install, use `uvx --from 'mindroom[postgres]' mindroom run`, or include `--extra postgres` when syncing a source checkout.
+Then select the backend explicitly and provide a connection URL:
+
+```yaml
+event_journal:
+  backend: postgres
+  database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL
+```
+
+`MINDROOM_EVENT_CACHE_DATABASE_URL` is the default environment variable name.
+Set it in the exported process environment or the config-adjacent `.env`; an exported value takes precedence over `.env`.
+Alternatively, `event_journal.database_url` supplies an inline URL, and a nonblank inline value takes precedence over environment lookup.
+Custom nonblank `database_url_env` names must be `DATABASE_URL` or end in `_DATABASE_URL` so runtime secret filters recognize them.
+PostgreSQL requires a nonblank URL; supplying a URL alone does not switch a SQLite journal to PostgreSQL.
+
+Changes to the effective store apply after restarting MindRoom.
+Changing URL fields while the backend remains `sqlite` does not change the opened file or require a journal restart.
+See the [journal binding and migration commands](../cli.md#journal) before moving, restoring, or adopting a journal.
+
+## Automatic Restart Resumption
+
+`defaults.auto_resume_after_restart` defaults to `true` and permits visible router resume prompts for eligible interrupted threaded conversations after startup or runtime replacement.
+Set it to `false` to suppress those automatic prompts and resume the work manually.
+Resumption still depends on current recovery ownership, room membership, a resolved original requester, and fresh history checks that reject superseded work.
+This setting does not globally disable ordinary durable event replay or stale-response cleanup.
+See [runtime recovery](../architecture/bot-runtime.md) for the surrounding lifecycle.
 
 ## Matrix Sync Limits
 
