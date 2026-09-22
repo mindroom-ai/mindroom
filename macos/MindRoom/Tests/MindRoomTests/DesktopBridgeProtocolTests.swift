@@ -15,7 +15,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
     private static let completeStatusData = """
     {
       "config":{"state":"ready","revision":2,"enabled":true,"controller_user_id":"@controller:example.org","controller_device_id":"CLOUD","allowed_requester_ids":["@me:example.org"],"allowed_agent_names":["assistant"],"allowed_app_ids":["com.example.Editor"]},
-      "pairing":{"state":"paired","homeserver":"https://example.org","user_id":"@me:example.org","device_id":"LOCAL","controller_fingerprint":"key"},
+      "pairing":{"state":"paired","session_state":"ready","homeserver":"https://example.org","user_id":"@me:example.org","device_id":"LOCAL","controller_fingerprint":"key"},
       "helper":{"state":"running","version":"1.2.3"},
       "bridge":{"state":"observe_only","active_action":null,"last_error":null},
       "authority":{"control_available":false,"lease_remaining_seconds":0,"lease_expires_at_ms":null,"emergency_stop_latched":false},
@@ -44,6 +44,33 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         XCTAssertTrue(store.browserEnabled)
         XCTAssertEqual(store.browserExecutable, "/Applications/Browser.app/Contents/MacOS/Browser")
         XCTAssertEqual(store.browserProfile, "/Users/test/Library/Application Support/Browser")
+    }
+
+    func testHydratesSavedSessionWithoutOverwritingLaterLoginEdits() throws {
+        let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
+        let store = DesktopControlStore()
+
+        store.hydrateConfiguration(from: status)
+
+        XCTAssertEqual(store.homeserver, "https://example.org")
+        XCTAssertEqual(store.matrixUserID, "@me:example.org")
+        store.homeserver = "https://other.example.org"
+        store.matrixUserID = ""
+        store.hydrateConfiguration(from: status)
+        XCTAssertEqual(store.homeserver, "https://other.example.org")
+        XCTAssertEqual(store.matrixUserID, "")
+    }
+
+    func testSavedSessionDoesNotOverwritePreparedLoginIdentity() throws {
+        let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
+        let store = DesktopControlStore()
+        store.homeserver = "https://other.example.org"
+        store.matrixUserID = "@other:other.example.org"
+
+        store.hydrateConfiguration(from: status)
+
+        XCTAssertEqual(store.homeserver, "https://other.example.org")
+        XCTAssertEqual(store.matrixUserID, "@other:other.example.org")
     }
 
     func testProtocolVersionRejectsBooleanAndFloatingPointValues() {
