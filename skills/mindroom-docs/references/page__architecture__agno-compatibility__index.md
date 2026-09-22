@@ -52,6 +52,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | --- | --- | --- |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
+| Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
 | Byte-only image dimension parsing is private. | Expose a public header parser without file/network I/O or pixel decoding. | `_embedded_image_dimensions` in `openai_models.py`. |
 | Bedrock Claude hard-codes pre-Mantle SDK clients. | Add Mantle support or public typed client factories. | `bedrock_claude.py`. |
@@ -114,6 +115,7 @@ Small owner-adjacent boundaries use the same source records:
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
+| `tools/lumalabs.py` | Bind the required model on each toolkit's SDK generation resource. | Tool configuration selects the model; inherited methods retain polling, video attachments, error results, and function flags. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |

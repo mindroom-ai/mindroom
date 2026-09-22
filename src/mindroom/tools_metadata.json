@@ -4560,6 +4560,27 @@
         },
         {
           "authored_override": true,
+          "default": "ray-2",
+          "description": "Dream Machine video model used for text and image generation requests",
+          "label": "Model",
+          "name": "model",
+          "options": [
+            {
+              "label": "Ray 2",
+              "value": "ray-2"
+            },
+            {
+              "label": "Ray 2 Flash",
+              "value": "ray-flash-2"
+            }
+          ],
+          "placeholder": null,
+          "required": false,
+          "type": "select",
+          "validation": null
+        },
+        {
+          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Wait For Completion",
