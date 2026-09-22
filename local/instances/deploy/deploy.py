@@ -654,12 +654,56 @@ def _resolve_authelia_users_file(instance: Instance) -> Path:
     return Path(source.replace("$$", "$")) / "users_database.yml"
 
 
+def _argon2_hash_identity(value: object) -> tuple[str, int, int, int, bytes, bytes] | None:  # noqa: PLR0911
+    """Compare Argon2 inputs using Authelia's go-crypt decoder semantics."""
+    if not isinstance(value, str):
+        return None
+    parts = value.removeprefix("{CRYPT}").removeprefix("{ARGON2}").split("$")
+    if len(parts) != 6 or parts[0] or parts[1] not in {"argon2id", "argon2i", "argon2d"}:
+        return None
+
+    parameters: dict[str, int] = {}
+    # go-crypt processes the version segment last; repeated parameters overwrite.
+    for parameter in (parts[3] + "," + parts[2]).split(","):
+        key, separator, number = parameter.partition("=")
+        if key not in {"v", "m", "t", "p", "k"} or not separator or not number.isascii() or not number.isdecimal():
+            return None
+        number = number.lstrip("0") or "0"
+        if len(number) > 10:
+            return None
+        parsed = int(number)
+        if parsed > 0xFFFFFFFF or (key == "v" and parsed != 19):
+            return None
+        parameters[key] = parsed
+
+    decoded: list[bytes] = []
+    try:
+        for part in parts[4:]:
+            # Go's unpadded base64 ignores CR/LF and accepts unused tail bits.
+            encoded = part.replace("\r", "").replace("\n", "")
+            if "=" in encoded:
+                return None
+            decoded.append(base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True))
+    except ValueError:
+        return None
+    if not decoded[1]:
+        return None
+    return (
+        parts[1],
+        parameters.get("m", 0) or 32768,
+        parameters.get("t", 0) or 1,
+        parameters.get("p", 0) or 4,
+        decoded[0],
+        decoded[1],
+    )
+
+
 def _require_authelia_account_setup(instance: Instance) -> None:
     """Reject enabled accounts that still use the shipped public password hash."""
     users_file = _resolve_authelia_users_file(instance)
     try:
-        database = yaml.safe_load(users_file.read_text())
-    except (OSError, yaml.YAMLError) as error:
+        database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
         console.print(f"[red]✗[/red] Cannot read Authelia users database: {users_file}")
         console.print("  Configure users as described in local/instances/deploy/README.md before starting.")
         raise typer.Exit(1) from error
@@ -673,8 +717,16 @@ def _require_authelia_account_setup(instance: Instance) -> None:
         raise typer.Exit(1)
 
     template_file = SCRIPT_DIR / "templates" / "authelia" / "users_database.yml"
-    example_hash = yaml.safe_load(template_file.read_text())["users"]["admin"]["password"]
-    if any(user.get("disabled") is not True and user.get("password") == example_hash for user in users.values()):
+    example_hash = yaml.safe_load(template_file.read_text(encoding="utf-8"))["users"]["admin"]["password"]
+    example_identity = _argon2_hash_identity(example_hash)
+    if any(
+        user.get("disabled") is not True
+        and (
+            user.get("password") == example_hash
+            or (example_identity is not None and _argon2_hash_identity(user.get("password")) == example_identity)
+        )
+        for user in users.values()
+    ):
         console.print(f"[red]✗[/red] Enabled Authelia account uses the public example password hash: {users_file}")
         console.print("  Replace the password hash and email, or remove/disable the example account before starting.")
         console.print("  See local/instances/deploy/README.md for password hashing instructions.")

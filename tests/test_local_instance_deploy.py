@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -605,7 +606,27 @@ def _launched_services(commands: list[str]) -> list[str]:
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
-@pytest.mark.parametrize("example_state", ["unchanged", "renamed", "enabled_by_default"])
+@pytest.mark.parametrize(
+    "example_state",
+    [
+        "unchanged",
+        "renamed",
+        "enabled_by_default",
+        "literal_block",
+        "internal_crlf",
+        "base64_tail_bits",
+        "zero_padded_parameters",
+        "reordered_duplicate_parameters",
+        "version_segment_parameters",
+        "missing_version",
+        "zero_time",
+        "missing_time",
+        "ignored_key_length",
+        "ldap_crypt",
+        "ldap_argon2",
+        "ldap_both",
+    ],
+)
 def test_authelia_launch_rejects_enabled_public_credentials(
     authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
     command: str,
@@ -613,12 +634,36 @@ def test_authelia_launch_rejects_enabled_public_credentials(
 ) -> None:
     """Reject the public hash before launch effects even after account edits."""
     instance, users_file, commands, console = authelia_launch
-    database = yaml.safe_load(users_file.read_text())
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    public_hash = database["users"]["admin"]["password"]
+    _, variant, version, parameters, salt, digest = public_hash.split("$")
+    prefix = f"${variant}${version}${parameters}$"
+    crlf_salt = "\r\n".join(salt)
+    crlf_digest = "\r\n".join(digest)
+    equivalent_hashes = {
+        "internal_crlf": f"{prefix}{crlf_salt}${crlf_digest}\r\n",
+        "base64_tail_bits": f"{prefix}{salt[:-1]}R${digest[:-1]}p",
+        "zero_padded_parameters": f"${variant}$v=0019$m={'0' * 5000}1024,t=01,p=08${salt}${digest}",
+        "reordered_duplicate_parameters": f"${variant}$v=19$m=1,t=3,p=1,p=8,m=1024,t=1${salt}${digest}",
+        "version_segment_parameters": f"${variant}$v=19,m=1024,t=1,p=8$m=1,t=3,p=1${salt}${digest}",
+        "missing_version": f"${variant}$m=1024$t=1,p=8${salt}${digest}",
+        "zero_time": f"${variant}$v=19$m=1024,t=0,p=8${salt}${digest}",
+        "missing_time": f"${variant}$v=19$m=1024,p=8${salt}${digest}",
+        "ignored_key_length": f"${variant}$v=19$m=1024,t=1,p=8,k=4294967295${salt}${digest}",
+        "ldap_crypt": "{CRYPT}" + public_hash,
+        "ldap_argon2": "{ARGON2}" + public_hash,
+        "ldap_both": "{CRYPT}{ARGON2}" + public_hash,
+    }
     if example_state == "renamed":
         database["users"]["operator"] = database["users"].pop("admin")
     elif example_state == "enabled_by_default":
         del database["users"]["admin"]["disabled"]
-    users_file.write_text(yaml.safe_dump(database))
+    elif example_state in equivalent_hashes:
+        database["users"]["admin"]["password"] = equivalent_hashes[example_state]
+    if example_state == "literal_block":
+        users_file.write_text(f"users:\n  admin:\n    password: |\n      {public_hash}\n", encoding="utf-8")
+    else:
+        users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
     before = users_file.read_bytes()
     env_before = (deploy.ENV_DIR / "alpha.env").read_bytes()
 
@@ -637,6 +682,7 @@ def test_authelia_launch_rejects_enabled_public_credentials(
     assert "password hash" in text.lower()
     assert "local/instances/deploy/README.md" in text
     assert database["users"][next(iter(database["users"]))]["password"] not in text
+    assert public_hash not in text
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
@@ -668,7 +714,7 @@ def test_authelia_launch_rejects_colliding_yaml_usernames(
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
-@pytest.mark.parametrize("example_state", ["replaced", "removed", "disabled"])
+@pytest.mark.parametrize("example_state", ["replaced", "removed", "disabled", "disabled_encoded"])
 def test_authelia_launch_preserves_configured_users(
     authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
     command: str,
@@ -694,6 +740,8 @@ def test_authelia_launch_preserves_configured_users(
             del database["users"]["admin"]
         else:
             database["users"]["admin"]["disabled"] = True
+            if example_state == "disabled_encoded":
+                database["users"]["admin"]["password"] = "{CRYPT}" + database["users"]["admin"]["password"] + "\n"
     users_file.write_text(yaml.safe_dump(database))
     before = users_file.read_bytes()
 
@@ -748,25 +796,110 @@ def test_launch_without_authelia_does_not_require_users(
     assert not any(" config --format json" in cmd for cmd in commands)
 
 
-@pytest.mark.parametrize("contents", [None, "users: [", "users: []", "users:\n  admin: null\n"])
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+@pytest.mark.parametrize(
+    "contents",
+    [None, "users: [", "users: []", "users:\n  admin: null\n", b"users:\n  private-marker: \xff\n"],
+)
 def test_authelia_launch_rejects_unreadable_user_database(
     authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
-    contents: str | None,
+    command: str,
+    contents: str | bytes | None,
 ) -> None:
     """An unreadable account database cannot bypass the launch check."""
     _instance, users_file, commands, console = authelia_launch
     if contents is None:
         users_file.unlink()
+    elif isinstance(contents, bytes):
+        users_file.write_bytes(contents)
     else:
-        users_file.write_text(contents)
+        users_file.write_text(contents, encoding="utf-8")
 
     with pytest.raises(deploy.typer.Exit) as exc:
-        _launch_authelia("start")
+        _launch_authelia(command)
 
     assert exc.value.exit_code == 1
     assert commands
     assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
-    assert str(users_file) in normalize_console_output(console.export_text())
+    text = normalize_console_output(console.export_text())
+    assert str(users_file) in text
+    assert "local/instances/deploy/README.md" in text
+    assert "private-marker" not in text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (1, "argon2i"),
+        (3, "m=1025,t=1,p=8"),
+        (3, "m=1024,t=2,p=8"),
+        (3, "m=1024,t=1,p=9"),
+        (4, "MDEyMzQ1Njc4OWFiY2RlZg"),
+        (5, "e7rBJC02ad64LZ63hb15DFQ2CrfzMkABVvrIFNI6aZ8"),
+    ],
+    ids=["variant", "memory", "time", "parallelism", "salt", "digest"],
+)
+def test_authelia_launch_allows_distinct_argon2_inputs(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    field: int,
+    value: str,
+) -> None:
+    """Public-hash detection must compare all effective Argon2 inputs."""
+    _instance, users_file, commands, _console = authelia_launch
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    parts = database["users"]["admin"]["password"].split("$")
+    parts[field] = value
+    database["users"]["admin"]["password"] = "$".join(parts)
+    users_file.write_text(yaml.safe_dump(database), encoding="utf-8")
+    before = users_file.read_bytes()
+
+    _launch_authelia("start")
+
+    assert "authelia" in _launched_services(commands)
+    assert users_file.read_bytes() == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Requires a POSIX ASCII C locale")
+def test_authelia_account_check_reads_utf8_under_ascii_locale(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    tmp_path: Path,
+) -> None:
+    """UTF-8 account files and the shipped template must not depend on locale."""
+    _instance, users_file, _commands, _console = authelia_launch
+    database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    database["users"]["admin"].update(disabled=True, displayname="Zoë")
+    users_file.write_text(yaml.safe_dump(database, allow_unicode=True), encoding="utf-8")
+    template = tmp_path / "templates" / "authelia" / "users_database.yml"
+    template.parent.mkdir(parents=True)
+    template.write_text(yaml.safe_dump(database, allow_unicode=True), encoding="utf-8")
+    before = users_file.read_bytes()
+    code = """
+import importlib.util
+import locale
+from pathlib import Path
+import sys
+
+assert sys.flags.utf8_mode == 0
+assert locale.getencoding().lower() in {"ascii", "ansi_x3.4-1968", "us-ascii"}
+spec = importlib.util.spec_from_file_location("deploy_encoding_test", sys.argv[1])
+deploy = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = deploy
+spec.loader.exec_module(deploy)
+users_file = Path(sys.argv[2])
+deploy.SCRIPT_DIR = Path(sys.argv[3])
+deploy._resolve_authelia_users_file = lambda _instance: users_file
+instance = deploy.Instance(name="alpha", mindroom_port=8765, data_dir=str(users_file.parent), domain="localhost")
+deploy._require_authelia_account_setup(instance)
+"""
+    result = _REAL_SUBPROCESS_RUN(
+        [sys.executable, "-X", "utf8=0", "-c", code, str(_SCRIPT_PATH.resolve()), str(users_file), str(tmp_path)],
+        env={**os.environ, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0"},
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert users_file.read_bytes() == before
 
 
 @pytest.mark.parametrize("auth_enabled", [False, True])
