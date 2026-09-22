@@ -13371,7 +13371,7 @@
         {
           "authored_override": true,
           "default": null,
-          "description": "Restrict tool calls to these subreddits (case-insensitive)",
+          "description": "Restrict posts and replies to these subreddits (case-insensitive); reads are unaffected",
           "label": "Allowed Subreddits",
           "name": "allowed_subreddits",
           "options": null,

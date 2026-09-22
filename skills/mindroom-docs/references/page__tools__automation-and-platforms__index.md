@@ -323,13 +323,15 @@ agents:
 
 ## [`custom_api`]
 
-`custom_api` is the generic escape hatch for making HTTP requests to APIs that do not have a dedicated MindRoom tool.
+`custom_api` makes requests to public HTTP(S) APIs that do not have a dedicated MindRoom tool.
 
 ### What It Does
 
 `custom_api` exposes `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)`.
 If `base_url` is set, the tool joins it with the passed endpoint.
-If `username` and `password` are configured, the request uses HTTP Basic Auth.
+MindRoom validates the destination URL, resolved DNS addresses, and redirect destinations.
+Localhost, loopback, private-network, metadata-service, and non-HTTP(S) destinations are rejected; this tool has no opt-in for private or local access.
+If both `username` and `password` are nonempty, the request uses HTTP Basic Auth.
 If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to the default headers.
 Per-call headers are merged on top of configured default headers.
 The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`.
@@ -370,7 +372,7 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 ### Notes
 
 - If `base_url` is omitted, `endpoint` must be a full URL.
-- If both Basic Auth and `api_key` are configured, the request will send both the `Authorization: Bearer ...` header and the Basic Auth credentials because the wrapper does not treat them as mutually exclusive modes.
+- A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
 - `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 
 ## Related Docs
