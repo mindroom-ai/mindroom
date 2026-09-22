@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="claude_agent",
+    requires_primary_runtime=True,
     display_name="Claude Agent SDK",
     description="Run persistent Claude coding sessions with tool-use and subagents",
     category=ToolCategory.DEVELOPMENT,

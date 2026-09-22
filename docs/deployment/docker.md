@@ -195,8 +195,10 @@ Size and monitor the volume for lifetime callback growth, and use the inspection
 When configured, `coding`, `docker`, `file`, `python`, and `shell` tool calls can be proxied to a separate **sandbox-runner** sidecar container.
 The sidecar runs the same image but without access to secrets, credentials, or the primary data volume.
 This provides real process-level isolation for code-execution tools.
-In a simple local static-runner install with no proxy URL, execution tools continue to run in the MindRoom process.
-When routing is explicitly requested or a dedicated worker backend is configured, misconfigured worker routing fails closed instead of silently falling back to the primary runtime.
+In a simple local static-runner install with no proxy URL and no YAML or environment settings requesting worker routing, execution tools run in the MindRoom process.
+Explicit YAML worker lists take precedence over environment execution modes.
+Requested routing fails closed when its backend is misconfigured, subject to the static runner's explicit `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` fallback.
+Dedicated Docker and Kubernetes workers do not allow that fallback.
 
 See [Sandbox Proxy Isolation](sandbox-proxy.md) for full documentation including Docker Compose examples, Kubernetes shared-sidecar and dedicated-worker modes, host-machine-with-container mode, credential leases, and environment variable reference.
 

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 @register_tool_with_metadata(
     name="fal",
+    worker_inert_agent_functions=("generate_media", "image_to_image"),
     display_name="Fal",
     description="AI model serving platform for media generation (images and videos)",
     category=ToolCategory.DEVELOPMENT,  # others category maps to DEVELOPMENT
