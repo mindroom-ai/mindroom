@@ -364,6 +364,8 @@ async def emit_collect(
                 _bind_hook_context(registry, hook, context),
             )
             invocation = await _invoke_hook(hook, hook_context)
+            if not invocation.succeeded:
+                return []
             return _normalize_collector_result(invocation.value, hook_context)
 
     results = await asyncio.gather(*(run_hook(hook) for hook in hooks))

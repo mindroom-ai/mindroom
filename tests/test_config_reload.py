@@ -61,7 +61,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from mindroom.message_target import MessageTarget
 
@@ -2740,7 +2740,10 @@ async def test_router_updates_rooms_on_config_reload(
         _config: Config,
         _runtime_paths: object,
         _conversation_reader: object,
+        *,
+        config_provider: Callable[[], Config | None] | None = None,
     ) -> int:
+        del config_provider
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
@@ -3100,7 +3103,10 @@ async def test_room_membership_state_after_config_update(  # noqa: C901, PLR0915
         _config: Config,
         _runtime_paths: object,
         _conversation_reader: object,
+        *,
+        config_provider: Callable[[], Config | None] | None = None,
     ) -> int:
+        del config_provider
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

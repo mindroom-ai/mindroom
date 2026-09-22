@@ -146,7 +146,7 @@ async def _retry_prepared_room_message_after_sync_recovery(
             return None
 
 
-async def _send_prepared_room_message(
+async def _send_prepared_room_message(  # noqa: C901 - recheck write authority for initial sends and retries
     client: nio.AsyncClient,
     room_id: str,
     content_sent: dict[str, Any],
@@ -156,10 +156,13 @@ async def _send_prepared_room_message(
     operation: str,
     retry_sync_recovery: bool,
     transaction_id: str | None = None,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> object | None:
     """Send one prepared Matrix room message and normalize local delivery exceptions."""
 
     async def send_once() -> object | None:
+        if write_allowed is not None and not write_allowed():
+            return None
         if cache_bypass:
             access_token = client.access_token
             if not access_token:
@@ -448,6 +451,7 @@ async def send_message_outcome(
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
     content_is_prepared: bool = False,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> MatrixSendOutcome:
     """Send a message to a Matrix room and return the delivered payload or a typed failure.
 
@@ -500,6 +504,7 @@ async def send_message_outcome(
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,
+        write_allowed=write_allowed,
     )
     if response is None:
         emit_timing_event(
@@ -564,6 +569,7 @@ async def send_message_result(
     operation: str = "send_message",
     retry_sync_recovery: bool = False,
     transaction_id: str | None = None,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send a message to a Matrix room and return the exact delivered payload."""
     outcome = await send_message_outcome(
@@ -574,6 +580,7 @@ async def send_message_result(
         operation=operation,
         retry_sync_recovery=retry_sync_recovery,
         transaction_id=transaction_id,
+        write_allowed=write_allowed,
     )
     return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 

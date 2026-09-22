@@ -8,7 +8,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - **Core MindRoom** (`src/mindroom/`) - AI agent orchestration system with Matrix integration
 - **SaaS Platform** (`saas-platform/`) - Kubernetes-based platform for hosting MindRoom instances
   - Platform Backend (FastAPI) - API server for subscriptions, instances, SSO
-  - Platform Frontend (Next.js 15) - Dashboard for managing instances
+  - Platform Frontend (Next.js 16) - Dashboard for managing instances
   - Instance deployment via Helm charts
 
 ## Latest Frontier Models
@@ -40,7 +40,8 @@ Coding model training data often lags recent releases, so never trust memorized 
 
 Model IDs were checked against provider catalogs on September 10, 2026.
 OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
-DeepSeek direct API aliases remain `deepseek-v4-flash` and `deepseek-v4-pro`; do not substitute the OpenRouter V4.1 ID on the direct API.
+For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
+The older `deepseek-v4-flash` name remains accepted as a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 
 For `anthropic`, prefer `claude-sonnet-5`, `claude-opus-5`, and `claude-haiku-4-5` unless you intentionally need a pinned snapshot ID.
 Use `claude-fable-5-1` when you need Anthropic's highest available capability.
@@ -94,6 +95,8 @@ Matrix sync callback
 | `orchestrator.py` | MultiAgentOrchestrator - boots agents, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (config update plans, plugin watch, rooms, runtime) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
+| `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
+| `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `event_loop_stall.py` | Native-thread event-loop stall detector that logs the blocking stack |
 | `runtime_resolution.py` | Authoritative runtime resolution for one agent materialization |
@@ -141,6 +144,7 @@ Matrix sync callback
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
+| `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
@@ -157,6 +161,7 @@ Matrix sync callback
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
+| `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `routing_judgment.py` | Opt-in bounded System One responder selection, with explicit no-fit outcomes and existing LLM routing fallback |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
@@ -178,6 +183,7 @@ Matrix sync callback
 | `scheduling_executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
 | `tools/` | 100+ tool integrations |
+| `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | AI response generation, streaming, and Matrix run metadata |
 | `model_loading.py` | Model instantiation and provider-specific loader selection |
@@ -205,8 +211,10 @@ Matrix sync callback
 | `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
 | `matrix/room_cleanup.py` | Orphaned bot cleanup from rooms |
+| `matrix/personal_rooms.py` | Target-agent service for eligible personal-room creation, ownership checks, invitations, and recoverable welcome delivery |
+| `matrix/personal_room_store.py` | Durable per-requester room ownership, operator adoption attestations, welcome receipts, and cleanup retention |
 | `matrix/event_info.py` | Event metadata parsing |
-| `matrix/reply_chain.py` | Reply chain context management |
+| `matrix/thread_membership.py` | Canonical Matrix thread identity and transitive relation membership |
 | `matrix/identity.py` | Matrix ID parsing and utilities |
 | `matrix/mentions.py` | Matrix mention formatting |
 | `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |
@@ -281,8 +289,8 @@ Matrix sync callback
 
 **Persistent state** lives under `mindroom_data/` by default (next to `config.yaml`, overridable via `MINDROOM_STORAGE_PATH`):
 - `agents/*/sessions/` and `teams/*/sessions/` – SQLite event history for Agno conversations, optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `learning/` – Per-agent Agno Learning preference data
-- `chroma/` – ChromaDB storage backing the memory system
+- `agents/*/learning/` – Per-agent Agno Learning data when learning is enabled
+- `agents/*/chroma/` – Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` – Knowledge base vector stores for file-backed RAG
 - `tracking/` – Durable handled-turn ledger plus exact callback obligations and compact terminal tombstones
 - `credentials/` – JSON secrets synchronized from `.env`
@@ -291,9 +299,12 @@ Matrix sync callback
 - `logs/` – Log files
 - `matrix_state.yaml` – Matrix sync state
 
+These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
+`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
+
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`
-- **Platform Frontend**: Next.js 15 with centralized API client in `saas-platform/platform-frontend/src/lib/api.ts`
+- **Platform Frontend**: Next.js 16 with centralized API client in `saas-platform/platform-frontend/src/lib/api.ts`
 - **Authentication**: SSO via HttpOnly cookies across subdomains
 - **Deployment**: Kubernetes with Helm charts, dual-mode support (platform/standalone)
 - **Database**: Supabase with comprehensive RLS policies
@@ -305,7 +316,7 @@ Matrix sync callback
 | `src/mindroom/` | Core agent runtime (Matrix orchestrator, routing, memory, tools) |
 | `frontend/` | Core MindRoom dashboard (Vite + React) |
 | `saas-platform/platform-backend/` | SaaS control-plane API (FastAPI) |
-| `saas-platform/platform-frontend/` | SaaS portal UI (Next.js 15) |
+| `saas-platform/platform-frontend/` | SaaS portal UI (Next.js 16) |
 | `saas-platform/supabase/` | Supabase migrations, policies, seeds |
 | `cluster/` | Terraform + Helm for hosted deployments |
 | `local/` | Docker Compose helpers for local dev stacks |
@@ -531,17 +542,24 @@ Design migrations around that assumption rather than adding machinery to coordin
 Use this when you want a full local Matrix stack with the Python backend running on the host (not in Docker).
 
 1) Start/refresh Matrix (Synapse + Postgres + Redis)
+Stop the host backend before resetting.
+The optional reset deletes this Compose project's containers, networks, and volumes, including local accounts, rooms, messages, and media; it also removes the selected runtime's `matrix_state.yaml` and repository `tmp/`.
 ```bash
-# Optional if switching between remote and local homeservers
+# Optional destructive reset of the local development homeserver
 just local-matrix-reset
 just local-matrix-up
 curl -s http://localhost:8008/_matrix/client/versions | head -c 200
 ```
 
-2) If you see login errors (M_FORBIDDEN) or changed homeserver, clear local Matrix state
+Reset uses the same config discovery and storage resolver as `mindroom run`, including `MINDROOM_CONFIG_PATH`, `MINDROOM_STORAGE_PATH`, and the selected config's `.env`.
+If the backend uses `--config` or `--storage-path`, supply the matching `MINDROOM_CONFIG_PATH` or `MINDROOM_STORAGE_PATH` when resetting.
+Run these commands from the repository root; relative environment paths use that directory, while a relative storage path in `.env` uses the selected config directory.
+
+2) If you see login errors (M_FORBIDDEN) or changed homeserver, stop the backend and clear the selected runtime's Matrix state
 ```bash
-rm -f mindroom_data/matrix_state.yaml
+uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
 ```
+This uses the same environment selection as the reset; a hardcoded `mindroom_data/matrix_state.yaml` only covers default storage beside the repository's config.
 
 3) Ensure local OpenAI-compatible server is running on port 9292
 ```bash
@@ -620,18 +638,29 @@ bun install && bun run dev
 ```
 
 #### Deployment
+Run these commands from the repository root.
+For staging, copy the example values and fill in the Supabase, Stripe, and provisioner credentials before running Helm.
+This chart-managed Secret workflow also stores credentials in Helm release history; restrict access to the release Secrets as well as the populated values file.
+See [Platform Deployment](docs/deployment/kubernetes.md#platform-deployment) for credential retention and the existing external-Secret option.
+The `domain` value selects ingress hosts; the namespace alone does not select staging domains.
+For a fresh staging install, store Helm release records in `staging`; the chart creates application resources in `mindroom-staging`, matching the Terraform namespace layout.
+For an existing release, retain its original release name and namespace.
+
 ```bash
 # Set kubeconfig path
 export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
-# Deploy platform
-helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values.yaml --namespace mindroom-staging
+# Prepare staging values (keep the populated file private)
+cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-staging.yaml
+# Fill in credentials before deploying
+helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/values-staging.yaml --namespace staging --create-namespace
 
-# Deploy instance - ALWAYS use the provisioner API:
-./cluster/scripts/mindroom-cli.sh provision 1
+# Create customer instances through the portal or authenticated POST /my/instances/provision.
+# See docs/deployment/kubernetes.md for the customer and operator API flows.
+# The CLI provision <id> command sends fixed test metadata; use only with existing test fixtures.
 
-# The provisioner handles everything:
-# - Creates database records
+# The provisioner:
+# - Creates new database records or updates an existing instance
 # - Manages secrets securely
 # - Deploys via Helm with proper values
 # - Tracks status
@@ -682,8 +711,9 @@ helm upgrade --install platform ./cluster/k8s/platform -f cluster/k8s/platform/v
 
 ### Step 6: Viewing the Widget
 
-- **Taking Screenshots**: To view the dashboard without Jupyter, use `uv run python frontend/take_screenshot.py` from the project root.
-- **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `bun run screenshot` in another terminal.
+- **Taking Screenshots**: With the bundled dashboard running at `http://localhost:8765`, use `uv run python frontend/take_screenshot.py` from the project root.
+- **Manual Screenshot**: From the frontend directory, run `bun run dev` to start the development server, then run `DEMO_URL=http://localhost:3003 bun run screenshot` in another terminal.
+  Replace `3003` with the configured `FRONTEND_PORT` when using a different development port.
 - **Screenshot Location**: Screenshots are saved to `frontend/screenshots/` with timestamps.
 - **Use Cases**: This is helpful for visual verification, documentation, and sharing the dashboard appearance.
 
@@ -696,6 +726,7 @@ just local-matrix-up              # Boot Synapse + Postgres dev stack
 just local-platform-compose-up    # Full SaaS sandbox
 
 # Testing (IMPORTANT: enter the Node.js 24 `nix-shell shell.nix` first on NixOS hosts)
+# Recipe regression tests require just; shell.nix and CI install it.
 # If `uv run pytest` fails with 'module mindroom has no attribute bot',
 # use the repo dev shell so `libstdc++.so.6` is available:
 nix-shell shell.nix
@@ -796,7 +827,9 @@ matty thread-reply "test_room" t1 "@research find information about X"
 - **Message handles**: Use m1, m2, m3 to reference messages
 - **Thread IDs**: Use t1, t2, t3 to reference threads (persistent across sessions)
 - **Output formats**: Add `--format json` for machine-readable output
-- **Streaming responses**: If you see "⋯" in agent messages, they're still typing. Agents stream responses by editing messages, which may take 10+ seconds to complete. Re-check the thread after waiting.
+- **Streaming responses**: Agents stream responses by editing messages, which may take 10+ seconds to complete.
+  Inspect the latest `io.mindroom.stream_status` in a client or event view that exposes it: `pending` and `streaming` indicate progress, and `completed` confirms successful completion.
+  Record `cancelled` or `error` as terminal outcomes; body ellipses are not a completion signal.
 
 ## 5. Quick Reference
 
@@ -827,25 +860,23 @@ Inspect agent traces under `<session-storage-root>/agents/<agent>/sessions/<agen
 
 ## 6. Releases
 
-Use `gh release create` to create releases. The tag is created automatically.
+Pushes to `main` run `.github/workflows/calver-auto-release.yml`, except pushes that only change `macos/appcast.xml`.
+The workflow serializes CalVer release creation and dispatches publishers only after confirming that the release tag points to the run's commit.
+It dispatches these workflows from `main`, passing the release tag as `release_ref`:
+
+- `build-mindroom.yml`: MindRoom container images.
+- `build-platform.yml`: Platform container images.
+- `publish-helm-charts.yml`: Helm charts.
+- `release.yml`: Python package and macOS desktop artifacts.
+
+Check the release workflow and publisher runs before retrying a failed publication.
+To retry one publisher for an existing intended release tag, use its workflow filename and pass that same tag as `release_ref`:
 
 ```bash
-# IMPORTANT: Ensure you're on latest origin/main before releasing!
-git fetch origin
-git checkout origin/main
-
-# Check current version
-git tag --sort=-v:refname | head -1
-
-# Create release (minor version bump: v0.2.2 -> v0.3.0)
-gh release create v0.3.0 --title "v0.3.0" --notes "release notes here"
+gh workflow run build-mindroom.yml --ref main --field release_ref='<existing-release-tag>'
 ```
 
-Versioning:
-- **Patch** (v0.2.2 -> v0.2.3): Bug fixes
-- **Minor** (v0.2.3 -> v0.3.0): New features, non-breaking changes
-
-Write release notes manually describing what changed. Group by features and bug fixes.
+Replace the example workflow with the publisher that needs recovery and the placeholder with the existing release tag.
 
 # Important Instruction Reminders
 Do what has been asked; nothing more, nothing less.

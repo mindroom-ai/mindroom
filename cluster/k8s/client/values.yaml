@@ -84,6 +84,7 @@ serviceWorker:
   enabled: true
   # Root-relative sibling application paths that the PWA navigation fallback
   # must leave to the network. Requires client support for runtime exclusions.
+  # The client honors only the first eight distinct valid prefixes; later entries are ignored.
   navigationFallbackExcludePaths: []
 
 # Serve a cleanup service worker at the origin-root /sw.js.
@@ -96,6 +97,17 @@ serviceWorker:
 # Requires a basePath other than /.
 rootServiceWorkerCleanup:
   enabled: false
+
+# Recover from an expired reverse-proxy browser session before the client
+# receives an authentication response that it cannot distinguish from logout.
+authenticationRecovery:
+  enabled: false
+  # Same-origin endpoint the native client bootstrap probes.
+  # The chart-managed nginx probe remains fixed at /authentication-recovery-probe.
+  probeUrl: /authentication-recovery-probe
+  # Leave empty to navigate back to the basePath application root.
+  navigationUrl: ""
+  timeoutMs: 5000
 
 # Client config.json.
 config:

@@ -84,7 +84,9 @@ serviceWorker:
     - /other-app
 ```
 
-Each prefix excludes its exact path and descendants without excluding similarly named client routes.
+The client honors only the first eight distinct valid navigation-exclusion prefixes; later entries are ignored.
+Each retained prefix excludes its exact path and descendants without excluding similarly named client routes.
+Use a shared parent prefix only when excluding that entire subtree is appropriate.
 Use a MindRoom Chat release that supports runtime navigation exclusions.
 
 A Matrix client that previously controlled the origin root is a known footgun: its root-scoped service worker keeps serving the old app for every path on the origin, including the new base path.
@@ -100,6 +102,31 @@ rootServiceWorkerCleanup:
 
 The cleanup worker requires a `basePath` other than `/`, because at the origin root `/sw.js` is the client's own service worker.
 Once stale clients have cycled through the cleanup worker, the flag can be disabled again.
+
+## Reverse-Proxy Authentication Recovery
+
+Enable the native client recovery bootstrap when a reverse proxy protects the client and its application routes:
+
+```yaml
+authenticationRecovery:
+  enabled: true
+  probeUrl: /authentication-recovery-probe
+  navigationUrl: ""
+  timeoutMs: 5000
+```
+
+The default navigation URL is the `basePath` application root, including its trailing slash.
+The probe and navigation URLs must be safe same-origin root-relative references, and the timeout must be an integer from 1000 through 30000 milliseconds.
+The chart serves the image's native `authentication-recovery.js` asset and a fixed `/authentication-recovery-probe` endpoint with no-store caching, then loads the asset from `/runtime-config.js` so cached application HTML also receives the recovery behavior.
+Changing `probeUrl` changes only the client bootstrap target; it does not create another nginx location.
+The selected client image must contain `/usr/share/nginx/html/authentication-recovery.js`.
+
+If an external gateway applies authentication, expose only the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes without authentication so cached application shells can load the configuration and recovery code.
+Keep `/authentication-recovery-probe`, the configured navigation target, client routes, and API routes protected.
+Enabling this option does not change gateway authentication policies.
+
+Authentication recovery requires the chart-managed nginx configuration.
+The chart rejects `authenticationRecovery.enabled: true` with `nginx.existingConfigMap` or `nginx.create: false` because an external configuration cannot silently omit the required runtime script and fixed routes.
 
 ## Extending nginx
 

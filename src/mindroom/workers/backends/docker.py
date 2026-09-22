@@ -211,7 +211,7 @@ def _host_config_contents_hash(host_config_path: Path | None) -> str:
     if host_config_path is None:
         return ""
     try:
-        _, source_digests = load_yaml_config_source_with_digests(host_config_path)
+        _, source_digests, _uses_includes = load_yaml_config_source_with_digests(host_config_path)
     except OSError as exc:
         msg = f"Failed to read Docker worker config file '{host_config_path}': {exc}"
         raise WorkerBackendError(msg) from exc

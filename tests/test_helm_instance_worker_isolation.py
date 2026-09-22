@@ -439,6 +439,70 @@ def test_runtime_chart_rejects_content_bundle_images_without_digest(image: str) 
     assert "contentBundles[0].image must be pinned by full sha256 digest" in completed.stderr
 
 
+def test_runtime_chart_native_bootstrap_runs_in_main_container() -> None:
+    """Bootstrap must use the runtime image, environment, and mounts before serving."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        "config.source=file",
+        "config.path=/app/agent_data/active/custom.yaml",
+        "config.bootstrapBundlePath=/app/agent_data/incoming",
+        "workers.backend=kubernetes",
+        release_name="mindroom-runtime",
+    )
+    deployment = _resource(docs, "Deployment", "mindroom-runtime")
+    runtime = deployment["spec"]["template"]["spec"]["containers"][0]
+    command = runtime["command"]
+    assert command[command.index("--bootstrap-config-bundle") + 1] == "/app/agent_data/incoming"
+    assert {entry["name"]: entry.get("value") for entry in runtime["env"]}["MINDROOM_CONFIG_PATH"] == (
+        "/app/agent_data/active/custom.yaml"
+    )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        ("workers.backend=kubernetes",),
+        ("config.source=file", "config.path=/app/agent_data/config.yaml", "workers.backend=kubernetes"),
+        ("config.source=file", "config.path=/app/agent_data/active/config.yaml", "workers.backend=static_runner"),
+    ],
+)
+def test_runtime_chart_rejects_unsafe_native_bootstrap(settings: tuple[str, ...]) -> None:
+    """A bootstrap must target its own writable subtree, never a ConfigMap or storage root."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        *settings,
+        "config.bootstrapBundlePath=/app/agent_data/incoming",
+    )
+    assert result.returncode != 0
+    assert "config.bootstrapBundlePath" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("source", "allowed"),
+    [
+        ("/app/agent_data/active", False),
+        ("/app/agent_data/active/../active/", False),
+        ("/app/agent_data", False),
+        ("/", False),
+        ("/app/agent_data/active/incoming", False),
+        ("/app/agent_data/active-copy", True),
+        ("/app/agent_data/act", True),
+    ],
+)
+def test_runtime_chart_checks_bootstrap_path_boundaries(source: str, allowed: bool) -> None:
+    """Bootstrap paths cannot overlap after normalization; shared name prefixes remain valid."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "config.source=file",
+        "config.path=/app/agent_data/active/config.yaml",
+        f"config.bootstrapBundlePath={source}",
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    if not allowed:
+        assert "overlap" in result.stderr
+
+
 def test_runtime_chart_rejects_duplicate_content_bundle_names() -> None:
     """Generated init container names must stay unique."""
     completed = _run_helm_template(
@@ -2920,6 +2984,39 @@ def test_runtime_chart_state_storage_can_create_pvc() -> None:
 
 
 @pytest.mark.parametrize(
+    ("config_path", "extra_args"),
+    [
+        ("/app/agent_data/encryption_keys/config.yaml", ()),
+        ("/app/agent_data/sync_continuity/config.yaml", ("stateStorage.syncContinuity.enabled=true",)),
+        ("/app/agent_data/active/config.yaml", ("stateStorage.encryptionKeys.mountPath=/app/agent_data/active/keys",)),
+        (
+            "/app/agent_data/active/config.yaml",
+            ("extraVolumeMounts[0].name=custom", "extraVolumeMounts[0].mountPath=/app/agent_data/active/keys"),
+        ),
+    ],
+)
+def test_runtime_chart_rejects_bootstrap_target_overlapping_mount(
+    config_path: str,
+    extra_args: tuple[str, ...],
+) -> None:
+    """Chart-known mounts must not become bootstrap target or its nested children."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        f"config.path={config_path}",
+        "config.bootstrapBundlePath=/bundle",
+        "workers.backend=kubernetes",
+        "stateStorage.enabled=true",
+        "stateStorage.existingClaim=mindroom-state",
+        *extra_args,
+        release_name="mindroom-runtime",
+    )
+    assert completed.returncode != 0
+    assert "config.path directory overlaps a mounted volume" in completed.stderr
+
+
+@pytest.mark.parametrize(
     ("conflict_args", "expected_error"),
     [
         (
@@ -3012,3 +3109,37 @@ def test_worker_manager_can_verify_absence_without_controller_write_access(chart
         if resource == "replicasets":
             assert verbs <= {"get", "list", "watch"}
         assert all("resourceNames" not in rule for rule in rules)
+
+
+@pytest.mark.parametrize("port", [5432, 6432])
+def test_runtime_event_journal_postgres_port_contract(port: int) -> None:
+    """The headless database endpoint must match its listener and health checks."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        f"eventCache.postgres.service.port={port}",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    database_name = "mindroom-runtime-event-cache-postgres"
+    database = _resource(docs, "StatefulSet", database_name)
+    postgres = _container(database, "postgres")
+    service = _resource(docs, "Service", database_name)
+    policy = _resource(docs, "NetworkPolicy", database_name)
+    runtime = _resource(docs, "Deployment", "mindroom-runtime")
+    runtime_env = _env_by_name(_container(runtime, "mindroom"))
+    secret_ref = runtime_env["MINDROOM_EVENT_CACHE_DATABASE_URL"]["valueFrom"]["secretKeyRef"]
+    secret = _resource(docs, "Secret", secret_ref["name"])
+
+    assert service["spec"]["clusterIP"] == "None"
+    assert service["spec"]["ports"] == [{"name": "postgres", "port": port, "targetPort": "postgres", "protocol": "TCP"}]
+    assert postgres["ports"] == [{"name": "postgres", "containerPort": port, "protocol": "TCP"}]
+    assert policy["spec"]["ingress"][0]["ports"] == [{"protocol": "TCP", "port": port}]
+    assert secret["stringData"][secret_ref["key"]] == (
+        f"postgresql://mindroom_cache:test-password@{database_name}:{port}/mindroom_cache"
+    )
+    assert postgres.get("args") == ["-p", str(port)]
+    for probe in ("readinessProbe", "livenessProbe"):
+        command = postgres[probe]["exec"]["command"]
+        assert command[0] == "pg_isready"
+        assert "-p" in command, f"{probe} must check the configured database port"
+        assert command[command.index("-p") + 1] == str(port)

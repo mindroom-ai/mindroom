@@ -560,7 +560,7 @@ class ConfigManagerTools(Toolkit):
         include_note = (
             "\n\n⚠️ This configuration is composed from multiple files via `!include`. "
             "Inspection shows the composed authored document, but structured patching is unavailable."
-            if len(config.source_files) > 1
+            if config.uses_includes
             else ""
         )
         return (
@@ -594,7 +594,7 @@ class ConfigManagerTools(Toolkit):
         authorization_error = self._configuration_mutation_authorization_error(config)
         if authorization_error is not None:
             return authorization_error
-        if len(config.source_files) > 1:
+        if config.uses_includes:
             return (
                 "Error: configuration is composed from multiple files via !include; "
                 f"edit the source files instead.\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"

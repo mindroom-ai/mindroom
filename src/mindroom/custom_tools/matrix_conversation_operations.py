@@ -340,11 +340,13 @@ class MatrixMessageOperations:
                 read_limit=read_limit,
             )
 
+        # Include encrypted wire events so the owned client can decrypt them
+        # before visible-message projection and edit folding.
         response = await context.client.room_messages(
             room_id,
             limit=read_limit,
             direction=nio.MessageDirection.back,
-            message_filter={"types": ["m.room.message"]},
+            message_filter={"types": ["m.room.message", "m.room.encrypted"]},
         )
         if not isinstance(response, nio.RoomMessagesResponse):
             return self._result(

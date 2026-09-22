@@ -268,7 +268,9 @@ describe("Home", () => {
         "button",
       ),
     ).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "Export config" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Export summary" }),
+    ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Back to home" }));
     expect(screen.getByRole("heading", { name: "Home" })).toBeVisible();
     expect(screen.getByLabelText("Current pathname")).toHaveTextContent(

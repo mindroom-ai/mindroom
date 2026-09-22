@@ -25,17 +25,21 @@ The router supports these configuration options:
 |--------|------|---------|-------------|
 | `model` | string | `"default"` | Model to use for ordinary routing and judgment fallback |
 | `judgment` | object or null | `null` | Optional JEV (TypeSafe) responder selection before the LLM router |
+| `access` | object or null | `null` | Membership-based responder access policy |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted room IDs are persisted, rejoined after restart, and preserved during room cleanup |
 
 Invitation patterns are matched after identity alias resolution and use the same case-sensitive wildcard semantics as responder `access.users`.
 Invitation acceptance grants room membership only and remains independent from responder access.
-The router applies its ordinary `access` policy to every interaction after joining.
+The router applies its `access` policy to every interaction after joining.
+Omitted router access resolves to `current_room_members: true` with empty room and user grants.
+Setting only `access.users` preserves that current-room-member grant; set `current_room_members: false` explicitly to remove it.
+See [Authorization](../authorization.md) for the policy fields.
 
 ## How Routing Works
 
 When a message arrives in a room without a specific agent or team mention, MindRoom first builds the eligible responder candidate set for that sender and room.
 
-1. If the thread already requires explicit targeting, MindRoom stays silent until someone mentions an agent or team
+1. If the thread requires explicit targeting, the router stays silent; eligible existing individual agents may still use the opt-in adaptive participation described below
 2. If exactly one eligible responder remains, that agent or team handles the message directly
 3. If multiple eligible responders remain, the router analyzes the message content and any recent thread context (up to 3 previous messages)
 4. Based on the candidate entities' roles, tools, and instructions, it selects the best match
@@ -190,15 +194,19 @@ The single responder handles messages directly, which is faster and more efficie
 
 ### Multi-Human Thread Protection
 
-When multiple human users have posted in a thread, the router, agents, and teams require an explicit `@mention` before responding.
-This prevents MindRoom entities from injecting themselves into human-to-human conversations.
+When multiple human users have posted in a thread, explicit `@mention` targeting is the default.
+An authorized, materializable individual agent that already replied in the thread can opt into judging an untagged turn with `agents.<name>.participation`.
+It can answer after participation approval; a decline produces no text reply, and failed checks stay quiet after any configured judgment fallback.
+A configured `decline_reaction` can acknowledge a deliberate decline.
+See [Adaptive Participation](agents.md#adaptive-participation) for eligibility and configuration.
+The router stays silent and multi-human threads do not automatically form ad-hoc teams.
 
 The rules are:
 
 1. **Mentioned eligible agents or teams respond** — an explicit `@agent` or `@team` bypasses AI routing, but room configuration and reply permissions still apply.
 2. **Non-thread messages** — a single eligible agent or team can auto-respond, regardless of how many humans are present.
 3. **Threads with one human** — normal auto-response behavior applies, so the agent or team continues the conversation.
-4. **Threads with two or more humans** — agents and teams stay silent unless explicitly mentioned.
+4. **Threads with two or more humans** — explicit targeting is required by default; eligible individual agents can use the opt-in participation exception above.
 5. **Mentioning another joined room participant** — if a message tags only joined users who are neither managed entities nor configured bot accounts, agents and teams stay silent.
 
 Mentions of unmanaged user IDs that are absent from the room or merely invited do not suppress normal routing or automatic responses.
@@ -237,5 +245,7 @@ If a message mentions only the router and no other users, agents, or teams, the 
 Mention a specific agent or team when you want that entity to answer.
 Mention multiple agents when you want an ad-hoc collaboration, or mention a configured team directly for its team workflow.
 When one human and one agent or team are already talking in a thread, continuing without an explicit tag is fine.
-Once a thread has multiple human users or multiple agent/team participants, tag the agents or teams you want next.
+Explicit tags select the agents or teams you want next.
+An untagged single-human thread can also continue an eligible ad-hoc team of previously mentioned or participating individual agents; named team IDs do not become ad-hoc members.
+Multi-human threads use the explicit-targeting default and opt-in individual participation described above.
 In a new untagged message, automatic routing can still choose an agent or team when that is appropriate.

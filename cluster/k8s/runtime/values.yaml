@@ -89,6 +89,10 @@ config:
   # file reads an absolute path that already exists in the runtime filesystem, commonly copied by contentBundles.
   source: configMap
   path: ""
+  # Optional source directory for native initialize-only installation before run.
+  # Requires source: file and path inside its own directory below storage.mountPath.
+  # contentBundles can transport files here; initialization runs in the runtime image.
+  bootstrapBundlePath: ""
   create: true
   existingConfigMap: ""
   key: config.yaml
@@ -122,6 +126,7 @@ eventCache:
       tag: "17"
       pullPolicy: IfNotPresent
     service:
+      # Shared by the PostgreSQL listener, probes, Service, and generated connection URL.
       port: 5432
       annotations: {}
     auth:

@@ -97,7 +97,11 @@ Reusable triggers use Ed25519 signatures and caller-chosen stable event IDs.
 
 Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record UID for replay protection.
 
-Single-use triggers are consumed only after Matrix delivery succeeds, so a failed delivery can be retried without minting a new callback.
+Single-use triggers are consumed after Matrix delivery succeeds and local replay state is recorded, so a failed delivery can be retried without minting a new callback.
+
+A failed HTTP request can occur after Matrix accepted the message but before local replay state or trigger consumption was saved.
+If the trigger remains unconsumed, a retry after its 24-hour replay claim expires can deliver the message again.
+Single-use capability consumption is not an exactly-once delivery guarantee.
 
 The public external trigger manager creates reusable triggers, while `callback_manager.mint_callback` creates single-use triggers bound to the current agent, room, and thread.
 
@@ -166,6 +170,8 @@ Each request uses one immutable trigger snapshot.
 That snapshot includes the record version, auth mode, target, authentication material, policy-capped replay window, policy-capped body size, and current API config generation.
 
 The API authenticates the signature or bearer capability, parses the body, checks current owner authorization, checks target runtime readiness, checks live owner membership in the target room, claims replay state, then dispatches.
+The owner's canonical Matrix ID or a configured human alias must be in the live joined-member roster; configured bot accounts and managed identities do not count as human aliases.
+If the live roster cannot be fetched, the request is rejected before replay state is claimed.
 
 Target runtime readiness requires both the router and target bot to be running and joined to the resolved target room.
 

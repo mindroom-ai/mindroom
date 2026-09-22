@@ -60,8 +60,8 @@ models:
 Each model entry supports these fields:
 - **provider** (required) - Provider name (see list below)
 - **id** (required) - Model ID specific to the provider
-- **host** - Optional host URL (e.g., for Ollama or OpenAI-compatible servers)
-- **extra_kwargs** - Additional provider-specific parameters (e.g., `base_url`)
+- **host** - Optional host URL for Ollama.
+- **extra_kwargs** - Additional provider-specific parameters; set `extra_kwargs.base_url` for an OpenAI-compatible server.
 - **context_window** - Actual provider context window size in tokens; when set, MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction config sets a smaller `replay_window_tokens`, and applies a final replay-fit step that may reduce or disable persisted replay for that run; on `vertexai_claude` models it additionally enables request-time fitting that trims replayed history when a request would exceed the window
 
 ### Supported Providers
@@ -348,7 +348,7 @@ matrix_space:
 ```
 
 Managed-room `invite_users` are invited to the root Space without receiving root Space admin power.
-Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+The runtime preserves existing Space admins without adding human admins; managing Space children in a Matrix client requires sufficient existing Matrix power in that Space.
 
 ## Defaults Configuration
 
@@ -447,7 +447,7 @@ Below is a representative selection:
 ### Research & Information Tools
 - **arxiv** - Search academic papers
 - **duckduckgo** - Web search
-- **googlesearch** - Google search (requires API key)
+- **googlesearch** - Search through DDGS (no API key required).
 - **tavily** - AI-powered search (requires API key)
 - **exa** - Neural search API (requires API key)
 - **wikipedia** - Encyclopedia lookup
@@ -589,7 +589,6 @@ To interact with an agent:
 Some tools need additional setup:
 
 ### Tools requiring API keys:
-- **googlesearch** - Set up Google API credentials
 - **tavily** - Get API key from Tavily
 - **exa** - Get API key from Exa
 - **telegram** - Create a Telegram bot and get token

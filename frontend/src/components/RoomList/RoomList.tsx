@@ -63,7 +63,6 @@ export function RoomList() {
       icon={Home}
       items={rooms as RoomListItem[]}
       selectedId={selectedRoomId || undefined}
-      onItemSelect={selectRoom}
       onCreateItem={handleCreateRoom}
       renderItem={renderRoom}
       showSearch={true}

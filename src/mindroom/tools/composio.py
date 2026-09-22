@@ -1,15 +1,14 @@
 """Composio tool configuration."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.vendor_telemetry import disable_vendor_telemetry
 
 if TYPE_CHECKING:
-    from composio_agno import ComposioToolSet
+    from agno.tools import Toolkit
 
 
 @register_tool_with_metadata(
@@ -22,6 +21,14 @@ if TYPE_CHECKING:
     icon="FaConnectdevelop",
     icon_color="text-blue-600",
     config_fields=[
+        ConfigField(
+            name="actions",
+            label="Actions",
+            type="string[]",
+            required=True,
+            placeholder="GITHUB_GET_THE_AUTHENTICATED_USER",
+            description="Nonempty list of Composio action IDs to expose to the agent",
+        ),
         # Authentication/Connection parameters first
         ConfigField(
             name="api_key",
@@ -161,42 +168,69 @@ if TYPE_CHECKING:
     dependencies=["composio-agno"],
     docs_url="https://docs.agno.com/tools/toolkits/others/composio",
     supports_toolkit_filters=False,
-    function_names=(
-        "check_connected_account",
-        "create_integration",
-        "create_trigger_listener",
-        "delete_trigger",
-        "execute_action",
-        "execute_request",
-        "fetch_expected_integration_params",
-        "find_actions_by_tags",
-        "find_actions_by_use_case",
-        "get_action",
-        "get_action_schemas",
-        "get_active_triggers",
-        "get_agent_instructions",
-        "get_app",
-        "get_apps",
-        "get_auth_params",
-        "get_auth_scheme_for_app",
-        "get_auth_schemes",
-        "get_connected_account",
-        "get_connected_accounts",
-        "get_entity",
-        "get_expected_params_for_user",
-        "get_integration",
-        "get_integrations",
-        "get_tools",
-        "get_trigger",
-        "get_trigger_config_scheme",
-        "initiate_connection",
-        "set_workspace_id",
-        "validate_tools",
-    ),
 )
-def composio_tools() -> type[ComposioToolSet]:
-    """Return Composio tools for accessing 1000+ integrations."""
+def composio_tools() -> "type[Toolkit]":
+    """Return selected Composio actions as an Agno toolkit."""
+    from agno.tools import Toolkit
+    from composio import AppType
+    from composio.tools.env.base import WorkspaceConfigType
+    from composio.tools.toolset import MetadataType, ProcessorsType
+    from composio.utils.logging import LogLevel
     from composio_agno import ComposioToolSet
 
     disable_vendor_telemetry()
-    return ComposioToolSet
+
+    class MindRoomComposioTools(Toolkit):
+        """Expose the SDK's selected action functions to MindRoom consumers."""
+
+        def __init__(
+            self,
+            actions: list[str] | None = None,
+            *,
+            api_key: str | None = None,
+            base_url: str | None = None,
+            entity_id: str = "default",
+            workspace_id: str | None = None,
+            workspace_config: WorkspaceConfigType | None = None,
+            metadata: MetadataType | None = None,
+            processors: ProcessorsType | None = None,
+            logging_level: LogLevel = LogLevel.INFO,
+            output_dir: Path | None = None,
+            output_in_file: bool = False,
+            verbosity_level: int | None = None,
+            allow_tracing: bool = False,
+            connected_account_ids: dict[AppType, str] | None = None,
+            max_retries: int = 3,
+            lockfile: Path | None = None,
+            lock: bool = True,
+            **kwargs: Any,  # noqa: ANN401 - forwards metadata-selected SDK constructor kwargs.
+        ) -> None:
+            if not actions:
+                msg = "Composio requires a nonempty actions list."
+                raise ValueError(msg)
+            super().__init__(name="composio")
+            toolset = ComposioToolSet(
+                api_key=api_key,
+                base_url=base_url,
+                entity_id=entity_id,
+                workspace_id=workspace_id,
+                workspace_config=workspace_config,
+                metadata=metadata,
+                processors=processors,
+                logging_level=logging_level,
+                output_dir=output_dir,
+                output_in_file=output_in_file,
+                verbosity_level=verbosity_level,
+                allow_tracing=allow_tracing,
+                connected_account_ids=connected_account_ids,
+                max_retries=max_retries,
+                lockfile=lockfile,
+                lock=lock,
+                **kwargs,
+            )
+            for toolkit in cast("list[Toolkit]", toolset.get_tools(actions=actions)):
+                # Preserve SDK entrypoints and their deferred schema processing.
+                self.functions.update(toolkit.functions)
+                self.async_functions.update(toolkit.async_functions)
+
+    return MindRoomComposioTools

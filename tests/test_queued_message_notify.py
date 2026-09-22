@@ -4633,7 +4633,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
 @pytest.mark.parametrize("selection", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("reaction", [None, "👀"])
-async def test_response_runner_binds_agent_mid_turn_judge(
+async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -4654,7 +4654,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(
         if enabled
         else None
     )
-    judge = ParticipationModel(ModelResponse(content='{"decision": true}'))
+    judge = ParticipationModel(ModelResponse(content='{"decision": false}'))
     monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
     envelope = _envelope(target=MessageTarget.resolve("!room:localhost", "$thread", "$event"))
     prompt = "Question: Install the dependency?\nSelected option: yes (install)" if selection else "hello"
@@ -4669,6 +4669,19 @@ async def test_response_runner_binds_agent_mid_turn_judge(
         thread_history=[],
         response_envelope=envelope,
         payload_preparation=preparation if pending_media else None,
+    )
+    monkeypatch.setattr(
+        runner.deps.resolver,
+        "fetch_thread_history",
+        AsyncMock(
+            return_value=ThreadHistoryResult(
+                [
+                    ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="Do the task", event_id="$thread"),
+                    ResolvedVisibleMessage.synthetic(sender="@user:localhost", body=prompt, event_id="$event"),
+                ],
+                is_full_history=True,
+            ),
+        ),
     )
     reservations = []
 
@@ -4699,6 +4712,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(
     agent = AgnoAgent(model=model, tools=[queue_followup], telemetry=False)
 
     async def locked_operation(_target: MessageTarget, _placeholder: object) -> str:
+        await runner._prepare_request_after_lock(replace(request, payload_preparation=None))
         note_progress("I have located the requested file")
         await agent.arun("Do the task")
         return "$response"

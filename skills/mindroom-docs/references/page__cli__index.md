@@ -166,23 +166,30 @@ Start MindRoom with your configuration.
  - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
-│                                          ERROR)                                        │
-│                                          [env var: LOG_LEVEL]                          │
-│                                          [default: INFO]                               │
-│ --config        -c              PATH     Use this config file path. Defaults the       │
-│                                          storage location to the selected config       │
-│                                          directory unless --storage-path is set.       │
-│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
-│                                          (state, sessions, tracking)                   │
-│ --api               --no-api             Start the bundled dashboard/API server        │
-│                                          alongside the bot                             │
-│                                          [default: api]                                │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
-│                                          [default: 8765]                               │
-│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
-│                                          [default: 0.0.0.0]                            │
-│ --help          -h                       Show this message and exit.                   │
+│ --log-level                -l              TEXT     Set the logging level (DEBUG,      │
+│                                                     INFO, WARNING, ERROR)              │
+│                                                     [env var: LOG_LEVEL]               │
+│                                                     [default: INFO]                    │
+│ --config                   -c              PATH     Use this config file path.         │
+│                                                     Defaults the storage location to   │
+│                                                     the selected config directory      │
+│                                                     unless --storage-path is set.      │
+│ --storage-path             -s              PATH     Base directory for persistent      │
+│                                                     MindRoom data (state, sessions,    │
+│                                                     tracking)                          │
+│ --bootstrap-config-bundle                  PATH     Initialize the selected config     │
+│                                                     directory from this bundle only    │
+│                                                     when the directory is absent.      │
+│ --api                          --no-api             Start the bundled dashboard/API    │
+│                                                     server alongside the bot           │
+│                                                     [default: api]                     │
+│ --api-port                                 INTEGER  Port for the bundled dashboard/API │
+│                                                     server                             │
+│                                                     [default: 8765]                    │
+│ --api-host                                 TEXT     Host for the bundled dashboard/API │
+│                                                     server                             │
+│                                                     [default: 0.0.0.0]                 │
+│ --help                     -h                       Show this message and exit.        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -697,6 +704,7 @@ mindroom threads export --url http://127.0.0.1:9000 --storage-path mindroom_data
 ## journal
 
 Inspect and rebind the durable event journal.
+See [Event Journal configuration](https://docs.mindroom.chat/configuration/#event-journal) for backend selection, the SQLite location, and PostgreSQL URL resolution.
 
 The event journal is the database that holds turn deduplication, delivery ownership, and recovery ownership.
 Every install is bound to exactly one, and MindRoom refuses to start against any other one, because using a stranger's journal does not fail — it answers every question confidently and about somebody else's history.
@@ -769,7 +777,7 @@ For a quiesced migration:
 
 1. Stop MindRoom, and any `mindroom threads export --watch` running against the same storage root.
 2. Copy or dump-and-restore the database in full.
-3. Point `event_journal` at the new location.
+3. Configure the destination PostgreSQL backend and URL, or move the SQLite journal with its storage root; SQLite always uses `<storage>/tracking/event_journal.db`.
 4. Start MindRoom. No adoption is needed, because the generation travelled with the data.
 
 Adopt instead of copying only when you accept beginning the journal's history fresh.
@@ -1050,17 +1058,19 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init            Create a starter config.yaml with a personal agent and model.          │
-│ show            Display the current config file with syntax highlighting.              │
-│ edit            Open config.yaml in your default editor.                               │
-│ validate        Validate config.yaml and check for common issues.                      │
-│ resolve         Print the fully merged config YAML with all !include tags resolved.    │
-│ path            Show the resolved config file path and search locations.               │
-│ migrate         Migrate config.yaml to membership access settings.                     │
-│ fingerprint     Print the config source SHA-256, including all transitively included   │
-│                 files.                                                                 │
-│ check-applied   Confirm config application; exit 0 applied, 1 pending/mismatch, 2      │
-│                 failed/restart-required/unavailable.                                   │
+│ init             Create a starter config.yaml with a personal agent and model.         │
+│ show             Display the current config file with syntax highlighting.             │
+│ edit             Open config.yaml in your default editor.                              │
+│ validate         Validate config.yaml and check for common issues.                     │
+│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
+│ path             Show the resolved config file path and search locations.              │
+│ migrate          Migrate config.yaml to membership access settings.                    │
+│ fingerprint      Print the config source SHA-256, including all transitively included  │
+│                  files.                                                                │
+│ install-bundle   Validate and install a complete tree; use check-applied to confirm    │
+│                  runtime reload.                                                       │
+│ check-applied    Confirm config application; exit 0 applied, 1 pending/mismatch, 2     │
+│                  failed/restart-required/unavailable.                                  │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -1181,6 +1191,83 @@ mindroom config resolve
 mindroom config resolve --path ./config.yaml
 ```
 
+### config install-bundle
+
+Install a complete configuration directory, including nested YAML includes, prompts, and its `.env`:
+
+```bash
+mindroom config install-bundle ./candidate --target ./active --json
+mindroom config install-bundle ./candidate --target ./active --initialize-only
+mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300
+# Keep each installation receipt; pin rollback to the previous revision's digest:
+mindroom config install-bundle ./active.previous --target ./active --expected-digest <previous-receipt-digest> --json
+```
+
+`--config` selects a relative file inside the bundle (default `config.yaml`).
+The installer copies into a sibling staging directory and uses the native loader for include, environment, and config validation before publication.
+Native includes must remain inside the selected config file's directory.
+Run the installer with the runtime's environment and filesystem access; external resources referenced by config are outside the bundle's drift protection.
+Relative paths resolve within the staged candidate during validation.
+Automatic config migrations affect the staged copy only.
+
+`--initialize-only` preserves any existing target directory, even when the supplied revision changes or the existing files have been edited.
+It does not validate that existing tree and returns `initialized` with no fingerprint.
+Without this flag, unchanged trees return `unchanged`.
+Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation.
+This covers `.env` and files outside the YAML include graph too.
+An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
+`--force` cannot be combined with `--initialize-only`.
+
+Successful replacement retains the complete former tree at `TARGET.previous`.
+Invalid candidates and failed copies leave active and previous trees untouched.
+Symlinks and special files are rejected.
+Mounts at or inside active and recovery trees are rejected before rotation or cleanup, including with `--force`.
+Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
+
+Rollback uses the same validated installation operation with `TARGET.previous` as its source.
+Keep each installation receipt and pass the previous revision's `digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
+The rejected active revision then becomes the new previous tree.
+Repeating the pinned rollback after a lost receipt fails safely instead of toggling back to the rejected revision.
+The native fingerprint alone cannot distinguish revisions that only change `.env` or unrelated assets.
+The guard can pin any mutable candidate source.
+If the active revision has since been authored, rollback also requires explicit `--force`.
+A failed or missing runtime receipt does not automatically roll back filesystem state.
+
+For startup, `mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` runs initialize-only installation before loading the runtime environment.
+The target directory is derived from the selected config path, and the source must contain the same config filename at its root.
+Validation reads the staged `.env`, with exported process values and explicit `--storage-path` taking precedence.
+Startup then resolves paths and `.env` again from the installed tree.
+Existing target directories are preserved, so changed source revisions never overwrite authored edits on restart.
+Keep storage outside this dedicated config directory.
+
+**Filesystem limits:** directory replacement uses two renames on the target filesystem.
+Readers can briefly see a missing target between renames, but never a partly copied tree.
+This is not a transaction across concurrent reads or external writers, nor a power-loss durability guarantee.
+Installer calls serialize using a sibling lock.
+A failed publication rename restores the former active tree.
+Interrupted operations leave complete trees at `.TARGET.pending` and `.TARGET.retired`; `.TARGET.transaction` records whole-tree content digests and persists ownership of `TARGET.previous` between installations.
+Journal updates use atomic replacement; partial writes preserve the prior record.
+Recovery accepts copied or restored trees with identical file names, modes, and bytes, even on another mount; it rejects changed previous or recovery contents.
+Reserved regular `.mindroom-bundle.json` metadata is excluded from these digests, but links and special files are always rejected.
+This verifies preserved content, not filesystem object identity.
+Hashing previous and recovery trees adds filesystem reads during installation and bootstrap.
+Retry the command to recover before proceeding.
+Do not manually modify these reserved recovery paths.
+If retired cleanup deletes some files before failing, its content no longer matches the journal; retry fails closed and requires manual inspection.
+A process killed while copying may leave an unused `.TARGET.stage-*` directory for manual cleanup.
+The target must be a directory below a writable mount, not the mount point itself.
+
+JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, and `recovery_pending`.
+The whole-tree `digest` identifies file names, modes, and contents, excluding installer metadata; initialize-only preservation returns no digest or fingerprint.
+Exit `0` confirms filesystem installation or preservation; exit `2` reports an installation error.
+An `installed` receipt with `recovery_pending: true` means publication succeeded but previous-tree rotation or cleanup needs a retry.
+A failure writing the receipt after publication does not undo activation; retrying an immutable source is idempotent.
+Pin mutable rollback sources as above.
+The fingerprint identifies native YAML/include sources, so use the existing `check-applied` command to confirm runtime application.
+The installer advances the root config mtime on changed activation for the existing watcher.
+Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
+Preserve `TARGET.previous` until runtime confirmation succeeds.
+
 ### config fingerprint and config check-applied
 
 Confirm that the running runtime finished applying a particular config source:
@@ -1251,7 +1338,7 @@ mindroom connect \
 
 ## local-stack-setup
 
-Start local Synapse and the MindRoom Chat client container for development.
+Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
 By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
 
@@ -1276,9 +1363,9 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │ --synapse-dir                                 PATH                 Directory           │
 │                                                                    containing Synapse  │
 │                                                                    docker-compose.yml  │
-│                                                                    (from               │
-│                                                                    mindroom-stack      │
-│                                                                    settings).          │
+│                                                                    (core MindRoom      │
+│                                                                    repo:               │
+│                                                                    local/matrix).      │
 │                                                                    [default:           │
 │                                                                    local/matrix]       │
 │ --homeserver-url                              TEXT                 Homeserver URL that │
@@ -1483,10 +1570,12 @@ mindroom run --storage-path /data/mindroom
 mindroom connect --pair-code ABCD-EFGH
 ```
 
-### Start local Synapse + Cinny (default local setup)
+### Start local Synapse + MindRoom Chat (development)
+
+Use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 ```
 
 ### Start local stack without writing `.env`

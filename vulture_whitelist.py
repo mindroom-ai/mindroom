@@ -1,5 +1,8 @@
 # ruff: noqa: D100, B018, F821
 # Generated Vulture baseline for dynamic/framework entry points.
+_.validate_personal_rooms  # Pydantic model validator (src/mindroom/config/main.py)
+_.validate_template  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
+_.validate_commands  # Pydantic field validator (src/mindroom/config/personal_rooms.py)
 _.unique_services  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 _.normalize_domains  # Pydantic field validator (src/mindroom/tool_system/google_workspaces.py)
 desktop_native_app  # Typer dispatches the native desktop helper command (src/mindroom/cli/desktop.py)
@@ -398,3 +401,10 @@ session_status  # FastAPI Computer endpoint
 stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
+_.require_adoption_room_id  # Pydantic model validator for explicit personal-room adoption
+
+_.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically.
+# AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.
+_.scrape_website
+_.custom_scrape_website
+_._execute_query

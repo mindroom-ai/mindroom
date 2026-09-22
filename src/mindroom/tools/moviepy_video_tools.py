@@ -8,7 +8,7 @@ from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCatego
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
-    from agno.tools.moviepy_video import MoviePyVideoTools
+    from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 
 
 @register_tool_with_metadata(
@@ -61,8 +61,8 @@ if TYPE_CHECKING:
         "split_text_into_lines",
     ),
 )
-def moviepy_video_tools() -> type[MoviePyVideoTools]:
+def moviepy_video_tools() -> type[MindRoomMoviePyVideoTools]:
     """Return MoviePy Video Tools for video processing, audio extraction, and caption generation."""
-    from agno.tools.moviepy_video import MoviePyVideoTools
+    from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 
-    return MoviePyVideoTools
+    return MindRoomMoviePyVideoTools

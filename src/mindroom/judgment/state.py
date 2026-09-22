@@ -104,6 +104,7 @@ def build_judgment_request(
     messages: tuple[JudgmentMessage, ...],
     *,
     instructions: str,
+    max_context_messages: int = _MAX_CONTEXT_MESSAGES,
 ) -> JudgmentRequest:
     """Send a bounded complete text window, refusing redacted or oversized inputs."""
     criteria = _question_criteria(question)
@@ -114,7 +115,7 @@ def build_judgment_request(
     ):
         return _incomplete("missing_essential_input")
     rubric = (instructions, question.id, question.instructions, *criteria.keys(), *criteria.values())
-    if len(messages) > _MAX_CONTEXT_MESSAGES or not all(_text_is_bounded(text) for text in rubric):
+    if len(messages) > max_context_messages or not all(_text_is_bounded(text) for text in rubric):
         return _incomplete("essential_input_too_large")
     size = len(instructions.encode())
     for message in messages:

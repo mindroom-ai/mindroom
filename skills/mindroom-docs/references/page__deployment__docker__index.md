@@ -15,6 +15,18 @@ MindRoom may atomically rewrite `config.yaml` at startup when an automatic confi
 Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
 Current configs can remain read-only as shown below.
 
+Create the host data directory before starting either container recipe below.
+The image runs as UID/GID `1000:1000`, so the bind-mounted directory and any existing contents must be writable by that container identity.
+For a new data directory on Linux with rootful Docker and no user-namespace remapping:
+
+```bash
+mkdir -p ./mindroom_data
+sudo chown 1000:1000 ./mindroom_data
+```
+
+For rootless Docker or user-namespace remapping, grant access using the corresponding host UID/GID mapping or suitable ACLs.
+A bind mount hides the image directory's ownership, so the image's preconfigured permissions do not make an unwritable host directory usable.
+
 Run it with:
 
 ```bash
@@ -29,6 +41,7 @@ docker run -d \
 
 ## Docker Compose
 
+Prepare the writable `mindroom_data` directory as described above before starting this Compose service.
 Create a `docker-compose.yml`:
 
 ```yaml
@@ -124,10 +137,10 @@ The local Matrix stack includes:
 - **PostgreSQL**: Database backend
 - **Redis**: Caching layer
 
-If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
+For a host-installed backend, use `mindroom local-stack-setup` with the core MindRoom checkout's `local/matrix` directory to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 mindroom run
 ```
 
@@ -144,8 +157,8 @@ curl http://localhost:8765/api/health
 MindRoom stores data in the `mindroom_data` directory by default:
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
-- `chroma/` - ChromaDB vector store for agent/team memories
+- `agents/*/learning/` - Per-agent Agno Learning state when enabled (SQLite, persistent across restarts)
+- `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` - Knowledge base vector stores
 - `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
 - `credentials/` - Synchronized secrets from `.env`
@@ -153,7 +166,11 @@ MindRoom stores data in the `mindroom_data` directory by default:
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
+These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
+`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
+
 Keep `tracking/` on persistent storage and include it in backups.
+Include the primary storage directory in backups, with any `learning/` and Mem0 `chroma/` directories under shared-agent or resolved private-instance state roots.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
 
 Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
