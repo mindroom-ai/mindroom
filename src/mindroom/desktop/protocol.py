@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Literal, cast
 
 from mindroom.desktop.input import DESKTOP_SAFE_KEYS
-from mindroom.matrix.encrypted_file import encrypted_file_content
+from mindroom.matrix.encrypted_file import encrypted_file_content_from_values
 
 DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
@@ -203,7 +203,7 @@ class EncryptedDesktopMedia:
 
     def to_content(self) -> dict[str, object]:
         """Serialize using the Matrix encrypted-file shape."""
-        return encrypted_file_content(
+        return encrypted_file_content_from_values(
             url=self.url,
             key=self.key,
             iv=self.iv,

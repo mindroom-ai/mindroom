@@ -14,6 +14,7 @@ from nio import crypto
 from nio.http import TransportResponse
 
 from mindroom.logging_config import get_logger
+from mindroom.matrix.encrypted_file import encrypted_file_content
 
 logger = get_logger(__name__)
 
@@ -203,15 +204,14 @@ class _PreparedMediaUpload:
         """Build encrypted metadata separately so callers retain their error boundaries."""
         if self.encryption_keys is None:
             return None
-        return {
-            "url": "",
-            "key": self.encryption_keys["key"],
-            "iv": self.encryption_keys["iv"],
-            "hashes": self.encryption_keys["hashes"],
-            "v": "v2",
-            "mimetype": self.info["mimetype"],
-            "size": self.info["size"],
-        }
+        return encrypted_file_content(
+            url="",
+            key=self.encryption_keys["key"],
+            iv=self.encryption_keys["iv"],
+            hashes=self.encryption_keys["hashes"],
+            mime_type=self.info["mimetype"],
+            size=self.info["size"],
+        )
 
 
 def prepare_media_upload(

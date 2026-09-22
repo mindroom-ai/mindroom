@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mindroom.attachment_ids import normalize_attachment_id
-from mindroom.matrix.encrypted_file import encrypted_file_content
+from mindroom.matrix.encrypted_file import encrypted_file_content_from_values
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +44,7 @@ class RuntimeEncryptedMediaAttachment:
 
     def encrypted_file_content(self) -> dict[str, object]:
         """Return the Matrix encrypted-file object for an ``m.image`` or file event."""
-        return encrypted_file_content(
+        return encrypted_file_content_from_values(
             url=self.url,
             key=self.key,
             iv=self.iv,

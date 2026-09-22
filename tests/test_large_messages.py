@@ -110,6 +110,25 @@ async def test_text_upload_preserves_bytes_and_metadata(encrypted: bool, mimetyp
         assert set(info) == {"url", "size", "mimetype"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ["key", "iv", "hashes"])
+async def test_text_upload_rejects_incomplete_encryption_metadata(missing_field: str) -> None:
+    """Sidecars handle malformed SDK metadata as an encryption failure before uploading."""
+    client = _UploadClient(nio.UploadResponse("mxc://server/sidecar"))
+    encryption = {
+        "v": "v2",
+        "key": {"kty": "oct", "alg": "A256CTR", "ext": True, "k": "key", "key_ops": ["encrypt", "decrypt"]},
+        "iv": "iv",
+        "hashes": {"sha256": "hash"},
+    }
+    del encryption[missing_field]
+
+    with patch("mindroom.matrix.media.crypto.attachments.encrypt_attachment", return_value=(b"encrypted", encryption)):
+        assert await _upload_text_as_mxc(client, "secret", room_encrypted=True) == (None, None)
+
+    assert client.uploaded_data is None
+
+
 def _actual_encrypted_event_size(
     content: dict[str, object],
     *,
