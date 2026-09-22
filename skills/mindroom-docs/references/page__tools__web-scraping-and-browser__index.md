@@ -571,15 +571,15 @@ search_amazon_products("ergonomic keyboard", domain_code="com")
 
 `agentql` exposes `scrape_website(url)` and, when enabled, `custom_scrape_website(url)`.
 `scrape_website()` uses a built-in query that extracts generic page text.
-`custom_scrape_website()` only becomes useful when `agentql_query` is non-empty.
+`custom_scrape_website()` uses the configured `agentql_query` and returns JSON that preserves extracted values and nested lists and objects.
 The installed upstream toolkit registers the custom scrape function automatically when `agentql_query` is set, even if `enable_custom_scrape_website` is false.
-The current upstream implementation launches Playwright with `headless=False`, which matters on headless-only runtimes.
+The toolkit launches Playwright with `headless=False`, which matters on headless-only runtimes.
 
 #### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `api_key` | `password` | `yes` | `null` | AgentQL API key, with `AGENTQL_API_KEY` as the SDK fallback. |
+| `api_key` | `password` | `yes` | `null` | Stored AgentQL API key; falls back to `AGENTQL_API_KEY` when no key is supplied. |
 | `enable_scrape_website` | `boolean` | `no` | `true` | Enable `scrape_website()`. |
 | `enable_custom_scrape_website` | `boolean` | `no` | `false` | Enable `custom_scrape_website()` when `agentql_query` is also useful. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
@@ -606,7 +606,9 @@ custom_scrape_website("https://matrix.org/blog/")
 
 #### Notes
 
-- The installed upstream code launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
+- Each request uses the toolkit's resolved key without changing shared AgentQL SDK configuration or environment credentials.
+- AgentQL SDK global settings and CLI credential files do not override this tool's stored or environment key.
+- The toolkit launches Playwright with `headless=False`, so this tool may need a GUI-capable runtime or virtual display.
 - Setting `agentql_query` is enough to register the custom scrape function on this branch.
 - Use `agentql` when you want AgentQL query semantics rather than a generic readable-text scraper.
 
