@@ -141,7 +141,7 @@ The same responder gate covers text, media, calls, reactions, approval actors, e
 
 MindRoom resolves a trusted inbound requester through `authorization.aliases` before selecting requester-owned state.
 The raw authenticated Matrix sender remains transport provenance and is not used as a second downstream ownership decision.
-One canonical requester therefore owns the same requester-scoped conversations, state, requester-scoped credentials, approvals, triggers, scripts, attachments, and usage when arriving through a configured bridge alias.
+One canonical requester therefore owns the same requester-scoped conversations, state, requester-scoped credentials, approvals, triggers, scripts, and usage when arriving through a configured bridge alias.
 
 An agent's `private` field controls requester-private state placement.
 It does not authorize anyone to interact with the agent.
@@ -168,8 +168,10 @@ When enabled, `!config`, confirmation reactions, and `!reload-plugins` require a
 Conversation access allows a requester to ask a responder to act, but the responder must still have the tool and any configured approval must still succeed.
 Tool approval is bound to the canonical requester who initiated the action and rechecks current responder access.
 
-Schedules are room-managed resources, while external triggers, background scripts, attachments, requester-private workers, and requester-scoped credentials are requester-owned.
-These ownership rules do not create additional responder access.
+Schedules are room-managed resources, while external triggers, background scripts, requester-private workers, and requester-scoped credentials are requester-owned.
+Ordinary attachments are scoped to their room and thread context.
+Authorized response turns may inspect attachments available in that conversation, including uploads by other participants; the recorded sender is provenance.
+These scope and ownership rules do not create additional responder access.
 
 ## Bridge aliases
 

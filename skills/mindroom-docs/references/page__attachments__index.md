@@ -8,7 +8,7 @@ Supported attachment kinds: `audio`, `file`, `image`, `video`.
 When a user sends a file, image, audio message, or video in a Matrix room:
 
 1. The responder determines whether it should answer (via mention, thread participation, or DM)
-2. The media is downloaded and decrypted (if E2E encrypted)
+2. The media is downloaded and decrypted (if E2E encrypted), subject to the [incoming media size checks](#limitations)
 3. The file is saved locally and registered as a context-scoped attachment
 4. The responder receives the media as an Agno `File`, `Video`, `Audio`, or `Image` object plus an attachment ID it can reference in tool calls
 5. The responder replies with its analysis or takes action on the file
@@ -62,6 +62,7 @@ Agents can use the annotation's attachment ID with tools when they need to inspe
 
 Attachment IDs are **context-scoped** -- an attachment registered in one room or thread is not accessible from another.
 This prevents cross-room data leakage for ID-based access.
+An authorized response may inspect another participant's uploads when their attachment IDs are available in the same conversation.
 When voice media download and registration succeed, raw-audio fallback uses the same attachment ID mechanism; see [Voice Fallback](https://docs.mindroom.chat/voice/#voice-fallback-no-stt-available).
 
 ## The `attachments` Tool
@@ -95,7 +96,7 @@ Image format is detected from the bytes; other media uses the attachment's MIME 
 The selected model and its provider adapter must support the media type and may impose stricter format or size limits.
 The attachment must be available in the current context and have a readable local file.
 `view=True` cannot be combined with `mindroom_output_path`.
-If the provider rejects inline media, MindRoom retries the request without it and explicitly tells the agent that the removed content was not inspected.
+For an eligible inline-media failure, MindRoom can retry without the media and explicitly tell the agent that the removed content was not inspected; see [Media Fallback](https://docs.mindroom.chat/images/#media-fallback) for retry limits and exclusions.
 Known adapter omissions use the same guidance, so unsupported media is not silently dropped.
 The agent can then call `get_attachment` without `view` to obtain metadata or save the file, and use other available extraction, transcription, or analysis tools.
 This does not provision another model, grant credentials, or automatically delegate the task.
@@ -123,10 +124,16 @@ Encrypted media is decrypted transparently using the key material from the Matri
 
 ## Retention
 
-MindRoom automatically prunes attachment metadata and managed `incoming_media/` files older than 30 days.
-Pruning runs opportunistically during new attachment registration.
+MindRoom automatically prunes attachment metadata and eligible managed `incoming_media/` files older than 30 days.
+Pruning runs opportunistically during new attachment registration, with a one-hour cleanup throttle.
+Managed files with active attachment references are retained, and filesystem failures can delay deletion.
+This is not an exact deletion deadline and does not delete unmanaged source or workspace files or Matrix homeserver copies.
 
 ## Limitations
 
+- **Incoming media size** -- downloaded and decrypted payloads must each be at most 64 MiB (67,108,864 bytes).
+  MindRoom checks the returned download body and, for encrypted media, the decrypted bytes before normal attachment or model use.
+  This is a post-download check, so use a smaller file when it is rejected.
+  Homeservers and model providers may impose lower limits; `get_attachment(view=True)` has a separate 20 MiB per-attachment limit.
 - **Routing with multiple eligible responders** -- without an `@mention`, the router uses the file caption to select among candidates only when room configuration and reply permissions leave multiple eligible agents or teams.
 - **Model support** -- the configured model must support file or video inputs for direct analysis. Models that do not can still use the `attachments` tool to inspect and process files via tool calls.

@@ -792,7 +792,9 @@ matty thread-reply "test_room" t1 "@research find information about X"
 - **Message handles**: Use m1, m2, m3 to reference messages
 - **Thread IDs**: Use t1, t2, t3 to reference threads (persistent across sessions)
 - **Output formats**: Add `--format json` for machine-readable output
-- **Streaming responses**: If you see "⋯" in agent messages, they're still typing. Agents stream responses by editing messages, which may take 10+ seconds to complete. Re-check the thread after waiting.
+- **Streaming responses**: Agents stream responses by editing messages, which may take 10+ seconds to complete.
+  Inspect the latest `io.mindroom.stream_status` in a client or event view that exposes it: `pending` and `streaming` indicate progress, and `completed` confirms successful completion.
+  Record `cancelled` or `error` as terminal outcomes; body ellipses are not a completion signal.
 
 ## 5. Quick Reference
 
