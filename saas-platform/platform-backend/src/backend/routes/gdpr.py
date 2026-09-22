@@ -215,19 +215,7 @@ async def cancel_account_deletion(user: Annotated[dict, Depends(verify_user)]) -
     if not account_result.data or not account_result.data[0].get("deleted_at"):
         return {"status": "not_pending", "message": "No deletion request found for this account"}
 
-    # Restore the account
+    # The RPC restores the account and records the cancellation in one transaction.
     sb.rpc("restore_account", {"target_account_id": account_id}).execute()
-
-    # Log the cancellation
-    sb.table("audit_logs").insert(
-        {
-            "account_id": account_id,
-            "action": "gdpr_deletion_cancelled",
-            "resource_type": "account",
-            "resource_id": account_id,
-            "success": True,
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-    ).execute()
 
     return {"status": "success", "message": "Account deletion request has been cancelled", "account_status": "active"}

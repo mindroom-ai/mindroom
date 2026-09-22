@@ -182,8 +182,10 @@ class TestGDPREndpoints:
         assert data["status"] == "success"
         assert "cancelled" in data["message"]
 
-        # Verify restore was called
-        mock_supabase.rpc.assert_called_with("restore_account", {"target_account_id": mock_user["account_id"]})
+        # The RPC restores the account and records the cancellation atomically.
+        mock_supabase.rpc.assert_called_once_with("restore_account", {"target_account_id": mock_user["account_id"]})
+        mock_rpc.execute.assert_called_once_with()
+        mock_supabase.table.assert_called_once_with("accounts")
 
     def test_update_consent(self, client, mock_verify_user, mock_user, mock_supabase):
         """Test updating consent preferences."""
