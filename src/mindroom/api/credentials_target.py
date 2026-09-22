@@ -25,7 +25,6 @@ from mindroom.credentials import (
     delete_scoped_credentials,
     get_runtime_credentials_manager,
     load_scoped_credentials,
-    load_worker_grantable_shared_credentials,
     save_scoped_credentials,
 )
 from mindroom.tool_system.worker_routing import (
@@ -282,36 +281,13 @@ def load_credentials_for_target(service: str, target: RequestCredentialsTarget) 
         return target.base_manager.load_credentials(service)
     if target.worker_scope is None:
         return target.target_manager.load_credentials(service)
-    if _service_uses_primary_runtime_store(service, target):
-        return load_scoped_credentials(
-            service,
-            credentials_manager=target.base_manager,
-            worker_target=worker_target_for_credentials_target(target),
-            allowed_shared_services=target.allowed_shared_services,
-        )
-
-    shared_manager = target.base_manager.shared_manager()
-    shared_credentials = load_worker_grantable_shared_credentials(
+    return load_scoped_credentials(
         service,
-        shared_manager=shared_manager,
-        allowed_services=target.allowed_shared_services or frozenset(),
-    )
-    worker_credentials = target.target_manager.load_credentials(service)
-    if not shared_credentials and not isinstance(worker_credentials, dict):
-        return None
-    merged_credentials = dict(shared_credentials or {})
-    if isinstance(worker_credentials, dict):
-        merged_credentials.update(worker_credentials)
-    return merged_credentials or None
-
-
-def _service_uses_primary_runtime_store(service: str, target: RequestCredentialsTarget) -> bool:
-    policy = credential_service_policy(service, target.worker_scope)
-    return (
-        policy.uses_primary_runtime_global_credentials
-        or policy.uses_primary_runtime_scoped_credentials
-        or policy.uses_primary_runtime_agent_scoped_credentials
-        or policy.uses_local_shared_credentials
+        credentials_manager=target.base_manager,
+        worker_target=worker_target_for_credentials_target(target),
+        allowed_shared_services=target.allowed_shared_services,
+        worker_credentials_manager=target.target_manager,
+        allow_shared_mirror=False,
     )
 
 
@@ -335,7 +311,7 @@ def save_credentials_for_target(service: str, credentials: dict[str, Any], targe
     if _service_uses_primary_runtime_global_store(service, target):
         target.base_manager.save_credentials(service, credentials)
         return
-    if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
+    if target.worker_scope is None:
         target.target_manager.save_credentials(service, credentials)
         return
     save_scoped_credentials(
@@ -343,6 +319,7 @@ def save_credentials_for_target(service: str, credentials: dict[str, Any], targe
         credentials,
         credentials_manager=target.base_manager,
         worker_target=worker_target_for_credentials_target(target),
+        worker_credentials_manager=target.target_manager,
     )
 
 
@@ -351,13 +328,14 @@ def delete_credentials_for_target(service: str, target: RequestCredentialsTarget
     if _service_uses_primary_runtime_global_store(service, target):
         target.base_manager.delete_credentials(service)
         return
-    if target.worker_scope is None or not _service_uses_primary_runtime_store(service, target):
+    if target.worker_scope is None:
         target.target_manager.delete_credentials(service)
         return
     delete_scoped_credentials(
         service,
         credentials_manager=target.base_manager,
         worker_target=worker_target_for_credentials_target(target),
+        worker_credentials_manager=target.target_manager,
     )
 
 

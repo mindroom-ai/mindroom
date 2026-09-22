@@ -9,6 +9,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
+import mindroom.credentials as credential_runtime
 from mindroom import constants
 from mindroom.api import credentials_oauth_policy, credentials_target, main
 from mindroom.api.main import app, initialize_api_app
@@ -18,7 +19,12 @@ from mindroom.credentials import get_runtime_credentials_manager
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.oauth import mcp_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    WorkerScope,
+    resolve_worker_key,
+    resolve_worker_target,
+)
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
 
 
@@ -1632,15 +1638,18 @@ class TestCredentialsAPI:
                 "auth_user": {"user_id": "dashboard-user"},
             },
         )
-        config = _config_with_worker_scope("shared")
-        base_manager = MagicMock()
-        base_manager.for_worker.return_value = MagicMock()
+        config = _config_with_worker_scope("shared", worker_grantable_credentials=["weather"])
+        base_manager = credential_runtime.CredentialsManager(runtime_a.storage_root / "credentials")
+        base_manager.save_credentials("weather", {"api_key": "original-shared-key"})
         _publish_committed_runtime_config(app, config)
 
-        def _swap_runtime_on_manager_lookup(runtime_paths: object) -> MagicMock:
+        def _swap_runtime_on_manager_lookup(runtime_paths: object) -> credential_runtime.CredentialsManager:
             assert runtime_paths == runtime_a
             initialize_api_app(app, runtime_b)
-            _publish_committed_runtime_config(app, config)
+            _publish_committed_runtime_config(
+                app,
+                _config_with_worker_scope("shared", administrators=[], credential_managers=[]),
+            )
             return base_manager
 
         with patch(
@@ -1653,6 +1662,12 @@ class TestCredentialsAPI:
         assert target.execution_identity is not None
         assert target.execution_identity.tenant_id == "tenant-a"
         assert target.execution_identity.account_id == "account-a"
+        assert credentials_target.load_credentials_for_target("weather", target) == {"api_key": "original-shared-key"}
+        credentials_target.save_credentials_for_target("weather", {"api_key": "scoped-key"}, target)
+        assert base_manager.for_worker("v1:tenant-a:shared:general").load_credentials("weather") == {
+            "api_key": "scoped-key",
+        }
+        assert get_runtime_credentials_manager(runtime_b).list_services() == []
 
     def test_credentials_routes_use_committed_snapshot_until_reload(
         self,
@@ -1682,9 +1697,10 @@ class TestCredentialsAPI:
         assert response.status_code == 404
         assert response.json()["detail"] == "Unknown agent: missing"
 
-    def test_agent_credentials_require_agent_reply_permission(self, client: TestClient) -> None:
+    @pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
+    def test_agent_credentials_require_agent_reply_permission(self, client: TestClient, method: str) -> None:
         """Agent-scoped credential routes should reject requesters outside the agent allowlist."""
-        use_trusted_upstream_runtime(client.app)
+        runtime_paths = use_trusted_upstream_runtime(client.app)
         config = _config_with_worker_scope(
             "shared",
             credential_managers=["@alice:example.org"],
@@ -1695,10 +1711,15 @@ class TestCredentialsAPI:
             email="bob@example.org",
             matrix_user_id="@bob:example.org",
         )
+        manager = get_runtime_credentials_manager(runtime_paths)
+        worker_manager = manager.for_worker("v1:default:shared:general")
+        worker_manager.save_credentials("openai", {"api_key": "original-key"})
 
-        agent_response = client.get(
-            "/api/credentials/openai/api-key?agent_name=general",
+        agent_response = client.request(
+            method,
+            "/api/credentials/openai?agent_name=general",
             headers=bob_headers,
+            json={"credentials": {"api_key": "replacement-key"}},
         )
         global_response = client.get(
             "/api/credentials/openai/api-key",
@@ -1706,6 +1727,7 @@ class TestCredentialsAPI:
         )
 
         assert agent_response.status_code == 403
+        assert worker_manager.load_credentials("openai") == {"api_key": "original-key"}
         assert global_response.status_code == 200
         assert global_response.json()["has_key"] is False
 
@@ -2109,3 +2131,170 @@ class TestCredentialsAPI:
         assert response.status_code == 400
         assert "Service name can only include" in response.json()["detail"]
         mock_credentials_manager.load_credentials.assert_not_called()
+
+
+@pytest.mark.parametrize("allow_shared", [False, True])
+@pytest.mark.parametrize(
+    ("worker_scope", "service", "store"),
+    [
+        (None, "weather", "base"),
+        ("shared", "weather", "worker"),
+        ("shared", "google_drive", "base"),
+        ("shared", "acme_oauth", "agent"),
+        ("user", "weather", "worker"),
+        ("user", "google_drive", "requester"),
+        ("user", "acme_oauth", "requester"),
+        ("user_agent", "weather", "worker"),
+        ("user_agent", "google_drive", "requester_agent"),
+        ("user_agent", "acme_oauth", "requester_agent"),
+    ],
+)
+def test_credential_target_matches_runtime_storage(
+    tmp_path: Path,
+    worker_scope: WorkerScope | None,
+    service: str,
+    store: str,
+    allow_shared: bool,
+) -> None:
+    """API and runtime operations must agree on storage, overlays, and deletion fallback."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+    )
+    manager = get_runtime_credentials_manager(runtime_paths)
+    identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
+    worker_target = resolve_worker_target(worker_scope, "general", identity)
+    worker_manager = manager.for_worker(worker_target.worker_key) if worker_target.worker_key else manager
+    stores = {
+        "base": manager,
+        "worker": worker_manager,
+        "agent": manager.for_primary_runtime_agent_scope("general"),
+        "requester": manager.for_primary_runtime_scope("@alice:example.org", None),
+        "requester_agent": manager.for_primary_runtime_scope("@alice:example.org", "general"),
+    }
+    allowed = frozenset({service}) if allow_shared else frozenset()
+    target = credentials_target.RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=worker_manager,
+        worker_scope=worker_scope,
+        agent_name="general",
+        execution_identity=identity,
+        allowed_shared_services=allowed,
+    )
+    shared_credentials = {"api_key": "shared-key", "shared_only": True}
+    manager.save_credentials(service, shared_credentials)
+
+    credentials_target.save_credentials_for_target(service, {"api_key": "api-key"}, target)
+    assert stores[store].load_credentials(service) == {"api_key": "api-key"}
+    expected = {"api_key": "api-key"}
+    if store == "worker" and allow_shared:
+        expected["shared_only"] = True
+    assert (
+        credential_runtime.load_scoped_credentials(
+            service,
+            credentials_manager=manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed,
+        )
+        == expected
+    )
+    assert credentials_target.load_credentials_for_target(service, target) == expected
+
+    credential_runtime.save_scoped_credentials(
+        service,
+        {"api_key": "runtime-key"},
+        credentials_manager=manager,
+        worker_target=worker_target,
+    )
+    expected["api_key"] = "runtime-key"
+    assert credentials_target.load_credentials_for_target(service, target) == expected
+    credential_runtime.delete_scoped_credentials(service, credentials_manager=manager, worker_target=worker_target)
+    fallback = shared_credentials if store == "worker" and allow_shared else None
+    assert credentials_target.load_credentials_for_target(service, target) == fallback
+
+    credentials_target.save_credentials_for_target(service, {"api_key": "api-key"}, target)
+    credentials_target.delete_credentials_for_target(service, target)
+    assert stores[store].load_credentials(service) is None
+    assert (
+        credential_runtime.load_scoped_credentials(
+            service,
+            credentials_manager=manager,
+            worker_target=worker_target,
+            allowed_shared_services=allowed,
+        )
+        == fallback
+    )
+    if store != "base":
+        assert manager.load_credentials(service) == shared_credentials
+
+
+@pytest.mark.parametrize("worker_scope", [None, "shared", "user", "user_agent"])
+@pytest.mark.parametrize("allow_shared", [False, True])
+def test_credential_target_keeps_authorized_manager_and_shared_visibility(
+    tmp_path: Path,
+    worker_scope: WorkerScope | None,
+    allow_shared: bool,
+) -> None:
+    """Dashboard IO must use its resolved manager and enforce grants on a separate shared layer."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+    )
+    manager = credential_runtime.CredentialsManager(tmp_path / "credentials", shared_base_path=tmp_path / "shared")
+    authorized_manager = manager.for_worker("authorized-worker")
+    target = credentials_target.RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=authorized_manager,
+        worker_scope=worker_scope,
+        agent_name="general",
+        execution_identity=ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None),
+        allowed_shared_services=frozenset({"weather"}) if allow_shared else None,
+    )
+    manager.shared_manager().save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
+    authorized_manager.save_credentials("weather", {"api_key": "authorized-key"})
+    expected = {"api_key": "authorized-key"}
+    if worker_scope is not None and allow_shared:
+        expected["shared_only"] = True
+    assert credentials_target.load_credentials_for_target("weather", target) == expected
+
+    credentials_target.save_credentials_for_target("weather", {"api_key": "updated-key"}, target)
+    assert authorized_manager.load_credentials("weather") == {"api_key": "updated-key"}
+    credentials_target.delete_credentials_for_target("weather", target)
+    assert authorized_manager.load_credentials("weather") is None
+    assert manager.shared_manager().load_credentials("weather") == {"api_key": "shared-key", "shared_only": True}
+
+
+@pytest.mark.parametrize("worker_scope", [None, "shared"])
+def test_oauth_client_config_keeps_base_store_with_separate_shared_layer(
+    tmp_path: Path,
+    worker_scope: WorkerScope | None,
+) -> None:
+    """Global OAuth clients use the base store even when a shared mirror and worker both exist."""
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+    )
+    manager = credential_runtime.CredentialsManager(tmp_path / "credentials", shared_base_path=tmp_path / "shared")
+    worker_manager = manager.for_worker("authorized-worker")
+    target = credentials_target.RequestCredentialsTarget(
+        runtime_paths=runtime_paths,
+        base_manager=manager,
+        target_manager=worker_manager,
+        worker_scope=worker_scope,
+        agent_name="general",
+        execution_identity=None,
+    )
+    service = "acme_oauth_client"
+    manager.save_credentials(service, {"client_id": "base-client"})
+    manager.shared_manager().save_credentials(service, {"client_id": "shared-client"})
+    worker_manager.save_credentials(service, {"client_id": "worker-client"})
+
+    assert credentials_target.load_credentials_for_target(service, target) == {"client_id": "base-client"}
+    credentials_target.save_credentials_for_target(service, {"client_id": "updated-client"}, target)
+    assert manager.load_credentials(service) == {"client_id": "updated-client"}
+    credentials_target.delete_credentials_for_target(service, target)
+    assert manager.load_credentials(service) is None
+    assert manager.shared_manager().load_credentials(service) == {"client_id": "shared-client"}
+    assert worker_manager.load_credentials(service) == {"client_id": "worker-client"}
