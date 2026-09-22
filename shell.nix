@@ -37,6 +37,7 @@ pkgs.mkShell {
     nodejs_24
     bun
     ffmpeg-headless
+    just
 
     # uv for Python package management
     uv
@@ -44,7 +45,7 @@ pkgs.mkShell {
 
   shellHook = ''
     echo "MindRoom Development Shell"
-    echo "Tools available: uv, bun, nodejs, python3"
+    echo "Tools available: uv, bun, nodejs, python3, just"
     ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
       export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
       export PUPPETEER_EXECUTABLE_PATH=${pkgs.chromium}/bin/chromium

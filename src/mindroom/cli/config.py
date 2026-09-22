@@ -1168,7 +1168,7 @@ def _provider_env_template(provider_preset: _ProviderPreset) -> str:  # noqa: PL
         return textwrap.dedent(f"""\
         # Vertex AI Claude configuration
         {VERTEXAI_CLAUDE_ENV_BY_KEY["project_id"]}=your-gcp-project-id
-        {VERTEXAI_CLAUDE_ENV_BY_KEY["region"]}=us-central1
+        {VERTEXAI_CLAUDE_ENV_BY_KEY["region"]}=global
 
         # Authenticate with Google Application Default Credentials before running:
         # gcloud auth application-default login

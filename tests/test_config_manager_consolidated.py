@@ -1460,6 +1460,43 @@ class TestConsolidatedConfigManager:
             {"match": "run_shell_command", "action": "require_approval"},
         ]
 
+    @pytest.mark.parametrize(
+        ("authored_defaults", "enabled", "expected_tools"),
+        [
+            (None, False, ["scheduler"]),
+            (None, True, ["scheduler", "approved_egress"]),
+            ({}, True, ["scheduler", "approved_egress"]),
+            ({"tools": []}, False, []),
+            ({"tools": []}, True, ["approved_egress"]),
+            ({"tools": ["scheduler"]}, False, ["scheduler"]),
+            ({"tools": ["scheduler"]}, True, ["scheduler", "approved_egress"]),
+        ],
+    )
+    def test_runtime_approved_egress_preserves_effective_default_tools(
+        self,
+        authored_defaults: dict[str, object] | None,
+        enabled: bool,
+        expected_tools: list[str],
+    ) -> None:
+        """The runtime overlay adds egress without changing default-tool inheritance."""
+        data: dict[str, object] = {
+            "agents": {
+                "assistant": {"display_name": "Assistant"},
+                "standalone": {"display_name": "Standalone", "include_default_tools": False},
+            },
+        }
+        if authored_defaults is not None:
+            data["defaults"] = authored_defaults
+        runtime_paths = resolve_runtime_paths(
+            config_path=Path("config.yaml"),
+            process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": str(enabled).lower()},
+        )
+
+        config = Config.validate_with_runtime(data, runtime_paths)
+
+        assert config.resolve_entity("assistant").available_tools == expected_tools
+        assert config.resolve_entity("standalone").available_tools == []
+
     def test_runtime_approved_egress_flag_keeps_authored_dump_unmodified(self) -> None:
         """Runtime-managed approved egress should not become persisted authored config."""
         runtime_paths = resolve_runtime_paths(
@@ -1478,7 +1515,7 @@ class TestConsolidatedConfigManager:
         assert config.defaults.tool_names == ["scheduler", "approved_egress"]
         assert config.authored_model_dump()["defaults"]["tools"] == ["scheduler"]
         assert "tool_approval" not in config.authored_model_dump()
-        assert empty_config.defaults.tool_names == ["approved_egress"]
+        assert empty_config.defaults.tool_names == ["scheduler", "approved_egress"]
         assert empty_config.authored_model_dump() == {}
 
     def test_runtime_approved_egress_flag_forces_approval_ahead_of_script_rules(self) -> None:

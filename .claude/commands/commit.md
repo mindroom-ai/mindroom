@@ -14,8 +14,9 @@ allowed-tools: Bash(git status:*), Bash(git diff:*), Bash(git add:*), Bash(pre-c
 
 1. **Selective Staging**
    - **NEVER use `git add .` or `git add -A`**
-   - Add files individually: `git add <filename>` or use `git commit -a`
    - Review with `git status` before staging
+   - Add files individually: `git add <filename>`
+   - Review `git diff --staged` and `git status` after staging
 
 2. **Why This Matters**
    - Project has unstaged debugging scripts
@@ -53,8 +54,9 @@ allowed-tools: Bash(git status:*), Bash(git diff:*), Bash(git add:*), Bash(pre-c
 
 5. **Final Checks**
    - Run `pytest` to ensure tests pass
-   - Review `git diff --staged`
+   - Review `git diff --staged` and `git status`
    - Verify no unrelated files included
    - Check for sensitive information
+   - Commit the reviewed index with `git commit`
 
 Remember: The project frequently has debugging scripts and test files that should NOT be committed!

@@ -25,11 +25,10 @@ local-matrix-down:
 local-matrix-logs:
     cd local/matrix && docker compose logs -f
 
-# Reset Matrix + DB stack (remove volumes)
+# Reset local Matrix volumes, selected runtime Matrix state, and repository tmp/
 local-matrix-reset:
     cd local/matrix && docker compose down -v
-    rm -f matrix_state.yaml
-    docker volume prune -f
+    uv run python -c "from mindroom.constants import matrix_state_file, resolve_runtime_paths; matrix_state_file(resolve_runtime_paths()).unlink(missing_ok=True)"
     rm -rf tmp/
     @echo "✅ Reset complete! Run 'just local-matrix-up' then 'mindroom run' to start fresh."
 

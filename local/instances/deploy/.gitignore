@@ -4,6 +4,7 @@
 envs/*.env
 envs/*.matrix-hosts.yml
 instances.json
+bridge_instances.json
 instance_data/
 *.yaml.backup
 matrix-data/

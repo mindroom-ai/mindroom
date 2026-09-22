@@ -77,16 +77,18 @@ Use this when the machine already has local MindRoom instances, existing Matrix 
 
 ```bash
 tmp="$(mktemp -d /tmp/mindroom-live-test.XXXXXX)"
-uv run mindroom config init --provider openai --force --path "$tmp/config.yaml"
+uv run mindroom config init --matrix-server self-hosted --provider openai --force --path "$tmp/config.yaml"
 ```
 
 `config init` has no `--minimal` flag; write the config YAML directly when you need a precise minimal shape (models, agents, teams, authorization, `mindroom_user`).
 If no local model server is running on 9292 and no provider key is available, a ~60-line FastAPI stub serving `/v1/models` and `/v1/chat/completions` (JSON + SSE stream) is enough for deterministic end-to-end turns; run it with `uvicorn` from the venv.
 
-Patch the generated config so it can run locally without private credentials and without restrictive room auth.
+Deep-merge the following patch into the generated config, preserving the `mind` agent's required `display_name` and its `personal` room.
+This enables public joins and replies to current room members for the isolated local smoke test.
 When you are targeting the local OpenAI-compatible server on `http://localhost:9292/v1`, start with `gpt-oss-low:20b`.
 That is the suggested local chat model for this skill because it has been verified to work with MindRoom's `developer` messages in this repo.
 
+Replace `<unique_suffix>` with a unique lowercase-letter/digit suffix before validating or running.
 Minimum changes:
 
 ```yaml
@@ -98,8 +100,12 @@ models:
       base_url: http://localhost:9292/v1
 
 agents:
-  assistant:
+  mind:
     learning: false
+    access:
+      current_room_members: true
+      members_of_rooms: []
+      users: []
 
 memory:
   backend: file
@@ -107,14 +113,8 @@ memory:
 mindroom_user:
   username: mindroom_user_<unique_suffix>
 
-matrix_room_access:
-  mode: multi_user
-  multi_user_join_rule: public
-
-authorization:
-  default_room_access: true
-  global_users: []
-  agent_reply_permissions: {}
+room_defaults:
+  join_policy: public
 ```
 
 Then export an isolated runtime.
@@ -208,7 +208,7 @@ curl -sS -X POST "http://localhost:8008/_matrix/client/v3/join/$encoded_room_id"
 Join by alias only when you know the exact alias:
 
 ```bash
-room_alias='#lobby_<namespace>:localhost'
+room_alias='#personal_<namespace>:localhost'
 encoded_alias="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$room_alias")"
 curl -sS -X POST "http://localhost:8008/_matrix/client/v3/join/$encoded_alias" \
   -H "Authorization: Bearer $access_token"
@@ -219,7 +219,8 @@ Use the actual alias created by the active config.
 ## Read and Send Messages with Matty
 
 Matty accepts per-command credentials with `-u` and `-p`.
-Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b` filtering `m.relates_to.rel_type == "m.thread"`), which is fully sufficient for send/read smoke tests.
+Matty may be absent from a fresh worktree venv; if `matty` is not found after `uv sync --all-extras`, fall back to the raw Matrix client API with `curl` (register, `/join/{roomId}`, `PUT /rooms/{roomId}/send/m.room.message/{txn}`, and `GET /rooms/{roomId}/messages?dir=b`).
+Correlate replies with the submitted event ID through either `m.thread` relations or room-mode `m.in_reply_to` relations, then apply edits targeting the matched response event; follow the [tester observation protocol](../../../agents/mindroom-tester.md) for sender checks, terminal status, and timeouts.
 
 List rooms:
 
@@ -228,19 +229,21 @@ MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
 uv run --python 3.13 matty rooms -u "$username" -p "$password" --format json
 ```
 
-Inspect room membership:
+Use the concrete `room_id` for the generated `personal` room from backend logs and the room list.
+Inspect its membership:
 
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
-uv run --python 3.13 matty users "Lobby" -u "$username" -p "$password" --format json
+uv run --python 3.13 matty users "$room_id" -u "$username" -p "$password" --format json
 ```
 
+Copy Mind's full namespaced Matrix user ID from that membership output into `agent_id`.
 Send a smoke message:
 
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
-uv run --python 3.13 matty send "Lobby" \
-  "Hello @mindroom_assistant:localhost please reply with pong." \
+uv run --python 3.13 matty send "$room_id" \
+  "Hello $agent_id please reply with pong." \
   -u "$username" -p "$password"
 ```
 
@@ -251,21 +254,21 @@ Read recent room messages:
 
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
-uv run --python 3.13 matty messages "Lobby" -u "$username" -p "$password" --format json
+uv run --python 3.13 matty messages "$room_id" -u "$username" -p "$password" --format json
 ```
 
 List threads:
 
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
-uv run --python 3.13 matty threads "Lobby" -u "$username" -p "$password" --format json
+uv run --python 3.13 matty threads "$room_id" -u "$username" -p "$password" --format json
 ```
 
 Read one thread:
 
 ```bash
 MATRIX_HOMESERVER=http://localhost:8008 MATRIX_SSL_VERIFY=false \
-uv run --python 3.13 matty thread "Lobby" t1 -u "$username" -p "$password" --format json
+uv run --python 3.13 matty thread "$room_id" t1 -u "$username" -p "$password" --format json
 ```
 
 Agents usually reply in threads and may stream by editing the same event.

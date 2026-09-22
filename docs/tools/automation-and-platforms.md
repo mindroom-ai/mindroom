@@ -280,16 +280,16 @@ create_file("main.py", "print('ok')")
 
 ### What It Does
 
-The registered MindRoom tool instantiates `composio_agno.ComposioToolSet`.
-That upstream object does not expose a stable fixed method list like `aws_lambda` or `custom_api`.
-Instead, its main surface is `get_tools(actions=..., apps=..., tags=...)`, which wraps selected Composio actions into Agno `Toolkit` objects at runtime.
-The resulting callable tools therefore depend on your Composio workspace, connected accounts, and action selection rather than a static MindRoom-defined function list.
-MindRoom's current registry metadata on this branch documents the connection and workspace fields, but it does not expose separate per-agent app or action filter fields in `config.yaml`.
+MindRoom requires a nonempty `actions` list of Composio action IDs.
+Its adapter instantiates `composio_agno.ComposioToolSet`, calls `get_tools(actions=...)`, and exposes the resulting action functions through an Agno toolkit.
+The callable tools depend on your selected actions, Composio workspace, and connected accounts.
+The SDK's management methods, such as `get_tools` and `initiate_connection`, are not exposed as agent tools.
 
 ### Configuration
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
+| `actions` | `string[]` | `yes` | `null` | Nonempty list of Composio action IDs to expose, such as `GITHUB_GET_THE_AUTHENTICATED_USER`. |
 | `api_key` | `password` | `no` | `null` | Composio API key. The SDK can also fall back to cached Composio user data or `COMPOSIO_API_KEY`. |
 | `base_url` | `url` | `no` | `null` | Optional Composio API base URL. |
 | `entity_id` | `text` | `no` | `default` | Composio entity identifier used when executing actions. |
@@ -314,26 +314,31 @@ agents:
   integrations:
     tools:
       - composio:
+          actions:
+            - GITHUB_GET_THE_AUTHENTICATED_USER
           entity_id: default
-          workspace_id: workspace_123
           logging_level: INFO
 ```
 
 ### Notes
 
-- The resulting callable actions are dynamic and depend on the Composio workspace rather than on fixed MindRoom-defined function names.
+- Configure the Composio API key and connect the selected app accounts for the chosen entity before loading the tool.
+- Callable names follow the SDK's lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
+- Omitting `actions` or supplying an empty list raises a configuration error.
 - `workspace_config`, `connected_account_ids`, `metadata`, and `processors` are advanced constructor inputs and are not the most ergonomic handwritten YAML fields in the current metadata model.
 - Use `composio` when you want one external platform to broker many app integrations instead of configuring each app-specific tool directly in MindRoom.
 
 ## [`custom_api`]
 
-`custom_api` is the generic escape hatch for making HTTP requests to APIs that do not have a dedicated MindRoom tool.
+`custom_api` makes requests to public HTTP(S) APIs that do not have a dedicated MindRoom tool.
 
 ### What It Does
 
 `custom_api` exposes `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)`.
 If `base_url` is set, the tool joins it with the passed endpoint.
-If `username` and `password` are configured, the request uses HTTP Basic Auth.
+MindRoom validates the destination URL, resolved DNS addresses, and redirect destinations.
+Localhost, loopback, private-network, metadata-service, and non-HTTP(S) destinations are rejected; this tool has no opt-in for private or local access.
+If both `username` and `password` are nonempty, the request uses HTTP Basic Auth.
 If `api_key` is configured, the tool adds `Authorization: Bearer <api_key>` to the default headers.
 Per-call headers are merged on top of configured default headers.
 The response body is parsed as JSON when possible and otherwise returned as plain text inside a JSON envelope with `status_code`, response `headers`, and `data`.
@@ -374,7 +379,7 @@ make_request("reports", method="POST", json_data={"range": "7d"})
 ### Notes
 
 - If `base_url` is omitted, `endpoint` must be a full URL.
-- If both Basic Auth and `api_key` are configured, the request will send both the `Authorization: Bearer ...` header and the Basic Auth credentials because the wrapper does not treat them as mutually exclusive modes.
+- A complete nonempty `username` / `password` pair selects HTTP Basic Auth and replaces the bearer `Authorization` header supplied by `api_key`; configure the authentication mode your API expects.
 - `headers` is an advanced constructor input rather than a polished hand-authored YAML field on this branch.
 
 ## Related Docs

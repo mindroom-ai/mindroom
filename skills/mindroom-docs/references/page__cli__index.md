@@ -697,6 +697,7 @@ mindroom threads export --url http://127.0.0.1:9000 --storage-path mindroom_data
 ## journal
 
 Inspect and rebind the durable event journal.
+See [Event Journal configuration](https://docs.mindroom.chat/configuration/#event-journal) for backend selection, the SQLite location, and PostgreSQL URL resolution.
 
 The event journal is the database that holds turn deduplication, delivery ownership, and recovery ownership.
 Every install is bound to exactly one, and MindRoom refuses to start against any other one, because using a stranger's journal does not fail — it answers every question confidently and about somebody else's history.
@@ -769,7 +770,7 @@ For a quiesced migration:
 
 1. Stop MindRoom, and any `mindroom threads export --watch` running against the same storage root.
 2. Copy or dump-and-restore the database in full.
-3. Point `event_journal` at the new location.
+3. Configure the destination PostgreSQL backend and URL, or move the SQLite journal with its storage root; SQLite always uses `<storage>/tracking/event_journal.db`.
 4. Start MindRoom. No adoption is needed, because the generation travelled with the data.
 
 Adopt instead of copying only when you accept beginning the journal's history fresh.
@@ -1251,7 +1252,7 @@ mindroom connect \
 
 ## local-stack-setup
 
-Start local Synapse and the MindRoom Chat client container for development.
+Start local Synapse and the MindRoom Chat client container using the core MindRoom repository's `local/matrix` development Compose files.
 
 By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, and `MATRIX_SSL_VERIFY=false` into `.env` next to your active `config.yaml` so `mindroom run` works without inline env exports.
 
@@ -1276,9 +1277,9 @@ By default this command also writes `MATRIX_HOMESERVER`, `MATRIX_SERVER_NAME`, a
 │ --synapse-dir                                 PATH                 Directory           │
 │                                                                    containing Synapse  │
 │                                                                    docker-compose.yml  │
-│                                                                    (from               │
-│                                                                    mindroom-stack      │
-│                                                                    settings).          │
+│                                                                    (core MindRoom      │
+│                                                                    repo:               │
+│                                                                    local/matrix).      │
 │                                                                    [default:           │
 │                                                                    local/matrix]       │
 │ --homeserver-url                              TEXT                 Homeserver URL that │
@@ -1483,10 +1484,12 @@ mindroom run --storage-path /data/mindroom
 mindroom connect --pair-code ABCD-EFGH
 ```
 
-### Start local Synapse + Cinny (default local setup)
+### Start local Synapse + MindRoom Chat (development)
+
+Use the core MindRoom checkout's `local/matrix` directory:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 ```
 
 ### Start local stack without writing `.env`

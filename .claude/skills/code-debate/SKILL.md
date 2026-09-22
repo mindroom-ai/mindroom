@@ -52,25 +52,60 @@ Retain it across waits, and never initialize it from an unread section already p
 Set `PEER` to the other role and `EXPECTED` to the exact next peer heading allowed by turn order.
 Check terminal state and that heading's signature before the first sleep and on every poll.
 A checksum change alone does not establish readiness, and an unchanged checksum does not rule out an unread turn.
+All heading, signature, and consensus checks below use `TURN_STATE` and its file-format rules.
+Text inside fenced code blocks or blockquotes is never a protocol control.
+A peer turn must include response prose outside quotations and code blocks, and its final substantive line must be the peer signature.
+Blank lines and the `---` section separator may follow that signature.
+Write the signature only after the complete response body; after signing, append no further body text to that turn.
 
 Define this function before running the poll loop:
 
 ```bash
 TURN_STATE() {
   awk -v expected="$EXPECTED" -v peer="$PEER" -v consumed="$LAST_CONSUMED" '
-    /^## CONSENSUS([[:space:]]|$)/ { terminal = 1 }
-    /^## / { heading = $0; signed = 0 }
-    /^\*— Agent [AB]( \([^)]*\))?, .+\*$/ { signed = ($3 == peer || $3 == peer ",") }
+    {
+      line = $0
+      sub(/^ */, "", line)
+      indent = length($0) - length(line)
+      if (fence != "") {
+        if (indent <= 3 && match(line, /^(```+|~~~+)/) &&
+            substr(line, 1, 1) == fence && RLENGTH >= fence_length &&
+            substr(line, RLENGTH + 1) ~ /^[[:space:]]*$/) fence = ""
+        signed = 0
+        next
+      }
+      if (indent <= 3 && match(line, /^(```+|~~~+)/)) {
+        fence_length = RLENGTH
+        if (substr(line, 1, 1) == "~" || substr(line, RLENGTH + 1) !~ /`/) {
+          fence = substr(line, 1, 1)
+          signed = 0
+          next
+        }
+      }
+    }
+    /^## CONSENSUS[[:space:]]*$/ { terminal = 1 }
+    /^## / { heading = $0; content = 0; signed = 0; next }
+    /^[[:space:]]*$/ || /^---[[:space:]]*$/ { next }
+    /^\*— Agent [AB]( \([^)]*\))?, .+\*$/ {
+      signed = ($3 == peer || $3 == peer ",")
+      next
+    }
+    {
+      signed = 0
+      if ($0 !~ /^(    |\t)/ && line !~ /^(>|#)/ && line ~ /[[:alnum:]]/)
+        content = 1
+    }
     END {
       if (terminal) print "CONSENSUS"
-      else if (heading == expected && heading != consumed && signed) print "PEER_TURN_READY"
+      else if (heading == expected && heading != consumed && content && signed && fence == "")
+        print "PEER_TURN_READY"
       else print "WAIT"
     }
   ' DEBATE.md
 }
 ```
 
-The signature must belong to the expected section, so an unfinished append does not reuse the previous section's signature.
+The closing signature and response text must belong to the expected section, so unfinished or empty appends cannot reuse the previous section's signature.
 After reading and processing a ready turn, set `LAST_CONSUMED=$EXPECTED` before appending your reply.
 
 ## Shell requirement
@@ -79,35 +114,33 @@ Run polling commands in `bash`. The timeout example uses Bash's `SECONDS`.
 
 ## Turn order enforcement
 
-Before appending a section, check the last `## ` heading in `DEBATE.md`:
+Before consuming a peer turn, require `TURN_STATE` to return `PEER_TURN_READY` and read the complete expected peer section.
+The expected heading encodes the turn order below, and readiness validates its closing peer signature.
+Do not repeat these checks with a raw heading or signature search, because code examples may contain identical text.
 
 - After `## Opening` → only Agent B may append `## Response 1`.
 - After `## Response N` → only Agent A may append `## Follow-up N` (or `## CONSENSUS`).
 - After `## Follow-up N` → only Agent B may append `## Response N+1`.
 
-If it is not your turn, re-read the file and go back to polling.
-
-Before appending, also verify the last signature line role:
-
-- If the last signature is your role, it is not your turn.
-- Append only when heading order and signature role both allow your turn.
+If the expected peer turn is not ready, continue polling.
+Once the turn is processed, set `LAST_CONSUMED=$EXPECTED` and append your reply without requiring readiness again for the consumed turn.
 
 ## Polling discipline (critical)
 
 - After starting a poll loop, keep polling until one of these happens:
   - the expected signed, unconsumed peer turn is ready
   - timeout reached
-  - `## CONSENSUS` exists
+  - `TURN_STATE` returns `CONSENSUS`
 - Do not stop early just to report that polling started.
 - When the expected peer turn is ready, immediately read `DEBATE.md` and continue the protocol.
-- Stop only when `## CONSENSUS` exists or timeout handling completes.
+- Stop only when `TURN_STATE` returns `CONSENSUS` or timeout handling completes.
 - Polling is mandatory after every append. Do not return control to the user between append and poll completion.
 - After a peer turn is ready, do not ask the user what to do next. Immediately take the next protocol step for your role only.
 
 ## Hard Exit Gate (MUST)
 
 - After entering this protocol, do not send any user-facing status/progress/completion message until one of these is true:
-  - `DEBATE.md` contains `## CONSENSUS`, or
+  - `TURN_STATE` returns `CONSENSUS`, or
   - timeout handling completed per role rules.
 - Messages like "started", "waiting", "polling", "done", or "completed" before the stop condition are protocol violations.
 - If you accidentally replied early, treat that reply as invalid and immediately resume the protocol loop.
@@ -115,14 +148,14 @@ Before appending, also verify the last signature line role:
 ## Pre-Reply Check (MUST)
 
 - Before any user-facing reply, run this gate:
-  - If `DEBATE.md` exists and does not contain `## CONSENSUS`, do not reply; continue append/poll flow immediately.
+  - If `DEBATE.md` exists and `TURN_STATE` does not return `CONSENSUS`, do not reply; continue append/poll flow immediately.
   - If terminal timeout condition is reached, perform the timeout terminal action for your role, then stop.
 
 ## Blocking Poll Requirement (MUST)
 
 - After every append (`## Opening`, `## Response N`, `## Follow-up N`), run one blocking poll loop.
 - Do not return control early while polling.
-- Exit the loop only on an expected signed, unconsumed peer turn, `## CONSENSUS`, or timeout.
+- Exit the loop only on `PEER_TURN_READY`, parsed `CONSENSUS`, or timeout.
 
 ## Conflict Override
 
@@ -133,10 +166,10 @@ Before appending, also verify the last signature line role:
 ## Completion criteria (MUST)
 
 - A debate run is only complete when one of these is true:
-  - `## CONSENSUS` exists, or
+  - `TURN_STATE` returns `CONSENSUS`, or
   - timeout handling completed and timeout `## CONSENSUS` was appended.
 - It is a protocol violation to stop after writing `## Opening`, `## Response N`, or `## Follow-up N` without entering the poll loop.
-- If `DEBATE.md` does not yet contain `## CONSENSUS`, you must still be in the protocol loop (append or poll).
+- If `TURN_STATE` does not return `CONSENSUS`, you must still be in the protocol loop (append or poll).
 - Never send a “done”/“completed” status while waiting for the other agent; continue polling instead.
 - Never pause to request user confirmation between turns. Continue autonomously within your assigned role until consensus/timeout.
 
@@ -172,19 +205,23 @@ Before appending, also verify the last signature line role:
    ```bash
    SECONDS=0; while [ ! -f DEBATE.md ]; do sleep 5; if [ "$SECONDS" -ge 600 ]; then echo "TIMEOUT waiting for DEBATE.md"; exit 0; fi; done
    ```
-2. If the file contains `## CONSENSUS`, stop; otherwise analyze the debate subject: **$1** (the arguments after the role).
+2. If `TURN_STATE` returns `CONSENSUS`, stop; otherwise analyze the debate subject: **$1** (the arguments after the role).
    Run `git show`, `git diff`, `gh pr view`, read files, etc. as appropriate.
 3. Run the same readiness loop as Agent A, checking the expected heading and signature immediately and on every poll.
    This step is blocking and mandatory; do not exit the workflow before it finishes.
 4. If `CONSENSUS` → stop; if timed out → append `## CONSENSUS` noting the timeout and stop.
 5. Read and process Agent A's expected signed turn, then set `LAST_CONSUMED=$EXPECTED`.
-6. Verify turn order, set shell variable `N` to 1 after `## Opening` or one greater than the consumed follow-up number, and append `## Response N` with a point-by-point reply.
+6. Using the consumed peer heading, set shell variable `N` to 1 after `## Opening` or one greater than the consumed follow-up number, and append `## Response N` with a point-by-point reply.
 7. Set `EXPECTED="## Follow-up $N"`, then return immediately to step 3 without resetting `LAST_CONSUMED`.
 8. Do not ask the user whether to continue; continue automatically per turn order within Agent B only.
 
 ## File format
 
-Each section should end with a signature line: `*— Agent A|Agent B (optional tool name), <timestamp>*`
+Reserve unindented top-level `##` headings for protocol sections; use `###` or deeper for response subsections.
+Each nonterminal section must contain response prose and end with its author's signature line: `*— Agent A|Agent B (optional tool name), <timestamp>*`
+Put examples in fenced blocks or prefix every quoted line with `>`.
+Fences use at least three backticks or tildes, indented by at most three spaces.
+Close each fence with the same character, at least the opening length, and no suffix except whitespace.
 
 ```markdown
 # Code Debate: <subject>
@@ -242,7 +279,7 @@ If the agent has already completed its own review of the subject, it must also i
 
 - Maximum 5 rounds (a round = one follow-up + one response, so 10 sections max after the opening).
 - If the maximum is reached without convergence, the last writer appends `## CONSENSUS` summarizing what was agreed and listing remaining disagreements.
-- The `## CONSENSUS` heading is the stop signal. When you see it, stop polling and end.
+- The unquoted, unfenced `## CONSENSUS` heading is the stop signal; when `TURN_STATE` returns `CONSENSUS`, stop polling and end.
 
 ## Guidelines
 
