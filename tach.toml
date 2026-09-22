@@ -673,6 +673,7 @@ depends_on = [
     "mindroom.media_inputs",
 ]
 visibility = [
+    "mindroom.response_runner",
     "mindroom.ai",
     "mindroom.api.openai_compat",
     "mindroom.approval_execution",
@@ -1112,6 +1113,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks.sender",
     "mindroom.matrix.client_room_admin",
+    "mindroom.requester_identity",
 ]
 
 [[modules]]
@@ -2150,6 +2152,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.ai_runtime",
     "mindroom.mid_turn",
     "mindroom.mid_turn_judgment",
     "mindroom.participation_judgment",
@@ -3834,6 +3837,7 @@ depends_on = [
     "mindroom.model_loading",
     "mindroom.scheduling_executor",
     "mindroom.recurring_schedule",
+    "mindroom.requester_identity",
 ]
 
 [[modules]]
@@ -6546,6 +6550,24 @@ from = ["mindroom.custom_tools.agno_compat_website_reader"]
 expose = ["queue_crawl_url", "crawl_with_callbacks"]
 
 [[modules]]
+path = "mindroom.tools.replicate"
+depends_on = [
+    "mindroom.model_defaults",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+    "mindroom.custom_tools.agno_compat_replicate",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.agno_compat_replicate"
+depends_on = ["mindroom.logging_config"]
+visibility = ["mindroom.tools.replicate"]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.agno_compat_replicate"]
+expose = ["MindRoomReplicateTools"]
+
+[[modules]]
 path = "mindroom.custom_tools.agno_compat_github_errors"
 depends_on = []
 visibility = ["mindroom.custom_tools.github"]
@@ -6637,10 +6659,10 @@ depends_on = ["mindroom.config.judgment"]
 
 [[modules]]
 path = "mindroom.mid_turn"
-depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.judgment.answers", "mindroom.hooks", "mindroom.redaction"]
+depends_on = ["mindroom.dispatch_source", "mindroom.judgment.state", "mindroom.hooks", "mindroom.redaction"]
 visibility = ["mindroom.mid_turn_judgment", "mindroom.ai_runtime", "mindroom.response_lifecycle", "mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.mid_turn_judgment"
-depends_on = ["mindroom.judgment.evaluator", "mindroom.mid_turn"]
+depends_on = ["mindroom.logging_config", "mindroom.config.judgment", "mindroom.constants", "mindroom.entity_resolution", "mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.matrix.thread_diagnostics", "mindroom.matrix.thread_history_result", "mindroom.mid_turn"]
 visibility = ["mindroom.response_runner"]

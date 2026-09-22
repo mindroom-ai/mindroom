@@ -2984,6 +2984,39 @@ def test_runtime_chart_state_storage_can_create_pvc() -> None:
 
 
 @pytest.mark.parametrize(
+    ("config_path", "extra_args"),
+    [
+        ("/app/agent_data/encryption_keys/config.yaml", ()),
+        ("/app/agent_data/sync_continuity/config.yaml", ("stateStorage.syncContinuity.enabled=true",)),
+        ("/app/agent_data/active/config.yaml", ("stateStorage.encryptionKeys.mountPath=/app/agent_data/active/keys",)),
+        (
+            "/app/agent_data/active/config.yaml",
+            ("extraVolumeMounts[0].name=custom", "extraVolumeMounts[0].mountPath=/app/agent_data/active/keys"),
+        ),
+    ],
+)
+def test_runtime_chart_rejects_bootstrap_target_overlapping_mount(
+    config_path: str,
+    extra_args: tuple[str, ...],
+) -> None:
+    """Chart-known mounts must not become bootstrap target or its nested children."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "eventCache.postgres.auth.password=test-password",
+        "config.source=file",
+        f"config.path={config_path}",
+        "config.bootstrapBundlePath=/bundle",
+        "workers.backend=kubernetes",
+        "stateStorage.enabled=true",
+        "stateStorage.existingClaim=mindroom-state",
+        *extra_args,
+        release_name="mindroom-runtime",
+    )
+    assert completed.returncode != 0
+    assert "config.path directory overlaps a mounted volume" in completed.stderr
+
+
+@pytest.mark.parametrize(
     ("conflict_args", "expected_error"),
     [
         (

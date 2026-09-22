@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol, cast
 from unittest.mock import AsyncMock
 
@@ -25,11 +25,14 @@ from mindroom.api import config_lifecycle
 from mindroom.api import external_triggers as external_triggers_api
 from mindroom.api import main as api_main
 from mindroom.config.main import Config
+from mindroom.external_triggers import executor as trigger_executor
 from mindroom.external_triggers.auth import mint_trigger_capability, sign_trigger_request
 from mindroom.external_triggers.replay_store import ExternalTriggerEventClaim, ExternalTriggerReplayStore
 from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, TriggerDeliverySnapshot
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.response_admission import ResponseAdmissionGate
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -1090,3 +1093,107 @@ def test_exception_during_first_delivery_releases_thread_key_reservation(
 
     assert opened.status_code == 202
     assert continued == [None, None]
+
+
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("capability", [False, True], ids=["signed-reusable", "single-use-capability"])
+@pytest.mark.parametrize(
+    ("joined_id", "unavailable", "expected_status"),
+    [
+        pytest.param(_OWNER, False, 202, id="canonical-only"),
+        pytest.param("@bridge_owner:example.org", False, 202, id="alias-only"),
+        pytest.param(None, False, 403, id="neither-joined"),
+        pytest.param(None, True, 403, id="membership-unavailable"),
+        pytest.param("@bridgebot:example.org", False, 403, id="excluded-bot"),
+        pytest.param("@persisted_research:localhost", False, 403, id="excluded-persisted-agent"),
+        pytest.param("@mindroom_research:localhost", False, 403, id="excluded-generated-agent"),
+        pytest.param("@persisted_router:localhost", False, 403, id="excluded-router"),
+        pytest.param("@internal:localhost", False, 403, id="excluded-internal-user"),
+    ],
+)
+def test_trigger_endpoint_requires_live_human_equivalent_membership(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+    joined_id: str | None,
+    expected_status: int,
+    *,
+    capability: bool,
+    unavailable: bool,
+) -> None:
+    """Both authenticated endpoints apply human aliases before delivery and replay claims."""
+    payload = _config_payload()
+    payload["bot_accounts"] = ["@bridgebot:example.org"]
+    payload["mindroom_user"] = {"username": "internal"}
+    payload["authorization"] = {
+        "aliases": {
+            _OWNER: [
+                "@bridge_owner:example.org",
+                "@bridgebot:example.org",
+                "@persisted_research:localhost",
+                "@mindroom_research:localhost",
+                "@persisted_router:localhost",
+                "@internal:localhost",
+            ],
+        },
+    }
+    runtime_paths = trigger_api.runtime_paths
+    runtime_paths.config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+    config, _ = config_lifecycle.read_app_committed_runtime_config(api_main.app)
+    persist_entity_accounts(
+        config,
+        runtime_paths,
+        usernames={"router": "persisted_router", "research": "persisted_research"},
+    )
+    _bind_runtime(trigger_api.ready_snapshots)
+    app_state = config_lifecycle.app_state(api_main.app)
+    runtime = app_state.external_trigger_runtime
+    assert runtime is not None
+    matrix_client = AsyncMock(spec=nio.AsyncClient)
+
+    async def joined_members(room_id: str) -> nio.JoinedMembersResponse | nio.JoinedMembersError:
+        if unavailable:
+            return nio.JoinedMembersError("forbidden", "M_FORBIDDEN")
+        members = [nio.RoomMember(joined_id, None, None)] if joined_id is not None else []
+        return nio.JoinedMembersResponse(members=members, room_id=room_id)
+
+    matrix_client.joined_members.side_effect = joined_members
+    conversation_reader = AsyncMock()
+    conversation_reader.latest_thread_event_id.return_value = "$latest"
+    app_state.external_trigger_runtime = replace(runtime, client=matrix_client, conversation_reader=conversation_reader)
+    delivered_owners: list[str] = []
+
+    async def send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+        delivered_owners.append(cast("str", content[constants.ORIGINAL_SENDER_KEY]))
+        return DeliveredMatrixEvent(event_id="$delivered", content_sent=content)
+
+    monkeypatch.setattr(
+        external_triggers_api,
+        "is_external_trigger_owner_joined_target_room",
+        trigger_executor.is_external_trigger_owner_joined_target_room,
+    )
+    monkeypatch.setattr(trigger_executor, "send_matrix_message", send)
+    if capability:
+        token, snapshot = _create_capability_record(trigger_api)
+        response = trigger_api.client.post(
+            f"/api/triggers/{snapshot.trigger_id}",
+            content=_body(),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    else:
+        response = _post_signed(trigger_api)
+
+    assert response.status_code == expected_status
+    assert delivered_owners == ([_OWNER] if expected_status == 202 else [])
+    if expected_status == 403:
+        assert runtime_paths.control_state_root is not None
+        assert not (runtime_paths.control_state_root / "external_triggers" / "replay.json").exists()
+        if capability:
+            assert (
+                ExternalTriggerStore(runtime_paths).delivery_snapshot(
+                    snapshot.trigger_id,
+                    config=config,
+                    config_generation=runtime.config_generation,
+                )
+                is not None
+            )

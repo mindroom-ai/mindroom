@@ -54,6 +54,28 @@
 {{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $source)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
 {{- fail "config.bootstrapBundlePath must not overlap the config.path directory" -}}
 {{- end -}}
+{{- $mountPaths := list (clean .Values.storage.mountPath) -}}
+{{- if .Values.stateStorage.enabled -}}
+{{- if .Values.stateStorage.mountPath -}}
+{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.mountPath) -}}
+{{- end -}}
+{{- if .Values.stateStorage.encryptionKeys.enabled -}}
+{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.encryptionKeys.mountPath) -}}
+{{- end -}}
+{{- if .Values.stateStorage.syncContinuity.enabled -}}
+{{- $mountPaths = append $mountPaths (clean .Values.stateStorage.syncContinuity.mountPath) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.extraVolumeMounts -}}
+{{- if .mountPath -}}
+{{- $mountPaths = append $mountPaths (clean .mountPath) -}}
+{{- end -}}
+{{- end -}}
+{{- range $mount := $mountPaths -}}
+{{- if or (eq $target $mount) (hasPrefix (printf "%s/" $target) $mount) -}}
+{{- fail "config.path directory overlaps a mounted volume" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
 {{- fail "config.source must be either configMap or file" -}}

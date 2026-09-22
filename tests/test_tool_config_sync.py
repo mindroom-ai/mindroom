@@ -33,6 +33,9 @@ IGNORED_AGNO_PARAMS = {
     # Agno still exposes deprecated BigQuery aliases in its constructor, but MindRoom intentionally only surfaces canonical flags.
     "google_bigquery": {"enable_list_tables", "enable_describe_table", "enable_run_sql_query"},
     # Mapping-only inputs have no safe authored ConfigField representation.
+    "crawl4ai": {"proxy_config"},
+    "firecrawl": {"search_params"},
+    "spider": {"optional_params"},
     "mem0": {"config"},
     "scrapegraph": {"headers"},
     "tavily": {"search_params"},
@@ -57,7 +60,14 @@ def test_youtube_languages_accepts_authored_string_list() -> None:
 
 @pytest.mark.parametrize(
     ("tool_name", "mapping_field"),
-    [("youtube", "proxies"), ("mem0", "config"), ("scrapegraph", "headers")],
+    [
+        ("youtube", "proxies"),
+        ("mem0", "config"),
+        ("scrapegraph", "headers"),
+        ("crawl4ai", "proxy_config"),
+        ("firecrawl", "search_params"),
+        ("spider", "optional_params"),
+    ],
 )
 def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_field: str) -> None:
     """Mapping-only upstream inputs should not be exposed as misleading text fields."""

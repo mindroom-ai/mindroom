@@ -107,7 +107,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
                 runtime.agent_reply_memberships,
             )
             await _require_external_trigger_runtime_ready(runtime, trigger_snapshot)
-            await _require_owner_joined_target_room(runtime, trigger_snapshot)
+            await _require_owner_joined_target_room(runtime, trigger_snapshot, config, runtime_paths)
 
             return await _claim_and_execute_trigger(
                 payload=payload,
@@ -469,10 +469,14 @@ async def _require_external_trigger_runtime_ready(
 async def _require_owner_joined_target_room(
     runtime: config_lifecycle.ExternalTriggerRuntime,
     snapshot: TriggerDeliverySnapshot,
+    config: Config,
+    runtime_paths: RuntimePaths,
 ) -> None:
     owner_joined = await is_external_trigger_owner_joined_target_room(
         cast("nio.AsyncClient", runtime.client),
         snapshot,
+        config,
+        runtime_paths,
     )
     if not owner_joined:
         raise HTTPException(status_code=403, detail="External trigger owner is not joined to the target room")

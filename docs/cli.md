@@ -1225,6 +1225,7 @@ An unmanaged or edited tree requires explicit `--force`; this never bypasses val
 Successful replacement retains the complete former tree at `TARGET.previous`.
 Invalid candidates and failed copies leave active and previous trees untouched.
 Symlinks and special files are rejected.
+Mounts at or inside active and recovery trees are rejected before rotation or cleanup, including with `--force`.
 Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
 
 Rollback uses the same validated installation operation with `TARGET.previous` as its source.

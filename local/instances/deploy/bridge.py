@@ -359,12 +359,14 @@ def _generate_bridge_config(bridge: BridgeConfig, template_path: Path) -> Path: 
     return config_file
 
 
-def _register_with_tuwunel(bridge: BridgeConfig, registration_yaml: str) -> bool:  # noqa: ARG001
+def _register_with_tuwunel(bridge: BridgeConfig, registration_yaml: str) -> bool:
     """Register bridge with Tuwunel/Conduit via admin room API."""
     console.print("[yellow]i[/yellow] Tuwunel registration requires manual steps:")
-    console.print(f"1. Join the admin room: #admins:{bridge.matrix_domain}")
-    console.print("2. Send: !admin appservices register")
-    console.print("3. Paste the registration.yaml content")
+    console.print(f"1. Join the admin room as an authorized admin: #admins:{bridge.matrix_domain}")
+    console.print("2. Send this command and fenced YAML together as one message:")
+    message = "!admin appservices register\n```\n" + registration_yaml.rstrip("\n") + "\n```"
+    console.print(message, markup=False, highlight=False, soft_wrap=True)
+    console.print("3. Check the response, then verify with: !admin appservices list")
     console.print("\n[dim]Registration content saved to:[/dim]")
     console.print(f"  {bridge.registration_file}")
 
@@ -373,7 +375,7 @@ def _register_with_tuwunel(bridge: BridgeConfig, registration_yaml: str) -> bool
     console.print("The bridge will attempt this automatically when started.")
 
     console.print("\n[yellow]After registration, run:[/yellow]")
-    console.print(f"  ./bridge.py start {bridge.bridge_type} --instance {bridge.instance_name}")
+    console.print(f"  ./bridge.py start {bridge.bridge_type.value} --instance {bridge.instance_name}")
     return True
 
 
@@ -405,7 +407,9 @@ def _register_with_synapse(bridge: BridgeConfig, registration_file: Path) -> boo
         yaml.dump(config, f, default_flow_style=False)
 
     console.print("[green]✓[/green] Added to Synapse configuration")
-    console.print("[yellow]i[/yellow] Restart Synapse to apply: './deploy.py restart --only-matrix'")
+    console.print(
+        f"[yellow]i[/yellow] Restart Synapse to apply: './deploy.py restart {bridge.instance_name} --only-matrix'",
+    )
     return True
 
 

@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +23,32 @@ from mindroom.file_locks import advisory_file_lock
 __all__ = ["BundleInstallResult", "install_config_bundle"]
 
 _METADATA = ".mindroom-bundle.json"
+
+
+class _NestedMountError(ValueError):
+    """A tree contains files owned by another mounted filesystem."""
+
+
+def _reject_managed_mounts(*roots: Path) -> None:
+    """Reject mounts at or below managed roots, including same-device bind mounts."""
+    if sys.platform == "linux":
+        try:
+            mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="surrogateescape")
+        except OSError as exc:
+            msg = "Cannot verify bundle mount boundaries."
+            raise _NestedMountError(msg) from exc
+        mount_paths = (
+            Path(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), line.split()[4]))
+            for line in mountinfo.splitlines()
+        )
+    else:
+        mount_paths = (
+            path for root in roots if root.exists() for path in chain((root,), root.rglob("*")) if path.is_mount()
+        )
+    for mount_path in mount_paths:
+        if any(mount_path.is_relative_to(root) for root in roots):
+            msg = f"Bundle tree contains a mount: {mount_path}"
+            raise _NestedMountError(msg)
 
 
 @dataclass(frozen=True)
@@ -129,6 +158,7 @@ def _finish_rotation(target: Path) -> None:
     owned = _recovery_transaction(target)
     if owned is None:
         return
+    _reject_managed_mounts(target, previous, pending, retired)
     for path, digest in ((pending, owned.pending), (retired, owned.retired)):
         if path.exists() and _directory_digest(path) != digest:
             msg = f"Unowned bundle recovery directory: {path}"
@@ -144,6 +174,7 @@ def _finish_rotation(target: Path) -> None:
                 previous.rename(retired)
             pending.rename(previous)
     if retired.exists():
+        _reject_managed_mounts(retired)
         shutil.rmtree(retired)
     _write_transaction(journal, _IdleTransaction(previous=_directory_digest(previous)))
 
@@ -153,6 +184,7 @@ def _publish_bundle(stage: Path, target: Path) -> bool:
     pending = target.with_name(f".{target.name}.pending")
     previous = target.with_name(f"{target.name}.previous")
     journal = target.with_name(f".{target.name}.transaction")
+    _reject_managed_mounts(target, previous, pending, target.with_name(f".{target.name}.retired"))
     _write_transaction(
         journal,
         _ActiveTransaction(pending=_directory_digest(target), retired=_directory_digest(previous)),
@@ -167,7 +199,7 @@ def _publish_bundle(stage: Path, target: Path) -> bool:
         raise
     try:
         _finish_rotation(target)
-    except OSError:
+    except (OSError, _NestedMountError):
         # Publication succeeded; the journal still owns recovery paths.
         return True
     return False
@@ -285,4 +317,5 @@ def install_config_bundle(
             )
         finally:
             if stage.exists():
+                _reject_managed_mounts(stage)
                 shutil.rmtree(stage)
