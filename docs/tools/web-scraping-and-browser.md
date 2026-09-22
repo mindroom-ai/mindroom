@@ -94,7 +94,6 @@ crawl("https://matrix.org/blog/", search_query="bridges and federation")
 #### Notes
 
 - Use `crawl4ai` when you want a local scraper instead of a hosted API.
-- `proxy_config` maps directly to Crawl4AI browser settings, so treat it as an advanced raw config object.
 - For heavily protected or browser-hostile sites, `browserbase`, `brightdata`, or `browser` can be a better fit.
 
 ### [`website`]
@@ -384,7 +383,6 @@ scrape("https://matrix.org/blog/")
 #### Notes
 
 - Treat `spider` as a credentialed tool and set `SPIDER_API_KEY`, even though the current MindRoom metadata still says `setup_type: none`.
-- `optional_params` is a raw provider object and is best used only when you already know the Spider API field names you want.
 - If you want a cleaner, explicitly credentialed hosted scraper with clearer metadata, `firecrawl` is usually simpler.
 
 ### [`scrapegraph`]
