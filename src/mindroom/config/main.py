@@ -400,6 +400,7 @@ class Config(BaseModel):
     _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
     _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
+    _runtime_approved_egress_inherited_default_tools: bool = PrivateAttr(default=False)
     _runtime_approved_egress_injected_approval_rule: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
 
@@ -1078,6 +1079,7 @@ class Config(BaseModel):
 
         validate_call_agent_room_ownership(config, runtime_paths)
         config._runtime_approved_egress_injected_default_tool = approved_egress_overlay.injected_default_tool
+        config._runtime_approved_egress_inherited_default_tools = approved_egress_overlay.inherited_default_tools
         config._runtime_approved_egress_injected_approval_rule = approved_egress_overlay.injected_approval_rule
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
@@ -1106,6 +1108,7 @@ class Config(BaseModel):
         payload = strip_runtime_approved_egress_overlay_from_dump(
             payload,
             injected_default_tool=self._runtime_approved_egress_injected_default_tool,
+            inherited_default_tools=self._runtime_approved_egress_inherited_default_tools,
             injected_approval_rule=self._runtime_approved_egress_injected_approval_rule,
         )
         return _strip_empty_root_sections(payload)
@@ -1860,15 +1863,16 @@ class Config(BaseModel):
         return "thread"
 
     @model_validator(mode="after")
-    def validate_agent_participation(self) -> Config:
+    def validate_agent_judgments(self) -> Config:
         """Validate dedicated judgment model aliases for opted-in agents."""
         for agent_name, agent in self.agents.items():
-            if agent.participation is None:
-                continue
-            judgment = agent.participation.judgment
-            if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
-                msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
-                raise ValueError(msg)
+            for settings in (agent.participation, agent.mid_turn):
+                if settings is None:
+                    continue
+                judgment = settings.judgment
+                if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
+                    msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
+                    raise ValueError(msg)
         return self
 
     def _entity_model_name(self, entity_name: str) -> str:

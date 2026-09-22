@@ -66,9 +66,12 @@ GOOGLE_API_KEY=...
 
 This will start:
 - MindRoom on its bundled dashboard/API port (automatically assigned, e.g., 8765)
+- The sandbox runner used by the default shell, file, and Python tool routing
 - Matrix server if enabled (port automatically assigned, e.g., 8448)
 - Authelia authentication server if enabled
 - PostgreSQL and Redis (if using Synapse)
+
+Before starting the sandbox runner, Compose initializes its scratch volume ownership using `UID` and `GID` (both default to `1000`).
 
 ### 4. Access Your Instance
 

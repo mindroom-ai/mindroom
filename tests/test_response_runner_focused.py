@@ -3069,7 +3069,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         resume = asyncio.create_task(runner._resume_approval_source("$source"))
         await asyncio.wait_for(resume_entered.wait(), timeout=1.0)
 
-        pending_human_messages = set(queued_signal.pending_human_message_event_ids)
+        pending_human_messages = {message.event_id for message in queued_signal.pending_message_snapshot()}
         run_approval_continuation.assert_not_awaited()
         release_follow_up.set()
         assert await asyncio.wait_for(follow_up, timeout=1.0) == "$follow-up-response"
@@ -7068,7 +7068,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
     await first_entered.wait()
     reservation = await coordinator.reserve_response_lifecycle(second_envelope)
     queued_signal = coordinator._get_or_create_queued_signal(second_envelope.target)
-    assert queued_signal.pending_human_message_event_ids == {"$second"}
+    assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {"$second"}
 
     with response_lifecycle_reservation_context(reservation):
         second = asyncio.create_task(
@@ -7095,7 +7095,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     await lifecycle_lock.acquire()
     reservation = await coordinator.reserve_response_lifecycle(envelope)
     queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
-    assert queued_signal.pending_human_message_event_ids == {envelope.source_event_id}
+    assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {envelope.source_event_id}
     assert queued_signal.has_active_response_turn()
 
     if consumed:
@@ -7116,7 +7116,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
 
     await reservation.release()
     await reservation.release()
-    assert queued_signal.pending_human_message_event_ids == set()
+    assert {message.event_id for message in queued_signal.pending_message_snapshot()} == set()
     assert not queued_signal.has_active_response_turn()
     lifecycle_lock.release()
 

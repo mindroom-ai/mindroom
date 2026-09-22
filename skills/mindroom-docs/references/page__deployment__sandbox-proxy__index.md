@@ -24,7 +24,7 @@ This page describes the current sandboxed execution model.
 The static worker runtime authenticates requests with `MINDROOM_SANDBOX_PROXY_TOKEN`.
 Kubernetes dedicated workers derive a separate runner token for each worker from that control-plane token and the worker key.
 Compromising one dedicated worker token does not authorize requests to another dedicated worker runner.
-For tools that need credentials, such as a shell tool that calls an authenticated API, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
+For worker-routed toolkits with declared credential configuration fields, the primary MindRoom runtime can create a short-lived **credential lease** that the worker consumes once.
 Credentials never become part of the normal tool arguments or the model prompt.
 
 MindRoom currently ships three worker backend shapes:
@@ -232,7 +232,8 @@ Agent-scoped workers such as unscoped, `worker_scope: shared`, and `worker_scope
 `worker_scope: user` intentionally shares one worker across multiple agents, so it keeps the broader shared projection for that worker.
 Writable file-memory paths are rewritten into the worker's own state root instead of being mounted from the host config tree.
 MindRoom also masks config-adjacent `.env` inside the worker container, so the raw file is not mounted into the worker.
-Proxied `shell` and `python` requests still receive their execution env from the active runtime contract, so ordinary `.env` values can remain visible to those tools unless you remove them or override `execution_env`.
+Proxied `shell` receives a filtered system environment plus explicitly allowed process-env passthrough; `python` receives only allowed runtime names from the process and config-adjacent `.env`.
+Neither inherits arbitrary `.env` values; see [Shell env and PATH](#shell-env-and-path) for explicit passthrough and request-environment controls.
 If a tool inside the worker still needs a secret that you stored directly in `config.yaml`, provide that secret through a supported worker-visible env or credential path instead of relying on the projected config copy.
 
 MindRoom auto-installs the optional `docker` extra the first time this backend is used.
@@ -528,7 +529,7 @@ The runner sources this script with `bash` after applying the workspace home con
 
 **Filtering:**
 
-`.mindroom/worker-env.sh` is sourced by bash that inherits the runner's process env, which contains tokens the runner needs to function (sandbox proxy auth, etc.).
+`.mindroom/worker-env.sh` is sourced by bash with the prepared request environment and applicable worker/workspace defaults, rather than the runner’s full process environment.
 To prevent runtime control material from reaching tools, the overlay drops credential seed declarations, Kubernetes worker backend config env names, runner control names including `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Bash bookkeeping vars (`PWD`, `OLDPWD`, `SHLVL`, `_`, `PIPESTATUS`) are also dropped because they're noise, not values the script meant to export.
 After MindRoom-owned env names are reasserted, other exported values pass through, including service tokens and provider credentials you intentionally export from the hook.
@@ -548,19 +549,14 @@ For an example, see `docs/tools/execution-and-coding.md`.
 
 ## Credential leases
 
-Some proxied tools need credentials, such as a `shell` tool that runs `git push` and needs an SSH key.
-Rather than giving the runner permanent access to secrets, the primary MindRoom runtime creates a **credential lease**.
-That lease is a short-lived, single-use token that the runner exchanges for credentials during execution.
+A **credential lease** supplies short-lived credential values as constructor configuration overrides to a worker-routed toolkit.
+`MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` maps tool names, `tool.function` selectors, or `*` to lists of credential service names.
+Selected services follow the call's scoped credential policy and, where applicable, the worker-grantable shared-service allowlist.
+Only fields declared by the receiving toolkit are applied as constructor configuration; unrelated credential fields are ignored.
+The lease holds its values in memory until consumed or expired, and the proxy requests one use with the configured TTL.
 
-Configure which credentials are shared via `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON`:
-
-```bash
-export MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON='{"shell": ["github"], "python": ["openai"]}'
-```
-
-This shares the `github` credential service with `shell` tool calls and `openai` with `python` tool calls.
-Credentials are never persisted by the runner; a lease holds them in memory until consumed or expired.
-Each lease is consumed on use and expires after the configured TTL.
+Leases do not export API keys into shell environments, configure Git authentication, or install SSH keys.
+For shell authentication, explicitly configure [environment passthrough](#shell-env-and-path) or the [workspace env hook](#workspace-env-hook-mindroomworker-envsh) as needed.
 
 ## Security considerations
 
@@ -631,7 +627,7 @@ The `worker_tools` field has three states:
 
 | Value | Behavior |
 |-------|----------|
-| `null` (omitted) | Inherit `defaults.worker_tools`; if that is also null or omitted, use the environment routing policy described under [Execution modes](#execution-modes) |
+| `null` (omitted) | Inherit `defaults.worker_tools`; if that is also null or omitted, use the environment routing policy described under [Execution modes](#execution-modes), including toolkit metadata defaults for a dedicated backend with no explicit mode or tool selection |
 | `[]` (empty list) | Explicitly disable sandbox proxying for this agent |
 | `["shell", "file"]` | Proxy exactly these tools for this agent |
 

@@ -124,10 +124,10 @@ The local Matrix stack includes:
 - **PostgreSQL**: Database backend
 - **Redis**: Caching layer
 
-If you're running the backend on the host (not in Docker), you can use `mindroom local-stack-setup` to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
+For a host-installed backend, use `mindroom local-stack-setup` with the core MindRoom checkout's `local/matrix` directory to start Synapse + MindRoom Chat and persist local Matrix env vars automatically:
 
 ```bash
-mindroom local-stack-setup --synapse-dir /path/to/mindroom-stack/local/matrix
+mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
 mindroom run
 ```
 

@@ -51,6 +51,8 @@ eventCache:
       size: 20Gi
 ```
 
+For the chart-managed database, `eventCache.postgres.service.port` configures the PostgreSQL listener, health probes, headless Service, NetworkPolicy, and generated connection URL together (default: `5432`).
+
 For GitOps or `helm template` workflows, set `eventCache.postgres.auth.password` or provide existing Secrets so renders do not rotate generated credentials.
 When adopting an existing PostgreSQL StatefulSet, keep the service name and password source stable:
 

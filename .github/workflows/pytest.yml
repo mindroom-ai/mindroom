@@ -26,6 +26,11 @@ jobs:
         run: |
           uv sync --all-extras
 
+      - name: Install just for recipe regression tests
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@1.58.0
+
       - name: Run tests with pytest
         run: |
           # Ubuntu's AppArmor profile permits the installed Chrome sandbox.

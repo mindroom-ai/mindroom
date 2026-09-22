@@ -72,9 +72,16 @@ For an existing connection, saving apps preserves the controller, requester, bro
 If computer access is active, Stop and Save asks for confirmation, stops observation and control, and leaves access stopped after saving.
 Start Observe Only explicitly to resume with the saved app list.
 Saving an empty selection removes all app access; select and save at least one app before Start Observe Only becomes available again.
-During initial setup, choose apps first and save them with Save Setup.
+During initial setup, choose apps first and select Continue Setup to open the connection form; Save Setup saves those app selections with the connection.
+The session card explains why Start or Stop is unavailable and links directly to incomplete setup or pending app selections.
+Paste setup data into the labeled, bordered field before selecting Import Setup.
 Primary-screen access is a separate advanced option because it can expose content outside selected apps.
 Settings shows the installed app version and build number.
+
+Permission status reflects what macOS grants the running copy, not whether an older MindRoom entry remains enabled in System Settings.
+The app provides Check Again and recovery guidance when access is unavailable.
+Local ad-hoc builds do not satisfy permissions saved for the Developer ID-signed release and can lose permission continuity on every rebuild.
+Use the signed release for stable permissions; when testing a local copy, approve that copy explicitly in System Settings.
 
 Computer access shows the saved local Matrix device without signing in again, including sessions created by the CLI while the app is open.
 Saved identity is read from the private session file; its presence does not prove server authentication or completed controller pairing.
