@@ -10,12 +10,44 @@ import numpy as np
 import pytest
 from moviepy import ColorClip, CompositeVideoClip
 from moviepy.tools import compute_position
+from PIL import Image, ImageDraw, ImageFont
 
 from mindroom.custom_tools import agno_compat_moviepy as adapter
 
 if TYPE_CHECKING:
     from moviepy import TextClip
     from numpy.typing import NDArray
+
+
+def _assert_complete_word_mask(clip: TextClip, font_size: int, stroke_width: int) -> None:
+    """Compare complete glyph pixels against an independent Pillow raster."""
+    font = ImageFont.load_default(font_size)
+    left, top, right, bottom = font.getbbox(clip.text, anchor="ls", stroke_width=stroke_width)
+    reference = Image.new("RGBA", (right - left, bottom - top))
+    ImageDraw.Draw(reference).text(
+        (-left, -top),
+        clip.text,
+        font=font,
+        fill="white",
+        stroke_width=stroke_width,
+        stroke_fill="black",
+        anchor="ls",
+    )
+    expected = np.asarray(reference)[:, :, 3] / 255
+    actual = clip.mask.get_frame(0)
+    expected_rows, expected_columns = np.nonzero(expected)
+    actual_rows, actual_columns = np.nonzero(actual)
+    assert len(expected_rows)
+    assert len(actual_rows)
+    expected = expected[
+        expected_rows.min() : expected_rows.max() + 1,
+        expected_columns.min() : expected_columns.max() + 1,
+    ]
+    actual = actual[
+        actual_rows.min() : actual_rows.max() + 1,
+        actual_columns.min() : actual_columns.max() + 1,
+    ]
+    np.testing.assert_array_equal(actual, expected)
 
 
 def _ink_bounds(clip: TextClip) -> tuple[int, int, int, int]:
@@ -68,6 +100,7 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
             rows, columns = np.nonzero(clip.mask.get_frame(0))
             if not len(rows):  # Spaces have no visible pixels.
                 continue
+            _assert_complete_word_mask(clip, font_size, stroke_width)
             x, y = compute_position(clip.size, caption.size, clip.pos(0))
             assert np.all((columns + x >= 0) & (columns + x < caption.w))
             assert np.all((rows + y >= 0) & (rows + y < caption.h))

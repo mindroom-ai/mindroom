@@ -9,6 +9,7 @@ from typing import Any, override
 
 from agno.tools import moviepy_video as agno_moviepy
 from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
+from PIL import ImageFont
 
 # AGNO_COMPAT: MoviePyVideoTools drops caption styles and derives font size unconditionally.
 # Reason: Agno's embed_captions accepts four style arguments but never forwards
@@ -23,10 +24,13 @@ from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
 # AGNO_COMPAT: MoviePy caption geometry clips text and overlaps wrapped words.
 # Reason: The SDK uses fixed video-height fractions for caption size/position
 # and leaves the horizontal cursor at zero after placing a wrapped word.
+# MoviePy's Pillow 11 fallback sizes words by ink height but draws at font ascent;
+# explicit font-metric height and top alignment preserve the complete glyphs.
 # Upstream issue: Tracking gap; caption-layout tracking has not been verified.
 # Upstream PR: None identified.
 # Remove when: The SDK sizes and positions captions from rendered clip bounds,
 # advances wrapped words without overlap, and rejects text that cannot fit.
+# MoviePy must also retain complete word rasters across supported Pillow versions.
 # Coverage: tests/test_moviepy_caption_layout.py.
 
 # AGNO_COMPAT: MoviePy captions assume an Arial font file is installed.
@@ -80,6 +84,9 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         x_buffer = frame_width * 0.1
         max_line_width = frame_width - (2 * x_buffer)
         fontsize = int(frame_height * 0.30) if font_size is None else font_size
+        pil_font = ImageFont.truetype(font, int(fontsize)) if font else ImageFont.load_default(int(fontsize))
+        ascent, descent = pil_font.getmetrics()
+        text_height = ascent + descent
 
         full_duration = text_json["end"] - text_json["start"]
 
@@ -95,6 +102,8 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                     color=color,
                     stroke_color=stroke_color,
                     stroke_width=int(stroke_width),
+                    size=(None, text_height + 2 * int(stroke_width)),
+                    vertical_align="top",
                     method="label",
                 )
                 .with_start(text_json["start"])
@@ -103,7 +112,15 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
 
             # Create space clip
             space_clip = (
-                TextClip(text=" ", font=font, font_size=int(fontsize), color=color, method="label")
+                TextClip(
+                    text=" ",
+                    font=font,
+                    font_size=int(fontsize),
+                    color=color,
+                    size=(None, text_height),
+                    vertical_align="top",
+                    method="label",
+                )
                 .with_start(text_json["start"])
                 .with_duration(full_duration)
             )
@@ -138,6 +155,8 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                     color=highlight_color,
                     stroke_color=stroke_color,
                     stroke_width=int(stroke_width),
+                    size=(None, text_height + 2 * int(stroke_width)),
+                    vertical_align="top",
                     method="label",
                 )
                 .with_start(word_data["start"])

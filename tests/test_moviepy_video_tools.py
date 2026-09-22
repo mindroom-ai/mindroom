@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
+from PIL import ImageFont
 
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
 
@@ -19,7 +20,8 @@ if TYPE_CHECKING:
 
 def _clip(**kwargs: object) -> MagicMock:
     clip = MagicMock()
-    clip.size = kwargs.get("size", (20, 12))
+    width, height = kwargs.get("size", (20, 12))
+    clip.size = (20 if width is None else width, 12 if height is None else height)
     clip.w, clip.h = clip.size
     clip.fps = 30
     clip.pos = lambda _time: (0, 0)
@@ -200,9 +202,12 @@ def test_embed_captions_keeps_styles_independent_between_calls(
 
 def test_create_caption_clips_preserves_explicit_font(
     caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An explicit font path reaches words, spaces, and highlighted words."""
     toolkit, factories = caption_renderer
+    font_loader = MagicMock(return_value=ImageFont.load_default(24))
+    monkeypatch.setattr(ImageFont, "truetype", font_loader)
     line = {
         "start": 0,
         "end": 1,
@@ -211,4 +216,5 @@ def test_create_caption_clips_preserves_explicit_font(
 
     toolkit.create_caption_clips(line, (320, 180), font="custom-caption.ttf", font_size=24)
 
+    font_loader.assert_called_once_with("custom-caption.ttf", 24)
     assert [call.kwargs["font"] for call in factories["TextClip"].call_args_list] == ["custom-caption.ttf"] * 3
