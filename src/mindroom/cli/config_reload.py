@@ -79,7 +79,7 @@ def _fingerprint(path: Path) -> str:
     )
 
     try:
-        data, digests = load_yaml_config_source_with_digests(path)
+        data, digests, _uses_includes = load_yaml_config_source_with_digests(path)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         msg = "Cannot fingerprint config; check its YAML and include paths."
         raise ValueError(msg) from exc

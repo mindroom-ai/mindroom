@@ -108,6 +108,8 @@ mindroom run --storage-path ./mindroom_data
 
 ### Docker (single container)
 
+Create `./mindroom_data` and grant write access to the container's UID/GID `1000:1000` before running this command; follow the [Docker guide's storage preparation](docker.md#quick-start) for your Docker user mapping.
+
 ```bash
 docker run -d \
   --name mindroom \

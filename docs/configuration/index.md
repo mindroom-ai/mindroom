@@ -339,8 +339,9 @@ diff before.yaml after.yaml
 ```
 
 The dashboard config editor operates on whole-config structured saves, which cannot be mapped back to individual include files.
-When the loaded config resolved at least one include tag, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead.
+When the configuration uses include tags, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead, including empty directory includes and include sources that fail to load.
 Rejected structured saves return HTTP 409 with the machine-readable error code `config_composed_from_includes`, so clients can tell this permanent rejection apart from a retryable stale-write conflict.
+If an existing source cannot be read or tokenized well enough to establish whether it uses includes, structured saves return HTTP 422 and ask you to repair the source files; raw YAML editing remains available.
 `POST /api/config/load` reports the includes state in the `x-mindroom-config-uses-includes` response header, which the dashboard uses to show an up-front banner explaining that structured saves will be rejected.
 The raw config editor (`GET`/`PUT /api/config/raw`) keeps operating on the top-level file's literal text, and its response flags when includes are in use.
 `MINDROOM_CONFIG_TEMPLATE` seeding copies only the single template file, so bundled templates that use includes must ship the whole directory.
@@ -1093,6 +1094,121 @@ Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` f
 Both stages require only `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 `mindroom avatars sync` only fills missing Matrix avatars by default.
 Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
+
+## Personal Agent Rooms
+
+The optional `personal_rooms` section creates one private, unlisted room for each eligible human who joins an onboarding room.
+The router observes those rooms; the selected agent does not need to join them.
+
+```yaml
+rooms:
+  lobby: {}
+agents:
+  helper:
+    display_name: Helper
+    rooms: []
+    access:
+      members_of_rooms: [lobby]
+personal_rooms:
+  agent: helper
+  onboarding_rooms: [lobby]
+  commands: ["!personal"]
+  alias_prefix: personal
+  name: "Personal room for {user}"
+  topic: "Private conversation with {agent}."
+  welcome: "Welcome {user}! This is your personal room with {agent}."
+  welcome_dispatch: false
+  confirmation: ""
+  backfill: false
+  requester_admin: false
+  # avatar: avatars/personal.png
+  avatar_from_requester: false
+```
+
+The top-level `personal_rooms` type is an object or `null`, with default `null`.
+When enabled, its fields are:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `agent` | string | Required | Configured agent that owns and answers in personal rooms. |
+| `onboarding_rooms` | list of strings | Required | Nonempty list of configured onboarding rooms observed by the router. |
+| `commands` | list of strings | `[]` | Exact self-onboarding commands beginning with `!`, without whitespace or arguments. |
+| `alias_prefix` | string | `"personal"` | Lowercase alias prefix, matching `[a-z0-9_-]{1,40}`. |
+| `name` | string | `"Personal room for {user}"` | New room name template, up to 1,000 characters. |
+| `topic` | string | `"Private conversation with {agent}."` | New room topic template, up to 1,000 characters. |
+| `welcome` | string | `"Welcome {user}! This is your personal room with {agent}."` | Welcome template, up to 10,000 characters; empty disables new welcome intent. |
+| `welcome_dispatch` | boolean | `false` | Dispatch the welcome to the selected agent after the human joins; otherwise send a notice. |
+| `confirmation` | string | `""` | Optional once-only notice template in the original onboarding room, up to 10,000 characters. |
+| `backfill` | boolean | `false` | Also reconcile current eligible onboarding-room members on startup and config reload. |
+| `requester_admin` | boolean | `false` | Grant the human Matrix room administration. |
+| `avatar` | string or `null` | `null` | Room avatar file, relative to the configuration; fills only an empty avatar. |
+| `avatar_from_requester` | boolean | `false` | Copy the human's profile avatar into an empty room avatar when no avatar file is configured. |
+
+Omit the section to disable onboarding.
+Trigger rooms must already be configured.
+Commands are optional, exact messages in those rooms, and onboard only their authenticated human sender.
+Existing agent access rules still apply; agent and service accounts are excluded.
+`backfill: true` also reconciles current eligible members at startup and configuration reload.
+
+Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
+Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
+Room ownership and membership are verified before reusing an alias.
+Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
+Disabling onboarding does not delete rooms or revoke their existing access.
+
+The default welcome is a notice.
+Set `welcome_dispatch: true` to initiate agent onboarding through the existing trusted hook-dispatch path after the human joins; requester identity and normal authorization remain intact.
+Dispatched welcomes explicitly mention the selected agent through Matrix mention metadata, so default and custom templates can mention the human without suppressing agent onboarding.
+Welcome delivery is durable and idempotent.
+A pending welcome bound to a replaced Matrix device fails closed instead of risking a duplicate.
+`requester_admin` explicitly grants the human Matrix room administration; otherwise the agent owns room state.
+An optional avatar file uses the existing Matrix upload service; `avatar_from_requester: true` instead copies the human's profile avatar.
+Both policies fill only an empty room avatar, with an explicit file taking priority.
+An optional `confirmation` template sends one durable notice in the original onboarding room after creation and invitation; its contents, including any room alias, are visible to that room.
+Pending confirmation and welcome text remain frozen across configuration changes.
+Welcome text and dispatch mode are saved before waiting for the human to join; changing the welcome template, including setting it to empty, does not replace pending intent.
+Disabling `personal_rooms` or revoking the human's access prevents pending welcome dispatch.
+No tools or workspace reset behavior are added.
+
+### Operator-seeded Existing Rooms
+
+Operators can preserve an existing room ID and history by writing a trusted `PersonalRoomRecord` before enabling onboarding.
+Stop the runtime before importing records.
+Use `personal_room_record_path(runtime_paths, agent_name, user_id)` and `write_personal_room(path, record)` from `mindroom.matrix.personal_room_store` to atomically persist validated current-format records.
+The storage location is `agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root.
+These files are trusted operator state, never user-submitted input.
+
+A minimal seed looks like this:
+
+```json
+{
+  "user_id": "@alice:example.org",
+  "alias": "#personal-alice:example.org",
+  "source_room_id": "!lobby:example.org",
+  "room_id": "!existing:example.org",
+  "welcome_completed": true,
+  "adoption": {
+    "creator_user_id": "@router:example.org",
+    "agent_user_id": "@helper:example.org",
+    "router_user_id": "@router:example.org"
+  }
+}
+```
+
+The filename must bind the exact full requester ID, and adoption requires an exact room ID; an alias alone never authorizes adoption.
+`creator_user_id` must match the immutable create-event sender, and `agent_user_id` must match the selected agent's authenticated Matrix identity.
+An optional `router_user_id` permits only this installation's persisted router account to remain in the room.
+Before import, arrange an agent-authored `org.mindroom.personal_room` state event with empty state key and exactly `{"user_id": "<requester>", "agent_user_id": "<agent>"}` as content.
+The target agent must already be joined with room admin power, the directory visibility must be private, the join rule must be invite-only, and history visibility must be `invited`.
+No other joined, invited, or knocking member is permitted beyond the requester, agent, and explicitly seeded router.
+Normal authorization and current onboarding-room membership still apply when reconciling the seed.
+The service verifies these conditions before inviting or sending; it does not rewrite existing room identity, name, topic, or history.
+Explicitly seeded router membership is retained during ordinary cleanup, including after onboarding is disabled.
+
+Set `welcome_completed: true` only when onboarding history is already complete; no historical event ID needs to be invented.
+Pending welcome content and device receipts should be omitted from completed imports.
+No historical-format converter, import CLI, forced self-rejoin, or workspace reset is provided.
+Operators must prepare Matrix ownership state and any historical-format conversion before writing this current-format seed.
 
 ## Internal User Username
 

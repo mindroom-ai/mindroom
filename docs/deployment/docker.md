@@ -19,6 +19,18 @@ MindRoom may atomically rewrite `config.yaml` at startup when an automatic confi
 Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
 Current configs can remain read-only as shown below.
 
+Create the host data directory before starting either container recipe below.
+The image runs as UID/GID `1000:1000`, so the bind-mounted directory and any existing contents must be writable by that container identity.
+For a new data directory on Linux with rootful Docker and no user-namespace remapping:
+
+```bash
+mkdir -p ./mindroom_data
+sudo chown 1000:1000 ./mindroom_data
+```
+
+For rootless Docker or user-namespace remapping, grant access using the corresponding host UID/GID mapping or suitable ACLs.
+A bind mount hides the image directory's ownership, so the image's preconfigured permissions do not make an unwritable host directory usable.
+
 Run it with:
 
 ```bash
@@ -33,6 +45,7 @@ docker run -d \
 
 ## Docker Compose
 
+Prepare the writable `mindroom_data` directory as described above before starting this Compose service.
 Create a `docker-compose.yml`:
 
 ```yaml

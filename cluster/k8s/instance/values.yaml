@@ -84,6 +84,8 @@ openrouter_key: ""
 deepseek_key: ""
 sandbox_proxy_token: ""
 credentials_encryption_key: ""
+# Dedicated Synapse registration shared secret when Helm creates the instance Secret.
+# With instanceSecrets.create=false, populate matrix_registration_shared_secret in the existing instance Secret instead.
 matrixRegistrationSharedSecret: ""
 
 # Supabase (shared auth)
@@ -107,5 +109,8 @@ trustedUpstreamAuth:
   jwtUserIdClaim: ""
   jwtMatrixUserIdClaim: ""
 
-# Matrix admin user (leave empty and set via --set or Secret)
+# Optional Synapse secret seed for macaroon_secret_key and form_secret in the ConfigMap.
+# Also used as the registration-secret fallback when matrixRegistrationSharedSecret is empty.
+# Does not create an admin login; use random secret material rather than a login password.
+# These ConfigMap fields do not support an existing-Secret reference.
 matrix_admin_password: ""

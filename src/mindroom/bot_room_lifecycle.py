@@ -80,6 +80,9 @@ class BotRoomLifecycleDeps:
     continuity_store: SyncContinuityStore
     get_logger: Callable[[], structlog.stdlib.BoundLogger]
     get_configured_rooms: Callable[[], Sequence[str]]
+    # Exact durable ownership authorizes rejoining; cleanup exclusions may be broader.
+    get_retained_room_ids: Callable[[], set[str]]
+    get_cleanup_exclusions: Callable[[], Awaitable[set[str]]]
     send_response: _SendRoomResponse
     change_membership: _ChangeRoomMembership
     admit_response: Callable[[], AbstractAsyncContextManager[None]]
@@ -316,6 +319,7 @@ class BotRoomLifecycle:
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or ())
         desired_rooms = set(self.deps.get_configured_rooms())
+        desired_rooms.update(self.deps.get_retained_room_ids())
         if self._should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)
 
@@ -383,6 +387,7 @@ class BotRoomLifecycle:
 
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.deps.get_configured_rooms())
+        configured_rooms.update(await self.deps.get_cleanup_exclusions())
         if self._should_persist_invited_rooms():
             await self._refresh_invited_rooms()
             configured_rooms.update(self.invited_rooms)

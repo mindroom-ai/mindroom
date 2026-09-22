@@ -2,7 +2,7 @@
 #
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["typer", "rich", "pydantic", "jinja2"]
+# dependencies = ["typer", "rich", "pydantic", "jinja2", "pyyaml"]
 # ///
 """Docker MindRoom instance manager."""
 # ruff: noqa: S602  # subprocess with shell=True needed for docker compose
@@ -24,6 +24,7 @@ from enum import Enum
 from pathlib import Path
 
 import typer
+import yaml
 from jinja2 import Template
 from pydantic import BaseModel, Field
 from rich.console import Console
@@ -629,6 +630,119 @@ def _get_build_flag(
     return "--build"
 
 
+def _resolve_authelia_users_file(instance: Instance) -> Path:
+    """Resolve the users database from the configuration Compose will mount."""
+    compose = _get_docker_compose_files(instance)
+    cmd = f"{compose} -f - -p {shlex.quote(instance.name)} config --format json --no-env-resolution"
+    # Older Compose loads service env files despite --no-env-resolution. They do
+    # not affect the Authelia mount; omit them only from this read-only projection.
+    projection = "services:\n  mindroom:\n    env_file: !reset []\n"
+    result = subprocess.run(cmd, input=projection, check=False, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        console.print(f"[red]✗[/red] Cannot resolve Authelia data directory for instance '{instance.name}'.")
+        console.print("  Check the instance environment and Docker Compose configuration before starting.")
+        raise typer.Exit(1)
+
+    try:
+        model = json.loads(result.stdout)
+        mounts = [mount for mount in model["services"]["authelia"]["volumes"] if mount["target"] == "/config"]
+        source = mounts[0]["source"] if len(mounts) == 1 and mounts[0]["type"] == "bind" else None
+    except (KeyError, TypeError, ValueError):
+        source = None
+    if not isinstance(source, str) or not Path(source).is_absolute():
+        console.print(f"[red]✗[/red] Cannot resolve Authelia users database for instance '{instance.name}'.")
+        raise typer.Exit(1)
+
+    # Compose escapes dollar signs when rendering an interpolated model.
+    return Path(source.replace("$$", "$")) / "users_database.yml"
+
+
+def _argon2_hash_identity(value: object) -> tuple[str, int, int, int, bytes, bytes] | None:  # noqa: PLR0911
+    """Compare Argon2 inputs using Authelia's go-crypt decoder semantics."""
+    if isinstance(value, bytes):
+        # Authelia's YAML decoder accepts binary scalars in password strings.
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(value, str):
+        return None
+    parts = value.removeprefix("{CRYPT}").removeprefix("{ARGON2}").split("$")
+    if len(parts) != 6 or parts[0] or parts[1] not in {"argon2id", "argon2i", "argon2d"}:
+        return None
+
+    parameters: dict[str, int] = {}
+    # go-crypt processes the version segment last; repeated parameters overwrite.
+    for parameter in (parts[3] + "," + parts[2]).split(","):
+        key, separator, number = parameter.partition("=")
+        if key not in {"v", "m", "t", "p", "k"} or not separator or not number.isascii() or not number.isdecimal():
+            return None
+        number = number.lstrip("0") or "0"
+        if len(number) > 10:
+            return None
+        parsed = int(number)
+        if parsed > 0xFFFFFFFF or (key == "v" and parsed != 19):
+            return None
+        parameters[key] = parsed
+
+    decoded: list[bytes] = []
+    try:
+        for part in parts[4:]:
+            # Go's unpadded base64 ignores CR/LF and accepts unused tail bits.
+            encoded = part.replace("\r", "").replace("\n", "")
+            if "=" in encoded:
+                return None
+            decoded.append(base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True))
+    except ValueError:
+        return None
+    if not decoded[1]:
+        return None
+    return (
+        parts[1],
+        parameters.get("m", 0) or 32768,
+        parameters.get("t", 0) or 1,
+        parameters.get("p", 0) or 4,
+        decoded[0],
+        decoded[1],
+    )
+
+
+def _require_authelia_account_setup(instance: Instance) -> None:
+    """Reject enabled accounts that still use the shipped public password hash."""
+    users_file = _resolve_authelia_users_file(instance)
+    try:
+        database = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+        console.print(f"[red]✗[/red] Cannot read Authelia users database: {users_file}")
+        console.print("  Configure users as described in local/instances/deploy/README.md before starting.")
+        raise typer.Exit(1) from error
+
+    users = database.get("users") if isinstance(database, dict) else None
+    if not isinstance(users, dict) or any(
+        not isinstance(username, str) or not isinstance(user, dict) or any(not isinstance(field, str) for field in user)
+        for username, user in users.items()
+    ):
+        console.print(f"[red]✗[/red] Invalid Authelia users database: {users_file}")
+        console.print("  Configure users as described in local/instances/deploy/README.md before starting.")
+        raise typer.Exit(1)
+
+    template_file = SCRIPT_DIR / "templates" / "authelia" / "users_database.yml"
+    example_hash = yaml.safe_load(template_file.read_text(encoding="utf-8"))["users"]["admin"]["password"]
+    example_identity = _argon2_hash_identity(example_hash)
+    if any(
+        user.get("disabled") is not True
+        and (
+            user.get("password") == example_hash
+            or (example_identity is not None and _argon2_hash_identity(user.get("password")) == example_identity)
+        )
+        for user in users.values()
+    ):
+        console.print(f"[red]✗[/red] Enabled Authelia account uses the public example password hash: {users_file}")
+        console.print("  Replace the password hash and email, or remove/disable the example account before starting.")
+        console.print("  See local/instances/deploy/README.md for password hashing instructions.")
+        raise typer.Exit(1)
+
+
 def _bring_up_instance(
     name: str,
     instance: Instance,
@@ -644,6 +758,9 @@ def _bring_up_instance(
     force_recreate: bool = False,
 ) -> None:
     """Start or restart an instance using one shared compose-up path."""
+    if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
+        _require_authelia_account_setup(instance)
+
     env_file = _require_instance_env_file(name)
     _sync_matrix_host_overrides(registry.instances)
     _ensure_instance_env_file_reference(env_file)
@@ -913,8 +1030,13 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
             f"  [dim]Matrix domain:[/dim] https://m-{instance.domain} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
         )
     if auth_type:
-        console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
-        console.print("    [yellow]Default login:[/yellow] admin / mindroom")
+        console.print("  [dim]Auth:[/dim] [yellow]Authelia (account setup required)[/yellow]")
+        console.print(
+            "    [yellow]Before starting:[/yellow] Configure intended users in "
+            f"{Path(instance.data_dir) / 'authelia' / 'users_database.yml'}",
+        )
+        console.print("      Replace the public example admin password hash and email, or remove/disable that account.")
+        console.print("      See local/instances/deploy/README.md for password hashing instructions.")
         console.print(
             f"    [dim]Auth URL:[/dim] {_auth_url(instance)} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
         )
@@ -932,7 +1054,7 @@ def create(
     auth: str | None = typer.Option(
         None,
         "--auth",
-        help="Include authentication: 'authelia' (production-ready auth server)",
+        help="Include authentication: 'authelia' (requires account setup before starting)",
     ),
 ) -> None:
     """Create a new instance with automatic port allocation."""
@@ -1026,6 +1148,8 @@ def start(
     instance = registry.instances[name]
     previous_status = instance.status
     env_file = _require_instance_env_file(name)
+    if instance.auth_type == AuthType.AUTHELIA and not only_matrix:
+        _require_authelia_account_setup(instance)
 
     # Create data directories with proper permissions
     _create_instance_directories(instance)

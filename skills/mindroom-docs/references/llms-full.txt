@@ -1394,8 +1394,9 @@ diff before.yaml after.yaml
 ```
 
 The dashboard config editor operates on whole-config structured saves, which cannot be mapped back to individual include files.
-When the loaded config resolved at least one include tag, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead.
+When the configuration uses include tags, structured saves from the dashboard and self-config tools are rejected with an error asking you to edit the source files instead, including empty directory includes and include sources that fail to load.
 Rejected structured saves return HTTP 409 with the machine-readable error code `config_composed_from_includes`, so clients can tell this permanent rejection apart from a retryable stale-write conflict.
+If an existing source cannot be read or tokenized well enough to establish whether it uses includes, structured saves return HTTP 422 and ask you to repair the source files; raw YAML editing remains available.
 `POST /api/config/load` reports the includes state in the `x-mindroom-config-uses-includes` response header, which the dashboard uses to show an up-front banner explaining that structured saves will be rejected.
 The raw config editor (`GET`/`PUT /api/config/raw`) keeps operating on the top-level file's literal text, and its response flags when includes are in use.
 `MINDROOM_CONFIG_TEMPLATE` seeding copies only the single template file, so bundled templates that use includes must ship the whole directory.
@@ -2148,6 +2149,121 @@ Generation uses `gpt-6-astra` for prompt creation and `gpt-image-2.5-sunburst` f
 Both stages require only `OPENAI_API_KEY` or the file-based `OPENAI_API_KEY_FILE` credential.
 `mindroom avatars sync` only fills missing Matrix avatars by default.
 Run `mindroom avatars sync --force` to replace existing Matrix room or root-space avatars.
+
+## Personal Agent Rooms
+
+The optional `personal_rooms` section creates one private, unlisted room for each eligible human who joins an onboarding room.
+The router observes those rooms; the selected agent does not need to join them.
+
+```yaml
+rooms:
+  lobby: {}
+agents:
+  helper:
+    display_name: Helper
+    rooms: []
+    access:
+      members_of_rooms: [lobby]
+personal_rooms:
+  agent: helper
+  onboarding_rooms: [lobby]
+  commands: ["!personal"]
+  alias_prefix: personal
+  name: "Personal room for {user}"
+  topic: "Private conversation with {agent}."
+  welcome: "Welcome {user}! This is your personal room with {agent}."
+  welcome_dispatch: false
+  confirmation: ""
+  backfill: false
+  requester_admin: false
+  # avatar: avatars/personal.png
+  avatar_from_requester: false
+```
+
+The top-level `personal_rooms` type is an object or `null`, with default `null`.
+When enabled, its fields are:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `agent` | string | Required | Configured agent that owns and answers in personal rooms. |
+| `onboarding_rooms` | list of strings | Required | Nonempty list of configured onboarding rooms observed by the router. |
+| `commands` | list of strings | `[]` | Exact self-onboarding commands beginning with `!`, without whitespace or arguments. |
+| `alias_prefix` | string | `"personal"` | Lowercase alias prefix, matching `[a-z0-9_-]{1,40}`. |
+| `name` | string | `"Personal room for {user}"` | New room name template, up to 1,000 characters. |
+| `topic` | string | `"Private conversation with {agent}."` | New room topic template, up to 1,000 characters. |
+| `welcome` | string | `"Welcome {user}! This is your personal room with {agent}."` | Welcome template, up to 10,000 characters; empty disables new welcome intent. |
+| `welcome_dispatch` | boolean | `false` | Dispatch the welcome to the selected agent after the human joins; otherwise send a notice. |
+| `confirmation` | string | `""` | Optional once-only notice template in the original onboarding room, up to 10,000 characters. |
+| `backfill` | boolean | `false` | Also reconcile current eligible onboarding-room members on startup and config reload. |
+| `requester_admin` | boolean | `false` | Grant the human Matrix room administration. |
+| `avatar` | string or `null` | `null` | Room avatar file, relative to the configuration; fills only an empty avatar. |
+| `avatar_from_requester` | boolean | `false` | Copy the human's profile avatar into an empty room avatar when no avatar file is configured. |
+
+Omit the section to disable onboarding.
+Trigger rooms must already be configured.
+Commands are optional, exact messages in those rooms, and onboard only their authenticated human sender.
+Existing agent access rules still apply; agent and service accounts are excluded.
+`backfill: true` also reconciles current eligible members at startup and configuration reload.
+
+Templates support `{user}` (full Matrix user ID), `{room}` (room alias), and `{agent}` (display name).
+Aliases combine the prefix, the first 20 lowercase SHA256 hex characters of the full user ID, and the installation namespace.
+Room ownership and membership are verified before reusing an alias.
+Personal rooms are retained across restarts and ordinary room cleanup, including after this feature is disabled.
+Disabling onboarding does not delete rooms or revoke their existing access.
+
+The default welcome is a notice.
+Set `welcome_dispatch: true` to initiate agent onboarding through the existing trusted hook-dispatch path after the human joins; requester identity and normal authorization remain intact.
+Dispatched welcomes explicitly mention the selected agent through Matrix mention metadata, so default and custom templates can mention the human without suppressing agent onboarding.
+Welcome delivery is durable and idempotent.
+A pending welcome bound to a replaced Matrix device fails closed instead of risking a duplicate.
+`requester_admin` explicitly grants the human Matrix room administration; otherwise the agent owns room state.
+An optional avatar file uses the existing Matrix upload service; `avatar_from_requester: true` instead copies the human's profile avatar.
+Both policies fill only an empty room avatar, with an explicit file taking priority.
+An optional `confirmation` template sends one durable notice in the original onboarding room after creation and invitation; its contents, including any room alias, are visible to that room.
+Pending confirmation and welcome text remain frozen across configuration changes.
+Welcome text and dispatch mode are saved before waiting for the human to join; changing the welcome template, including setting it to empty, does not replace pending intent.
+Disabling `personal_rooms` or revoking the human's access prevents pending welcome dispatch.
+No tools or workspace reset behavior are added.
+
+### Operator-seeded Existing Rooms
+
+Operators can preserve an existing room ID and history by writing a trusted `PersonalRoomRecord` before enabling onboarding.
+Stop the runtime before importing records.
+Use `personal_room_record_path(runtime_paths, agent_name, user_id)` and `write_personal_room(path, record)` from `mindroom.matrix.personal_room_store` to atomically persist validated current-format records.
+The storage location is `agents/<agent>/personal_rooms/<full-sha256-user-id>.json` under the runtime storage root.
+These files are trusted operator state, never user-submitted input.
+
+A minimal seed looks like this:
+
+```json
+{
+  "user_id": "@alice:example.org",
+  "alias": "#personal-alice:example.org",
+  "source_room_id": "!lobby:example.org",
+  "room_id": "!existing:example.org",
+  "welcome_completed": true,
+  "adoption": {
+    "creator_user_id": "@router:example.org",
+    "agent_user_id": "@helper:example.org",
+    "router_user_id": "@router:example.org"
+  }
+}
+```
+
+The filename must bind the exact full requester ID, and adoption requires an exact room ID; an alias alone never authorizes adoption.
+`creator_user_id` must match the immutable create-event sender, and `agent_user_id` must match the selected agent's authenticated Matrix identity.
+An optional `router_user_id` permits only this installation's persisted router account to remain in the room.
+Before import, arrange an agent-authored `org.mindroom.personal_room` state event with empty state key and exactly `{"user_id": "<requester>", "agent_user_id": "<agent>"}` as content.
+The target agent must already be joined with room admin power, the directory visibility must be private, the join rule must be invite-only, and history visibility must be `invited`.
+No other joined, invited, or knocking member is permitted beyond the requester, agent, and explicitly seeded router.
+Normal authorization and current onboarding-room membership still apply when reconciling the seed.
+The service verifies these conditions before inviting or sending; it does not rewrite existing room identity, name, topic, or history.
+Explicitly seeded router membership is retained during ordinary cleanup, including after onboarding is disabled.
+
+Set `welcome_completed: true` only when onboarding history is already complete; no historical event ID needs to be invented.
+Pending welcome content and device receipts should be omitted from completed imports.
+No historical-format converter, import CLI, forced self-rejoin, or workspace reset is provided.
+Operators must prepare Matrix ownership state and any historical-format conversion before writing this current-format seed.
 
 ## Internal User Username
 
@@ -8017,6 +8133,9 @@ MindRoom treats `spotify` as a shared-only integration, so dashboard credential 
 Despite the `enable_process_video` config name, the current upstream method it enables is specifically `extract_audio()`, not a general-purpose video editing surface.
 `create_srt()` writes the provided transcription text directly to disk, so it expects the caller to already have SRT-formatted content.
 `embed_captions()` reads an SRT file, converts it to word timings, and renders word-highlighted captions onto a new MP4 output.
+`font_size` sets the pixel size of words and spaces; `font_color` sets the base text color, while the active word remains yellow.
+`stroke_color` and `stroke_width` apply to both base and highlighted words, with `stroke_width=0` disabling the outline.
+Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
 
 ### Configuration
@@ -18898,6 +19017,8 @@ MindRoom's architecture consists of several key components working together.
 | `orchestrator.py` | MultiAgentOrchestrator — boots entities, manages sync loops, hot-reload |
 | `orchestration/` | Extracted orchestrator helpers (sync loops, config diffing, room invitations) |
 | `orchestration/config_lifecycle.py` | Debounced config-reload lifecycle: queueing, response drain, and update-plan dispatch |
+| `config_bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
+| `cli/config_bundle.py` | Bundle install receipts and initialize-only runtime bootstrap command adapter |
 | `runtime_state.py` | Shared runtime readiness state for health/ready endpoints |
 | `runtime_resolution.py` | Authoritative runtime resolution for agent materialization |
 | `team_exact_members.py` | Runtime resolution for team member materialization |
@@ -18916,6 +19037,8 @@ MindRoom's architecture consists of several key components working together.
 | `matrix/journal_ingress.py` | Typed event classification from nio provenance and reconstruction of stored events |
 | `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
+| `matrix/personal_rooms.py` | Target-agent service for eligible personal-room creation, ownership checks, invitations, and recoverable welcome delivery |
+| `matrix/personal_room_store.py` | Durable per-requester room ownership, operator adoption attestations, welcome receipts, and cleanup retention |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
@@ -18936,6 +19059,7 @@ MindRoom's architecture consists of several key components working together.
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
 | `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
+| `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |
@@ -18955,6 +19079,7 @@ MindRoom's architecture consists of several key components working together.
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
 | `tools/chat_ui.py` | Tool-catalog registration and discovery metadata for Chat UI actions |
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
+| `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
 | `streaming.py` | Streaming state machine and progressive response state |
@@ -20093,6 +20218,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 
 | Observed gap or required extension point | Next upstream work | Local evidence |
 | --- | --- | --- |
+| MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, and leaves temporary audio after encoding failures. | Use a portable font default, forward styles, preserve complete glyph bounds, advance wrapped words, and clean owned audio files on every exit; upstream tracking remains unverified. | `custom_tools/agno_compat_moviepy.py`; regressions in `tests/test_moviepy_video_tools.py`, `tests/test_moviepy_caption_layout.py`, and `tests/test_moviepy_caption_output.py`. |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
@@ -20137,6 +20263,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 
 | Compatibility module | Agno adaptation | Policy and lifecycle owner |
 | --- | --- | --- |
+| `custom_tools/agno_compat_moviepy.py` | Portable caption fonts, style forwarding, complete glyph bounds, measured canvas sizing, bottom placement, non-overlapping wrapping, and owned temporary audio cleanup; SDK parsing and temporary-file helpers remain shared. | `tools/moviepy_video_tools.py` selects the adapter lazily; rendering settings and atomic output publication are preserved. |
 | `agno_compat_session_persistence.py` | Async Agent/Team persistence bindings for the owned synchronous store and exact-run cancellation drainage. | `agent_storage.py` and storage lifecycle callers; `ai.py` retains canonical history ownership. |
 | `agno_compat_sqlite.py` | Private pragma listener removal, monotonic run insertion with atomic usage snapshots, atomic run/legacy deletion transaction, and private cache counters. | `agent_storage.py` retains journaling choice, prompt sanitization, descendant selection, diagnostics, and legacy scrub policy. |
 | `agno_compat_session_metrics.py` | Version-guarded Agent/Team accumulator repair, scoped to owned storage. | Loaded run metrics seed transient accounting snapshots; repeated saves add only changed contributions while preserving existing cumulative history. |
@@ -20367,6 +20494,8 @@ mindroom run --storage-path ./mindroom_data
 ```
 
 ### Docker (single container)
+
+Create `./mindroom_data` and grant write access to the container's UID/GID `1000:1000` before running this command; follow the [Docker guide's storage preparation](https://docs.mindroom.chat/deployment/docker/#quick-start) for your Docker user mapping.
 
 ```bash
 docker run -d \
@@ -21701,6 +21830,18 @@ MindRoom may atomically rewrite `config.yaml` at startup when an automatic confi
 Before starting an upgraded container with a pre-membership access config, run `mindroom config migrate --path ./config.yaml` on the host because a single-file bind mount cannot be replaced atomically.
 Current configs can remain read-only as shown below.
 
+Create the host data directory before starting either container recipe below.
+The image runs as UID/GID `1000:1000`, so the bind-mounted directory and any existing contents must be writable by that container identity.
+For a new data directory on Linux with rootful Docker and no user-namespace remapping:
+
+```bash
+mkdir -p ./mindroom_data
+sudo chown 1000:1000 ./mindroom_data
+```
+
+For rootless Docker or user-namespace remapping, grant access using the corresponding host UID/GID mapping or suitable ACLs.
+A bind mount hides the image directory's ownership, so the image's preconfigured permissions do not make an unwritable host directory usable.
+
 Run it with:
 
 ```bash
@@ -21715,6 +21856,7 @@ docker run -d \
 
 ## Docker Compose
 
+Prepare the writable `mindroom_data` directory as described above before starting this Compose service.
 Create a `docker-compose.yml`:
 
 ```yaml
@@ -22838,12 +22980,35 @@ The CLI's `provision <id>` command uses fixed test metadata and is not the new-c
 
 ### Direct Helm Installation
 
-For debugging only:
+For debugging only, first create a private values file with a nonempty sandbox token from a trusted working directory:
+
+```bash
+(
+  set -eu
+  umask 077
+  test ! -d ./instance-secrets.yaml
+  instance_secrets_tmp="$(mktemp ./instance-secrets.yaml.XXXXXX)"
+  trap 'rm -f -- "$instance_secrets_tmp"' EXIT
+  instance_sandbox_token="$(openssl rand -hex 32)"
+  printf 'sandbox_proxy_token: "%s"\n' "$instance_sandbox_token" > "$instance_secrets_tmp"
+  mv -f -- "$instance_secrets_tmp" ./instance-secrets.yaml
+)
+```
+
+The private temporary file replaces `instance-secrets.yaml` atomically, without reusing an existing file's permissions or following a file symlink.
+Keep this file out of version control.
+With Helm's default Secret storage backend, the command below also retains supplied values and rendered Secrets in release history in `mindroom-instances`.
+Readers of those release Secrets can recover the sandbox token and other supplied credentials.
+Restrict access to both the instance Secret and every retained Helm release Secret, as well as this local values file.
+Deleting the local file or changing future values does not remove credentials from older Helm release revisions.
+The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
+The provisioner supplies this token automatically, while a direct install must provide it.
 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --create-namespace \
+  -f instance-secrets.yaml \
   --set customer=1 \
   --set accountId="your-account-uuid" \
   --set baseDomain=mindroom.chat \
@@ -22968,7 +23133,16 @@ Shared, unscoped, and `user_agent` worker keys select their encoded agent, while
 Knowledge bases assigned to other agents and configured knowledge bases with no matching assignment are not mounted.
 
 For a source at `<shared-storage-root>/<relative-path>`, the worker-visible path is `<worker-storage-mount>/<relative-path>`.
-The default worker storage mount is `/app/worker`, so a source at `<shared-storage-root>/knowledge/reference` is visible at `/app/worker/knowledge/reference`.
+The effective default depends on the deployment:
+
+| Deployment | Worker storage mount | Visible path for `knowledge/reference` |
+| --- | --- | --- |
+| Runtime chart (`storage.mountPath`) | `/app/agent_data` | `/app/agent_data/knowledge/reference` |
+| Instance chart (`storagePath`) | `/mindroom_data` | `/mindroom_data/knowledge/reference` |
+| Direct backend without a mount override | `/app/worker` | `/app/worker/knowledge/reference` |
+
+Both charts set `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`; the direct-backend fallback applies when that environment override is absent.
+Custom chart values or runtime environment settings can select another root.
 The worker mounts that directory from the existing worker-storage PVC with `subPath: <relative-path>` and `readOnly: true`.
 The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
 MindRoom does not copy or clone the source per agent.
@@ -23364,23 +23538,30 @@ Start MindRoom with your configuration.
  - Starts the bundled dashboard/API server (disable with --no-api)
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --log-level     -l              TEXT     Set the logging level (DEBUG, INFO, WARNING,  │
-│                                          ERROR)                                        │
-│                                          [env var: LOG_LEVEL]                          │
-│                                          [default: INFO]                               │
-│ --config        -c              PATH     Use this config file path. Defaults the       │
-│                                          storage location to the selected config       │
-│                                          directory unless --storage-path is set.       │
-│ --storage-path  -s              PATH     Base directory for persistent MindRoom data   │
-│                                          (state, sessions, tracking)                   │
-│ --api               --no-api             Start the bundled dashboard/API server        │
-│                                          alongside the bot                             │
-│                                          [default: api]                                │
-│ --api-port                      INTEGER  Port for the bundled dashboard/API server     │
-│                                          [default: 8765]                               │
-│ --api-host                      TEXT     Host for the bundled dashboard/API server     │
-│                                          [default: 0.0.0.0]                            │
-│ --help          -h                       Show this message and exit.                   │
+│ --log-level                -l              TEXT     Set the logging level (DEBUG,      │
+│                                                     INFO, WARNING, ERROR)              │
+│                                                     [env var: LOG_LEVEL]               │
+│                                                     [default: INFO]                    │
+│ --config                   -c              PATH     Use this config file path.         │
+│                                                     Defaults the storage location to   │
+│                                                     the selected config directory      │
+│                                                     unless --storage-path is set.      │
+│ --storage-path             -s              PATH     Base directory for persistent      │
+│                                                     MindRoom data (state, sessions,    │
+│                                                     tracking)                          │
+│ --bootstrap-config-bundle                  PATH     Initialize the selected config     │
+│                                                     directory from this bundle only    │
+│                                                     when the directory is absent.      │
+│ --api                          --no-api             Start the bundled dashboard/API    │
+│                                                     server alongside the bot           │
+│                                                     [default: api]                     │
+│ --api-port                                 INTEGER  Port for the bundled dashboard/API │
+│                                                     server                             │
+│                                                     [default: 8765]                    │
+│ --api-host                                 TEXT     Host for the bundled dashboard/API │
+│                                                     server                             │
+│                                                     [default: 0.0.0.0]                 │
+│ --help                     -h                       Show this message and exit.        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -24249,17 +24430,19 @@ The `config` subgroup contains commands for creating, viewing, editing, and vali
 │ --help  -h        Show this message and exit.                                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Commands ─────────────────────────────────────────────────────────────────────────────╮
-│ init            Create a starter config.yaml with a personal agent and model.          │
-│ show            Display the current config file with syntax highlighting.              │
-│ edit            Open config.yaml in your default editor.                               │
-│ validate        Validate config.yaml and check for common issues.                      │
-│ resolve         Print the fully merged config YAML with all !include tags resolved.    │
-│ path            Show the resolved config file path and search locations.               │
-│ migrate         Migrate config.yaml to membership access settings.                     │
-│ fingerprint     Print the config source SHA-256, including all transitively included   │
-│                 files.                                                                 │
-│ check-applied   Confirm config application; exit 0 applied, 1 pending/mismatch, 2      │
-│                 failed/restart-required/unavailable.                                   │
+│ init             Create a starter config.yaml with a personal agent and model.         │
+│ show             Display the current config file with syntax highlighting.             │
+│ edit             Open config.yaml in your default editor.                              │
+│ validate         Validate config.yaml and check for common issues.                     │
+│ resolve          Print the fully merged config YAML with all !include tags resolved.   │
+│ path             Show the resolved config file path and search locations.              │
+│ migrate          Migrate config.yaml to membership access settings.                    │
+│ fingerprint      Print the config source SHA-256, including all transitively included  │
+│                  files.                                                                │
+│ install-bundle   Validate and install a complete tree; use check-applied to confirm    │
+│                  runtime reload.                                                       │
+│ check-applied    Confirm config application; exit 0 applied, 1 pending/mismatch, 2     │
+│                  failed/restart-required/unavailable.                                  │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -24379,6 +24562,83 @@ Keys are sorted so the output can be diffed before and after splitting a configu
 mindroom config resolve
 mindroom config resolve --path ./config.yaml
 ```
+
+### config install-bundle
+
+Install a complete configuration directory, including nested YAML includes, prompts, and its `.env`:
+
+```bash
+mindroom config install-bundle ./candidate --target ./active --json
+mindroom config install-bundle ./candidate --target ./active --initialize-only
+mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt-fingerprint> --wait 300
+# Keep each installation receipt; pin rollback to the previous revision's digest:
+mindroom config install-bundle ./active.previous --target ./active --expected-digest <previous-receipt-digest> --json
+```
+
+`--config` selects a relative file inside the bundle (default `config.yaml`).
+The installer copies into a sibling staging directory and uses the native loader for include, environment, and config validation before publication.
+Native includes must remain inside the selected config file's directory.
+Run the installer with the runtime's environment and filesystem access; external resources referenced by config are outside the bundle's drift protection.
+Relative paths resolve within the staged candidate during validation.
+Automatic config migrations affect the staged copy only.
+
+`--initialize-only` preserves any existing target directory, even when the supplied revision changes or the existing files have been edited.
+It does not validate that existing tree and returns `initialized` with no fingerprint.
+Without this flag, unchanged trees return `unchanged`.
+Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation.
+This covers `.env` and files outside the YAML include graph too.
+An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
+`--force` cannot be combined with `--initialize-only`.
+
+Successful replacement retains the complete former tree at `TARGET.previous`.
+Invalid candidates and failed copies leave active and previous trees untouched.
+Symlinks and special files are rejected.
+Mounts at or inside active and recovery trees are rejected before rotation or cleanup, including with `--force`.
+Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
+
+Rollback uses the same validated installation operation with `TARGET.previous` as its source.
+Keep each installation receipt and pass the previous revision's `digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
+The rejected active revision then becomes the new previous tree.
+Repeating the pinned rollback after a lost receipt fails safely instead of toggling back to the rejected revision.
+The native fingerprint alone cannot distinguish revisions that only change `.env` or unrelated assets.
+The guard can pin any mutable candidate source.
+If the active revision has since been authored, rollback also requires explicit `--force`.
+A failed or missing runtime receipt does not automatically roll back filesystem state.
+
+For startup, `mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` runs initialize-only installation before loading the runtime environment.
+The target directory is derived from the selected config path, and the source must contain the same config filename at its root.
+Validation reads the staged `.env`, with exported process values and explicit `--storage-path` taking precedence.
+Startup then resolves paths and `.env` again from the installed tree.
+Existing target directories are preserved, so changed source revisions never overwrite authored edits on restart.
+Keep storage outside this dedicated config directory.
+
+**Filesystem limits:** directory replacement uses two renames on the target filesystem.
+Readers can briefly see a missing target between renames, but never a partly copied tree.
+This is not a transaction across concurrent reads or external writers, nor a power-loss durability guarantee.
+Installer calls serialize using a sibling lock.
+A failed publication rename restores the former active tree.
+Interrupted operations leave complete trees at `.TARGET.pending` and `.TARGET.retired`; `.TARGET.transaction` records whole-tree content digests and persists ownership of `TARGET.previous` between installations.
+Journal updates use atomic replacement; partial writes preserve the prior record.
+Recovery accepts copied or restored trees with identical file names, modes, and bytes, even on another mount; it rejects changed previous or recovery contents.
+Reserved regular `.mindroom-bundle.json` metadata is excluded from these digests, but links and special files are always rejected.
+This verifies preserved content, not filesystem object identity.
+Hashing previous and recovery trees adds filesystem reads during installation and bootstrap.
+Retry the command to recover before proceeding.
+Do not manually modify these reserved recovery paths.
+If retired cleanup deletes some files before failing, its content no longer matches the journal; retry fails closed and requires manual inspection.
+A process killed while copying may leave an unused `.TARGET.stage-*` directory for manual cleanup.
+The target must be a directory below a writable mount, not the mount point itself.
+
+JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, and `recovery_pending`.
+The whole-tree `digest` identifies file names, modes, and contents, excluding installer metadata; initialize-only preservation returns no digest or fingerprint.
+Exit `0` confirms filesystem installation or preservation; exit `2` reports an installation error.
+An `installed` receipt with `recovery_pending: true` means publication succeeded but previous-tree rotation or cleanup needs a retry.
+A failure writing the receipt after publication does not undo activation; retrying an immutable source is idempotent.
+Pin mutable rollback sources as above.
+The fingerprint identifies native YAML/include sources, so use the existing `check-applied` command to confirm runtime application.
+The installer advances the root config mtime on changed activation for the existing watcher.
+Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
+Preserve `TARGET.previous` until runtime confirmation succeeds.
 
 ### config fingerprint and config check-applied
 
