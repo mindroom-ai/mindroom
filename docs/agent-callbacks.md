@@ -49,7 +49,11 @@ After successful Matrix delivery, the external trigger is consumed and the scrip
 
 If delivery fails, the script remains so the background agent can retry it.
 
-Changing the request's `event_id` cannot make the trigger deliver more than once.
+Changing the request's `event_id` does not change the trigger’s replay identity or restore a consumed trigger.
+
+A failed HTTP request can be ambiguous: Matrix may already have accepted the message before local replay state or callback consumption was saved.
+A later retry can duplicate delivery after the 24-hour replay claim expires if the trigger was not consumed.
+Single-use callbacks do not guarantee exactly-once delivery.
 
 Unused callbacks do not expire automatically, so delete abandoned records with `external_trigger_manager` if they are no longer needed.
 

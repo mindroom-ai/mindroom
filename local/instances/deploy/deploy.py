@@ -421,8 +421,8 @@ def _get_services_to_start(instance: Instance, only_matrix: bool = False) -> str
             raise ValueError(msg)
         return _get_matrix_services(instance.matrix_type).strip()
 
-    # Start full stack: MindRoom + matrix + auth
-    services = ["mindroom"]
+    # Start full stack: MindRoom + sandbox runner + matrix + auth
+    services = ["mindroom", "sandbox-runner"]
 
     if instance.matrix_type == MatrixType.SYNAPSE:
         services.extend(["postgres", "redis", "synapse", "wellknown"])

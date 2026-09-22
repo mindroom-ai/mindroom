@@ -540,7 +540,6 @@ export function Schedules() {
             icon={CalendarClock}
             items={scheduleItems}
             selectedId={selectedTaskId || undefined}
-            onItemSelect={setSelectedTaskId}
             renderItem={renderScheduleItem}
             showSearch={true}
             searchPlaceholder="Search schedules..."

@@ -154,11 +154,15 @@ The option controls task execution; parsing the scheduling request still uses th
 
 ## Timezone
 
-Schedules use the timezone from `config.yaml` (defaults to UTC):
+The timezone in `config.yaml` controls natural-language time interpretation and displayed timestamps (defaults to UTC):
 
 ```yaml
 timezone: America/Los_Angeles
 ```
+
+Recurring schedules are stored and evaluated as UTC cron expressions.
+Their local execution time can shift when the timezone’s UTC offset changes, including daylight-saving transitions.
+Edit or recreate a recurring schedule after an offset change if it must keep the same local clock time.
 
 ## Limitations
 
