@@ -24,6 +24,7 @@ from mindroom.matrix.invited_rooms_store import (
     should_accept_invites,
     should_persist_invited_rooms,
 )
+from mindroom.matrix.personal_room_store import personal_room_cleanup_exclusions, retained_personal_rooms
 from mindroom.matrix.rooms import leave_non_dm_rooms
 from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.message_target import MessageTarget
@@ -316,6 +317,9 @@ class BotRoomLifecycle:
         joined_rooms = await get_joined_rooms(client)
         current_rooms = set(joined_rooms or ())
         desired_rooms = set(self.deps.get_configured_rooms())
+        desired_rooms.update(
+            retained_personal_rooms(self.deps.runtime_paths, self.deps.agent_name, user_id=client.user_id),
+        )
         if self._should_persist_invited_rooms():
             desired_rooms.update(self.invited_rooms)
 
@@ -383,6 +387,9 @@ class BotRoomLifecycle:
 
         current_rooms = set(joined_rooms)
         configured_rooms = set(self.deps.get_configured_rooms())
+        configured_rooms.update(
+            await personal_room_cleanup_exclusions(client, self.deps.runtime_paths, self.deps.agent_name),
+        )
         if self._should_persist_invited_rooms():
             await self._refresh_invited_rooms()
             configured_rooms.update(self.invited_rooms)

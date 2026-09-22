@@ -102,6 +102,7 @@ async def create_room(
     admin_users: list[str] | None = None,
     *,
     encrypted: bool = False,
+    initial_state: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """Create a new Matrix room."""
     room_config: dict[str, Any] = {"name": name}
@@ -110,6 +111,8 @@ async def create_room(
     if topic:
         room_config["topic"] = topic
     room_config["initial_state"] = _create_room_initial_state(client, power_users, admin_users, encrypted=encrypted)
+    if initial_state:
+        room_config["initial_state"].extend(initial_state)
 
     response = await client.room_create(**room_config)
     if isinstance(response, nio.RoomCreateResponse):
