@@ -54,10 +54,10 @@ async def judge_with_llm(
     runtime_paths: RuntimePaths,
     *,
     owner: str,
-) -> JudgmentResult:
+) -> JudgmentResult[bool]:
     """Load the named model lazily and isolate its decision from the response run."""
 
-    async def evaluate(prepared: JudgmentRequest) -> JudgmentResponse:
+    async def evaluate(prepared: JudgmentRequest) -> JudgmentResponse[bool]:
         assert prepared.body is not None
         model = await run_judgment_thread(
             lambda: model_loading.get_model_instance(config, runtime_paths, settings.model),

@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from tests.identity_helpers import persist_entity_accounts
 
@@ -310,7 +311,11 @@ def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
 def test_auto_route_only_receives_permitted_agents(api: _ApiHarness) -> None:
     """The routing model cannot select a target outside this caller's access."""
     with (
-        patch.object(openai_compat, "suggest_responder", new=AsyncMock(return_value="specialist")) as route,
+        patch.object(
+            openai_compat,
+            "suggest_responder",
+            new=AsyncMock(return_value=ResponderSelection("specialist")),
+        ) as route,
         patch.object(openai_compat, "ai_response", new=AsyncMock(return_value="done")),
     ):
         response = api.client.post(
