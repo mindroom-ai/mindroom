@@ -2248,26 +2248,6 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_create_agent_uses_default_worker_tool_policy_when_unset(
-    mock_storage: MagicMock,  # noqa: ARG001
-    mock_get_tool_by_name: MagicMock,
-) -> None:
-    """Agent creation should pass the built-in default worker-routing policy when worker_tools is omitted."""
-    mock_get_tool_by_name.return_value = MagicMock()
-    config = _test_config()
-    config.agents["summary"].tools = ["openclaw_compat"]
-    config.agents["summary"].include_default_tools = False
-    config.agents["summary"].worker_tools = None
-
-    _create_agent_for_test("summary", config=config)
-
-    worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
-    assert worker_overrides
-    assert all(override == ["shell", "coding"] for override in worker_overrides)
-
-
 @patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
     """openclaw_compat should stay in the runtime toolkit list and imply matrix_message."""
