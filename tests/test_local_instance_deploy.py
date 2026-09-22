@@ -640,6 +640,34 @@ def test_authelia_launch_rejects_enabled_public_credentials(
 
 
 @pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
+def test_authelia_launch_rejects_colliding_yaml_usernames(
+    authelia_launch: tuple[deploy.Instance, Path, list[str], Console],
+    command: str,
+) -> None:
+    """Ambiguous YAML account keys must not hide an enabled public password."""
+    instance, users_file, commands, console = authelia_launch
+    public_hash = yaml.safe_load(users_file.read_text())["users"]["admin"]["password"]
+    source = (
+        f'users:\n  on:\n    disabled: false\n    password: "{public_hash}"\n'
+        f'  yes:\n    disabled: true\n    password: "{public_hash}"\n'
+    )
+    users_file.write_text(source)
+    env_before = (deploy.ENV_DIR / "alpha.env").read_bytes()
+
+    with pytest.raises(deploy.typer.Exit) as exc:
+        _launch_authelia(command, use_registry=True)
+
+    assert exc.value.exit_code == 1
+    assert commands
+    assert all(cmd.endswith(" config --format json --no-env-resolution") for cmd in commands)
+    assert users_file.read_text() == source
+    assert (deploy.ENV_DIR / "alpha.env").read_bytes() == env_before
+    assert instance.status == deploy.InstanceStatus.RUNNING
+    assert "Invalid Authelia users database" in normalize_console_output(console.export_text())
+    assert public_hash not in console.export_text()
+
+
+@pytest.mark.parametrize("command", ["start", "restart", "restart_all"])
 @pytest.mark.parametrize("example_state", ["replaced", "removed", "disabled"])
 def test_authelia_launch_preserves_configured_users(
     authelia_launch: tuple[deploy.Instance, Path, list[str], Console],

@@ -665,7 +665,9 @@ def _require_authelia_account_setup(instance: Instance) -> None:
         raise typer.Exit(1) from error
 
     users = database.get("users") if isinstance(database, dict) else None
-    if not isinstance(users, dict) or any(not isinstance(user, dict) for user in users.values()):
+    if not isinstance(users, dict) or any(
+        not isinstance(username, str) or not isinstance(user, dict) for username, user in users.items()
+    ):
         console.print(f"[red]✗[/red] Invalid Authelia users database: {users_file}")
         console.print("  Configure users as described in local/instances/deploy/README.md before starting.")
         raise typer.Exit(1)
