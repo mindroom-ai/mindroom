@@ -63,6 +63,12 @@ Import only fills transient form state.
 The one-time pairing code is not written to the native configuration.
 The person at the Mac must confirm the exact controller fingerprint, requester, and agent after edits or configuration revision changes.
 
+Computer access shows the saved local Matrix device without signing in again, including sessions created by the CLI while the app is open.
+Saved identity is read from the private session file; its presence does not prove server authentication or completed controller pairing.
+Unreadable or invalid sessions remain recoverable without exposing their contents.
+Use the existing device to finish pairing, or select **Replace Session…** and confirm to sign in with a new device.
+Replacement requires pairing the new device again and is unavailable while the bridge is running.
+
 Ordinary setup mutations are serialized and the stdio server admits at most four concurrently queued regular requests.
 Stop has a separate single request lane; status, revoke, and emergency reset remain available while a login, pairing, browser, or stop request is pending.
 Excess requests receive an immediate retryable `busy` response.
