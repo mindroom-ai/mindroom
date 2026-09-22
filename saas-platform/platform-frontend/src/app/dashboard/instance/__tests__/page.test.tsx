@@ -228,4 +228,25 @@ describe('InstancePage', () => {
     expect(getCachedInstance('user-1')).toBeNull()
   })
 
+  it('retains the current instance during a same-account auth refresh after cache expiry', async () => {
+    jest.useFakeTimers()
+    const hook = renderHook(() => useInstance())
+    await act(async () => {})
+    expect(hook.result.current.instance).toEqual(instanceWithMissingSubdomain)
+
+    jest.setSystemTime(Date.now() + 16000)
+    let failRefresh!: (error: Error) => void
+    ;(listInstances as jest.Mock).mockReturnValue(
+      new Promise((_, reject) => { failRefresh = reject })
+    )
+    ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
+    await act(async () => { hook.rerender() })
+
+    expect(hook.result.current.instance).toEqual(instanceWithMissingSubdomain)
+    expect(hook.result.current.loading).toBe(false)
+    await act(async () => { failRefresh(new Error('refresh failed')) })
+    expect(hook.result.current.instance).toEqual(instanceWithMissingSubdomain)
+    expect(hook.result.current.loading).toBe(false)
+  })
+
 })

@@ -44,7 +44,9 @@ export function useInstance() {
       return
     }
 
-    setSnapshot({ userId, instance: getCachedInstance(userId) })
+    setSnapshot(previous => previous.userId === userId
+      ? previous
+      : { userId, instance: getCachedInstance(userId) })
 
     // Use dev instance if in development mode
     if (DEV_INSTANCE) {
