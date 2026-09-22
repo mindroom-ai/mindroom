@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 BASE = "/mcp/scim/v2"
 USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+ENTERPRISE_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
 PATCH_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:PatchOp"
 ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error"
 TOKEN = "provisioning-test-credential-" + "x" * 32
@@ -89,6 +90,98 @@ def test_user_roundtrip_filter_pagination_replace_delete(client: TestClient) -> 
     assert "displayName" not in client.get(path).json()
     assert client.delete(path).status_code == 204
     assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("schemas", [[USER_SCHEMA, ENTERPRISE_SCHEMA], [ENTERPRISE_SCHEMA, USER_SCHEMA]])
+def test_enterprise_declaration_preserves_core_profile_and_discards_extensions(
+    client: TestClient,
+    schemas: list[str],
+) -> None:
+    """Standard enterprise metadata must not prevent core provisioning or become account state."""
+    payload = {
+        "schemas": schemas,
+        "userName": "alice@example.org",
+        "active": True,
+        "displayName": "Alice",
+        ENTERPRISE_SCHEMA: {
+            "employeeNumber": "ignored-enterprise-marker",
+            "department": "Engineering",
+            "userName": "other@example.org",
+            "active": False,
+            "roles": ["admin"],
+        },
+    }
+    with capture_logs() as logs:
+        created = client.post(BASE + "/Users", json=payload)
+        assert created.status_code == 201
+        account = created.json()
+        path = BASE + "/Users/" + account["id"]
+        updated = client.put(path, json={**payload, "displayName": "Updated"})
+        assert updated.status_code == 200
+    assert not [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert updated.json()["displayName"] == "Updated"
+    assert updated.json()["userName"] == "alice@example.org"
+    assert updated.json()["active"] is True
+    assert updated.json()["schemas"] == [USER_SCHEMA]
+    assert client.get(path).json() == updated.json()
+    assert ENTERPRISE_SCHEMA not in updated.json()
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        profile = json.loads(connection.execute("SELECT profile FROM gateway_accounts").fetchone()[0])
+    assert profile == {"userName": "alice@example.org", "active": True, "displayName": "Updated"}
+
+
+def test_enterprise_user_replacement_still_revokes_on_deactivation(client: TestClient) -> None:
+    """Accepting an optional declaration preserves atomic offboarding effects."""
+    account_id = _create(client).json()["id"]
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        connection.execute(
+            "INSERT INTO pending (state_hash, payload, expires_at, account_id) VALUES (?, '{}', ?, ?)",
+            ("bound-consent", 2_100_000_000, account_id),
+        )
+    payload = {"schemas": [USER_SCHEMA, ENTERPRISE_SCHEMA], "userName": "alice@example.org", "active": False}
+    path = BASE + "/Users/" + account_id
+    response = client.put(path, json=payload)
+    assert response.status_code == 200
+    assert client.get(path).json()["active"] is False
+    with sqlite3.connect(client.app.state.store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "schemas",
+    [
+        [ENTERPRISE_SCHEMA],
+        [USER_SCHEMA, ENTERPRISE_SCHEMA, ENTERPRISE_SCHEMA],
+        [USER_SCHEMA, ENTERPRISE_SCHEMA, "urn:example:unsupported"],
+        [USER_SCHEMA, {}],
+    ],
+)
+def test_enterprise_compatibility_does_not_allow_invalid_user_schemas(
+    client: TestClient,
+    schemas: list[object],
+) -> None:
+    """Core schema remains required and duplicate, unknown or malformed declarations remain errors."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    assert (
+        client.put(path, json={"schemas": schemas, "userName": "alice@example.org", "active": False}).status_code == 400
+    )
+    assert client.get(path).json() == account
+
+
+def test_enterprise_schema_is_not_accepted_in_patch_envelope(client: TestClient) -> None:
+    """The User extension is not a PATCH message schema."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    response = client.patch(
+        path,
+        json={
+            "schemas": [PATCH_SCHEMA, ENTERPRISE_SCHEMA],
+            "Operations": [{"op": "replace", "path": "active", "value": False}],
+        },
+    )
+    assert response.status_code == 400
+    assert client.get(path).json() == account
 
 
 def test_patch_case_insensitive_attributes_atomic_failure(client: TestClient) -> None:
@@ -232,11 +325,11 @@ def test_success_and_authentication_failure_do_not_log_validation_diagnostics(cl
         ({"schemas": [USER_SCHEMA, USER_SCHEMA]}, "list", 2, [USER_SCHEMA], 0, 0),
         ({"schemas": ["urn:scim:schemas:core:1.0"]}, "list", 1, ["urn:scim:schemas:core:1.0"], 0, 0),
         (
-            {"schemas": [USER_SCHEMA, "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]},
+            {"schemas": [USER_SCHEMA, ENTERPRISE_SCHEMA, "private-schema-marker"]},
             "list",
-            2,
-            [USER_SCHEMA, "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"],
-            0,
+            3,
+            [USER_SCHEMA, ENTERPRISE_SCHEMA],
+            1,
             0,
         ),
         ({"schemas": [PATCH_SCHEMA]}, "list", 1, [PATCH_SCHEMA], 0, 0),

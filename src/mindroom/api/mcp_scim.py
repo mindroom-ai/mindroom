@@ -35,13 +35,14 @@ _BASE = "/mcp/scim/v2"
 _CORE = "urn:ietf:params:scim:schemas:core:2.0:"
 _MESSAGES = "urn:ietf:params:scim:api:messages:2.0:"
 _USER_SCHEMA = _CORE + "User"
+_ENTERPRISE_USER_SCHEMA = "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
 # Only these public identifiers may be included in schema diagnostics.
 _DIAGNOSTIC_SCHEMAS = frozenset(
     {
         _USER_SCHEMA,
         _MESSAGES + "PatchOp",
         "urn:scim:schemas:core:1.0",
-        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+        _ENTERPRISE_USER_SCHEMA,
     },
 )
 _HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
@@ -153,7 +154,11 @@ async def _body(request: Request, schema: str) -> dict[str, Any]:
     except (ValueError, RecursionError) as error:
         raise AccountValidationError from error
     schemas = fields.get("schemas")
-    if schemas != [schema]:
+    accepted_schemas = [[schema]]
+    if schema == _USER_SCHEMA:
+        # Account validation retains only supported core fields, never extension data.
+        accepted_schemas.extend([[schema, _ENTERPRISE_USER_SCHEMA], [_ENTERPRISE_USER_SCHEMA, schema]])
+    if schemas not in accepted_schemas:
         entries = schemas if isinstance(schemas, list) else [schemas] if "schemas" in fields else []
         strings = [entry for entry in entries if isinstance(entry, str)]
         logger.warning(
