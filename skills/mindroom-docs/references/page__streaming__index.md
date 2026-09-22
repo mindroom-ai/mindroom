@@ -6,9 +6,9 @@ Instead of waiting for the full response, users see text appear in real time as 
 ## How It Works
 
 1. Agent starts generating a response.
-2. MindRoom sends an initial message with the first chunk of text plus an in-progress marker (`⋯`).
-3. As more text arrives, MindRoom edits the same message with the accumulated content.
-4. When the response is complete, the final edit removes the `⋯` marker.
+2. MindRoom sends an initial message with `io.mindroom.stream_status: pending`, using a plain `Thinking...` placeholder if no text has arrived.
+3. As more text arrives, MindRoom edits the same message with the accumulated content and status `streaming`.
+4. When the response completes successfully, the final edit sets status `completed`.
 
 ```
 User sends message
@@ -22,11 +22,11 @@ User sends message
        ▼                            │            │
   Stream chunks                     ▼            ▼
   via edits                    Streaming     Single message
-  with ⋯ marker               (progressive   (sent when
+  status: streaming            (progressive   (sent when
        │                       edits)          complete)
        ▼
   Final edit
-  (⋯ removed)
+  status: completed
 ```
 
 ## Configuration
@@ -69,20 +69,15 @@ This is checked via `should_use_streaming()` which queries the Matrix presence A
 If the presence check fails, MindRoom defaults to non-streaming (safer, fewer API calls).
 When no requester user ID is available, MindRoom defaults to streaming.
 
-## In-Progress Marker
+## Stream Status
 
-While a response is being generated, the message ends with `⋯` followed by zero to two dots that cycle as edits arrive.
-This gives users a visual indicator that the agent is still working.
+MindRoom records progress in the Matrix event content field `io.mindroom.stream_status`.
+The initial non-final event uses `pending`, and subsequent in-progress edits use `streaming`.
+A successful final edit uses `completed`; user cancellation uses `cancelled`, and failures or other interruptions use `error`.
+Inspect the latest message content in a client or event view that exposes this metadata to verify completion.
 
-```
-Hello! I can help you with that ⋯
-Hello! I can help you with that ⋯.
-Hello! I can help you with that ⋯..
-Hello! I can help you with that ⋯
-```
-
-If no text has arrived yet, a `Thinking...` placeholder is shown with the marker.
-The marker is removed on the final edit.
+If no text has arrived yet, the message body is a plain `Thinking...` placeholder.
+The backend does not append a cycling ellipsis to generated text; clients may render their own progress indicators.
 
 ## Throttling
 

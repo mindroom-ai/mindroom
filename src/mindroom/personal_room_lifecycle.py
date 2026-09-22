@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.personal_room_store import (
     personal_room_cleanup_exclusions,
-    personal_room_records,
+    personal_room_record_path,
+    read_personal_room,
     retained_personal_rooms,
 )
 from mindroom.matrix.state import resolve_room_aliases
@@ -24,6 +26,9 @@ if TYPE_CHECKING:
     from mindroom.matrix.personal_rooms import PersonalRoomService
     from mindroom.matrix.room_member_joins import RoomMemberJoin
     from mindroom.runtime_protocols import SupportsClientConfig
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,27 @@ class PersonalRoomLifecycle:
         if join.prev_membership is None:
             await self._onboard(join.user_id, join.room_id)
 
+    def _recorded_candidates(self, agent_name: str) -> tuple[set[tuple[str, str]], bool]:
+        """Read each retained intent independently; keep damaged files retryable."""
+        candidates: set[tuple[str, str]] = set()
+        failed = False
+        directory = personal_room_record_path(self.runtime_paths, agent_name, "").parent
+        try:
+            paths = list(directory.glob("*.json"))
+        except OSError:
+            logger.exception("Personal-room records unavailable", agent=agent_name)
+            return candidates, True
+        for path in paths:
+            try:
+                record = read_personal_room(path)
+            except Exception:
+                logger.exception("Personal-room record invalid", record=path.name)
+                failed = True
+                continue
+            if record is not None:
+                candidates.add((record.user_id, record.source_room_id))
+        return candidates, failed
+
     async def reconcile(self) -> None:
         """Retry recorded intent and optional lobby backfill after the owner has synced."""
         revision = self._config_revision
@@ -118,20 +144,27 @@ class PersonalRoomLifecycle:
         target = self.lookup_target(settings.agent)
         if target is None or not target.first_sync_complete or self.runtime.client is None:
             return
-        candidates = {
-            (record.user_id, record.source_room_id)
-            for record in personal_room_records(self.runtime_paths, settings.agent)
-        }
+        candidates, failed = self._recorded_candidates(settings.agent)
         if settings.backfill:
             for room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths):
-                members = await get_room_members(self.runtime.client, room_id)
+                try:
+                    members = await get_room_members(self.runtime.client, room_id)
+                except Exception:
+                    logger.exception("Personal-room backfill failed", room_id=room_id)
+                    failed = True
+                    continue
                 if members is None:
-                    msg = "Personal-room backfill membership unavailable"
-                    raise RuntimeError(msg)
+                    logger.error("Personal-room backfill membership unavailable", room_id=room_id)
+                    failed = True
+                    continue
                 candidates.update((user_id, room_id) for user_id in members)
         for user_id, room_id in sorted(candidates):
-            await self._onboard(user_id, room_id)
-        if revision == self._config_revision:
+            try:
+                await self._onboard(user_id, room_id)
+            except Exception:
+                logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id)
+                failed = True
+        if not failed and revision == self._config_revision:
             self._reconciled = True
 
     def retained_room_ids(self) -> set[str]:

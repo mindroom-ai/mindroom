@@ -23,12 +23,12 @@ from mindroom.event_journal import EventClass, EventKind
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.handled_turns import TurnRecord
 from mindroom.journal_dispatch import JournalDispatcher
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, send_message_result
 from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
+    _personal_room_records,
     personal_room_record_path,
-    personal_room_records,
     read_personal_room,
     retained_personal_rooms,
     write_personal_room,
@@ -447,7 +447,7 @@ async def test_self_command_ignores_forged_requester_and_argument(
         },
     )
     assert await router._on_message(room, event) is TurnDispatchOutcome.INTENTIONALLY_IGNORED
-    assert [record.user_id for record in personal_room_records(router.runtime_paths, "helper")] == ["@alice:localhost"]
+    assert [record.user_id for record in _personal_room_records(router.runtime_paths, "helper")] == ["@alice:localhost"]
     event.body = "!personal @bob:localhost"
     assert not await router._personal_room_lifecycle.handle_command(room, event)
     assert server.create_count == 1
@@ -463,6 +463,105 @@ async def test_optional_backfill_and_cleanup_retention(tmp_path: Path, monkeypat
     target.config.personal_rooms = None
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=list(server.state)))
     assert await target._room_lifecycle._rooms_to_leave() == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_retained_room_does_not_block_router_sync_or_other_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One owner's invalid room stays retryable while sync readiness and other owners progress."""
+    server = MatrixServer()
+    router, target = bots(tmp_path, server, monkeypatch, backfill=True)
+    alice_room = await target.personal_rooms.ensure("@alice:localhost", "!lobby:localhost", server)
+    server.set_member(alice_room, "@outsider:localhost", "invite")
+    ready = AsyncMock()
+    router.orchestrator.handle_bot_ready = ready
+    monkeypatch.setattr(router, "_refresh_agent_reply_memberships_if_needed", AsyncMock())
+    monkeypatch.setattr(router, "_schedule_delivery_recovery", lambda: None)
+
+    await router._run_sync_response_side_effects(first_sync_response=False)
+
+    assert server.create_count == 2
+    assert read_personal_room(personal_room_record_path(router.runtime_paths, "helper", "@alice:localhost"))
+    assert read_personal_room(personal_room_record_path(router.runtime_paths, "helper", "@bob:localhost"))
+    ready.assert_awaited_once_with(router)
+    await router._personal_room_lifecycle.reconcile()
+    assert server.create_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["disable", "revoke"])
+async def test_policy_change_during_membership_lookup_stops_provisioning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """A stale membership result cannot authorize creation or requester privileges."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, requester_admin=True)
+    original = server.joined_members
+    reads = 0
+
+    async def joined_members(room_id: str) -> object:
+        nonlocal reads
+        result = await original(room_id)
+        reads += 1
+        if reads == 2:
+            if change == "disable":
+                owner.runtime.config.personal_rooms = None
+            else:
+                owner.runtime.config.agents["helper"].access.users = []
+        return result
+
+    monkeypatch.setattr(server, "joined_members", joined_members)
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) is None
+    assert server.create_count == 0
+    assert not server.state
+
+
+@pytest.mark.asyncio
+async def test_policy_change_during_alias_lookup_stops_room_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alias resolution cannot carry stale creation authority past an await."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, requester_admin=True)
+    original = server.room_resolve_alias
+
+    async def resolve(alias: str) -> object:
+        result = await original(alias)
+        owner.runtime.config.agents["helper"].access.users = []
+        return result
+
+    monkeypatch.setattr(server, "room_resolve_alias", resolve)
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) is None
+    assert server.create_count == 0
+
+
+@pytest.mark.asyncio
+async def test_access_revoke_during_invite_prevents_admin_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invitation in flight cannot authorize a later admin grant."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, requester_admin=True)
+    original = server.room_invite
+
+    async def invite(room_id: str, user_id: str) -> object:
+        result = await original(room_id, user_id)
+        owner.runtime.config.agents["helper"].access.users = []
+        return result
+
+    monkeypatch.setattr(server, "room_invite", invite)
+    assert await owner.ensure("@alice:localhost", "!lobby:localhost", server) is None
+    assert server.create_count == 1
+    power = next(
+        event["content"] for event in server.state["!personal1:localhost"] if event["type"] == "m.room.power_levels"
+    )
+    assert power.get("users", {}).get("@alice:localhost", 0) < 100
 
 
 @pytest.mark.asyncio
@@ -560,6 +659,80 @@ async def test_requester_admin_is_explicit(tmp_path: Path, monkeypatch: pytest.M
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     power = next(event["content"] for event in server.state[room_id] if event["type"] == "m.room.power_levels")
     assert power["users"]["@alice:localhost"] == 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoke", ["access", "feature", "admin_setting"])
+async def test_policy_change_during_admin_state_read_prevents_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revoke: str,
+) -> None:
+    """A power-level read cannot carry stale authority into its following write."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, requester_admin=True)
+    original = server.room_get_state_event
+
+    async def read_state(room_id: str, event_type: str, state_key: str = "") -> object:
+        response = await original(room_id, event_type, state_key)
+        if event_type == "m.room.power_levels":
+            if revoke == "access":
+                owner.runtime.config.agents["helper"].access.users = []
+            elif revoke == "feature":
+                owner.runtime.config.personal_rooms = None
+            else:
+                owner.runtime.config.personal_rooms.requester_admin = False
+        return response
+
+    monkeypatch.setattr(server, "room_get_state_event", read_state)
+    await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    power = next(
+        event["content"] for event in server.state["!personal1:localhost"] if event["type"] == "m.room.power_levels"
+    )
+    assert power.get("users", {}).get("@alice:localhost", 0) < 100
+
+
+@pytest.mark.asyncio
+async def test_access_revoke_during_avatar_upload_prevents_state_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploaded bytes cannot authorize an avatar update after access is revoked."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, avatar="avatar.png", welcome="")
+
+    async def upload(_client: object, _path: Path) -> str:
+        owner.runtime.config.agents["helper"].access.users = []
+        return "mxc://localhost/uploaded"
+
+    monkeypatch.setattr("mindroom.matrix.avatar._upload_avatar_file", upload)
+    await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    assert not any(event["type"] == "m.room.avatar" for event in server.state["!personal1:localhost"])
+    record = read_personal_room(personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost"))
+    assert not record.avatar_done
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["welcome", "confirmation"])
+async def test_access_revoke_during_message_preparation_prevents_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    """A pending personal-room notice cannot send after preparation loses authority."""
+    server = MatrixServer()
+    options = {"welcome": "Ready"} if message == "welcome" else {"welcome": "", "confirmation": "Ready"}
+    owner = service(tmp_path, server, monkeypatch, **options)
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.send_message_result", send_message_result)
+    server.room_send = AsyncMock(return_value=nio.RoomSendResponse("$unexpected", "!personal1:localhost"))
+
+    async def prepare(_client: object, _room_id: str, content: dict[str, Any], **_kwargs: object) -> SimpleNamespace:
+        owner.runtime.config.agents["helper"].access.users = []
+        return SimpleNamespace(content=content, cache_bypass=False)
+
+    monkeypatch.setattr("mindroom.matrix.client_delivery._prepare_matrix_message", prepare)
+    await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    server.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -955,7 +1128,7 @@ async def test_self_command_accepts_human_bridge_alias_without_trusting_forged_r
     )
     room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
     assert await router._on_message(room, event) is TurnDispatchOutcome.INTENTIONALLY_IGNORED
-    assert [record.user_id for record in personal_room_records(router.runtime_paths, "helper")] == [
+    assert [record.user_id for record in _personal_room_records(router.runtime_paths, "helper")] == [
         "@bridge_alice:localhost",
     ]
     await router._personal_room_lifecycle._onboard(event.sender, room.room_id)

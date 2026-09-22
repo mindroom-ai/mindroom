@@ -170,6 +170,8 @@ Each request uses one immutable trigger snapshot.
 That snapshot includes the record version, auth mode, target, authentication material, policy-capped replay window, policy-capped body size, and current API config generation.
 
 The API authenticates the signature or bearer capability, parses the body, checks current owner authorization, checks target runtime readiness, checks live owner membership in the target room, claims replay state, then dispatches.
+The owner's canonical Matrix ID or a configured human alias must be in the live joined-member roster; configured bot accounts and managed identities do not count as human aliases.
+If the live roster cannot be fetched, the request is rejected before replay state is claimed.
 
 Target runtime readiness requires both the router and target bot to be running and joined to the resolved target room.
 

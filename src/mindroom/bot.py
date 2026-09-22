@@ -1269,6 +1269,7 @@ class AgentBot:
             self.config,
             self.runtime_paths,
             self._conversation_reader,
+            config_provider=lambda: self.orchestrator.config if self.orchestrator is not None else self.config,
         )
         if restored_tasks > 0:
             self.logger.info("restored_scheduled_tasks", room_id=room_id, restored_task_count=restored_tasks)
@@ -2309,6 +2310,7 @@ class AgentBot:
                 self.config,
                 self.runtime_paths,
                 self._conversation_reader,
+                config_provider=lambda: self.orchestrator.config if self.orchestrator is not None else self.config,
             )
             if drained_count > 0:
                 self.logger.info("Started deferred overdue scheduled tasks", count=drained_count)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, MutableMapping
+from collections.abc import Callable, Iterable, MutableMapping
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -323,14 +323,15 @@ async def room_admin_power_user(
     return None
 
 
-async def ensure_room_admin_power_levels(
+async def ensure_room_admin_power_levels(  # noqa: PLR0911 - each unsafe Matrix state is a separate fail-closed exit
     client: nio.AsyncClient,
     room_id: str,
     user_ids: Iterable[str],
     *,
     snapshot: RoomStateSnapshot | None = None,
+    write_allowed: Callable[[], bool] | None = None,
 ) -> bool:
-    """Grant Matrix room admin power to users without revoking existing admins."""
+    """Grant Matrix room admin power while respecting a caller's live write authority."""
     concrete_user_ids = {user_id for user_id in user_ids if user_id}
     if not concrete_user_ids:
         return True
@@ -359,7 +360,10 @@ async def ensure_room_admin_power_levels(
         return True
 
     if snapshot is not None:
-        return await ensure_room_admin_power_levels(client, room_id, concrete_user_ids)
+        return await ensure_room_admin_power_levels(client, room_id, concrete_user_ids, write_allowed=write_allowed)
+
+    if write_allowed is not None and not write_allowed():
+        return False
 
     response = await client.room_put_state(
         room_id=room_id,

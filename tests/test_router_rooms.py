@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path  # noqa: TC003
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -29,6 +30,9 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import persist_entity_accounts
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _router_membership_dependencies() -> tuple[AgentReplyMembershipIndex, AgentReplyMembershipSync]:
@@ -228,7 +232,10 @@ async def test_router_joins_rooms_on_start(
         _config: Config,
         _runtime_paths: object,
         _conversation_reader: object,
+        *,
+        config_provider: Callable[[], Config | None] | None = None,
     ) -> int:
+        del config_provider
         return 0
 
     monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)

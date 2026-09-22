@@ -74,13 +74,6 @@ if TYPE_CHECKING:
             default="domcontentloaded",
         ),
         ConfigField(
-            name="proxy_config",
-            label="Proxy Config",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="enable_crawl",
             label="Enable Crawl",
             type="boolean",

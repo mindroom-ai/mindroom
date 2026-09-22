@@ -168,14 +168,69 @@ async def test_reconciliation_retries_failure_and_resets_on_reload(coordination:
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [RuntimeError("temporarily unavailable"), None, None]
-    with pytest.raises(RuntimeError, match="temporarily unavailable"):
-        await lifecycle.reconcile()
+    await lifecycle.reconcile()
     await lifecycle.reconcile()
     await lifecycle.reconcile()
     assert coordination.owner.ensure.await_count == 2
     lifecycle.config_changed()
     await lifecycle.reconcile()
     assert coordination.owner.ensure.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_preserves_cancellation(coordination: Coordination) -> None:
+    """Shutdown cancellation still stops a reconciliation pass."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await lifecycle.reconcile()
+
+
+@pytest.mark.asyncio
+async def test_backfill_failure_does_not_block_recorded_user(coordination: Coordination) -> None:
+    """A lobby membership outage leaves backfill retryable while recorded intent progresses."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
+    write_personal_room(
+        path,
+        PersonalRoomRecord(
+            user_id="@alice:localhost",
+            alias="#personal_alice:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
+    await lifecycle.reconcile()
+    coordination.owner.ensure.assert_awaited_once()
+    lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
+        {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
+        "!lobby:localhost",
+    )
+    await lifecycle.reconcile()
+    assert coordination.owner.ensure.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_corrupt_record_does_not_block_other_record(coordination: Coordination) -> None:
+    """A malformed retained record cannot starve another requester's intent."""
+    lifecycle = coordination.lifecycle
+    alice_path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
+    alice_path.parent.mkdir(parents=True, exist_ok=True)
+    alice_path.write_text("not json")
+    write_personal_room(
+        personal_room_record_path(lifecycle.runtime_paths, "helper", "@bob:localhost"),
+        PersonalRoomRecord(
+            user_id="@bob:localhost",
+            alias="#personal_bob:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    await lifecycle.reconcile()
+    await lifecycle.reconcile()
+    assert coordination.owner.ensure.await_count == 2
+    coordination.owner.ensure.assert_awaited_with("@bob:localhost", "!lobby:localhost", lifecycle.runtime.client)
 
 
 @pytest.mark.asyncio

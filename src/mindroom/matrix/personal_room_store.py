@@ -86,7 +86,7 @@ def write_personal_room(path: Path, record: PersonalRoomRecord) -> None:
     write_json_file_durable(path, record.model_dump(mode="json"), strict_atomic_replace=True)
 
 
-def personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list[PersonalRoomRecord]:
+def _personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list[PersonalRoomRecord]:
     """Read only one agent's room lifecycle records."""
     directory = personal_room_record_path(runtime_paths, agent_name, "").parent
     return [record for path in directory.glob("*.json") if (record := read_personal_room(path)) is not None]
@@ -94,7 +94,7 @@ def personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list[
 
 def retained_personal_rooms(runtime_paths: RuntimePaths, agent_name: str, *, user_id: str | None = None) -> set[str]:
     """Protect existing rooms even when onboarding has subsequently been disabled."""
-    records = personal_room_records(runtime_paths, agent_name)
+    records = _personal_room_records(runtime_paths, agent_name)
     if agent_name == ROUTER_AGENT_NAME and user_id is not None:
         directory = agent_state_root_path(runtime_paths.storage_root, agent_name).parent
         records.extend(
@@ -114,7 +114,7 @@ async def personal_room_cleanup_exclusions(
 ) -> set[str]:
     """Conservatively preserve interrupted creates without adopting or joining aliases."""
     rooms = retained_personal_rooms(runtime_paths, agent_name, user_id=client.user_id)
-    for record in personal_room_records(runtime_paths, agent_name):
+    for record in _personal_room_records(runtime_paths, agent_name):
         if record.room_id is not None:
             rooms.add(record.room_id)
             continue
