@@ -84,7 +84,9 @@ serviceWorker:
     - /other-app
 ```
 
-Each prefix excludes its exact path and descendants without excluding similarly named client routes.
+The client honors only the first eight distinct valid navigation-exclusion prefixes; later entries are ignored.
+Each retained prefix excludes its exact path and descendants without excluding similarly named client routes.
+Use a shared parent prefix only when excluding that entire subtree is appropriate.
 Use a MindRoom Chat release that supports runtime navigation exclusions.
 
 A Matrix client that previously controlled the origin root is a known footgun: its root-scoped service worker keeps serving the old app for every path on the origin, including the new base path.

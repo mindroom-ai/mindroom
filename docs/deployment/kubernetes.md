@@ -59,12 +59,24 @@ export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
 
 ### Direct Helm Installation
 
-For debugging only:
+For debugging only, first create a private values file with a nonempty sandbox token:
+
+```bash
+umask 077
+cat > instance-secrets.yaml <<EOF
+sandbox_proxy_token: "$(openssl rand -hex 32)"
+EOF
+```
+
+Keep this file out of version control.
+The chart passes the same token to the runtime and sandbox runner; the default file and shell tools need it to acquire the static runner.
+The provisioner supplies this token automatically, while a direct install must provide it.
 
 ```bash
 helm upgrade --install instance-1 ./cluster/k8s/instance \
   --namespace mindroom-instances \
   --create-namespace \
+  -f instance-secrets.yaml \
   --set customer=1 \
   --set accountId="your-account-uuid" \
   --set baseDomain=mindroom.chat \
@@ -189,7 +201,16 @@ Shared, unscoped, and `user_agent` worker keys select their encoded agent, while
 Knowledge bases assigned to other agents and configured knowledge bases with no matching assignment are not mounted.
 
 For a source at `<shared-storage-root>/<relative-path>`, the worker-visible path is `<worker-storage-mount>/<relative-path>`.
-The default worker storage mount is `/app/worker`, so a source at `<shared-storage-root>/knowledge/reference` is visible at `/app/worker/knowledge/reference`.
+The effective default depends on the deployment:
+
+| Deployment | Worker storage mount | Visible path for `knowledge/reference` |
+| --- | --- | --- |
+| Runtime chart (`storage.mountPath`) | `/app/agent_data` | `/app/agent_data/knowledge/reference` |
+| Instance chart (`storagePath`) | `/mindroom_data` | `/mindroom_data/knowledge/reference` |
+| Direct backend without a mount override | `/app/worker` | `/app/worker/knowledge/reference` |
+
+Both charts set `MINDROOM_KUBERNETES_WORKER_STORAGE_MOUNT_PATH`; the direct-backend fallback applies when that environment override is absent.
+Custom chart values or runtime environment settings can select another root.
 The worker mounts that directory from the existing worker-storage PVC with `subPath: <relative-path>` and `readOnly: true`.
 The mount exposes the complete source directory, including files excluded from semantic indexing by include patterns, exclude patterns, or extension filters.
 MindRoom does not copy or clone the source per agent.

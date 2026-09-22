@@ -60,6 +60,7 @@ tuwunel:
   appserviceRegistration:
     # Existing Secret containing a complete Matrix application-service registration YAML file.
     existingSecret: ""
+    # Also the mounted filename; must end in lowercase .yaml or .yml for Tuwunel to load it.
     key: registration.yaml
   wellKnown:
     # Homeserver base URL served in /.well-known/matrix/client.

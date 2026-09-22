@@ -11,4 +11,6 @@ Point the mindroom-runtime chart at this homeserver:
   matrix:
     homeserverUrl: http://{{ include "mindroom-tuwunel.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
 
-For production use, provide tuwunel.serverName, a registration token Secret shared with the runtime chart, and ingress plus apex well-known delegation outside this chart.
+For production use, provide tuwunel.serverName and ingress plus apex well-known delegation outside this chart.
+For password-based managed accounts with token-gated registration, share the registration-token Secret with the runtime chart's matrix.registrationToken setting.
+For appservice accounts, provide the registration YAML through tuwunel.appserviceRegistration and the runtime token through matrix.appserviceToken, select matrix.managedAccountAuth=appservice, and leave the runtime's matrix.registrationToken unset.

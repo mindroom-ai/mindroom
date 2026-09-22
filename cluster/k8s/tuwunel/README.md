@@ -49,7 +49,8 @@ MindRoom provisions agent accounts through registration, so a paired runtime dep
 
 ## Passwordless MindRoom Accounts
 
-For deployments that disable password login, store a complete Matrix application-service registration YAML file in a Secret and mount it through `tuwunel.appserviceRegistration`:
+For deployments that disable password login, store a complete Matrix application-service registration YAML file in a Secret and mount it through `tuwunel.appserviceRegistration`.
+`appserviceRegistration.key` is also the mounted filename and must end in lowercase `.yaml` or `.yml` for Tuwunel to load it:
 
 ```yaml
 tuwunel:
