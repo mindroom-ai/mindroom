@@ -42,13 +42,15 @@ Modular FastAPI application with a thin entrypoint (`main.py`) that includes rou
 
 ## Development
 
-Runs on port 8000 by default. Supports hot-reload in development mode.
+Configure the environment variables below, then run from the repository root:
 
-Run locally:
+```bash
+cd saas-platform/platform-backend
+uv sync --all-extras
+uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
 
-```
-uvicorn platform-backend.main:app --reload
-```
+The installed project exposes `src/main.py` as `main`; this command serves port 8000 with development reload enabled.
 
 ## Environment Variables
 

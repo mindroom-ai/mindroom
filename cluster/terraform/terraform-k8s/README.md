@@ -55,9 +55,9 @@ Complete Terraform configuration for deploying MindRoom on Kubernetes with a sin
 
 ## Quick Start
 
-1. **Navigate to the terraform-k8s directory:**
+1. **From the repository root, navigate to the Terraform directory:**
    ```bash
-   cd saas-platform/terraform-k8s
+   cd cluster/terraform/terraform-k8s
    ```
 
 2. **Copy and configure terraform.tfvars:**

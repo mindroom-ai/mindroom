@@ -48,14 +48,19 @@ Enable `autoscaling.enabled` only after the cluster has metrics-server and enoug
 
 ### Via Provisioner API (Recommended)
 
-```bash
-export KUBECONFIG=./cluster/terraform/terraform-k8s/mindroom-k8s_kubeconfig.yaml
+Create customer instances through the portal or `POST /my/instances/provision` using the customer's Supabase access token.
+The route checks subscription entitlement and derives the account, subscription, and tier from the authenticated customer.
+Set `PLATFORM_DOMAIN` to the deployment domain and `SUPABASE_ACCESS_TOKEN` to that customer's access token:
 
-# Provision, check status, view logs
-./cluster/scripts/mindroom-cli.sh provision 1
-./cluster/scripts/mindroom-cli.sh status
-./cluster/scripts/mindroom-cli.sh logs 1
+```bash
+curl --fail-with-body --request POST \
+  "https://api.${PLATFORM_DOMAIN}/my/instances/provision" \
+  --header "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}"
 ```
+
+Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned or re-provisioned when deprovisioned.
+Use the returned `customer_id` with the CLI's `logs <id>` command.
+The CLI's `provision <id>` command uses fixed test metadata and is not the new-customer creation path.
 
 ### Direct Helm Installation
 
@@ -286,8 +291,9 @@ env:
 The standalone runtime chart instead reads `providerCredentials` Secret keys into direct provider environment variables.
 Its `env` values shape is a map with `extra` and `envFrom`, not the list shown above for the hosted instance container.
 
-For production SaaS instance provisioning, the platform backend creates `mindroom-api-keys-{instance_id}` directly with Kubernetes before running Helm.
-The instance chart is then rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`, so tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
+For production SaaS instance provisioning, the instance chart is rendered with `instanceSecrets.create=false`, `instanceSecrets.name`, and a non-secret `instanceSecrets.hash`.
+After Helm completes, the platform backend applies `mindroom-api-keys-{instance_id}` directly with Kubernetes so legacy chart-managed Secret pruning cannot remove it.
+Tenant API keys and OIDC client secrets do not enter Helm release values or rendered Helm Secret manifests.
 
 ## Ingress
 
@@ -310,6 +316,8 @@ helm upgrade --install platform ./cluster/k8s/platform \
 ```
 
 The namespace must match `mindroom-{environment}` where `environment` is set in values.
+Ingress hosts use `domain`, independently of the namespace; the base values use `mindroom.chat`, while the staging example uses `staging.mindroom.chat`.
+Populate the staging file's credentials before deploying and keep it private.
 For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
 The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
 
@@ -336,12 +344,15 @@ See `cluster/k8s/kind/README.md` for details.
 ./cluster/scripts/mindroom-cli.sh list              # List instances
 ./cluster/scripts/mindroom-cli.sh status            # Overall status
 ./cluster/scripts/mindroom-cli.sh logs <id>         # View logs
-./cluster/scripts/mindroom-cli.sh provision <id>    # Create instance
+./cluster/scripts/mindroom-cli.sh provision <id>    # Re-provision an existing test fixture
 ./cluster/scripts/mindroom-cli.sh deprovision <id>  # Remove instance
 ./cluster/scripts/mindroom-cli.sh upgrade <id>      # Upgrade instance
 ```
 
 Reads configuration from `saas-platform/.env`.
+The `provision` helper always sends an instance ID, a fixed test account UUID, a synthetic subscription ID, and the BYOK tier.
+Use it only with a prepared test fixture whose instance and account records already exist, including the account email used to derive the owner identity.
+Use the customer route above for customer provisioning; operators should use real account and subscription records with the API below.
 
 ## Provisioner API
 
@@ -356,13 +367,16 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 | `/system/instances/{id}/uninstall` | DELETE | Remove an instance |
 | `/system/sync-instances` | POST | Sync states between DB and K8s |
 
-Example provision request:
+For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
+Supplying `instance_id` selects an update of an existing instance; a missing row returns `404`.
+The account must have an email for owner identity derivation.
+Replace the placeholders in this operator request with those database values:
 
 ```bash
 curl -X POST "https://api.mindroom.chat/system/provision" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PROVISIONER_API_KEY" \
-  -d '{"account_id": "uuid", "subscription_id": "sub-123", "tier": "byok"}'
+  -d '{"account_id": "<account-uuid>", "subscription_id": "<subscription-row-uuid>", "tier": "<subscription-tier>"}'
 ```
 
 The provisioner creates the namespace, generates URLs, deploys via Helm, and updates status in Supabase.
