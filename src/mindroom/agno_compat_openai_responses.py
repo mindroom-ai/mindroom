@@ -120,6 +120,10 @@ def _stream_error_types(error: BaseException) -> str:
     return " caused by ".join(names)
 
 
+def _has_token_usage(metrics: MessageMetrics) -> bool:
+    return any(value for key, value in metrics.to_dict().items() if key.endswith("_tokens"))
+
+
 class OpenAIResponsesProviderCompat:
     """Enforce complete stream lifecycle while preserving subclass callbacks."""
 
@@ -164,6 +168,17 @@ class OpenAIResponsesProviderCompat:
         ):
             return self._get_metrics(event.response.usage)
         return None
+
+    def _retain_terminal_usage(self, assistant_message: Message, usage: MessageMetrics | None) -> None:
+        """Keep failed attempts' counters while identifying combined retry usage."""
+        if usage is None:
+            return
+        if _has_token_usage(assistant_message.metrics):
+            assistant_message.provider_data = {
+                **(assistant_message.provider_data or {}),
+                "mindroom_aggregate_usage": True,
+            }
+        assistant_message.metrics += usage
 
     def _is_retryable_error(self, error: ModelProviderError) -> bool:
         """Reject retry only after an incomplete stream has retained output."""
@@ -268,8 +283,8 @@ class OpenAIResponsesProviderCompat:
             msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(cause)})"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from cause
         finally:
-            if not handed_off and terminal_usage is not None:
-                assistant_message.metrics += terminal_usage
+            if not handed_off:
+                self._retain_terminal_usage(assistant_message, terminal_usage)
             assistant_message.metrics.stop_timer()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
@@ -323,8 +338,8 @@ class OpenAIResponsesProviderCompat:
             msg = f"OpenAI Responses stream failed after yielding output ({_stream_error_types(cause)})"
             raise IncompleteResponsesStreamError(msg, model_name=self.name, model_id=self.id) from cause
         finally:
-            if not handed_off and terminal_usage is not None:
-                assistant_message.metrics += terminal_usage
+            if not handed_off:
+                self._retain_terminal_usage(assistant_message, terminal_usage)
             assistant_message.metrics.stop_timer()
         if not completed:
             msg = "OpenAI Responses stream ended without response.completed"
@@ -344,16 +359,7 @@ class OpenAIResponsesProviderCompat:
     ) -> None:
         """Retain earlier failed-attempt counters when a later attempt completes."""
         prior = assistant_message.metrics
-        if any(
-            (
-                prior.input_tokens,
-                prior.output_tokens,
-                prior.total_tokens,
-                prior.cache_read_tokens,
-                prior.cache_write_tokens,
-                prior.reasoning_tokens,
-            ),
-        ):
+        if _has_token_usage(prior):
             stream_data.response_provider_data = {
                 **(stream_data.response_provider_data or {}),
                 "mindroom_aggregate_usage": True,

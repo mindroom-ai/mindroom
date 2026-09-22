@@ -23,6 +23,7 @@ from agno.session.agent import AgentSession
 from openai import AsyncOpenAI, OpenAI
 
 from mindroom.agent_storage import create_state_storage
+from mindroom.agno_compat_session_persistence import drain_agent_cancellation
 from mindroom.codex_model import CodexResponses
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -411,7 +412,8 @@ async def test_terminal_usage_survives_stream_failure(
         with sqlite3.connect(storage.db_file) as connection:
             rows = connection.execute("SELECT usage_data FROM status_sessions_usage").fetchall()
         assert len(rows) == 1
-        metrics = json.loads(rows[0][0])["metrics"]
+        usage = json.loads(rows[0][0])
+        metrics = usage["metrics"]
         expected = {
             "input_tokens": 1000,
             "cache_read_tokens": 800,
@@ -427,8 +429,71 @@ async def test_terminal_usage_survives_stream_failure(
         if reported_usage:
             assert len(model_metrics) == 1
             assert {key: model_metrics[0][key] for key in expected} == expected
+            assert len(usage["requests"]) == 1
+            assert {key: usage["requests"][0]["metrics"].get(key, 0) for key in expected} == expected
+            assert usage["requests"][0]["created_at"] > 0
         else:
             assert all(not item.get(key, 0) for item in model_metrics for key in expected)
+    finally:
+        storage.close()
+
+
+async def test_received_request_usage_survives_task_cancellation(tmp_path: Path) -> None:
+    """Cancellation while awaiting EOF persists already-received request counters."""
+    waiting = asyncio.Event()
+    completed = _response("resp_cancelled", "completed")
+    completed["usage"] = {
+        "input_tokens": 1000,
+        "input_tokens_details": {"cached_tokens": 800},
+        "output_tokens": 100,
+        "output_tokens_details": {"reasoning_tokens": 60},
+        "total_tokens": 1100,
+    }
+
+    class WaitingStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield (_created() + _text() + _event("response.completed", response=completed)).encode()
+            waiting.set()
+            await asyncio.Future()
+
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = Config(agents={"status": AgentConfig(display_name="Status")})
+    storage = create_state_storage(
+        "status",
+        tmp_path / "agents/status",
+        subdir="sessions",
+        session_table="status_sessions",
+    )
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=WaitingStream())
+    try:
+        async with _model(response) as model:
+            agent = Agent(id="status", model=model, db=storage, telemetry=False)
+
+            async def run() -> None:
+                async with drain_agent_cancellation(agent, "run") as bind:
+                    with bind():
+                        async for _ in agent.arun("Check status", run_id="run", session_id="session", stream=True):
+                            pass
+
+            task = asyncio.create_task(run())
+            try:
+                async with asyncio.timeout(5):
+                    await waiting.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        session = storage.get_session("session", session_type=SessionType.AGENT)
+        assert isinstance(session, AgentSession)
+        assert session.runs[-1].status == RunStatus.cancelled
+        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+        assert report.totals.total_tokens == 1100
+        assert len(report.request_breakdown) == 1
+        assert report.request_breakdown[0].totals.total_tokens == 1100
+        assert report.request_breakdown[0].totals.cache_read_tokens == 800
+        assert report.request_coverage.unavailable_sources == 0
     finally:
         storage.close()
 

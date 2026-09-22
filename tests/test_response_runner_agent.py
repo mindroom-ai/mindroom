@@ -3446,6 +3446,8 @@ class TestAdaptiveResponse(AgentBotTestBase):
     ) -> None:
         """A silent decision must not send placeholders, typing, or retry notices."""
         config = self._config_for_storage(tmp_path)
+        # Keep background summaries out of foreground participation call counts.
+        config.defaults.thread_summary_first_threshold = 100
         paths = replace(runtime_paths_for(config), process_env={"TYPESAFE_API_KEY": "test-key"})
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=paths)
         install_direct_response_admission(bot)
