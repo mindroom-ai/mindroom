@@ -59,6 +59,7 @@ When you pass `search_query`, the tool enables BM25-based content filtering to k
 When `use_pruning` is enabled without a query, the tool uses Crawl4AI pruning to trim noisy page content.
 The current implementation bypasses Crawl4AI cache for fresher reads and truncates the result to `max_length` when needed.
 This is a local crawler rather than a hosted API, so it does not need an API key, but it still needs a working browser runtime.
+The upstream `proxy_config` mapping is not exposed in authored YAML or dashboard configuration.
 
 #### Configuration
 
@@ -71,7 +72,6 @@ This is a local crawler rather than a hosted API, so it does not need an API key
 | `bm25_threshold` | `number` | `no` | `1.0` | Threshold passed to BM25 filtering when `search_query` is used. |
 | `headless` | `boolean` | `no` | `true` | Launch Crawl4AI's browser in headless mode. |
 | `wait_until` | `text` | `no` | `domcontentloaded` | Playwright wait condition before extraction. |
-| `proxy_config` | `object` | `no` | `null` | Raw browser proxy config passed into Crawl4AI `BrowserConfig`, while the current MindRoom metadata exposes this as text. |
 | `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
 
@@ -301,7 +301,7 @@ search_query("latest Matrix bridge updates")
 `formats` is applied to scrape, crawl, and search requests.
 `limit` acts as the default result cap for crawl and search operations.
 `poll_interval` controls how often crawl jobs are polled.
-`search_params` is passed through to Firecrawl search calls as raw provider-specific options.
+The upstream `search_params` mapping is not exposed in authored YAML or dashboard configuration.
 The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provided directly.
 
 #### Configuration
@@ -314,10 +314,9 @@ The upstream tool falls back to `FIRECRAWL_API_KEY` when `api_key` is not provid
 | `enable_mapping` | `boolean` | `no` | `false` | Enable `map_website()`. |
 | `enable_search` | `boolean` | `no` | `false` | Enable `search_web()`. |
 | `all` | `boolean` | `no` | `false` | Enable the full upstream toolkit surface. |
-| `formats` | `string[]` | `no` | `null` | Requested Firecrawl formats such as `markdown` or `html`, while the current MindRoom metadata exposes this field as text. |
+| `formats` | `string[]` | `no` | `null` | Requested Firecrawl formats as a list of strings, such as `markdown` or `html`. |
 | `limit` | `number` | `no` | `10` | Default page or result limit for crawl and search. |
 | `poll_interval` | `number` | `no` | `30` | Crawl polling interval in seconds. |
-| `search_params` | `object` | `no` | `null` | Raw Firecrawl search parameters object, while the current MindRoom metadata exposes this field as text. |
 | `api_url` | `url` | `no` | `https://api.firecrawl.dev` | Firecrawl API base URL. |
 
 #### Example
@@ -340,7 +339,7 @@ search_web("latest Matrix bridges")
 #### Notes
 
 - Use `firecrawl` when you want scrape, crawl, map, and search in one hosted API.
-- `formats` and `search_params` are raw upstream arguments, so verify them against your Firecrawl plan and endpoint version.
+- Verify the requested `formats` against your Firecrawl plan and endpoint version.
 - This is usually a better fit than `crawl4ai` when you want provider-hosted crawling instead of local browser work.
 
 ### [`spider`]
@@ -352,7 +351,7 @@ search_web("latest Matrix bridges")
 `spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`.
 The current wrapper calls Spider search with `fetch_page_content: false`, so search is primarily discovery rather than full-content extraction.
 `scrape()` and `crawl()` request Markdown-style output from Spider.
-`optional_params` is merged into Spider API requests as a raw provider options object.
+The upstream `optional_params` mapping is not exposed in authored YAML or dashboard configuration.
 The installed `spider-client` constructor raises when no API key is available, even though the current MindRoom metadata says this tool is available without setup.
 
 #### Configuration
@@ -361,7 +360,6 @@ The installed `spider-client` constructor raises when no API key is available, e
 | --- | --- | --- | --- | --- |
 | `max_results` | `number` | `no` | `null` | Default result count override for `search_web()`. |
 | `url` | `url` | `no` | `null` | Optional default URL constructor argument from the upstream toolkit. |
-| `optional_params` | `object` | `no` | `null` | Raw Spider API parameters merged into search, scrape, and crawl requests, while the current MindRoom metadata exposes this field as text. |
 | `enable_search` | `boolean` | `no` | `true` | Enable `search_web()`. |
 | `enable_scrape` | `boolean` | `no` | `true` | Enable `scrape()`. |
 | `enable_crawl` | `boolean` | `no` | `true` | Enable `crawl()`. |

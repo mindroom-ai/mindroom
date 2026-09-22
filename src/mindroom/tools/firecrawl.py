@@ -66,7 +66,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="formats",
             label="Formats",
-            type="text",
+            type="string[]",
             required=False,
             default=None,
         ),
@@ -83,13 +83,6 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=30,
-        ),
-        ConfigField(
-            name="search_params",
-            label="Search Params",
-            type="text",
-            required=False,
-            default=None,
         ),
         ConfigField(
             name="api_url",

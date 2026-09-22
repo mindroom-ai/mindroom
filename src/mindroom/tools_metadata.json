@@ -10462,18 +10462,6 @@
         },
         {
           "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Proxy Config",
-          "name": "proxy_config",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
-          "validation": null
-        },
-        {
-          "authored_override": true,
           "default": true,
           "description": null,
           "label": "Enable Crawl",
@@ -10892,7 +10880,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -10904,7 +10892,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -11065,7 +11053,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -11090,18 +11078,6 @@
           "placeholder": null,
           "required": false,
           "type": "number",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Search Params",
-          "name": "search_params",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {
@@ -12015,7 +11991,7 @@
           "options": null,
           "placeholder": null,
           "required": false,
-          "type": "text",
+          "type": "string[]",
           "validation": null
         },
         {
@@ -12328,18 +12304,6 @@
           "placeholder": null,
           "required": false,
           "type": "url",
-          "validation": null
-        },
-        {
-          "authored_override": true,
-          "default": null,
-          "description": null,
-          "label": "Optional Params",
-          "name": "optional_params",
-          "options": null,
-          "placeholder": null,
-          "required": false,
-          "type": "text",
           "validation": null
         },
         {

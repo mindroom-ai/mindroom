@@ -263,8 +263,8 @@ The toolkit supports domain allowlists and denylists, crawl-date and publish-dat
 | `end_published_date` | `text` | `no` | `null` | Include results published on or before this date. |
 | `type` | `text` | `no` | `null` | Optional content type filter such as article, blog, or video. |
 | `category` | `text` | `no` | `null` | Optional category filter such as `news`, `github`, or `research paper`. |
-| `include_domains` | `string[]` | `no` | `null` | Domain allowlist. The current registry metadata exposes this as a text field, but runtime expects a list of domains. |
-| `exclude_domains` | `string[]` | `no` | `null` | Domain denylist. The current registry metadata exposes this as a text field, but runtime expects a list of domains. |
+| `include_domains` | `string[]` | `no` | `null` | Domain allowlist as a list of strings. |
+| `exclude_domains` | `string[]` | `no` | `null` | Domain denylist as a list of strings. |
 | `show_results` | `boolean` | `no` | `false` | Emit debug logs with raw parsed results. |
 | `model` | `text` | `no` | `null` | Answer model for `exa_answer()`, currently `exa` or `exa-pro`. |
 | `timeout` | `number` | `no` | `30` | Timeout in seconds for API operations. |
@@ -406,7 +406,7 @@ If `engines` is set, the tool appends those engine names to the SearXNG request.
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `host` | `url` | `yes` | `null` | Base URL for the SearXNG instance. Use the instance root, not a prebuilt `/search` URL. |
-| `engines` | `string[]` | `no` | `[]` | Optional engine allowlist. The current registry metadata exposes this as a text field, but runtime expects a list of engine names. |
+| `engines` | `string[]` | `no` | `[]` | Optional engine allowlist as a list of strings. |
 | `fixed_max_results` | `number` | `no` | `null` | Caps result count for all categories. |
 
 ### Example
