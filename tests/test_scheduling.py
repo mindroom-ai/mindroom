@@ -1841,6 +1841,87 @@ async def test_edit_scheduled_task_reuses_existing_thread() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("original_thread", "new_thread"),
+    [(None, False), ("$original_thread", False), (None, True)],
+)
+async def test_threaded_schedule_edit_preserves_persisted_placement(
+    tmp_path: Path,
+    original_thread: str | None,
+    new_thread: bool,
+) -> None:
+    """Editing the description must not move a saved schedule to the editing thread."""
+    client = AsyncMock()
+    room_state: dict[str, dict[str, Any]] = {}
+    matrix_admin = _RecordingScheduleStateAdmin(room_state)
+    client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key: nio.RoomGetStateEventResponse(
+            content=room_state[state_key]["content"],
+            room_id=room_id,
+            event_type=event_type,
+            state_key=state_key,
+        ),
+    )
+    runtime_paths = _test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant")},
+            models={"default": ModelConfig(provider="test", id="test-model")},
+        ),
+        runtime_paths,
+    )
+    ids = entity_ids(config, runtime_paths)
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="check the queue",
+        description="Original description",
+        room_id="!test:server",
+        thread_id=original_thread,
+        new_thread=new_thread,
+        created_by="@alice:server",
+    )
+    await _persist_scheduled_task_state(
+        client=client,
+        room_id="!test:server",
+        task_id="task123",
+        workflow=workflow,
+        matrix_admin=matrix_admin,
+    )
+    parsed = workflow.model_copy(update={"description": "Updated description"})
+    with (
+        patch(
+            "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
+            return_value=[ids["assistant"]],
+        ),
+        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
+        patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=parsed)),
+    ):
+        result = await edit_scheduled_task(
+            runtime=_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                room=_matrix_room("!test:server"),
+                matrix_admin=matrix_admin,
+            ),
+            room_id="!test:server",
+            task_id="task123",
+            full_text="change the description to Updated description",
+            scheduled_by="@alice:server",
+            thread_id="$editing_thread",
+        )
+
+    assert "Updated task" in result
+    saved = await get_scheduled_task(client, "!test:server", "task123")
+    assert saved is not None
+    assert saved.workflow.description == "Updated description"
+    assert saved.workflow.execute_at == workflow.execute_at
+    assert saved.workflow.thread_id == original_thread
+    assert saved.workflow.new_thread is new_thread
+
+
+@pytest.mark.asyncio
 async def test_edit_scheduled_task_forwards_history_limit_override() -> None:
     """An explicit history limit on edit must reach the shared scheduling backend."""
     client = AsyncMock()
