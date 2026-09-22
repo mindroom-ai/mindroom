@@ -10698,6 +10698,7 @@ The per-method enable flags let you narrow the exposed call surface when an agen
 | `api_key` | `password` | `no` | `null` | Cal.com API key. Configure this through the dashboard or credential store rather than inline YAML. |
 | `event_type_id` | `number` | `no` | `null` | Default Cal.com event type ID used for slot lookup and new bookings. |
 | `user_timezone` | `text` | `no` | `null` | IANA timezone used when formatting returned booking times. |
+| `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 | `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `get_available_slots()`. |
 | `enable_create_booking` | `boolean` | `no` | `true` | Enable `create_booking()`. |
 | `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `get_upcoming_bookings()`. |
@@ -17726,11 +17727,15 @@ The option controls task execution; parsing the scheduling request still uses th
 
 ## Timezone
 
-Schedules use the timezone from `config.yaml` (defaults to UTC):
+The timezone in `config.yaml` controls natural-language time interpretation and displayed timestamps (defaults to UTC):
 
 ```yaml
 timezone: America/Los_Angeles
 ```
+
+Recurring schedules are stored and evaluated as UTC cron expressions.
+Their local execution time can shift when the timezone’s UTC offset changes, including daylight-saving transitions.
+Edit or recreate a recurring schedule after an offset change if it must keep the same local clock time.
 
 ## Limitations
 
@@ -17886,7 +17891,11 @@ Reusable triggers use Ed25519 signatures and caller-chosen stable event IDs.
 
 Single-use triggers use a random bearer capability, store only its hash, and use the immutable trigger record UID for replay protection.
 
-Single-use triggers are consumed only after Matrix delivery succeeds, so a failed delivery can be retried without minting a new callback.
+Single-use triggers are consumed after Matrix delivery succeeds and local replay state is recorded, so a failed delivery can be retried without minting a new callback.
+
+A failed HTTP request can occur after Matrix accepted the message but before local replay state or trigger consumption was saved.
+If the trigger remains unconsumed, a retry after its 24-hour replay claim expires can deliver the message again.
+Single-use capability consumption is not an exactly-once delivery guarantee.
 
 The public external trigger manager creates reusable triggers, while `callback_manager.mint_callback` creates single-use triggers bound to the current agent, room, and thread.
 
@@ -18127,7 +18136,11 @@ After successful Matrix delivery, the external trigger is consumed and the scrip
 
 If delivery fails, the script remains so the background agent can retry it.
 
-Changing the request's `event_id` cannot make the trigger deliver more than once.
+Changing the request's `event_id` does not change the trigger’s replay identity or restore a consumed trigger.
+
+A failed HTTP request can be ambiguous: Matrix may already have accepted the message before local replay state or callback consumption was saved.
+A later retry can duplicate delivery after the 24-hour replay claim expires if the trigger was not consumed.
+Single-use callbacks do not guarantee exactly-once delivery.
 
 Unused callbacks do not expire automatically, so delete abandoned records with `external_trigger_manager` if they are no longer needed.
 
