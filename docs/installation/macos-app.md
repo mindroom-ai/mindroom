@@ -32,7 +32,7 @@ Overview explains the two roles and shows their status separately.
 Open **Local agents** and expand **Set up or reconnect local agents**.
 
 1. **Install MindRoom** installs the command-line runtime using the bundled `uv`.
-2. **Prepare Configuration** creates `config.yaml` and `.env` in `~/.mindroom`, keeping existing files unchanged.
+2. **Prepare Configuration** creates missing `config.yaml` and `.env` files in `~/.mindroom`, preserves an existing config and env values, and appends missing hosted Matrix defaults to `.env`.
    **Open MindRoom Chat**, sign in, and use **Local MindRoom** in the chat sidebar to generate a pair code.
    Enter the code and choose **Pair Account**.
 3. **Open Config Folder** and configure your AI provider in `.env`, or configure a local model in `config.yaml`.
