@@ -1260,6 +1260,7 @@ That snapshot includes published partial text and tool names when those names ap
 It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
 Private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
 Missing or partial conversation history, earlier media, more than 63 earlier messages, and context exceeding the 16 KB request limit retain wrap-up rather than silently dropping earlier instructions.
+Room-mode turns currently have no public conversation snapshot and retain normal wrap-up; empty history is sufficient only for a proven new thread.
 The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
 Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
 An existing reply whose visible text is unavailable retains wrap-up until a new Matrix update is acknowledged.

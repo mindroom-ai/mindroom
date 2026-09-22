@@ -75,7 +75,6 @@ from mindroom.event_journal import (
 from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.handled_turns import TurnRecord
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.judgment.answers import JudgmentResult
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -8593,10 +8592,10 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     )
     payloads = []
 
-    async def evaluate(judgment: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(judgment: JudgmentRequest) -> bool:
         assert judgment.body is not None
         payloads.append(json.loads(judgment.body))
-        return JudgmentResult(False, 0.05, None, "test", 0, None, None, judgment.state_bytes)
+        return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate)
     with queued_message_signal_context(None, mid_turn_gate=gate):
@@ -8651,10 +8650,10 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     )
     captured = []
 
-    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+    async def evaluate(request: JudgmentRequest) -> bool:
         assert request.body is not None
         captured.append(json.loads(request.body)["state"]["conversation"])
-        return JudgmentResult(False, 0.05, None, "test", 0, None, None, request.state_bytes)
+        return True
 
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=None)
 
@@ -8668,3 +8667,35 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
         assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
     assert build_lifecycle.call_args.kwargs["request"].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("thread_id", "finish"), [(None, False), ("$root", False), ("$resume", True)])
+async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
+    tmp_path: Path,
+    thread_id: str | None,
+    *,
+    finish: bool,
+) -> None:
+    """Missing room or existing-thread context cannot authorize continuing an unknown task."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    target = _target(thread_id=thread_id, reply_to_event_id="$resume")
+    request = replace(_plain_request(target, source_event_id="$resume"), prompt="Continue")
+    evaluated = []
+
+    async def evaluate(judgment: JudgmentRequest) -> bool:
+        evaluated.append(judgment)
+        return True
+
+    gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=None)
+    with (
+        queued_message_signal_context(None, mid_turn_gate=gate),
+        patch.object(
+            runner.deps.resolver,
+            "fetch_thread_history",
+            new=AsyncMock(return_value=ThreadHistoryResult([], is_full_history=True)),
+        ),
+    ):
+        await runner._prepare_request_after_lock(request)
+        assert await gate.should_finish((QueuedMessage("$new", "Only two more sleeps, please"),)) is finish
+    assert len(evaluated) == int(finish)

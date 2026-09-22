@@ -9,17 +9,13 @@ from typing import TYPE_CHECKING
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, JudgmentQuestion, build_judgment_request
-from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.hooks import MessageEnvelope
-    from mindroom.judgment.answers import JudgmentResult
     from mindroom.judgment.state import JudgmentRequest
-
-logger = get_logger(__name__)
 
 MID_TURN_QUESTION = JudgmentQuestion(
     id="interrupt_current_turn",
@@ -59,9 +55,8 @@ class MidTurnGate:
     """Reuse one decision per pending snapshot within one active response."""
 
     active_text: str | None
-    evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult]]
+    evaluate: Callable[[JudgmentRequest], Awaitable[bool | None]]
     instructions: str = ""
-    continuation_threshold: float = 0.8
     conversation_context: tuple[JudgmentMessage, ...] | None = ()
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None
@@ -139,23 +134,7 @@ class MidTurnGate:
             finish = False
             if request.complete:
                 try:
-                    result = await self.evaluate(request)
-                    finish = (
-                        result.failure is None
-                        and result.decision is not None
-                        and (
-                            1 - result.probability >= self.continuation_threshold
-                            if result.probability is not None
-                            else result.decision is False
-                        )
-                    )
-                    logger.info(
-                        "Mid-turn continuation evaluated",
-                        finish_current_turn=finish,
-                        continuation_probability=1 - result.probability if result.probability is not None else None,
-                        continuation_threshold=self.continuation_threshold if result.probability is not None else None,
-                        failure=result.failure,
-                    )
+                    finish = await self.evaluate(request) is True
                 except Exception:
                     # Keep the existing behavior; SDK exceptions can contain private inputs.
                     finish = False
