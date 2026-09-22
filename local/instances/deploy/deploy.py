@@ -913,8 +913,13 @@ def _print_instance_info(instance: Instance, matrix_type: MatrixType | None, aut
             f"  [dim]Matrix domain:[/dim] https://m-{instance.domain} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
         )
     if auth_type:
-        console.print("  [dim]Auth:[/dim] [green]Authelia (production-ready)[/green]")
-        console.print("    [yellow]Default login:[/yellow] admin / mindroom")
+        console.print("  [dim]Auth:[/dim] [yellow]Authelia (account setup required)[/yellow]")
+        console.print(
+            "    [yellow]Before starting:[/yellow] Configure intended users in "
+            f"{Path(instance.data_dir) / 'authelia' / 'users_database.yml'}",
+        )
+        console.print("      Replace the public example admin password hash and email, or remove/disable that account.")
+        console.print("      See local/instances/deploy/README.md for password hashing instructions.")
         console.print(
             f"    [dim]Auth URL:[/dim] {_auth_url(instance)} [yellow](requires Traefik on {EXTERNAL_NETWORK})[/yellow]",
         )
@@ -932,7 +937,7 @@ def create(
     auth: str | None = typer.Option(
         None,
         "--auth",
-        help="Include authentication: 'authelia' (production-ready auth server)",
+        help="Include authentication: 'authelia' (requires account setup before starting)",
     ),
 ) -> None:
     """Create a new instance with automatic port allocation."""

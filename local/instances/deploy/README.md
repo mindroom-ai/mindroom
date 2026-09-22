@@ -27,7 +27,7 @@ cd local/instances/deploy
 # Basic instance (no Matrix server, no auth)
 ./deploy.py create myapp
 
-# Instance with production-ready authentication (Authelia)
+# Instance with Authelia (account setup required before starting)
 ./deploy.py create myapp --auth authelia
 
 # Instance with lightweight Tuwunel Matrix server
@@ -57,6 +57,26 @@ ANTHROPIC_API_KEY=sk-ant-...
 GOOGLE_API_KEY=...
 # etc.
 ```
+
+#### Authelia accounts (required with `--auth authelia`)
+
+`create --auth authelia` copies an enabled public example `admin` account to `<data-dir>/authelia/users_database.yml` (by default, `instance_data/{instance_name}/authelia/users_database.yml`).
+It does not generate a unique login password or prompt for user credentials.
+Before running `start` or exposing the instance, configure intended users there: replace the example `admin` password hash and email, or remove/disable that account (`disabled: true`) after adding your own user.
+Do not leave any enabled account using the public template credentials.
+
+Generate a new password hash with the interactive prompt documented in [Authelia's password guide](https://www.authelia.com/reference/guides/passwords/):
+
+```bash
+docker run --rm -it authelia/authelia:latest authelia crypto hash generate argon2
+
+# Edit the user database in the instance's data directory
+nano instance_data/myapp/authelia/users_database.yml
+```
+
+Copy only the value after `Digest:` into the user's quoted `password` field, and set their `displayname`, `email`, and `groups`.
+Use the data directory printed by `create` if you changed the default data location.
+Complete this account setup and the required HTTPS/Traefik configuration before production use.
 
 ### 3. Start Your Instance
 
