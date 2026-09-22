@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
+from math import ceil
 from pathlib import Path
 from typing import Any, override
 
@@ -14,10 +15,19 @@ from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
 # them; create_caption_clips has no explicit font-size parameter.
 # Upstream issue: Tracking gap; no matching issue identified for caption style forwarding.
 # Upstream PR: None identified. The two copied methods retain the pinned SDK's
-# parsing, layout, media settings, temporary output publication, and cleanup.
+# parsing, media settings, temporary output publication, and cleanup.
 # Remove when: The pinned SDK applies all four embed_captions style arguments to
 # normal and highlighted clips, preserving layout and safe output publication.
 # Coverage: tests/test_moviepy_video_tools.py::test_embed_captions_applies_styles_to_text_clips.
+
+# AGNO_COMPAT: MoviePy caption geometry clips text and overlaps wrapped words.
+# Reason: The SDK uses fixed video-height fractions for caption size/position
+# and leaves the horizontal cursor at zero after placing a wrapped word.
+# Upstream issue: Tracking gap; caption-layout tracking has not been verified.
+# Upstream PR: None identified.
+# Remove when: The SDK sizes and positions captions from rendered clip bounds,
+# advances wrapped words without overlap, and rejects text that cannot fit.
+# Coverage: tests/test_moviepy_caption_layout.py.
 
 
 class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
@@ -55,7 +65,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         word_clips = []
         x_pos = 0
         y_pos = 0
-        line_width = 0
+        line_height = 0
 
         frame_width, frame_height = frame_size
         x_buffer = frame_width * 0.1
@@ -90,20 +100,22 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             )
 
             word_width, word_height = word_clip.size
-            space_width = space_clip.size[0]
+            space_width, space_height = space_clip.size
+            if x_buffer + word_width > frame_width:
+                message = "Caption word exceeds available width; use a smaller font_size."
+                raise ValueError(message)
 
-            # Handle line wrapping
-            if line_width + word_width + space_width <= max_line_width:
-                word_clip = word_clip.with_position((x_pos + x_buffer, y_pos))
-                space_clip = space_clip.with_position((x_pos + word_width + x_buffer, y_pos))
-                x_pos += word_width + space_width
-                line_width += word_width + space_width
-            else:
+            # MoviePy's clip height includes font ascent, descent, and stroke.
+            # The cursor already includes the preceding space; trailing spaces
+            # must not force an otherwise fitting word onto another row.
+            if x_pos and x_pos + word_width > max_line_width:
                 x_pos = 0
-                y_pos += word_height + 10
-                line_width = word_width + space_width
-                word_clip = word_clip.with_position((x_buffer, y_pos))
-                space_clip = space_clip.with_position((word_width + x_buffer, y_pos))
+                y_pos += line_height
+                line_height = 0
+            word_clip = word_clip.with_position((x_buffer + x_pos, y_pos))
+            space_clip = space_clip.with_position((x_buffer + x_pos + word_width, y_pos))
+            x_pos += word_width + space_width
+            line_height = max(line_height, word_height, space_height)
 
             word_clips.append(word_clip)
             word_clips.append(space_clip)
@@ -177,32 +189,34 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
 
             # Create caption clips for each line
             for line in subtitle_lines:
-                # Increase background height to accommodate larger text
-                bg_height = int(video.h * 0.15)
-                bg_clip = ColorClip(
-                    size=(video.w, bg_height),
-                    color=(0, 0, 0),
-                    duration=line["end"] - line["start"],
-                ).with_opacity(0.6)
-
-                # Position background even closer to bottom (90% instead of 85%)
-                bg_position = ("center", int(video.h * 0.90))
-                bg_clip = bg_clip.with_start(line["start"]).with_position(bg_position)
-
-                # Create word clips
                 word_clips = self.create_caption_clips(
                     line,
-                    (video.w, bg_height),
+                    (video.w, video.h),
                     color=font_color,
                     stroke_color=stroke_color,
                     stroke_width=stroke_width,
                     font_size=font_size,
                 )
+                bg_height = ceil(max(clip.pos(0)[1] + clip.h for clip in word_clips))
+                if bg_height > video.h:
+                    message = "Caption block exceeds video height; use a smaller font_size."
+                    raise ValueError(message)  # noqa: TRY301 - preserve SDK error results and cleanup.
 
-                # Combine background and words
-                caption_composite = CompositeVideoClip([bg_clip, *word_clips], size=bg_clip.size).with_position(
-                    bg_position,
+                # Children keep absolute video times and local canvas positions.
+                # Only the outer composite is positioned against the video.
+                bg_clip = (
+                    ColorClip(
+                        size=(video.w, bg_height),
+                        color=(0, 0, 0),
+                        duration=line["end"] - line["start"],
+                    )
+                    .with_opacity(0.6)
+                    .with_start(line["start"])
                 )
+                caption_composite = CompositeVideoClip(
+                    [bg_clip, *word_clips],
+                    size=(video.w, bg_height),
+                ).with_position(("center", "bottom"))
 
                 all_caption_clips.append(caption_composite)
 

@@ -308,6 +308,36 @@ def test_check_deps_installed_positive_and_negative() -> None:
     assert not check_deps_installed(["nonexistent_package_xyz_123"])
 
 
+@pytest.mark.parametrize("no_auto_install", ["0", "1"])
+def test_file_generation_uses_installed_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    no_auto_install: str,
+) -> None:
+    """Installed file-generation extras must load without requesting an install."""
+    pytest.importorskip("docx")
+    pytest.importorskip("reportlab")
+
+    def unexpected_install(_extras: list[str], **_kwargs: object) -> bool:
+        pytest.fail("Installed file-generation dependencies must not be installed again")
+
+    monkeypatch.setattr("mindroom.tool_system.dependencies._install_optional_extras", unexpected_install)
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": no_auto_install},
+    )
+
+    toolkit = get_tool_by_name(
+        "file_generation",
+        runtime_paths,
+        tool_config_overrides={"output_directory": str(tmp_path / "output")},
+        worker_target=None,
+    )
+
+    assert "generate_docx_file" in toolkit.functions
+
+
 @pytest.mark.parametrize(("pip_name", "expected_import"), list(_PIP_TO_IMPORT.items()))
 def test_pip_to_import_mapping(pip_name: str, expected_import: str) -> None:
     """_pip_name_to_import returns the correct import name for every entry in _PIP_TO_IMPORT."""

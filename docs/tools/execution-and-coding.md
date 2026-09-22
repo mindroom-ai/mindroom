@@ -30,9 +30,11 @@ Most tools on this page are exposed as `setup_type: none` in the live tool regis
 `docker` is marked `setup_type: special` and `requires_config` because Docker daemon access is privileged host control.
 `src/mindroom/api/integrations.py` currently has no dedicated integration endpoints for them because they are local-runtime tools rather than OAuth-backed services.
 
-MindRoom's built-in default worker-routed set is `coding`, `docker`, `file`, `python`, and `shell`.
+Default worker eligibility comes from each toolkit’s catalog metadata, including [`browser_mcp`](worker-computer.md) and code-execution tools.
+The effective route also depends on runtime worker configuration.
 You can override the effective routed set with `defaults.worker_tools` or `agents.<name>.worker_tools`.
-When `worker_scope` is unset, worker-routed calls still execute in the sandbox, but they use a fresh runtime per call instead of a persistent scoped worker.
+When `worker_scope` is unset, static-runner calls select no worker-specific storage root; Docker and Kubernetes reuse an unscoped worker per agent and tenant/account.
+Per-call subprocess or forkserver isolation does not imply fresh worker storage.
 `worker_scope: shared` reuses one runtime per agent, `worker_scope: user` reuses one runtime per requester across that requester's agents, and `worker_scope: user_agent` reuses one runtime per requester-agent pair.
 `worker_scope` controls runtime reuse, not filesystem security.
 Use [Sandbox Proxy Isolation](../deployment/sandbox-proxy.md) for the deployment model, storage visibility rules, and scope tradeoffs.
@@ -80,6 +82,10 @@ agents:
       - visualization:
           output_dir: charts
 ```
+
+In this example, `file_generation` and `visualization` default to the primary runtime, and `exports`/`charts` are relative to that process’s working directory.
+They are not automatically rebased into the agent workspace or made visible to worker-routed `file` and `shell` calls.
+Choose a destination shared with the tools that need the files, or generate worker-local artifacts through workspace-backed `shell` or `python`.
 
 ## [`file`]
 
@@ -443,13 +449,14 @@ analyze(
 
 ## [`file_generation`]
 
-`file_generation` creates export artifacts as JSON, CSV, PDF, DOCX, HTML, or plain text and can optionally save them to disk.
+`file_generation` creates export artifacts as JSON, CSV, PDF, DOCX, HTML, plain text, or source-code files and can optionally save them to disk.
 
 ### What It Does
 
-`file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, and `generate_text_file()`.
+`file_generation` exposes `generate_json_file()`, `generate_csv_file()`, `generate_pdf_file()`, `generate_docx_file()`, `generate_html_file()`, `generate_text_file()`, and `generate_code_file()`.
 Each function returns a `ToolResult` with a generated file artifact attached.
 If `output_directory` is set, the generated file is also written to disk and the result message includes that file path.
+Relative directories resolve from the executing process’s current working directory, not the agent workspace.
 If `output_directory` is unset and `save_files` is `false`, the file exists only in the tool result payload.
 If `save_files` is `true` without `output_directory`, the toolkit writes generated files to its current working directory.
 PDF generation is automatically disabled when `reportlab` is unavailable, even if `enable_pdf_generation` is left on.
@@ -467,6 +474,7 @@ DOCX generation is automatically disabled when `python-docx` is unavailable, eve
 | `enable_docx_generation` | `boolean` | `no` | `true` | Enable `generate_docx_file()` when `python-docx` is available. |
 | `enable_txt_generation` | `boolean` | `no` | `true` | Enable `generate_text_file()`. |
 | `enable_html_generation` | `boolean` | `no` | `true` | Enable `generate_html_file()`. |
+| `enable_code_generation` | `boolean` | `no` | `true` | Enable `generate_code_file()` for source-file exports. |
 | `save_files` | `boolean` | `no` | `false` | Save generated files to disk; when `output_directory` is unset, use the current working directory. |
 | `all` | `boolean` | `no` | `false` | Enable all file-generation functions. |
 
@@ -494,7 +502,7 @@ generate_text_file("Plain text export", filename="notes.txt")
 
 - Filenames are auto-generated when omitted, and missing file extensions are appended automatically for the matching export type.
 - `generate_json_file()` accepts dicts, lists, or strings, and plain strings are wrapped into JSON when they are not already valid JSON.
-- Set `output_directory` to persist artifacts at a predictable location for later shell or file-tool access.
+- Set `output_directory` to persist artifacts; later shell or file-tool access requires that destination to be visible in the runtime executing those tools.
 
 ## [`visualization`]
 
@@ -543,7 +551,8 @@ create_histogram([1, 1, 2, 3, 5, 8, 13], title="Value distribution")
 
 ### Notes
 
-- The toolkit saves PNG files to disk immediately, so later tool calls can read or send those files.
+- The toolkit saves PNG files to disk immediately; relative `output_dir` paths resolve from the executing process’s working directory.
+- Later tools can read or send those files only if their runtime can access that destination; primary and worker filesystems can differ.
 - If you explicitly route `visualization` through workers, the chart files will be created in the worker-visible filesystem instead of the primary process filesystem.
 - `matplotlib` must be importable in the runtime that executes the tool.
 

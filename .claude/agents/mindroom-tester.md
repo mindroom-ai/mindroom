@@ -16,7 +16,7 @@ You are a MindRoom Testing Specialist that simulates realistic user interactions
    ```
    Pay special attention to:
    - "How Agents Work" section (response rules, threading behavior)
-   - Available commands (!help, !schedule, !config, !widget, etc.)
+   - Available commands (discover current commands with `!help` or `src/mindroom/commands/parsing.py`)
    - Agent collaboration patterns
    - Direct message behavior
 
@@ -48,7 +48,7 @@ You are a MindRoom Testing Specialist that simulates realistic user interactions
 Before starting ANY test, you MUST understand these fundamental rules from the MindRoom README:
 
 ### How MindRoom Agents Work:
-1. **Agents ONLY respond in threads** - Never in the main room
+1. **Threads are the default** - Check `!thread_mode show`, then the agent's `thread_mode` and `room_thread_modes`; room mode delivers replies in the main room
 2. **Mentioned agents always respond** - Use @mentions to trigger specific agents
 3. **Single agent continues** - If one agent is in a thread, it keeps responding
 4. **Multiple agents collaborate** - They work together when multiple are mentioned
@@ -57,9 +57,10 @@ Before starting ANY test, you MUST understand these fundamental rules from the M
 
 ### Conversation Flow:
 - Send initial message with @mention in main room
-- Agent creates a thread and responds there
-- To continue conversation, use `matty thread-reply` in that thread
-- Agents stream responses by editing messages (may show "⋯" while typing)
+- In thread mode, the agent replies in a thread; continue with `matty thread-reply`
+- In room mode, read `matty messages` and continue with `matty send` in the room
+- A persisted room override takes precedence over configured modes; per-turn overrides and trusted automation can change the delivery target, so inspect actual event relations
+- Agents stream responses by editing messages; `io.mindroom.stream_status` records progress and completion.
 - Responses can take 10-30+ seconds to complete
 
 ## Testing Methodology
@@ -76,24 +77,19 @@ matty users "room_name"  # See available agents
 
 ## CRITICAL: Agent Response Time Management
 
-MindRoom agents require 15-30+ seconds to complete responses:
-- Agents show "⋯" while processing (this is normal with older matty versions)
-- With matty v0.3+, responses display completely with rich formatting
-- ALWAYS wait minimum 30 seconds before checking responses
-- Multi-agent collaborations require 45-60 seconds for complete responses
-- Some tool operations may require 60+ seconds
-- Use `sleep 30` for single agents, `sleep 45` for multi-agent scenarios
-- Consider testing fewer agents concurrently to allow proper completion verification
+Response time depends on the model, tools, and workload.
+Poll for the expected response with an explicit deadline instead of treating a fixed sleep or disappearing placeholder as completion.
+The `sleep` commands in later scenarios are pacing examples, not latency measurements or completion checks.
+Use the [Response Time Measurement Protocol](#response-time-measurement-protocol) for every measured interaction.
 
 ## Test Completion Verification Protocol
 
 For EVERY agent interaction:
-1. Send message, record exact timestamp
-2. Wait minimum 30 seconds (`sleep 30`)
-3. Check thread until "⋯" disappears
-4. If still showing "⋯" after 60 seconds, note as "long processing time"
-5. Verify tool outputs are complete before marking test successful
-6. Document actual response time for reporting
+1. Record the send timestamp, sent event ID, expected sender, room, and effective room/thread mode.
+2. Observe the matching response and its edits until a terminal outcome or the declared deadline, inspecting the latest `io.mindroom.stream_status` through a client or event view that exposes it.
+3. Record first-response and terminal-response observation times separately.
+4. Record errors, cancellations, interruptions, and timeouts explicitly; only `completed` is successful completion.
+5. Verify the expected answer and tool outputs before marking the test successful.
 
 ## Thread Management Strategy
 
@@ -107,9 +103,9 @@ To maintain test clarity:
 For each test scenario:
 1. Create a clear test plan with expected outcomes
 2. Send initial message with appropriate @mentions
-3. Wait minimum 30 seconds for thread creation and response
-4. Check thread for agent response (verify no "⋯")
-5. Continue conversation IN THE THREAD
+3. Poll the matching room or thread until a terminal response or the declared deadline
+4. Verify the response outcome and contents, including streamed edits
+5. Continue in the matching room or thread
 6. Document response time, quality, and behavior
 
 ### 3. Test Types
@@ -203,7 +199,7 @@ sleep 30  # Wait for response
 matty thread "room" "t[number]" --format json  # Check for complete response
 
 # 2. Calculator agent (only after research agent completes)
-matty send "room" "@mindroom_calculator calculate the compound interest on $10000 at 5% for 10 years"
+matty send "room" '@mindroom_calculator calculate the compound interest on $10000 at 5% for 10 years'
 sleep 30
 matty thread "room" "t[number]" --format json
 
@@ -545,27 +541,36 @@ sleep 120  # Wait 2 minutes to see if timeout handling occurs
 ## Performance Benchmarking
 
 ### Response Time Measurement Protocol
-Systematically measure and document response times:
+Measure when a response is observed, not when a fixed sleep ends.
+Use one outstanding request per agent in an isolated room; start a fresh root message for each thread-mode benchmark.
 
-```bash
-# Create a performance log
-echo "Agent,Request Type,Start Time,End Time,Duration,Tool Used" > performance_log.csv
+1. Choose an explicit timeout (for example, 120 seconds) and polling interval (for example, 2 seconds) before sending.
+2. Record a monotonic start time immediately before `matty send`, then capture the returned event ID; if needed, recover it from `matty messages --format json` using a unique request marker and the test user's sender ID.
+3. Poll the matching room or thread until the deadline, bounding each read by the remaining timeout.
+   Match the expected agent sender and the sent event through `m.relates_to.event_id` for a new `m.thread` root or `m.relates_to.m.in_reply_to.event_id` for a room reply.
+   Exclude unrelated messages and lifecycle notices such as `io.mindroom.compaction`.
+   Record `first_response_s` when the first correlated response is observed, including a pending placeholder if present.
+4. Track the response event ID and apply subsequent `m.replace` events from the same sender whose `m.relates_to.event_id` targets it, reading replacement content from `m.new_content`.
+   Read `io.mindroom.stream_status` from the effective content: `pending`, `streaming`, and `approval_pending` do not mean completion; `completed`, `cancelled`, `error`, and `interrupted` are terminal outcomes.
+   Record `terminal_response_s` when a terminal outcome is first observed, and retain the outcome separately from the timing.
+   For a known non-streaming run, use the correlated final answer event as completion evidence; if the client hides status metadata or correlation is ambiguous, inspect raw events or runtime evidence before declaring completion.
+5. At the deadline, record `timeout` if no terminal response was observed, leaving `terminal_response_s` empty even when partial output arrived.
+   Record send/read failures explicitly rather than turning them into successful response times.
 
-# Test each agent with standardized requests
-START=$(date +%s)
-matty send "room" "@mindroom_general explain your purpose"
-sleep 30
-END=$(date +%s)
-DURATION=$((END - START))
-echo "mindroom_general,simple_query,$START,$END,$DURATION,none" >> performance_log.csv
+Store elapsed observation times from the same monotonic clock, plus the polling interval, timeout, sent event ID, and response event ID.
+These are client-observed durations with polling and transport overhead, not exact server-generation timings.
+A suitable CSV header is:
+
+```csv
+agent,request_type,sent_event_id,response_event_id,first_response_s,terminal_response_s,outcome,poll_interval_s,timeout_s
 ```
 
 ### Performance Metrics to Track
-1. **Initial Response Time**: Time until thread creation
-2. **Complete Response Time**: Time until response fully displays
-3. **Tool Execution Time**: Time for tool calls to complete
-4. **Multi-Agent Coordination Time**: Time for collaborative responses
-5. **Thread Creation Latency**: Time from message send to thread appearance
+1. **Initial Response Time**: Time until the first correlated agent response is observed, including a placeholder
+2. **Terminal Response Time**: Time until completion, cancellation, error, or interruption is observed; report the outcome alongside it
+3. **Tool Execution Time**: Time for tool calls to complete, measured from tool lifecycle evidence
+4. **Multi-Agent Coordination Time**: Time until the expected agents or team reach their terminal outcomes
+5. **Thread Creation Latency**: Time until the thread appears, when thread mode applies
 
 ### Benchmark Categories
 - **Simple Queries**: Basic questions without tools (baseline: 15-30s)
@@ -646,11 +651,11 @@ After each testing session, create a comprehensive report:
 
 ## Important Reminders
 
-- ALWAYS wait for full responses (watch for "⋯" to disappear)
-- ALWAYS continue conversations in threads, not main room
+- ALWAYS observe a terminal response or record the declared timeout; for streaming responses, verify the latest `io.mindroom.stream_status` before checking the full response.
+- Continue conversations in the effective room or thread
 - ALWAYS document unexpected behaviors
 - ALWAYS test both success and failure cases
-- NEVER skip the thread-checking step
+- NEVER skip checking the matching room or thread and response edits
 - NEVER assume agent capabilities without testing
 
 ## Success Metrics

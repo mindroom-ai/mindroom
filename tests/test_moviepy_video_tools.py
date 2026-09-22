@@ -1,17 +1,20 @@
-"""Caption styling reaches MoviePy without requiring fonts or FFmpeg."""
+"""Caption styling with fake video rendering and no font lookup."""
 
 from __future__ import annotations
 
-import importlib
 import os
-import sys
 from pathlib import Path
-from types import ModuleType
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
 
 from mindroom.tools.moviepy_video_tools import moviepy_video_tools
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 
 
 def _clip(**kwargs: object) -> MagicMock:
@@ -19,16 +22,27 @@ def _clip(**kwargs: object) -> MagicMock:
     clip.size = kwargs.get("size", (20, 12))
     clip.w, clip.h = clip.size
     clip.fps = 30
-    for method in ("with_start", "with_duration", "with_position", "with_opacity"):
+    clip.pos = lambda _time: (0, 0)
+
+    def with_position(position: tuple[object, object] | Callable[[float], tuple[object, object]]) -> MagicMock:
+        clip.pos = position if callable(position) else lambda _time: position
+        return clip
+
+    clip.with_position.side_effect = with_position
+    for method in ("with_start", "with_duration", "with_opacity"):
         getattr(clip, method).return_value = clip
     clip.write_videofile.side_effect = lambda path, **_kwargs: Path(path).write_bytes(b"rendered")
     return clip
 
 
 @pytest.fixture
-def caption_renderer(monkeypatch: pytest.MonkeyPatch) -> tuple[object, MagicMock]:
-    """Keep the registered toolkit and its layout real; replace rendering only."""
-    moviepy = ModuleType("moviepy")
+def caption_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]]:
+    """Patch captured factories only after real modules have finished importing."""
+    from mindroom.custom_tools import agno_compat_moviepy as adapter  # noqa: PLC0415
+
+    toolkit_class = moviepy_video_tools()
     factories = {
         "TextClip": MagicMock(side_effect=lambda **kwargs: _clip(**kwargs)),
         "ColorClip": MagicMock(side_effect=lambda **kwargs: _clip(**kwargs)),
@@ -36,16 +50,8 @@ def caption_renderer(monkeypatch: pytest.MonkeyPatch) -> tuple[object, MagicMock
         "VideoFileClip": MagicMock(side_effect=lambda _path: _clip(size=(1280, 720))),
     }
     for name, factory in factories.items():
-        setattr(moviepy, name, factory)
-    monkeypatch.setitem(sys.modules, "moviepy", moviepy)
-    toolkit_class = moviepy_video_tools()
-    # Refresh captured imports if another test already loaded either implementation.
-    for module_name in {"agno.tools.moviepy_video", toolkit_class.__module__}:
-        module = importlib.import_module(module_name)
-        for name, factory in factories.items():
-            if hasattr(module, name):
-                monkeypatch.setattr(module, name, factory)
-    return toolkit_class(), factories["TextClip"]
+        monkeypatch.setattr(adapter, name, factory)
+    return toolkit_class(), factories
 
 
 @pytest.mark.parametrize(
@@ -61,14 +67,15 @@ def caption_renderer(monkeypatch: pytest.MonkeyPatch) -> tuple[object, MagicMock
     ids=["default-font-size", "font-size", "text-color", "outline-color", "outline-width", "no-outline"],
 )
 def test_embed_captions_applies_styles_to_text_clips(
-    caption_renderer: tuple[object, MagicMock],
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
     styles: dict[str, object],
     base_style: dict[str, object],
     highlight_style: dict[str, object],
 ) -> None:
     """Dropping any advertised style must change the effective rendering inputs."""
-    toolkit, text_clip = caption_renderer
+    toolkit, factories = caption_renderer
+    text_clip = factories["TextClip"]
     srt_path = tmp_path / "captions.srt"
     srt_path.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello world\n", encoding="utf-8")
     output_path = tmp_path / "captioned.mp4"
@@ -91,13 +98,13 @@ def test_embed_captions_applies_styles_to_text_clips(
 
 @pytest.mark.parametrize("failure", [None, "render", "publish"], ids=["success", "render-failure", "publish-failure"])
 def test_embed_captions_publishes_complete_output_and_closes_media(
-    caption_renderer: tuple[object, MagicMock],
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
 ) -> None:
     """Partial renders never replace existing output or leave temporary files or open media."""
-    toolkit, _text_clip = caption_renderer
+    toolkit, factories = caption_renderer
     srt_path = tmp_path / "captions.srt"
     srt_path.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello world\n", encoding="utf-8")
     output_path = tmp_path / "captioned.mp4"
@@ -126,10 +133,8 @@ def test_embed_captions_publishes_complete_output_and_closes_media(
         message = "destination locked"
         raise OSError(message)
 
-    # These factories are the same rendering boundaries installed by the fixture.
-    moviepy = sys.modules["moviepy"]
-    moviepy.VideoFileClip.side_effect = lambda _path: video
-    moviepy.CompositeVideoClip.side_effect = composite
+    factories["VideoFileClip"].side_effect = lambda _path: video
+    factories["CompositeVideoClip"].side_effect = composite
     if failure == "publish":
         monkeypatch.setattr(os, "replace", reject_publication)
 
@@ -154,11 +159,12 @@ def test_embed_captions_publishes_complete_output_and_closes_media(
 
 
 def test_embed_captions_keeps_styles_independent_between_calls(
-    caption_renderer: tuple[object, MagicMock],
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
     tmp_path: Path,
 ) -> None:
     """One toolkit applies each call's full style and restores defaults on a later call."""
-    toolkit, text_clip = caption_renderer
+    toolkit, factories = caption_renderer
+    text_clip = factories["TextClip"]
     srt_path = tmp_path / "captions.srt"
     srt_path.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
     cases = [

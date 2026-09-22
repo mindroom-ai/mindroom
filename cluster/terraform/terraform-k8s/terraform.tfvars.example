@@ -13,8 +13,19 @@ porkbun_api_key    = "YOUR_PORKBUN_API_KEY"
 porkbun_secret_key = "YOUR_PORKBUN_SECRET_KEY"
 
 # Domain and Environment
-domain      = "mindroom.chat"
-environment = "staging"  # or "production"
+# Replace example.test with your Porkbun DNS zone.
+# environment controls naming; it does not add a prefix to domain.
+domain      = "staging.example.test"
+root_domain = "example.test"
+environment = "staging"  # For production, also set domain to the root domain.
+
+# Enable the platform Helm release (defaults to false when omitted).
+deploy_platform = true
+
+# Provisioner authentication and fallback root for stable per-instance secrets.
+# Use a strong, unique value and configure system API clients with the same key.
+# Keep this value stable for existing tenants.
+provisioner_api_key = "REPLACE_WITH_A_STRONG_UNIQUE_SECRET"
 
 # Supabase
 supabase_url         = "https://YOUR_PROJECT.supabase.co"

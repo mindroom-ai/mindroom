@@ -120,8 +120,10 @@ class _DispatchPlan:
 _ROUTER_ONLY_MENTION_GUIDANCE = (
     "🧭 Rules of engagement: mention a specific agent or team when you want that entity to answer, or mention "
     "multiple agents when you want an ad-hoc collaboration. If one human and one agent or team are already talking "
-    "in a thread, you can keep going without an explicit tag. Once a thread has multiple human users or multiple "
-    "agent/team participants, explicitly tag the agent, team, or agents you want next. In a new untagged message, "
+    "in a thread, you can keep going without an explicit tag. Explicit tags select who answers next; an untagged "
+    "single-human thread may also continue an eligible ad-hoc team of participating individual agents. "
+    "In multi-human threads, explicitly tag who should answer; eligible existing individual agents may opt into "
+    "adaptive participation, but teams do not form automatically. In a new untagged message, "
     "automatic routing can still choose an agent or team when appropriate. The router is not a conversational AI "
     "agent you can tag directly."
 )

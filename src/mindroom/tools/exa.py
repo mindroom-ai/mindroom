@@ -150,14 +150,14 @@ if TYPE_CHECKING:
         ConfigField(
             name="include_domains",
             label="Include Domains",
-            type="text",
+            type="string[]",
             required=False,
             default=None,
         ),
         ConfigField(
             name="exclude_domains",
             label="Exclude Domains",
-            type="text",
+            type="string[]",
             required=False,
             default=None,
         ),

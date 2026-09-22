@@ -18,7 +18,7 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.config.main import Config
+from mindroom.config.main import Config, load_config
 from mindroom.event_journal_open import record_opened_event_journal
 
 VALID_CONFIG: dict[str, Any] = {
@@ -91,6 +91,52 @@ def loaded_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     api_app = _make_api_app(runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
     return api_app
+
+
+@pytest.mark.parametrize("writer", ["persist", "api"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "defaults",
+    [{}, {"tools": []}, {"tools": [], "markdown": False}, {"tools": ["scheduler"]}, {"tools": ["approved_egress"]}],
+)
+def test_approved_egress_structured_save_preserves_authored_tool_defaults(
+    tmp_path: Path,
+    writer: str,
+    enabled: bool,
+    defaults: dict[str, Any],
+) -> None:
+    """A structured save must preserve tool selection after the runtime overlay is disabled."""
+    payload: dict[str, Any] = {
+        "agents": {"research": {"display_name": "Research"}},
+        "timezone": "Europe/Paris",
+    }
+    if defaults:
+        payload["defaults"] = defaults
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path, payload)
+    paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": str(enabled).lower()},
+    )
+
+    if writer == "persist":
+        config_lifecycle.validate_and_persist_config_payload(payload, paths)
+    else:
+        api_app = _make_api_app(paths)
+        assert config_lifecycle.load_config_into_app(paths, api_app) is True
+        config_lifecycle.replace_committed_config(_request_for(api_app), payload, error_prefix="Save failed")
+
+    saved = yaml.safe_load(config_path.read_text())
+    assert saved.get("defaults", {}) == defaults
+    assert saved["timezone"] == "Europe/Paris"
+    disabled_paths = constants.resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "false"},
+    )
+    reloaded = load_config(disabled_paths)
+    assert reloaded.resolve_entity("research").available_tools == defaults.get("tools", ["scheduler"])
 
 
 class TestLoadAndValidationFailure:

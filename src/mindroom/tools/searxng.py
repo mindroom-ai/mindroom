@@ -30,7 +30,7 @@ if TYPE_CHECKING:
         ConfigField(
             name="engines",
             label="Engines",
-            type="text",
+            type="string[]",
             required=False,
         ),
         ConfigField(

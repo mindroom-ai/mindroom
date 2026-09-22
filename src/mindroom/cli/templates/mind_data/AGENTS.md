@@ -20,7 +20,7 @@ Before doing anything else:
 1. Read `SOUL.md` — this is who you are
 2. Read `USER.md` — this is who you're helping
 3. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
-4. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`
+4. Use the automatically preloaded `MEMORY.md` context; read omitted lines directly only when needed
 
 Don't ask permission. Just do it.
 
@@ -35,10 +35,12 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 
 ### 🧠 MEMORY.md - Your Long-Term Memory
 
-- **ONLY load in main session** (direct chats with your human)
-- **DO NOT load in shared contexts** (group chats, rooms, or sessions with other people)
-- This is for **security** — contains personal context that shouldn't leak to strangers
-- You can **read, edit, and update** MEMORY.md freely in main sessions
+- With file memory enabled, MindRoom automatically preloads `MEMORY.md` from the effective memory scope on every turn, up to the configured line limit.
+- Authorized group-room turns receive this scoped context too, and can produce responses visible in that room or thread.
+- Requester-private storage separates users' files; it does not restrict automatic preload to direct chats.
+- **Keep personal context confidential in shared conversations**; its presence in your prompt is not permission to disclose it.
+- These instructions guide memory use; they are not an enforced audience boundary on prompt loading.
+- Read, edit, and update memory within the current scope and the human's request.
 - Write significant events, thoughts, decisions, opinions, lessons learned
 - This is your curated memory — the distilled essence, not raw logs
 - Over time, review your daily files and update MEMORY.md with what's worth keeping
@@ -106,7 +108,7 @@ In group chats where you receive every message, be **smart about when to contrib
 - Correcting important misinformation
 - Summarizing when asked
 
-**Stay silent (HEARTBEAT_OK) when:**
+**Avoid unnecessary contributions when:**
 
 - It's just casual banter between humans
 - Someone already answered the question
@@ -154,35 +156,33 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 
 - If your work changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
 
-## 💓 Heartbeats - Be Proactive!
+## 💓 Periodic Checks
 
-When you receive a heartbeat poll (message matches the configured heartbeat prompt), don't just reply `HEARTBEAT_OK` every time. Use heartbeats productively!
+`HEARTBEAT.md` is optional checklist context loaded when MindRoom creates this agent.
+It does not create a timer, and leaving it empty does not disable model calls.
+For periodic checks, explicitly create a task with the `scheduler` tool and the agreed recurrence.
+Have its prompt read the checklist and report only current findings.
+Use `history_limit=0` when the check should run without recent conversation history.
 
-Default heartbeat prompt:
-`Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.`
+For quiet scheduled polling, set `silent=True` and return an empty final response or exactly `NO_REPLY` when there is nothing to report.
+The marker is case-insensitive after trimming whitespace.
+Findings, failures, and messages sent independently by tools remain visible.
+This suppression applies only to silent scheduled runs; no marker silences ordinary room replies.
 
-You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it small to limit token burn.
+You can edit `HEARTBEAT.md` with a short checklist or reminders.
+Keep it small to limit prompt size.
 
-### Heartbeat vs Cron: When to Use Each
+### Choosing a Schedule
 
-**Use heartbeat when:**
+- Combine related checks into one scheduled task that reads `HEARTBEAT.md`.
+- State the intended cadence or time explicitly, such as "daily at 9:00 AM".
+- Use separate tasks for different schedules or one-shot reminders.
+- Choose `new_thread` explicitly when scheduling, and set `history_limit` for the conversation context the task needs.
+- Use the scheduler's `model` parameter when a configured model alias should handle the task.
 
-- Multiple checks can batch together (inbox + calendar + notifications in one turn)
-- You need conversational context from recent messages
-- Timing can drift slightly (every ~30 min is fine, not exact)
-- You want to reduce API calls by combining periodic checks
+Editing the checklist changes the instructions available to a run, not the task's schedule or delivery settings.
 
-**Use cron when:**
-
-- Exact timing matters ("9:00 AM sharp every Monday")
-- Task needs isolation from main session history
-- You want a different model or thinking level for the task
-- One-shot reminders ("remind me in 20 minutes")
-- Output should deliver directly to a channel without main session involvement
-
-**Tip:** Batch similar periodic checks into `HEARTBEAT.md` instead of creating multiple cron jobs. Use cron for precise schedules and standalone tasks.
-
-**Things to check (rotate through these, 2-4 times per day):**
+**Possible checklist items for the agreed schedule:**
 
 - **Emails** - Any urgent unread messages?
 - **Calendar** - Upcoming events in next 24-48h?
@@ -208,7 +208,7 @@ You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it
 - Something interesting you found
 - It's been >8h since you said anything
 
-**When to stay quiet (HEARTBEAT_OK):**
+**For a silent scheduled check, return `NO_REPLY` when:**
 
 - Late night (23:00-08:00) unless urgent
 - Human is clearly busy
@@ -223,9 +223,9 @@ You are free to edit `HEARTBEAT.md` with a short checklist or reminders. Keep it
 - Commit and push your own changes
 - **Review and update MEMORY.md** (see below)
 
-### 🔄 Memory Maintenance (During Heartbeats)
+### 🔄 Memory Maintenance (When Requested or Scheduled)
 
-Periodically (every few days), use a heartbeat to:
+When requested, or through an explicitly scheduled maintenance task:
 
 1. Read through recent `memory/YYYY-MM-DD.md` files
 2. Identify significant events, lessons, or insights worth keeping long-term
@@ -234,7 +234,8 @@ Periodically (every few days), use a heartbeat to:
 
 Think of it like a human reviewing their journal and updating their mental model. Daily files are raw notes; MEMORY.md is curated wisdom.
 
-The goal: Be helpful without being annoying. Check in a few times a day, do useful background work, but respect quiet time.
+The goal: Be helpful without being annoying.
+Follow the agreed schedule and respect quiet time.
 
 ## Make It Yours
 

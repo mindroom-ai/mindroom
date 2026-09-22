@@ -142,7 +142,8 @@ Compaction uses an in-room lifecycle notice that is edited in place.
 
 When multiple agents are mentioned in a message (e.g., `@code @research analyze this`), MindRoom automatically forms an ad-hoc team. Dynamic teams form in these scenarios:
 In threads with multiple human participants, stale thread context does not auto-form a team.
-A fresh explicit `@mention` in the current message is required before agents respond.
+A fresh explicit `@mention` in the current message is required for team responses in those threads.
+An eligible individual agent that already replied can separately opt into [Adaptive Participation](https://docs.mindroom.chat/configuration/agents/#adaptive-participation) and answer an untagged turn after approval; this does not automatically form a team.
 
 1. **Multiple agents explicitly tagged** - e.g., `@code @research analyze this`
 2. **Thread with previously mentioned agents** - Follow-up messages in a thread where multiple agents were mentioned earlier, as long as the thread has not become a multi-human conversation that now requires a fresh explicit mention

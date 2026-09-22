@@ -3012,3 +3012,37 @@ def test_worker_manager_can_verify_absence_without_controller_write_access(chart
         if resource == "replicasets":
             assert verbs <= {"get", "list", "watch"}
         assert all("resourceNames" not in rule for rule in rules)
+
+
+@pytest.mark.parametrize("port", [5432, 6432])
+def test_runtime_event_journal_postgres_port_contract(port: int) -> None:
+    """The headless database endpoint must match its listener and health checks."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        f"eventCache.postgres.service.port={port}",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    database_name = "mindroom-runtime-event-cache-postgres"
+    database = _resource(docs, "StatefulSet", database_name)
+    postgres = _container(database, "postgres")
+    service = _resource(docs, "Service", database_name)
+    policy = _resource(docs, "NetworkPolicy", database_name)
+    runtime = _resource(docs, "Deployment", "mindroom-runtime")
+    runtime_env = _env_by_name(_container(runtime, "mindroom"))
+    secret_ref = runtime_env["MINDROOM_EVENT_CACHE_DATABASE_URL"]["valueFrom"]["secretKeyRef"]
+    secret = _resource(docs, "Secret", secret_ref["name"])
+
+    assert service["spec"]["clusterIP"] == "None"
+    assert service["spec"]["ports"] == [{"name": "postgres", "port": port, "targetPort": "postgres", "protocol": "TCP"}]
+    assert postgres["ports"] == [{"name": "postgres", "containerPort": port, "protocol": "TCP"}]
+    assert policy["spec"]["ingress"][0]["ports"] == [{"protocol": "TCP", "port": port}]
+    assert secret["stringData"][secret_ref["key"]] == (
+        f"postgresql://mindroom_cache:test-password@{database_name}:{port}/mindroom_cache"
+    )
+    assert postgres.get("args") == ["-p", str(port)]
+    for probe in ("readinessProbe", "livenessProbe"):
+        command = postgres[probe]["exec"]["command"]
+        assert command[0] == "pg_isready"
+        assert "-p" in command, f"{probe} must check the configured database port"
+        assert command[command.index("-p") + 1] == str(port)
