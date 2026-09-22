@@ -3219,14 +3219,25 @@ class TestPinLandingDuringGeneration:
 
         deliver.assert_awaited_once()
 
-    async def test_recheck_failure_still_delivers(self) -> None:
-        """A failed source re-read falls back to the pre-generation decision."""
+    async def test_recheck_failure_suppresses_delivery_until_next_interval(self) -> None:
+        """An unverified title is dropped without retrying the model on every turn."""
         unpinned = _make_thread_history(12)
         conversation_reader = AsyncMock(side_effect=RuntimeError("source read failed"))
 
         deliver = await self._run(conversation_reader, [unpinned, unpinned])
 
+        deliver.assert_not_awaited()
+        conversation_reader.assert_awaited_once()
+        assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
+
+        recovered = self._reader(source_history=_make_thread_history(22))
+        deliver = await self._run(recovered, [_make_thread_history(21)])
+        deliver.assert_not_awaited()
+        recovered.assert_not_awaited()
+
+        deliver = await self._run(recovered, [_make_thread_history(22)])
         deliver.assert_awaited_once()
+        recovered.assert_awaited_once()
 
 
 @pytest.mark.asyncio

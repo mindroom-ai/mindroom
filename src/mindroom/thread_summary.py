@@ -430,17 +430,18 @@ def _human_summary_authorizer(
         except ReplyMembershipPendingError:
             pending = True
         room = client.rooms.get(room_id)
-        if room is not None:
-            candidates = classify_responder_candidates_from_cached_room(
-                room,
-                sender,
-                config,
-                runtime_paths,
-                membership_index,
-            )
-            if candidates.allowed:
-                return True
-            pending = pending or bool(candidates.pending)
+        if room is None:
+            raise ReplyMembershipPendingError
+        candidates = classify_responder_candidates_from_cached_room(
+            room,
+            sender,
+            config,
+            runtime_paths,
+            membership_index,
+        )
+        if candidates.allowed:
+            return True
+        pending = pending or bool(candidates.pending)
         if pending:
             raise ReplyMembershipPendingError
         return False
@@ -711,10 +712,9 @@ async def _summary_delivery_timestamp(
     guard exists for. Costs one homeserver read per generated summary, so once
     per interval rather than per turn.
 
-    Fails open, like the other background reads here: if the re-read fails the
-    pass delivers, which is the same exposure the pre-generation gate already
-    has. An automatic summary carries no ``pinned`` key, so the worst case is a
-    single superseded title and the next pass bails at the gate.
+    A failed re-read suppresses delivery because a pin may have landed while
+    the model ran. The caller records the completed generation attempt so the
+    next eligible pass retries at the normal interval without a retry storm.
     """
     try:
         thread_history = await fetch_thread_messages_from_source(
@@ -725,11 +725,11 @@ async def _summary_delivery_timestamp(
         )
     except Exception:
         logger.exception(
-            "Pin re-check before summary delivery failed; delivering anyway",
+            "Pin re-check before summary delivery failed; discarding automatic summary",
             room_id=room_id,
             thread_id=thread_id,
         )
-        thread_history = projected_history
+        return None
     try:
         if _recover_pin_state(
             thread_history,
@@ -886,7 +886,7 @@ async def _deliver_generated_summary(
         return
     if generated_at is None:
         logger.info(
-            "Discarding an automatic thread summary that a pin superseded during generation",
+            "Skipping automatic thread summary delivery after pin re-check",
             room_id=room_id,
             thread_id=thread_id,
             message_count=message_count,

@@ -20,6 +20,7 @@ from mindroom.thread_summary import (
     _recover_initial_enrichment_complete,
     _recover_last_summary_count,
     _recover_pin_state,
+    _summary_delivery_timestamp,
     _thread_locks,
     maybe_generate_thread_summary,
     set_manual_thread_summary,
@@ -67,9 +68,13 @@ async def _run_automatic_summary(
     config: Config,
     history: list[ResolvedVisibleMessage],
     source_history: list[ResolvedVisibleMessage],
+    *,
+    client: AsyncMock | None = None,
+    entity_name: str = "talent",
 ) -> tuple[AsyncMock, AsyncMock]:
     """Exercise real pin, authorization, vocabulary, and tag reads with empty room state."""
-    client = make_matrix_client_mock()
+    if client is None:
+        client = make_matrix_client_mock()
     client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id="!room:x")
     client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
     reader = make_conversation_reader_mock()
@@ -86,7 +91,7 @@ async def _run_automatic_summary(
             runtime_paths_for(config),
             conversation_reader=reader,
             delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-            entity_name="talent",
+            entity_name=entity_name,
             membership_index=AgentReplyMembershipIndex(),
         )
     return client, generate
@@ -294,6 +299,65 @@ async def test_pin_authorized_for_another_room_responder_stops_automatic_updates
             membership_index=AgentReplyMembershipIndex(),
         )
     generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pin_source", ["history", "source"])
+async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path, pin_source: str) -> None:
+    """Incomplete shared-responder discovery cannot turn an allowed pin into a denial."""
+    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    config.agents["talent"].rooms = ["!room:x"]
+    config.agents["other"] = AgentConfig(display_name="Other", rooms=["!room:x"], access={"users": []})
+    runtime_paths = runtime_paths_for(config)
+    persist_entity_accounts(config, runtime_paths)
+    client = make_matrix_client_mock()
+    client.rooms = {}
+    notice = _human_notice()
+    history = _make_thread_history(12)
+    if pin_source == "history":
+        history.append(notice)
+
+    if pin_source == "history":
+        client, generate = await _run_automatic_summary(
+            config,
+            history,
+            [notice],
+            client=client,
+            entity_name="other",
+        )
+        client.room_send.assert_not_awaited()
+        generate.assert_not_awaited()
+        assert "!room:x:$thread1" not in _last_summary_counts
+    else:
+        with patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=[notice])):
+            assert (
+                await _summary_delivery_timestamp(
+                    client,
+                    "!room:x",
+                    "$thread1",
+                    trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),
+                    human_sender_allowed=_human_summary_authorizer(
+                        client,
+                        "!room:x",
+                        config,
+                        runtime_paths,
+                        "other",
+                        AgentReplyMembershipIndex(),
+                    ),
+                    projected_history=history,
+                )
+                is None
+            )
+
+    client.rooms["!room:x"] = nio.MatrixRoom("!room:x", client.user_id)
+    assert _human_summary_authorizer(
+        client,
+        "!room:x",
+        config,
+        runtime_paths,
+        "other",
+        AgentReplyMembershipIndex(),
+    )(notice.sender)
 
 
 @pytest.mark.parametrize(
