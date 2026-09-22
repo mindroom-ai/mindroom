@@ -412,6 +412,10 @@ tool_approval:
 | `MINDROOM_LOG_FORMAT` | `text` for readable logs or `json` for structured logs; file output never receives terminal styling | `text` |
 | `NO_COLOR` | Any nonempty value disables console colors and styled tracebacks, including in terminals; installed background services set this to `1` | unset |
 
+For native startup, export `LOG_LEVEL`, `MINDROOM_LOGGER_LEVELS`, `MINDROOM_LOG_FORMAT`, and `NO_COLOR` in the process environment; the config-adjacent `.env` does not supply these logging controls.
+The `mindroom run --log-level` option takes precedence over `LOG_LEVEL`.
+Container `env_file`/`--env-file` injection supplies process variables and can therefore set these controls.
+
 ### Matrix
 
 | Variable | Description | Default |
@@ -1009,7 +1013,14 @@ Those records include prompts, messages, the final provider-prepared tool array 
 The same flag also records successful tool-call rows in `mindroom_data/tracking/tool_calls.jsonl` so tool activity can be correlated with LLM request logs.
 Tool failures are always recorded in `tool_calls.jsonl`, even when request logging is disabled.
 Tool-call rows include a `timing` object with result-ready, before-hook, and tool-body durations when those phases are measured.
-Set `MINDROOM_TIMING=1` to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
+Export `MINDROOM_TIMING=1` before native process startup to emit additional structured debug timing events for stream-visible tool-call start, stream-visible tool-call completion, and full bridge completion.
+The config-adjacent `.env` does not enable this flag, and timing decorators read it when modules load.
+For example:
+
+```bash
+LOG_LEVEL=DEBUG MINDROOM_LOG_FORMAT=json MINDROOM_TIMING=1 mindroom run
+```
+
 The same flag emits one `Dispatch pipeline timing` summary per turn at INFO level, including `time_to_model_request_ms` from message handling through local preparation to the first Agno run invocation (not the provider SDK's HTTP-send boundary), plus separate context, queue, payload, agent-build, and model timing spans when available.
 Audit logging remains enabled.
 Credential-bearing fields such as tokens, cookies, passwords, API keys, and authorization headers are redacted before log records are emitted.
