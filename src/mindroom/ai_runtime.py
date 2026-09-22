@@ -190,11 +190,13 @@ def queued_message_signal_context(
         _queued_message_notice_context.reset(token)
 
 
-def bind_mid_turn_conversation_context(context: tuple[JudgmentMessage, ...] | None) -> None:
-    """Bind refreshed public history to this task's active queued-message judge."""
+def bind_mid_turn_conversation_context(
+    context_factory: Callable[[], tuple[JudgmentMessage, ...] | None],
+) -> None:
+    """Build refreshed public context only when this task has an active judge."""
     notice = _queued_message_notice_context.get()
     if notice is not None and notice.mid_turn_gate is not None:
-        notice.mid_turn_gate.bind_conversation_context(context)
+        notice.mid_turn_gate.bind_conversation_context(context_factory())
 
 
 def _has_queued_notice_marker(message: Message) -> bool:

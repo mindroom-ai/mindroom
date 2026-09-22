@@ -3036,14 +3036,16 @@ class ResponseRunner:
     def _bind_mid_turn_context(self, request: ResponseRequest) -> None:
         """Only successfully refreshed public history may authorize continuing tools."""
         bind_mid_turn_conversation_context(
-            None
-            if request.requires_model_history_refresh
-            else conversation_context_for_mid_turn(
-                request.thread_history,
-                source_event_ids=request.sources.logical_source_event_ids,
-                thread_id=request.thread_id,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
+            lambda: (
+                None
+                if request.requires_model_history_refresh
+                else conversation_context_for_mid_turn(
+                    request.thread_history,
+                    source_event_ids=request.sources.logical_source_event_ids,
+                    thread_id=request.thread_id,
+                    config=self.deps.runtime.config,
+                    runtime_paths=self.deps.runtime_paths,
+                )
             ),
         )
 
