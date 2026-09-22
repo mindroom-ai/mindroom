@@ -277,6 +277,7 @@ async def test_duplicate_decision_keys_stay_quiet(content: str) -> None:
     assert gate.is_silent
     assert gate.decision is not None
     assert gate.decision.reason == "decision_failed"
+    assert not gate.is_declined
     assert len(model.requests) == 1
 
 
@@ -287,6 +288,7 @@ async def test_duplicate_decision_keys_stay_quiet(content: str) -> None:
         ModelResponse(content='{"action":"stay_silent","reason":"Humans are discussing plans."}'),
         ModelResponse(content="Sure!"),
         ModelResponse(content='{"action":"respond"}'),
+        ModelResponse(content='{"action":"error","reason":"Not a model verdict."}'),
         RuntimeError("provider unavailable"),
     ],
 )
@@ -302,6 +304,7 @@ async def test_invalid_failed_or_declined_decision_stays_quiet(decision: ModelRe
     assert not result.content
     assert len(model.requests) == 1
     assert gate.is_silent
+    assert gate.is_declined == (isinstance(decision, ModelResponse) and '"stay_silent"' in (decision.content or ""))
 
 
 @pytest.mark.asyncio

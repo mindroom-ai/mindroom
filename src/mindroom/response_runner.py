@@ -5208,6 +5208,19 @@ class ResponseRunner:
                     attempt_run_id_collector=attempt_run_ids,
                     runtime=runtime,
                 )
+            if (
+                participation is not None
+                and participation.is_declined
+                and request.participation is not None
+                and request.participation.decline_reaction is not None
+                and generation.delivery.failure_reason == "participation_declined"
+            ):
+                await self.deps.delivery_gateway.send_decline_reaction(
+                    identity=response_identity,
+                    room_id=request.room_id,
+                    event_id=request.sources.logical_source_event_ids[-1],
+                    key=request.participation.decline_reaction,
+                )
             progress.settle(generation.delivery)
 
         def build_post_response_outcome(final_delivery_outcome: FinalDeliveryOutcome) -> ResponseOutcome:

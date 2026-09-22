@@ -3426,9 +3426,13 @@ class TestAdaptiveResponse(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
-    @pytest.mark.parametrize("action", ["respond", "stay_silent", "compression_failure", "sync_restart"])
+    @pytest.mark.parametrize(
+        "action",
+        ["respond", "stay_silent", "compression_failure", "sync_restart", "decision_failure"],
+    )
     @pytest.mark.parametrize("backend", ["model", "typesafe", "llm"])
-    async def test_participation_precedes_every_visible_effect(  # noqa: PLR0915 - full delivery lifecycle assertions
+    @pytest.mark.parametrize("reaction", [None, "👍"])
+    async def test_participation_precedes_every_visible_effect(  # noqa: C901, PLR0915 - full delivery lifecycle assertions
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -3436,6 +3440,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         streaming: bool,
         action: str,
         backend: str,
+        reaction: str | None,
     ) -> None:
         """A silent decision must not send placeholders, typing, or retry notices."""
         config = self._config_for_storage(tmp_path)
@@ -3450,12 +3455,17 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action == "sync_restart"
             else ModelResponse(content=json.dumps({"action": action, "reason": "Conversation context."})),
         )
+        if action == "decision_failure":
+            model.decision = RuntimeError("Decision provider unavailable")
         typesafe_calls: list[bytes] = []
 
         async def post(_self: SystemOneClient, body: bytes) -> bytes:
             typesafe_calls.append(body)
             if action == "sync_restart":
                 raise asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+            if action == "decision_failure":
+                msg = "Decision provider unavailable"
+                raise RuntimeError(msg)
             return json.dumps(
                 {
                     "model": PINNED_MODEL,
@@ -3470,8 +3480,10 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action == "sync_restart"
             else ModelResponse(content=json.dumps({"decision": action == "respond"})),
         )
+        if action == "decision_failure":
+            judge.decision = RuntimeError("Decision provider unavailable")
         monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_: judge)
-        if backend != "model":
+        if backend != "model" and action != "decision_failure":
             model.decision = ModelResponse(content="Useful answer")
         model.cache_response = True
         monkeypatch.setattr(
@@ -3510,7 +3522,10 @@ class TestAdaptiveResponse(AgentBotTestBase):
 
         request = ResponseRequest(
             prompt="Any thoughts?",
-            sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
+            sources=ResponseSources(
+                pending_event_ids=("$event", "$earlier"),
+                logical_source_event_ids=("$earlier", "$event"),
+            ),
             thread_history=[],
             user_id="@alice:localhost",
             response_envelope=request_envelope(
@@ -3523,6 +3538,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
             ),
             participation=RoomParticipationConfig.model_validate(
                 {
+                    "decline_reaction": reaction,
                     "judgment": (
                         {"provider": "typesafe"} if backend == "typesafe" else {"provider": "llm", "model": "default"}
                     )
@@ -3539,6 +3555,19 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 raise
             result = None
         bodies = [call.kwargs["content"].get("body", "") for call in bot.client.room_send.await_args_list]
+        reactions = [
+            call.kwargs for call in bot.client.room_send.await_args_list if call.kwargs["message_type"] == "m.reaction"
+        ]
+        if action == "stay_silent" and reaction is not None:
+            assert len(reactions) == 1
+            assert reactions[0]["room_id"] == "!test:localhost"
+            assert reactions[0]["content"] == {
+                "m.relates_to": {"rel_type": "m.annotation", "event_id": "$event", "key": reaction},
+            }
+            assert reactions[0]["tx_id"]
+        else:
+            assert reactions == []
+        bodies = [body for body in bodies if body]
         assert all("Thinking" not in body and '"action"' not in body for body in bodies)
         if action != "respond":
             assert result is None
@@ -3547,7 +3576,9 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 assert source_settled == ["quiet"]
             assert memory_queued == []
-            assert len(model.requests) == (0 if action == "compression_failure" or backend != "model" else 1)
+            assert len(model.requests) == (
+                0 if action == "compression_failure" or (backend != "model" and action != "decision_failure") else 1
+            )
         else:
             assert result == "$response"
             assert any("Useful answer" in body for body in bodies)
