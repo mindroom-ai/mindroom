@@ -84,14 +84,6 @@ Path prefix prepended to client file locations; empty at the origin root.
 {{- printf "%s/config.json" (include "mindroom-client.pathPrefix" .) -}}
 {{- end -}}
 
-{{- define "mindroom-client.authenticationRecoveryNavigationUrl" -}}
-{{- if .Values.authenticationRecovery.navigationUrl -}}
-{{- .Values.authenticationRecovery.navigationUrl -}}
-{{- else -}}
-{{- printf "%s/" (include "mindroom-client.pathPrefix" .) -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "mindroom-client.defaultClientConfig" -}}
 {{- $homeserver := default .Values.matrix.homeserverUrl .Values.matrix.defaultServerName -}}
 {
@@ -124,7 +116,7 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- $navigationFallbackExcludePaths := default (list) .Values.serviceWorker.navigationFallbackExcludePaths | toJson -}}
 {{- $runtimeConfig := printf "window.__APP_BASE_PATH__ = \"%s\"; window.__ENABLE_SERVICE_WORKER__ = %t; window.__SERVICE_WORKER_NAVIGATION_FALLBACK_EXCLUDE_PATHS__ = %s;" $base .Values.serviceWorker.enabled $navigationFallbackExcludePaths -}}
 {{- if .Values.authenticationRecovery.enabled -}}
-{{- $authenticationRecoveryConfig := dict "probeUrl" .Values.authenticationRecovery.probeUrl "navigationUrl" (include "mindroom-client.authenticationRecoveryNavigationUrl" .) "timeoutMs" (int .Values.authenticationRecovery.timeoutMs) | toJson -}}
+{{- $authenticationRecoveryConfig := dict "probeUrl" .Values.authenticationRecovery.probeUrl "navigationUrl" .Values.authenticationRecovery.navigationUrl "timeoutMs" (int .Values.authenticationRecovery.timeoutMs) | toJson -}}
 {{- $authenticationRecoveryLoader := "if (!window.__AUTHENTICATION_RECOVERY_READY__) { const script = document.createElement(\"script\"); script.src = new URL(\"authentication-recovery.js\", document.currentScript.src).href; script.async = false; window.__AUTHENTICATION_RECOVERY_READY__ = new Promise((resolve) => { script.onload = resolve; script.onerror = resolve; }); document.head.appendChild(script); }" -}}
 {{- $runtimeConfig = printf "%s window.__AUTHENTICATION_RECOVERY_CONFIG__ = %s; %s" $runtimeConfig $authenticationRecoveryConfig $authenticationRecoveryLoader -}}
 {{- end -}}

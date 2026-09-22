@@ -105,7 +105,7 @@ authenticationRecovery:
   # Same-origin endpoint the native client bootstrap probes.
   # The chart-managed nginx probe remains fixed at /authentication-recovery-probe.
   probeUrl: /authentication-recovery-probe
-  # Leave empty to navigate back to the basePath application root.
+  # Leave empty to return to the current pathname, query, and fragment.
   navigationUrl: ""
   timeoutMs: 5000
 
