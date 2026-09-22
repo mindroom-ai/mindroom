@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from mindroom.api import sandbox_exec
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.private_storage_paths import resolve_private_scope_path
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
@@ -245,13 +246,19 @@ def _resolve_worker_base_dir(
         raise ValueError(msg)
 
     allowed_roots = (paths.root.resolve(), *visible_state_roots)
-    if not any(candidate.is_relative_to(root) for root in allowed_roots):
-        candidate = resolve_private_scope_path(shared_root, worker_key, candidate)
-    if not any(candidate.is_relative_to(root) for root in allowed_roots):
-        msg = f"base_dir must stay inside the allowed state roots or worker root: {requested_base_dir}"
-        raise ValueError(msg)
-
-    return candidate
+    for translate_private_scope in (False, True):
+        if translate_private_scope:
+            candidate = resolve_private_scope_path(shared_root, worker_key, candidate)
+        for root in allowed_roots:
+            # Visible state roots authorize their configured location, not a linked replacement.
+            if root.resolve() != root:
+                continue
+            try:
+                return resolve_path_within_root(root, candidate, symlinks="internal")
+            except ValueError:
+                continue
+    msg = f"base_dir must stay inside the allowed state roots or worker root: {requested_base_dir}"
+    raise ValueError(msg)
 
 
 def ready_runtime_overrides(runtime_overrides: dict[str, object] | None) -> dict[str, object] | None:

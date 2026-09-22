@@ -123,7 +123,7 @@ def test_image_history_after_summary_does_not_repeat_compaction_for_encoded_byte
 @pytest.mark.parametrize("floor", ["canonical", "provider"])
 @pytest.mark.parametrize("native", [False, True])
 def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: str, *, native: bool) -> None:
-    """Unsupported visual accounting retains both full transport estimates."""
+    """Unknown models retain content-block floors and conservatively price viewed images."""
     buffer = BytesIO()
     # Seeded pixels keep the provider-dominant transport fixture reproducible.
     pixels = (
@@ -137,16 +137,20 @@ def test_unknown_image_model_preserves_transport_floors(tmp_path: Path, floor: s
         message = Message(role="user", content=[block])
         expected_tokens = (len(stable_serialize(block)) + (3 if native else 0)) // 4
     else:
-        message = Message(role="user", content="Describe.", images=[Image(content=buffer.getvalue(), format="png")])
+        message = Message(
+            role="user",
+            content="Describe.",
+            images=[Image(id="mindroom_viewed_fixture", content=buffer.getvalue(), format="png")],
+        )
     model = MindRoomOpenAIResponses(id="unrecognized-image-model")
     request_before = model._format_messages([message])
     provider_tokens = approximate_o200k_tokens(stable_serialize(request_before))
     if floor == "canonical":
         assert expected_tokens > provider_tokens
     else:
-        # Binary media has tiny canonical metadata but a large encoded provider payload.
+        # Historical viewed images use a bounded visual fallback rather than encoded transport text.
         assert provider_tokens > 100_000
-        expected_tokens = provider_tokens
+        expected_tokens = model.estimate_portable_replay_tokens([Message(role="user", content="Describe.")]) + 5_000
     messages = [message]
     route = "unknown-image-route" if native else None
     if native:

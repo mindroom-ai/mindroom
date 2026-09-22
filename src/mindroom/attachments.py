@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import mimetypes
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from uuid import uuid4
 
 import nio
 
+from .atomic_file import atomic_write_bytes_at
 from .attachment_ids import normalize_attachment_id
 from .background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from .constants import ATTACHMENT_IDS_KEY
@@ -37,6 +39,7 @@ from .matrix.media import (
     parse_matrix_media_dispatch_event_source,
     resolve_image_mime_type,
 )
+from .path_confinement import open_directory_within_root
 from .timing import emit_elapsed_timing
 
 if TYPE_CHECKING:
@@ -673,6 +676,84 @@ def register_local_attachment(
         # Hand off inside the worker, even when its awaiting caller was cancelled.
         cleanup_loop.call_soon_threadsafe(_maybe_cleanup_attachment_storage, storage_path)
 
+    return record
+
+
+def _validate_attachment_directories(root: Path, root_fd: int, directories: dict[str, int]) -> None:
+    """Reject a replaced storage directory before handing out a retained path."""
+    if not os.path.samestat(os.fstat(root_fd), root.stat(follow_symlinks=False)) or any(
+        not os.path.samestat(os.fstat(descriptor), os.stat(name, dir_fd=root_fd, follow_symlinks=False))
+        for name, descriptor in directories.items()
+    ):
+        message = "Attachment storage directory changed during image retention."
+        raise OSError(message)
+
+
+def register_image_bytes_attachment(
+    storage_path: Path,
+    payload: bytes,
+    *,
+    mime_type: str,
+    attachment_id: str,
+    filename: str,
+    room_id: str,
+    thread_id: str | None,
+    sender: str,
+) -> AttachmentRecord | None:
+    """Retain prepared image bytes without reopening paths that can change during registration."""
+    normalized_id = normalize_attachment_id(attachment_id)
+    extension = {"image/png": ".png", "image/jpeg": ".jpg"}.get(mime_type)
+    if normalized_id is None or extension is None:
+        return None
+    try:
+        root = storage_path.resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        with contextlib.ExitStack() as descriptors:
+            root_fd = descriptors.enter_context(open_directory_within_root(root))
+            directories: dict[str, int] = {}
+            media_directory = _incoming_media_dir(root).name
+            metadata_directory = _attachments_dir(root).name
+            for name in (media_directory, metadata_directory):
+                directories[name] = descriptors.enter_context(
+                    open_directory_within_root(root_fd, name, create=True, mode=0o700),
+                )
+            media_fd, metadata_fd = directories[media_directory], directories[metadata_directory]
+            local_path = _incoming_media_dir(root) / f"{normalized_id}{extension}"
+            record_path = _attachment_record_path(root, normalized_id)
+            record = AttachmentRecord(
+                attachment_id=normalized_id,
+                local_path=local_path,
+                kind="image",
+                filename=filename,
+                mime_type=mime_type,
+                room_id=room_id,
+                thread_id=thread_id,
+                sender=sender,
+                size_bytes=len(payload),
+                content_sha256=hashlib.sha256(payload).hexdigest(),
+                created_at=datetime.now(UTC).isoformat(),
+            )
+            try:
+                _validate_attachment_directories(root, root_fd, directories)
+                atomic_write_bytes_at(media_fd, local_path.name, payload, file_mode=0o600)
+                _validate_attachment_directories(root, root_fd, directories)
+                atomic_write_bytes_at(
+                    metadata_fd,
+                    record_path.name,
+                    json.dumps(record.to_payload(), sort_keys=True).encode("utf-8"),
+                    file_mode=0o600,
+                )
+                _validate_attachment_directories(root, root_fd, directories)
+            except OSError:
+                for name, descriptor in ((local_path.name, media_fd), (record_path.name, metadata_fd)):
+                    with contextlib.suppress(OSError):
+                        os.unlink(name, dir_fd=descriptor)
+                raise
+    except OSError:
+        logger.exception("Failed to retain image attachment", attachment_id=normalized_id)
+        return None
+    # Normal attachment registration also prunes these managed records.
+    # Do not start path-based cleanup after releasing the pinned directories.
     return record
 
 

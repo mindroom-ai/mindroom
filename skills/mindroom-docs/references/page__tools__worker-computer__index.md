@@ -129,7 +129,11 @@ Upstream workspace file restrictions remain enabled.
 File upload and drop paths are resolved before dispatch and must name existing regular files inside the canonical worker workspace.
 This rejects symlinks to files outside the workspace while allowing symlinks to files inside it.
 This path check does not protect against concurrent filesystem changes by malicious shell code.
-Screenshots without a native `filename` return inline model-visible images; a native filename produces the upstream file result instead.
+Screenshots without a native `filename` return inline model-visible images and retain a workspace file; a native filename is the explicit save-only mode.
+The host action-based provider also returns model-visible images by default with `browser_control(action="screenshot")`; set `saveOnly=True` to retain the capture without viewing.
+Both providers use the same bounded image delivery as `view_file` from the `attachments` toolkit.
+Use the returned workspace path with `view_file(path=...)` on later turns, or the returned attachment handle for reopening and optional sharing during the current tool run.
+Capturing and viewing never post an image into Matrix automatically.
 MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media receipt.
 The primary never fetches worker paths to reconstruct images.
 

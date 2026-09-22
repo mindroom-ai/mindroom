@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextvars import Context
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -19,6 +21,7 @@ from agno.models.message import Message
 from agno.models.ollama import Ollama
 from agno.models.openai import OpenAIChat, OpenAIResponses
 from agno.models.response import ModelResponse
+from agno.tools.function import ToolResult
 from starlette.responses import StreamingResponse
 
 from mindroom import provider_media_fallback, provider_stream_retry
@@ -34,6 +37,8 @@ from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_p
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
+
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 @dataclass
@@ -111,6 +116,99 @@ def _image_message() -> Message:
         content='Please inspect att_image.\n[attachments: att_image (image, "diagram.png")]',
         images=[Image(content=b"image")],
     )
+
+
+@pytest.mark.parametrize(
+    ("provider", "api", "supported"),
+    [
+        ("openai_codex", None, True),
+        ("openai", "responses", True),
+        ("anthropic", None, True),
+        ("openai", "chat_completions", True),
+        ("future_provider", None, True),
+        ("cerebras", None, False),
+    ],
+)
+def test_tool_image_guard_reports_adapter_support(
+    provider: str,
+    api: str | None,
+    supported: bool,
+) -> None:
+    """Primary tool image delivery fails explicitly only on known omitted adapters."""
+    context = SimpleNamespace(
+        active_model_name="default",
+        current_config=Config(
+            models={"default": ModelConfig(provider=provider, id="test-model", api=api)},
+        ),
+    )
+    result = ToolResult(
+        content='{"attachment_id":"att_view","view_status":"ready"}',
+        images=[Image(content=b"image", mime_type="image/png")],
+    )
+
+    guarded = provider_media_fallback.guard_tool_image_result(
+        context=cast("ToolRuntimeContext", context),
+        result=result,
+    )
+
+    assert isinstance(guarded, ToolResult)
+    receipt = json.loads(guarded.content)
+    assert receipt["attachment_id"] == "att_view"
+    if supported:
+        assert guarded is result
+        assert guarded.images
+        assert receipt["view_status"] == "ready"
+    else:
+        assert guarded.images is None
+        assert receipt["view_status"] == "unsupported"
+        assert "model adapter" in receipt["message"]
+
+
+def test_media_fallback_marks_view_receipt_unsupported() -> None:
+    """A provider rejection cannot leave a stripped image marked ready."""
+    message = Message(
+        role="tool",
+        content='{"attachment_id":"att_view","view_status":"ready"}',
+        images=[Image(content=b"image", mime_type="image/png")],
+    )
+
+    stripped = provider_media_fallback._without_inline_media(message, frozenset({"image"}))
+
+    assert stripped.images is None
+    receipt = json.loads(str(stripped.content))
+    assert receipt["attachment_id"] == "att_view"
+    assert receipt["view_status"] == "unsupported"
+    assert "rejected" in receipt["message"]
+
+
+def test_media_fallback_marks_receipt_before_synthetic_viewed_image() -> None:
+    """Stripping Agno's synthetic media follow-up also updates its tool receipt."""
+    messages = [
+        Message(
+            role="tool",
+            content='{"attachment_id":"att_view","view_status":"ready"}',
+            tool_call_id="fc_view",
+        ),
+        Message(
+            role="user",
+            content="The tool call above generated the attached media.",
+            images=[Image(id="mindroom_viewed_123", content=b"image", mime_type="image/png")],
+        ),
+    ]
+
+    _args, kwargs = provider_media_fallback._call_without_media_kinds(
+        (),
+        {"messages": messages},
+        messages,
+        frozenset({"image"}),
+        "Continue without media.",
+    )
+
+    stripped = cast("list[Message]", kwargs["messages"])
+    assert stripped[1].images is None
+    receipt = json.loads(str(stripped[0].content))
+    assert receipt["view_status"] == "unsupported"
+    assert stripped[2].content == "[Inline media unavailable for this model]\nContinue without media."
 
 
 def _load[LoadedModel](model: LoadedModel, tmp_path: Path) -> LoadedModel:

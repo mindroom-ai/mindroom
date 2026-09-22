@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
 import json
 import os
@@ -57,6 +58,9 @@ DESKTOP_MEDIA = EncryptedDesktopMedia(
     sha256="hash",
     mime_type="image/png",
     size=8,
+)
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
 )
 
 
@@ -182,7 +186,12 @@ def test_resolve_output_dir_defaults_to_runtime_storage_root(tmp_path: Path) -> 
     assert output_dir.is_dir()
 
 
-def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("root_kind", ["absolute", "relative", "alias"])
+def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_kind: str,
+) -> None:
     """Live tool context should override the runtime-root default for browser artifacts."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -191,6 +200,14 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
     )
     tool = BrowserTools(runtime_paths)
     context_storage_path = tmp_path / "context-storage"
+    context_storage_path.mkdir()
+    if root_kind == "relative":
+        monkeypatch.chdir(tmp_path)
+        context_storage_path = Path("context-storage")
+    elif root_kind == "alias":
+        alias = tmp_path / "storage-alias"
+        alias.symlink_to(context_storage_path, target_is_directory=True)
+        context_storage_path = alias
     context = make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -209,9 +226,12 @@ def test_resolve_output_dir_prefers_tool_runtime_context_storage_path(tmp_path: 
 
     with tool_runtime_context(context):
         output_dir = tool._resolve_output_dir()
+        artifact = output_dir / "capture.png"
+        tool._publish_browser_artifact(artifact, b"capture")
 
     assert output_dir == (context_storage_path / "browser").resolve()
     assert output_dir.is_dir()
+    assert artifact.read_bytes() == b"capture"
 
 
 def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_path: Path) -> None:
@@ -662,9 +682,29 @@ async def test_desktop_target_accepts_false_noop_host_hints(
 @pytest.mark.asyncio
 async def test_desktop_target_returns_decrypted_browser_screenshot(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """The agent receives the real-profile page screenshot as model-visible image media."""
-    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={},
+    )
+    context = make_test_tool_runtime_context(
+        agent_name="computer",
+        target=MessageTarget.resolve(
+            room_id="!room:example.org",
+            thread_id=None,
+            reply_to_event_id=None,
+        ),
+        requester_id="@alice:example.org",
+        client=MagicMock(),
+        config=MagicMock(),
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        storage_path=tmp_path,
+    )
     response = DesktopResponse(
         request_id="screenshot",
         session_id="session",
@@ -672,12 +712,11 @@ async def test_desktop_target_returns_decrypted_browser_screenshot(
         result={"action": "screenshot", "provider": "playwright_mcp_extension"},
         screenshot=DESKTOP_MEDIA,
     )
-    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
     monkeypatch.setattr(
         "mindroom.custom_tools.browser.desktop_response_router",
         lambda _client: SimpleNamespace(request=AsyncMock(return_value=response)),
     )
-    decrypt = AsyncMock(return_value=b"\x89PNGpage")
+    decrypt = AsyncMock(return_value=PNG_BYTES)
     monkeypatch.setattr("mindroom.custom_tools.browser.download_encrypted_screenshot", decrypt)
     tool = BrowserTools(
         TEST_RUNTIME_PATHS,
@@ -686,11 +725,15 @@ async def test_desktop_target_returns_decrypted_browser_screenshot(
         device_ed25519="fingerprint",
     )
 
-    result = await tool.browser(action="screenshot", target="desktop")
+    with tool_runtime_context(context):
+        result = await tool.browser(action="screenshot", target="desktop")
 
     assert not isinstance(result, str)
     assert result.images is not None
-    assert result.images[0].content == b"\x89PNGpage"
+    assert result.images[0].content == PNG_BYTES
+    receipt = json.loads(result.content)
+    assert receipt["view_status"] == "ready"
+    assert receipt["attachment_id"].startswith("att_")
 
 
 @pytest.mark.asyncio
@@ -720,7 +763,7 @@ async def test_desktop_browser_screenshot_can_return_sendable_attachment(
     )
     monkeypatch.setattr(
         "mindroom.custom_tools.browser.download_encrypted_screenshot",
-        AsyncMock(return_value=b"\x89PNGpage"),
+        AsyncMock(return_value=PNG_BYTES),
     )
     tool = BrowserTools(
         TEST_RUNTIME_PATHS,
@@ -813,10 +856,10 @@ async def test_act_click_uses_resolved_selector(monkeypatch: pytest.MonkeyPatch)
 def _install_upload_tab(tool: BrowserTools, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     set_input_files = AsyncMock()
     locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
-    page: Any = SimpleNamespace(locator=locator)
+    page: Any = SimpleNamespace(locator=locator, is_closed=lambda: False)
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
-
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=object()))
+    state = _BrowserProfileState(playwright=MagicMock(), context=MagicMock(), tabs={"tab-1": tab})
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
     return set_input_files
 
@@ -867,6 +910,13 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
     allowed_file.write_text("upload", encoding="utf-8")
     tool = BrowserTools(runtime_paths)
     set_input_files = _install_upload_tab(tool, monkeypatch)
+    uploaded: list[tuple[str, bytes]] = []
+
+    async def consume_upload(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
+        assert timeout == 30_000
+        uploaded.extend((Path(path).name, Path(path).read_bytes()) for path in paths)
+
+    set_input_files.side_effect = consume_upload
 
     payload = await tool._upload(
         profile_name="mindroom",
@@ -878,7 +928,7 @@ async def test_browser_upload_allows_paths_inside_tool_storage(
         timeout_ms=None,
     )
 
-    set_input_files.assert_awaited_once_with([str(allowed_file)], timeout=30_000)
+    assert uploaded == [("upload.txt", b"upload")]
     assert payload["paths"] == [str(allowed_file)]
 
 
@@ -1659,8 +1709,8 @@ async def test_screenshot_selector_uses_locator_screenshot(
     """Selector screenshots should keep using Playwright locator captures."""
     tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path)
     mock_state = object()
-    page_screenshot = AsyncMock()
-    element_screenshot = AsyncMock()
+    page_screenshot = AsyncMock(return_value=PNG_BYTES)
+    element_screenshot = AsyncMock(return_value=PNG_BYTES)
     locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(screenshot=element_screenshot)))
     page: Any = SimpleNamespace(locator=locator, screenshot=page_screenshot)
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "#timeline"})
@@ -1668,7 +1718,7 @@ async def test_screenshot_selector_uses_locator_screenshot(
     monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
 
-    payload = await tool._screenshot(
+    payload, image_bytes = await tool._screenshot(
         profile_name="mindroom",
         target_id=None,
         full_page=True,
@@ -1681,6 +1731,92 @@ async def test_screenshot_selector_uses_locator_screenshot(
     element_screenshot.assert_awaited_once()
     page_screenshot.assert_not_awaited()
     assert payload["selector"] == "#timeline"
+    assert image_bytes == PNG_BYTES
+
+
+@pytest.mark.asyncio
+async def test_host_screenshot_returns_inline_image_and_retains_saved_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A normal host capture is visible to the model and remains available by path."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path)
+    mock_state = object()
+
+    async def capture(**kwargs: object) -> bytes:
+        assert "path" not in kwargs
+        return PNG_BYTES
+
+    page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
+    tab = _BrowserTabState(target_id="tab-1", page=page)
+    read_saved_bytes = Path.read_bytes
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(Path, "read_bytes", MagicMock(side_effect=AssertionError("screenshot path was reread")))
+
+    result = await tool.browser(action="screenshot")
+
+    assert not isinstance(result, str)
+    assert result.images
+    assert result.images[0].content == PNG_BYTES
+    receipt = json.loads(result.content)
+    assert receipt["action"] == "screenshot"
+    assert receipt["view_status"] == "ready"
+    saved_path = Path(receipt["path"])
+    assert saved_path.parent == tmp_path
+    assert await asyncio.to_thread(read_saved_bytes, saved_path) == PNG_BYTES
+
+
+@pytest.mark.asyncio
+async def test_host_screenshot_save_only_returns_existing_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicit save-only capture keeps the prior path-only result contract."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path)
+    mock_state = object()
+
+    async def capture(**kwargs: object) -> bytes:
+        assert "path" not in kwargs
+        return PNG_BYTES
+
+    page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
+    tab = _BrowserTabState(target_id="tab-1", page=page)
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    result = await tool.browser(action="screenshot", saveOnly=True)
+
+    assert isinstance(result, str)
+    receipt = json.loads(result)
+    assert receipt["action"] == "screenshot"
+    assert Path(receipt["path"]).read_bytes() == PNG_BYTES
+    assert "view_status" not in receipt
+
+
+@pytest.mark.asyncio
+async def test_browser_save_only_is_boolean_and_screenshot_specific() -> None:
+    """The opt-out cannot silently affect other actions or accept truthy substitutes."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    with pytest.raises(TypeError, match="saveOnly must be a boolean"):
+        await tool.browser(action="screenshot", saveOnly=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="only supported for action=screenshot"):
+        await tool.browser(action="tabs", saveOnly=True)
+
+
+@pytest.mark.asyncio
+async def test_browser_save_only_rejects_transient_desktop_capture() -> None:
+    """Desktop save-only cannot claim a retained artifact when no local path exists."""
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    with pytest.raises(ValueError, match="saveOnly requires target=host"):
+        await tool.browser(action="screenshot", target="desktop", saveOnly=True)
 
 
 @pytest.mark.asyncio
@@ -1712,14 +1848,17 @@ async def test_worker_download_survives_browser_stop(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     browser.bind_worker_display(":99", workspace)
 
+    staging = tmp_path / "playwright-staging"
+    staging.write_bytes(b"download bytes")
+
     class Download:
-        """Filesystem-producing download adapter."""
+        """Expose a completed file owned by Playwright until context cleanup."""
 
         suggested_filename = "../../document.txt"
 
-        async def save_as(self, path: str | Path) -> None:
-            """Persist bytes like Playwright save_as."""
-            Path(path).write_text("download bytes")
+        async def path(self) -> Path:
+            """Return Playwright's completed private download."""
+            return staging
 
     await browser._save_worker_download(cast("PlaywrightDownload", Download()))
     await browser.aclose()
@@ -1753,7 +1892,7 @@ async def test_worker_browser_launch_uses_private_display_and_persistent_profile
     assert launch["env"]["DISPLAY"] == ":99"
     assert os.environ["DISPLAY"] == ":42"
     assert Path(str(launch["user_data_dir"])) == tmp_path / "state" / "browser-profiles" / "mindroom"
-    assert launch["downloads_path"] == str(tmp_path / "workspace" / "browser")
+    assert "downloads_path" not in launch
     await browser.aclose()
 
 
@@ -1913,9 +2052,11 @@ async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_h
 
         suggested_filename = "native.txt"
 
-        async def save_as(self, destination: str | Path) -> None:
-            """Save downloaded bytes through the real persistent handler."""
-            Path(destination).write_text("native download")
+        async def path(self) -> Path:
+            """Return Playwright's private completed download."""
+            source = tmp_path / "native-download-staging"
+            source.write_text("native download")
+            return source
 
     await native.emit("download", Download())
     await adapter.pages[-1].emit("download", Download())
@@ -2194,3 +2335,17 @@ async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replaceme
         await browser.aclose()
     assert not old.live_resources
     assert not new.live_resources
+
+
+def test_worker_default_output_rejects_symlink_escape(tmp_path: Path) -> None:
+    """Default screenshot directory has the same containment policy as configured outputs."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "browser").symlink_to(outside, target_is_directory=True)
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    browser = BrowserTools(paths)
+    with pytest.raises(ValueError, match="output_dir must stay inside"):
+        browser.bind_worker_display(":99", workspace)
+    assert not list(outside.iterdir())

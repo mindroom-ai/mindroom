@@ -306,8 +306,8 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
     """Current native names route through one retained toolkit; disabled mode fails closed."""
     from agno.tools.function import ToolResult  # noqa: PLC0415
 
+    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
     from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP  # noqa: PLC0415
-    from mindroom.worker_computer.mcp_results import decode_browser_mcp_result  # noqa: PLC0415
 
     identity = ToolExecutionIdentity(
         channel="matrix",
@@ -370,13 +370,13 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
                 return
             assert response.status_code == 200, response.text
             assert response.json()["ok"], response.text
-            result = decode_browser_mcp_result(response.json()["result"])
+            result = decode_media_result(response.json()["result"])
             assert result.content == name
         assert [call[1] for call in calls] == ["browser_snapshot", "browser_tabs", "browser_close"]
         payload["function_name"] = "browser_snapshot"
         payload["kwargs"] = {"mindroom_output_path": "snapshot.txt"}
         saved = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
-        receipt = decode_browser_mcp_result(saved.json()["result"])["mindroom_tool_output"]
+        receipt = decode_media_result(saved.json()["result"])["mindroom_tool_output"]
         assert receipt["status"] == "saved_to_file"
         assert (root / "workspace" / "snapshot.txt").read_text() == "browser_snapshot"
         assert len({call[0] for call in calls}) == 1

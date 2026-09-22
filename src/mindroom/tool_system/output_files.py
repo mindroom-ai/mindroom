@@ -5,9 +5,9 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import stat
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
-from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.tool_system.agno_compat_function_schema import install_schema_postprocessor, uses_schema_postprocessor
 from mindroom.tool_system.declarations import declare_tool_schema_source
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
@@ -351,41 +352,15 @@ def validate_output_path_syntax(raw_path: object) -> str | None:
 
 
 def _validate_parent_components(workspace_root: Path, relative_parent: Path) -> str | None:
-    """Reject existing unsafe parent components without creating anything."""
-    if relative_parent == Path():
-        return None
-
-    current = workspace_root.expanduser()
-    for part in relative_parent.parts:
-        current = current / part
-        if component_error := _existing_parent_component_error(current):
-            return component_error
-    return None
-
-
-def _existing_parent_component_error(path: Path) -> str | None:
-    if path.is_symlink():
-        return "mindroom_output_path parent must stay inside the workspace."
-    if path.exists() and not path.is_dir():
-        return "mindroom_output_path parent components must be directories."
-    return None
-
-
-@contextmanager
-def _output_parent_directory(workspace_root: Path, relative_parent: Path) -> Iterator[int]:
-    """Create and open parents relative to pinned directories, rejecting symlinks."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    directory_fd = os.open(workspace_root.expanduser().resolve(), flags)
+    """Retain directory-type diagnostics after shared symlink validation."""
+    message = "mindroom_output_path parent components must be directories."
     try:
-        for part in relative_parent.parts:
-            with suppress(FileExistsError):
-                os.mkdir(part, dir_fd=directory_fd)
-            child_fd = os.open(part, flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = child_fd
-        yield directory_fd
-    finally:
-        os.close(directory_fd)
+        mode = (workspace_root.expanduser() / relative_parent).stat().st_mode
+    except FileNotFoundError:
+        return None
+    except NotADirectoryError:
+        return message
+    return None if stat.S_ISDIR(mode) else message
 
 
 def _normalize_json_value(value: object) -> object:
@@ -466,7 +441,11 @@ def _write_atomic(
     file_mode: int | None = None,
 ) -> str | None:
     try:
-        with _output_parent_directory(workspace_root, relative_path.parent) as directory_fd:
+        with open_directory_within_root(
+            workspace_root.expanduser().resolve(),
+            relative_path.parent,
+            create=True,
+        ) as directory_fd:
             atomic_write_bytes_at(directory_fd, relative_path.name, payload, file_mode=file_mode)
     except OSError as exc:
         logger.warning("tool_output_redirect_write_failed", error_type=type(exc).__name__)

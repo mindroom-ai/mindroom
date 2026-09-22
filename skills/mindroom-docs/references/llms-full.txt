@@ -6407,6 +6407,8 @@ It creates tabs, records console entries, and resolves temporary element refs fr
 The host target's `snapshot()` can return either `ai` or `aria` format, while the desktop target returns Playwright MCP's native accessibility snapshot.
 `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
 The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge, the local extension option, and a local control lease for interactive actions.
+Host screenshots return model-visible image content by default plus their retained path; `saveOnly=True` preserves an explicit save-only mode.
+Host captures and `view_file` use shared bounded image delivery, with any resizing or first-frame handling disclosed.
 Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without creating a separate plaintext attachment copy or uploading the encrypted media again.
 Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
@@ -6629,7 +6631,11 @@ Upstream workspace file restrictions remain enabled.
 File upload and drop paths are resolved before dispatch and must name existing regular files inside the canonical worker workspace.
 This rejects symlinks to files outside the workspace while allowing symlinks to files inside it.
 This path check does not protect against concurrent filesystem changes by malicious shell code.
-Screenshots without a native `filename` return inline model-visible images; a native filename produces the upstream file result instead.
+Screenshots without a native `filename` return inline model-visible images and retain a workspace file; a native filename is the explicit save-only mode.
+The host action-based provider also returns model-visible images by default with `browser_control(action="screenshot")`; set `saveOnly=True` to retain the capture without viewing.
+Both providers use the same bounded image delivery as `view_file` from the `attachments` toolkit.
+Use the returned workspace path with `view_file(path=...)` on later turns, or the returned attachment handle for reopening and optional sharing during the current tool run.
+Capturing and viewing never post an image into Matrix automatically.
 MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media receipt.
 The primary never fetches worker paths to reconstruct images.
 
@@ -8318,11 +8324,26 @@ matrix_api(
 
 ### What It Does
 
-`attachments` exposes `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
+`attachments` exposes `view_file(path=None, attachment_id=None)`, `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
+`view_file(path="plots/result.png")` delivers an image directly to the calling model in one call.
+`view_file(attachment_id="att_...")` views an authorized conversation attachment without a registration/fetch sequence.
+Supply exactly one source; keep `read_file` for ordinary text and code.
+Workspace paths resolve inside the selected worker, or inside the configured workspace in local execution mode.
+PNG, JPEG, GIF and WebP inputs are supported up to 20 MiB and 40 million pixels.
+The delivered image is bounded to 2048 pixels on its longest edge and 5 MiB; resizing, conversion, and first-frame-only animation handling are disclosed in metadata.
+Transparent images retain their transparency; images that cannot fit the payload limit return an explicit error while preserving the source artifact.
+Viewing preserves the source path and retains a reusable attachment handle when context storage is available.
+A retained handle identifies the delivered image copy and follows existing attachment authority: it is available during the current tool run, or when supplied by conversation metadata.
+For later turns, reopen the original workspace path; model history replays up to four recent viewed images within a 10 MiB aggregate limit.
+Older or oversized replay images are omitted with an explicit notice; their saved artifacts remain available.
+Viewing does not publish, upload to a separate vision service, open a user-facing panel, or post into Matrix.
+Adapters that cannot deliver tool images return an explicit limitation while retaining the artifact.
+Share only when requested, using `matrix_message(attachments=["att_..."])` with the returned handle.
 `list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
 Pass a context-available attachment ID as `target` to return only that attachment; an ID outside the current context returns an error.
 `get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
 `get_attachment(attachment_id, view=True)` sends image, audio, video, or document content (including PDF) to the model, including local files and attachments from earlier in the conversation.
+Image viewing uses the same preparation, size limits, transformation disclosures, and history replay as `view_file` and browser screenshots.
 Viewing requires a model and provider adapter that support the media type, and a readable, context-scoped file no larger than 20 MiB.
 Rejected media requests retry without the media and give the agent explicit guidance to use the attachment ID/path with other available tools; known adapter omissions receive the same guidance.
 It cannot be combined with `mindroom_output_path`.
@@ -18430,6 +18451,22 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
 
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the module boundaries and the ongoing simplification roadmap.
 
+## Confined filesystem paths
+
+`mindroom.path_confinement.resolve_path_within_root` is the shared implementation for workspace and artifact path containment.
+Callers supply an authorized root and explicitly choose `internal` (allow links targeting that root), `reject` (reject descendant links), or `preserve_leaf` (reject linked parents while preserving the final entry for unlink or atomic replacement).
+Existing workspace and tool wrappers retain their input rules and error messages.
+Do not add another `resolve()` plus containment check when implementing a file consumer.
+
+Path resolution is a point-in-time check, not protection for a later file open.
+For local I/O requiring protection against symlink swaps, use `open_directory_within_root` or `open_regular_file_within_root` and keep operations relative to the returned descriptor.
+Publish bytes using `atomic_file.atomic_write_bytes_at`, or stream through `atomic_write_file_at`; both use the same atomic transaction and descriptor-relative cleanup.
+The action-based browser publishes captures and completed downloads through these helpers and snapshots upload sources through confined descriptors.
+Upload snapshots remain private until tab or profile teardown because Playwright reads selected files lazily.
+Drive downloads stream into a confined atomic file rooted at the authorized workspace.
+Caller-owned root authorization, directory identity checks, filesystem permissions, and requester isolation remain required.
+These helpers do not prevent hard-link aliasing or arbitrary directory relocation, and do not protect subsequent pathname opens by native MCP browser tools, Drive uploads, shell commands, or ordinary file-tool implementations.
+
 # Matrix Integration
 
 MindRoom uses the Matrix protocol for all agent communication. The integration is implemented in `src/mindroom/matrix/`.
@@ -19541,7 +19578,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
 | `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
-| `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
+| `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners keep the newest four marked viewed images within a 10 MiB aggregate limit, disclose omissions without changing stored artifacts, and charge provider visual estimates or a conservative fallback in replay planning. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs, retained terminal metadata, and cache-write usage preservation. | `openai_models.py` retains provider classes and canonical history/replay policy. |

@@ -35,6 +35,8 @@ class BrowserMCPTools(Toolkit):
                 name=name,
                 description=tool["description"],
                 parameters=tool["inputSchema"],
+                # Native optional fields must stay omitted, not become required empty values.
+                strict=False,
                 entrypoint=self._entrypoint(name),
                 skip_entrypoint_processing=True,
             )

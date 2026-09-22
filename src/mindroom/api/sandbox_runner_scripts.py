@@ -23,6 +23,7 @@ from mindroom.api.sandbox_runner import (
     validate_runner_token,
 )
 from mindroom.constants import CONTROL_STATE_PATH_ENV
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.models import (
     script_run_id_from_worker_key,
@@ -270,7 +271,14 @@ def _workspace_file(
         metadata = resolved.stat()
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"{label} is unavailable in the worker workspace.") from exc
-    if not resolved.is_relative_to(workspace.resolve()) or not stat.S_ISREG(metadata.st_mode):
+    try:
+        resolved = resolve_path_within_root(workspace, resolved, symlinks="internal", strict=True)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be a regular file inside the worker workspace.",
+        ) from None
+    if not stat.S_ISREG(metadata.st_mode):
         raise HTTPException(status_code=400, detail=f"{label} must be a regular file inside the worker workspace.")
     if metadata.st_size <= 0 or metadata.st_size > byte_limit:
         raise HTTPException(status_code=400, detail=f"{label} exceeds its supported size.")

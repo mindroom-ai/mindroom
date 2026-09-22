@@ -15,16 +15,17 @@ import time
 from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from agno.media import Image
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
+from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.browser_fetch_guard import continue_or_abort_browser_fetch
 from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.custom_tools.desktop_attachment import (
@@ -37,7 +38,14 @@ from mindroom.desktop.playwright_mcp import browser_action_requires_control
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS, DesktopCommand
 from mindroom.logging_config import get_logger
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
+from mindroom.media_delivery import image_result
+from mindroom.path_confinement import (
+    open_directory_within_root,
+    open_regular_file_within_root,
+    resolve_path_within_root,
+)
 from mindroom.server_fetch_url import validate_server_fetch_url
+from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
@@ -258,6 +266,7 @@ class _BrowserTabState:
     refs: dict[str, str] = field(default_factory=dict)
     pending_dialog: dict[str, Any] | None = None
     console: list[dict[str, Any]] = field(default_factory=list)
+    upload_staging: list[TemporaryDirectory[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -499,6 +508,25 @@ def _friendly_playwright_browser_error_message(exc: PlaywrightError) -> str | No
     )
 
 
+def _stage_browser_upload_paths(paths: list[Path], roots: tuple[Path, ...], staging_dir: Path) -> list[str]:
+    """Snapshot authorized descriptors to private paths that Playwright can reopen."""
+    staged_paths: list[str] = []
+    for index, path in enumerate(paths):
+        # Match the canonical file against the original authorized root spelling.
+        # Resolving a replaced child here would grant trust to its new destination.
+        root = next((root for root in roots if path.is_relative_to(root)), None)
+        if root is None:
+            msg = f"upload path '{path}' is outside browser upload root(s)"
+            raise ValueError(msg)
+        with open_regular_file_within_root(root, path.relative_to(root)) as descriptor:
+            destination = staging_dir / str(index) / path.name
+            destination.parent.mkdir(mode=0o700)
+            with os.fdopen(descriptor, "rb", closefd=False) as source, destination.open("xb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+        staged_paths.append(str(destination))
+    return staged_paths
+
+
 class _BrowserFunctionNotRegisteredError(RuntimeError):
     """Raised when the BrowserTools entrypoint is missing after Toolkit registration."""
 
@@ -582,13 +610,17 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         workspace = workspace.resolve()
         output_dir = self._configured_output_dir or workspace / "browser"
-        if not output_dir.is_relative_to(workspace):
+        try:
+            output_dir = resolve_path_within_root(workspace, output_dir, symlinks="internal")
+        except ValueError:
             msg = "Worker browser output_dir must stay inside the prepared workspace."
-            raise ValueError(msg)
+            raise ValueError(msg) from None
         self._worker_display = display
         self._worker_workspace = workspace
         self._configured_output_dir = output_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
+        workspace.mkdir(parents=True, exist_ok=True)
+        with open_directory_within_root(workspace, output_dir.relative_to(workspace), create=True):
+            pass
         return json.dumps(
             {
                 "output_dir": str(output_dir),
@@ -671,6 +703,12 @@ class BrowserTools(Toolkit):
         )
         properties["returnAttachment"] = attachment_schema
 
+        save_only_schema = dict(properties.get("saveOnly") or {})
+        save_only_schema["description"] = (
+            "For host action=screenshot, return only the saved artifact metadata instead of model-visible image bytes."
+        )
+        properties["saveOnly"] = save_only_schema
+
         parameters["properties"] = properties
         function.parameters = parameters
 
@@ -719,6 +757,7 @@ class BrowserTools(Toolkit):
         ref: str | None = None,
         element: str | None = None,
         type: str | None = None,
+        saveOnly: bool = False,
         returnAttachment: bool = False,
         level: str | None = None,
         paths: list[str] | None = None,
@@ -756,6 +795,7 @@ class BrowserTools(Toolkit):
             ref: Snapshot ref id or CSS selector.
             element: CSS selector for element-specific actions.
             type: Screenshot type (``png`` or ``jpeg``).
+            saveOnly: For host screenshots, return saved artifact metadata without model-visible image bytes.
             returnAttachment: For desktop screenshots, expose an ephemeral handle that matrix_message can send.
             level: Console log level filter.
             paths: Upload file paths.
@@ -778,13 +818,22 @@ class BrowserTools(Toolkit):
         if not isinstance(returnAttachment, bool):
             msg = "returnAttachment must be a boolean."
             raise TypeError(msg)
+        if not isinstance(saveOnly, bool):
+            msg = "saveOnly must be a boolean."
+            raise TypeError(msg)
         if returnAttachment and normalized_action != "screenshot":
             msg = "returnAttachment is only supported for action=screenshot."
+            raise ValueError(msg)
+        if saveOnly and normalized_action != "screenshot":
+            msg = "saveOnly is only supported for action=screenshot."
             raise ValueError(msg)
 
         resolved_target = self._resolve_target(target=target, node=node)
         if returnAttachment and resolved_target != "desktop":
             msg = "returnAttachment requires target=desktop."
+            raise ValueError(msg)
+        if saveOnly and resolved_target == "desktop":
+            msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
             raise ValueError(msg)
         if resolved_target == "desktop":
             unsupported = {
@@ -880,17 +929,20 @@ class BrowserTools(Toolkit):
                 sort_keys=True,
             )
         if normalized_action == "screenshot":
-            return json.dumps(
-                await self._screenshot(
-                    profile_name=profile_name,
-                    target_id=_clean_str(targetId),
-                    full_page=bool(fullPage),
-                    ref=_clean_str(ref),
-                    element=_clean_str(element),
-                    image_type=_clean_str(type),
-                ),
-                sort_keys=True,
+            screenshot, image_bytes = await self._screenshot(
+                profile_name=profile_name,
+                target_id=_clean_str(targetId),
+                full_page=bool(fullPage),
+                ref=_clean_str(ref),
+                element=_clean_str(element),
+                image_type=_clean_str(type),
             )
+            if saveOnly:
+                return json.dumps(screenshot, sort_keys=True)
+            result = await asyncio.to_thread(image_result, image_bytes, metadata=screenshot)
+            finalized = await asyncio.to_thread(finalize_tool_media, result)
+            assert isinstance(finalized, ToolResult)
+            return finalized
         if normalized_action == "navigate":
             target_url = _clean_str(targetUrl)
             if target_url is None:
@@ -1074,11 +1126,6 @@ class BrowserTools(Toolkit):
         result_payload = dict(response.result)
         if response.screenshot is None:
             return json.dumps(result_payload, sort_keys=True, ensure_ascii=False)
-        image_bytes = await download_encrypted_screenshot(
-            context.client,
-            response.screenshot,
-            timeout_seconds=self._timeout_seconds,
-        )
         if return_attachment:
             attachment = register_runtime_screenshot_attachment(
                 context,
@@ -1086,10 +1133,15 @@ class BrowserTools(Toolkit):
                 filename_prefix="browser-screenshot",
             )
             result_payload.update(screenshot_attachment_result_fields(attachment))
-        return ToolResult(
-            content=json.dumps(result_payload, sort_keys=True, ensure_ascii=False),
-            images=[Image(content=image_bytes, mime_type=response.screenshot.mime_type)],
+        image_bytes = await download_encrypted_screenshot(
+            context.client,
+            response.screenshot,
+            timeout_seconds=self._timeout_seconds,
         )
+        result = await asyncio.to_thread(image_result, image_bytes, metadata=result_payload)
+        finalized = await asyncio.to_thread(finalize_tool_media, result)
+        assert isinstance(finalized, ToolResult)
+        return finalized
 
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
         async with self._lock:
@@ -1235,7 +1287,8 @@ class BrowserTools(Toolkit):
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
         output_path = self._next_output_path("pdf")
-        await tab.page.pdf(path=str(output_path))
+        pdf_bytes = await tab.page.pdf()
+        await run_blocking_until_complete(self._publish_browser_artifact, output_path, pdf_bytes)
         return {
             "action": "pdf",
             "path": str(output_path),
@@ -1261,12 +1314,30 @@ class BrowserTools(Toolkit):
         if selector is None:
             msg = "upload requires inputRef, ref, or element"
             raise ValueError(msg)
-        normalized_paths = [str(self._resolve_upload_path(path)) for path in paths]
+        upload_roots = self._browser_upload_roots()
+        normalized_paths = [self._resolve_upload_path(path) for path in paths]
         locator = tab.page.locator(selector).first
-        await locator.set_input_files(normalized_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
+        staging = TemporaryDirectory(prefix="mindroom-browser-upload-")
+        try:
+            staged_paths = await run_blocking_until_complete(
+                _stage_browser_upload_paths,
+                normalized_paths,
+                upload_roots,
+                Path(staging.name),
+            )
+            await locator.set_input_files(staged_paths, timeout=timeout_ms or _DEFAULT_TIMEOUT_MS)
+        except BaseException:
+            staging.cleanup()
+            raise
+        # Chromium reads selected paths lazily, including during a later form submit.
+        # Keep snapshots until tab/profile teardown even after set_input_files returns.
+        if state.cleanup_required or tab.page.is_closed():
+            staging.cleanup()
+        else:
+            tab.upload_staging.append(staging)
         return {
             "action": "upload",
-            "paths": normalized_paths,
+            "paths": [str(path) for path in normalized_paths],
             "profile": profile_name,
             "selector": selector,
             "status": "ok",
@@ -1309,26 +1380,30 @@ class BrowserTools(Toolkit):
         ref: str | None,
         element: str | None,
         image_type: str | None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bytes]:
         state = await self._ensure_profile(profile_name)
         resolved_target_id, tab = await self._resolve_tab(state, target_id)
         resolved_type = "jpeg" if image_type == "jpeg" else "png"
         output_path = self._next_output_path("jpg" if resolved_type == "jpeg" else "png")
         selector = self._resolve_selector(tab, element or ref)
         if selector is None:
-            await tab.page.screenshot(path=str(output_path), type=resolved_type, full_page=full_page)
+            image_bytes = await tab.page.screenshot(type=resolved_type, full_page=full_page)
         else:
-            await tab.page.locator(selector).first.screenshot(path=str(output_path), type=resolved_type)
-        return {
-            "action": "screenshot",
-            "fullPage": full_page,
-            "path": str(output_path),
-            "profile": profile_name,
-            "selector": selector,
-            "status": "ok",
-            "targetId": resolved_target_id,
-            "type": resolved_type,
-        }
+            image_bytes = await tab.page.locator(selector).first.screenshot(type=resolved_type)
+        await run_blocking_until_complete(self._publish_browser_artifact, output_path, image_bytes)
+        return (
+            {
+                "action": "screenshot",
+                "fullPage": full_page,
+                "path": str(output_path),
+                "profile": profile_name,
+                "selector": selector,
+                "status": "ok",
+                "targetId": resolved_target_id,
+                "type": resolved_type,
+            },
+            image_bytes,
+        )
 
     async def _snapshot(
         self,
@@ -1645,7 +1720,6 @@ class BrowserTools(Toolkit):
                         "DISPLAY": self._worker_display,
                     }
                     launch_kwargs["viewport"] = {"width": 1280, "height": 800}
-                    launch_kwargs["downloads_path"] = str(self._resolve_output_dir())
                 user_data_dir = Path(str(launch_kwargs["user_data_dir"]))
                 clear_stale_singleton_locks(user_data_dir)
                 context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
@@ -1719,8 +1793,12 @@ class BrowserTools(Toolkit):
             try:
                 await state.playwright.stop()
             finally:
-                if state.destination_proxy is not None:
-                    await state.destination_proxy.close()
+                try:
+                    if state.destination_proxy is not None:
+                        await state.destination_proxy.close()
+                finally:
+                    for target_id in tuple(state.tabs):
+                        self._remove_tab(state, target_id)
         del self._profiles[profile_name]
 
     async def _resolve_tab(
@@ -1767,7 +1845,29 @@ class BrowserTools(Toolkit):
         """Copy completed downloads out of Playwright's context-owned temporary files."""
         filename = Path(download.suggested_filename).name or "download"
         destination = self._resolve_output_dir() / f"{uuid4().hex}-{filename}"
-        await download.save_as(destination)
+        # Playwright owns this private staging file until its browser context closes.
+        source = await download.path()
+        if source is None:
+            message = "Browser download did not produce a local file."
+            raise OSError(message)
+        await run_blocking_until_complete(self._publish_browser_artifact, destination, Path(source))
+
+    def _publish_browser_artifact(self, destination: Path, source: bytes | Path) -> None:
+        """Publish browser bytes or its private download stream through a pinned directory."""
+        root = self._browser_artifact_root()
+        with open_directory_within_root(root, destination.parent.relative_to(root), create=True) as directory:
+            if isinstance(source, bytes):
+                atomic_write_bytes_at(directory, destination.name, source, file_mode=0o600)
+            else:
+                with (
+                    source.open("rb") as input_file,
+                    atomic_write_file_at(
+                        directory,
+                        destination.name,
+                        file_mode=0o600,
+                    ) as output_file,
+                ):
+                    shutil.copyfileobj(input_file, output_file)
 
     @staticmethod
     def _record_console(tab: _BrowserTabState, message: ConsoleMessage) -> None:
@@ -1800,34 +1900,41 @@ class BrowserTools(Toolkit):
     def _next_output_path(self, extension: str) -> Path:
         return self._resolve_output_dir() / f"{uuid4().hex}.{extension}"
 
-    def _resolve_output_dir(self) -> Path:
-        """Return the directory used for browser artifacts."""
+    def _browser_artifact_root(self) -> Path:
+        """Select the caller-authorized canonical root without re-resolving bound roots."""
+        if self._worker_workspace is not None:
+            return self._worker_workspace
         if self._configured_output_dir is not None:
             return self._configured_output_dir
-
         context = get_tool_runtime_context()
         storage_root = (
             context.storage_path
             if context is not None and context.storage_path is not None
             else self._runtime_paths.storage_root
         )
-        output_dir = (storage_root / "browser").resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        return storage_root.resolve()
+
+    def _resolve_output_dir(self) -> Path:
+        """Return the directory used for browser artifacts."""
+        if self._configured_output_dir is not None:
+            return self._configured_output_dir
+
+        storage_root = self._browser_artifact_root()
+        output_dir = resolve_path_within_root(storage_root, "browser", symlinks="internal")
+        storage_root.mkdir(parents=True, exist_ok=True)
+        with open_directory_within_root(storage_root, output_dir.relative_to(storage_root), create=True):
+            pass
         return output_dir
 
     def _browser_upload_roots(self) -> tuple[Path, ...]:
         """Return roots whose files can be read by browser upload."""
         context = get_tool_runtime_context()
-        if self._configured_output_dir is not None:
-            roots = [self._configured_output_dir.resolve()]
-        elif context is not None and context.storage_path is not None:
-            roots = [(context.storage_path / "browser").resolve()]
-        else:
-            roots = [(self._runtime_paths.storage_root / "browser").resolve()]
+        root = self._browser_artifact_root()
+        roots = [
+            root if self._worker_workspace is not None or self._configured_output_dir is not None else root / "browser",
+        ]
         if context is not None and context.storage_path is not None:
             roots.append(context.storage_path.resolve())
-        if self._worker_workspace is not None:
-            roots.append(self._worker_workspace)
         return tuple(roots)
 
     def _resolve_upload_path(self, path: str) -> Path:
@@ -1837,14 +1944,21 @@ class BrowserTools(Toolkit):
             msg = f"upload path must be an existing file: {path}"
             raise ValueError(msg)
         roots = self._browser_upload_roots()
-        if any(resolved.is_relative_to(root) for root in roots):
-            return resolved
+        for root in roots:
+            try:
+                return resolve_path_within_root(root, resolved, symlinks="internal")
+            except ValueError:
+                continue
         root_list = ", ".join(str(root) for root in roots)
         msg = f"upload path '{path}' resolves to '{resolved}', outside browser upload root(s): {root_list}"
         raise ValueError(msg)
 
     @staticmethod
     def _remove_tab(state: _BrowserProfileState, target_id: str) -> None:
-        state.tabs.pop(target_id, None)
+        tab = state.tabs.pop(target_id, None)
+        if tab is not None:
+            for staging in tab.upload_staging:
+                staging.cleanup()
+            tab.upload_staging.clear()
         if state.active_target_id == target_id:
             state.active_target_id = next(iter(state.tabs.keys()), None)

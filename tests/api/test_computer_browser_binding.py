@@ -16,6 +16,30 @@ from mindroom.tools.browser import browser_tools
 from mindroom.tools.browser_mcp import browser_mcp_tools
 
 
+def test_action_browser_encoder_preserves_media_and_ordinary_json() -> None:
+    """Action-browser images use the bounded codec while ordinary JSON keeps its wire shape."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+    provider = select_browser_provider(
+        "browser",
+        "browser_control",
+        browser_tools,
+        lambda value: {"ordinary": value},
+    )
+    media = provider.encode_result(
+        ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")]),
+    )
+
+    decoded = decode_media_result(media)
+    assert isinstance(decoded, ToolResult)
+    assert decoded.images is not None
+    assert decoded.images[0].content == b"png"
+    assert provider.encode_result({"ok": True}) == {"ordinary": {"ok": True}}
+
+
 @pytest.mark.parametrize("native", [False, True])
 def test_provider_rejects_replaced_factory_and_subclass(tmp_path: Path, native: bool) -> None:
     """Only exact built-in factories and toolkit types can bind the Computer."""

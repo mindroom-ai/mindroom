@@ -46,6 +46,7 @@ dependencies = [
   "mindroom-nio[e2e]==1.1",
   "openai",
   "packaging>=24",
+  "pillow>=10.2",
   "pydantic>=2",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
