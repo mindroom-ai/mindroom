@@ -2364,7 +2364,6 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.main"
 depends_on = [
-    "mindroom.config.mid_turn",
     "mindroom.config.judgment",
     "mindroom.agent_policy",
     "mindroom.config.agent",

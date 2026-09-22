@@ -1,4 +1,4 @@
-"""Bind room-level queued-message decisions to the shared judgment backend."""
+"""Bind agent-level queued-message decisions to the shared judgment backend."""
 
 from __future__ import annotations
 
@@ -26,7 +26,8 @@ def create_mid_turn_gate(
     on_defer: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> MidTurnGate | None:
     """Bind one response's decision owner without performing inference."""
-    settings = config.get_room_mid_turn(envelope.room_id, runtime_paths)
+    agent = config.agents.get(envelope.agent_name)
+    settings = agent.mid_turn if agent is not None else None
     if settings is None:
         return None
     evaluate = create_judgment_evaluator(

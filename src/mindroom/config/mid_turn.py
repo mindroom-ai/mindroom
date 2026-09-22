@@ -5,8 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.config.judgment import JudgmentConfig
 
 
-class RoomMidTurnConfig(BaseModel):
-    """Choose whether an active turn may finish before handling queued messages."""
+class MidTurnConfig(BaseModel):
+    """Choose whether an agent's active turn may finish before handling queued messages."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 

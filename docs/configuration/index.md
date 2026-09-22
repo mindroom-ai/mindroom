@@ -158,38 +158,43 @@ Use these measurements alongside observed decision quality and provider pricing 
 ## Mid-Turn Coalescing
 
 When another human message arrives during an active response, MindRoom normally adds a notice after a tool batch asking the agent to stop making new tool calls and summarize its progress.
-Opt-in `room_mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
+Opt-in `agents.<name>.mid_turn` judgments can let the original task finish when the queued messages are clearly unrelated or simple acknowledgements.
 This is separate from participation eligibility and the debounce used to group incoming messages.
-`room_mid_turn` maps room aliases or Matrix room IDs to settings with a required `judgment` object, optional `instructions` string (default `""`), and optional `defer_reaction` (default `null`).
+Each agent can configure a required `judgment` object, optional `instructions` string (default `""`), and optional `defer_reaction` (default `null`).
 The `llm` judgment requires `provider: llm` and a `model` string naming an existing alias; its numeric `timeout_seconds` defaults to `5.0`.
 The `typesafe` judgment requires `provider: typesafe`; its numeric `threshold` defaults to `0.8` (range `0`–`1`) and `timeout_seconds` to `1.5`.
 Both backends require a positive timeout of at most `30` seconds and reject unknown fields.
 
 ```yaml
-room_mid_turn:
-  lobby:
-    instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
-    defer_reaction: "👀"
-    judgment:
-      provider: llm
-      model: fast  # An existing alias under models
-      timeout_seconds: 5
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      instructions: Continue for acknowledgements; wrap up for corrections or changed requirements.
+      defer_reaction: "👀"
+      judgment:
+        provider: llm
+        model: fast  # An existing alias under models
+        timeout_seconds: 5
 ```
 
-To use TypeSafe instead, configure the same room with:
+To use TypeSafe instead, configure the same agent with:
 
 ```yaml
-room_mid_turn:
-  lobby:
-    judgment:
-      provider: typesafe
-      threshold: 0.8
-      timeout_seconds: 1.5
+agents:
+  helper:
+    display_name: Helper
+    mid_turn:
+      judgment:
+        provider: typesafe
+        threshold: 0.8
+        timeout_seconds: 1.5
 ```
 
 TypeSafe also requires `TYPESAFE_API_KEY`.
-Room keys accept configured aliases or concrete Matrix room IDs.
-Omitting a room preserves the normal unconditional wrap-up notice.
+The setting follows the agent's Matrix user across every authorized room, including ad hoc rooms, just like participation.
+Omitting `mid_turn` or setting it to `null` preserves the normal unconditional wrap-up notice.
+There are no room overrides; the retired `room_mid_turn` configuration is rejected.
 Set `defer_reaction` to acknowledge queued messages when the judge lets the active task finish first.
 For example, `"👀"` means the message was seen and deferred; it remains queued for a later turn.
 Omit the setting or use `null` to keep deferrals invisible.
@@ -224,7 +229,7 @@ Once a wrap-up notice is sent, later messages cannot reverse that handoff.
 The queued messages remain queued and are handled through the existing dispatch path after the active response releases its lock.
 The notice requests a handoff from the model; it does not forcibly cancel tools, abort a response, or inject the queued text into the running model.
 Explicit stop handling and tool-approval requirements remain unchanged.
-Teams use the existing shared-team-model notice boundary; member models do not gain separate checks.
+Teams retain the normal wrap-up behavior and do not inherit a member agent's mid-turn settings.
 
 ## Splitting the Configuration Into Multiple Files
 

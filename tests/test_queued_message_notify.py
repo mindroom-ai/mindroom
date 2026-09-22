@@ -43,7 +43,7 @@ from mindroom.coalescing_batch import (
 from mindroom.config.agent import AgentConfig
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
-from mindroom.config.mid_turn import RoomMidTurnConfig
+from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.conversation_resolver import MessageContext
@@ -4633,7 +4633,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
 @pytest.mark.parametrize("selection", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("reaction", [None, "👀"])
-async def test_response_runner_binds_room_mid_turn_judge(
+async def test_response_runner_binds_agent_mid_turn_judge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -4642,19 +4642,17 @@ async def test_response_runner_binds_room_mid_turn_judge(
     enabled: bool,
     reaction: str | None,
 ) -> None:
-    """Room opt-in reaches the real tool loop while unprepared media keeps wrap-up."""
+    """Agent opt-in reaches the real tool loop while unprepared media keeps wrap-up."""
     bot = _bot(tmp_path)
     bot.client.room_send.return_value = nio.RoomSendResponse.from_dict({"event_id": "$reaction"}, "!room:localhost")
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    runner.deps.runtime.config.room_mid_turn = (
-        {
-            "!room:localhost": RoomMidTurnConfig(
-                judgment=LLMJudgmentConfig(provider="llm", model="default"),
-                defer_reaction=reaction,
-            ),
-        }
+    runner.deps.runtime.config.agents[bot.agent_name].mid_turn = (
+        MidTurnConfig(
+            judgment=LLMJudgmentConfig(provider="llm", model="default"),
+            defer_reaction=reaction,
+        )
         if enabled
-        else {}
+        else None
     )
     judge = ParticipationModel(ModelResponse(content='{"decision": true}'))
     monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)

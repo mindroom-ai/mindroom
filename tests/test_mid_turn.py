@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from mindroom import model_loading
 from mindroom.ai_runtime import install_queued_message_notice_hook, queued_message_signal_context
 from mindroom.config.main import Config
-from mindroom.config.mid_turn import RoomMidTurnConfig
+from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.judgment.answers import JudgmentResult
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
@@ -45,28 +45,89 @@ def _resumed_messages() -> list[Message]:
     ]
 
 
-def test_mid_turn_config_accepts_both_backends_and_validates_model_aliases() -> None:
-    """Room opt-in must use existing model aliases and reject configuration mistakes."""
+@pytest.mark.parametrize("backend", ["llm", "typesafe"])
+def test_mid_turn_config_accepts_both_backends_and_validates_model_aliases(backend: str) -> None:
+    """Mid-turn settings belong to an agent, not the room or another responder."""
+    judgment = {"provider": backend, **({"model": "default"} if backend == "llm" else {})}
     config = Config.model_validate(
         {
             "models": {"default": {"provider": "synthetic", "id": "test"}},
-            "room_mid_turn": {"!room:localhost": {"judgment": {"provider": "llm", "model": "default"}}},
+            "agents": {
+                "helper": {"display_name": "Helper", "mid_turn": {"judgment": judgment}},
+                "ordinary": {"display_name": "Ordinary"},
+            },
         },
     )
-    assert config.room_mid_turn["!room:localhost"].judgment.provider == "llm"
-    assert (
+    assert config.agents["helper"].mid_turn is not None
+    assert config.agents["helper"].mid_turn.judgment.provider == backend
+    assert config.agents["ordinary"].mid_turn is None
+    with pytest.raises(ValidationError, match="Unknown judgment model for agent"):
         Config.model_validate(
-            {"room_mid_turn": {"lobby": {"judgment": {"provider": "typesafe"}}}},
+            {
+                "agents": {
+                    "helper": {
+                        "display_name": "Helper",
+                        "mid_turn": {"judgment": {"provider": "llm", "model": "missing"}},
+                    },
+                },
+            },
         )
-        .room_mid_turn["lobby"]
-        .judgment.provider
-        == "typesafe"
-    )
-    with pytest.raises(ValidationError, match="Unknown judgment model"):
-        Config.model_validate({"room_mid_turn": {"lobby": {"judgment": {"provider": "llm", "model": "missing"}}}})
     with pytest.raises(ValidationError):
-        Config.model_validate({"room_mid_turn": {"lobby": {}}})
-    assert Config().room_mid_turn == {}
+        Config.model_validate({"agents": {"helper": {"display_name": "Helper", "mid_turn": {}}}})
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        None,
+        {"judgment": {"provider": "typesafe"}},
+        {"judgment": {"provider": "llm", "model": "default"}, "defer_reaction": "👀"},
+    ],
+)
+def test_mid_turn_survives_authored_config_round_trip(settings: dict[str, object] | None) -> None:
+    """Saving config preserves explicit disables and the agent's judgment settings."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "synthetic", "id": "test"}},
+            "agents": {"helper": {"display_name": "Helper", "mid_turn": settings}},
+        },
+    )
+    authored = config.authored_model_dump()
+    assert authored["agents"]["helper"]["mid_turn"] == settings
+    assert Config.model_validate(authored).agents["helper"].mid_turn == config.agents["helper"].mid_turn
+
+
+def test_retired_room_mid_turn_is_rejected() -> None:
+    """An old room configuration must not silently enable every agent in the room."""
+    with pytest.raises(ValidationError, match="room_mid_turn"):
+        Config.model_validate({"room_mid_turn": {"lobby": {"judgment": {"provider": "typesafe"}}}})
+
+
+@pytest.mark.parametrize("room", ["!first:localhost", "!adhoc:localhost"])
+@pytest.mark.parametrize("agent", ["helper", "ordinary", "team", "missing"])
+def test_mid_turn_follows_only_the_configured_agent(tmp_path: Path, room: str, agent: str) -> None:
+    """Agent opt-in follows its Matrix user across rooms without recruiting other agents or teams."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "synthetic", "id": "test"}},
+            "agents": {
+                "helper": {
+                    "display_name": "Helper",
+                    "mid_turn": {"judgment": {"provider": "llm", "model": "default"}, "defer_reaction": "👀"},
+                },
+                "ordinary": {"display_name": "Ordinary"},
+            },
+            "teams": {"team": {"display_name": "Team", "role": "Work together", "agents": ["helper"]}},
+        },
+    )
+    gate = create_mid_turn_gate(
+        config,
+        test_runtime_paths(tmp_path),
+        request_envelope(room_id=room, agent_name=agent),
+        prompt="Do the task",
+        has_media=False,
+    )
+    assert (gate is not None) is (agent == "helper")
 
 
 def test_queued_snapshot_keeps_text_until_exact_event_is_consumed() -> None:
@@ -91,7 +152,7 @@ def _result(request: JudgmentRequest, decision: bool | None) -> JudgmentResult:
 def test_defer_reaction_rejects_invalid_keys(reaction: object) -> None:
     """Deferred acknowledgements use bounded, nonblank Matrix reaction keys."""
     with pytest.raises(ValidationError):
-        RoomMidTurnConfig.model_validate({"judgment": {"provider": "typesafe"}, "defer_reaction": reaction})
+        MidTurnConfig.model_validate({"judgment": {"provider": "typesafe"}, "defer_reaction": reaction})
 
 
 @pytest.mark.asyncio
@@ -504,7 +565,7 @@ async def test_configured_backends_control_resumed_turns(
     config = Config.model_validate(
         {
             "models": {"cheap": {"provider": "synthetic", "id": "test"}},
-            "room_mid_turn": {"!test:localhost": {"judgment": settings}},
+            "agents": {"test_agent": {"display_name": "Test", "mid_turn": {"judgment": settings}}},
         },
     )
     paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": "synthetic"})
