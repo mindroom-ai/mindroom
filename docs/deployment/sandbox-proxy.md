@@ -639,7 +639,7 @@ Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
 Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
 This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
-The `browserbase`, `duckdb`, `e2b`, and `zep` toolkits also stay local because they retain a browser session, database connection, execution result, or generated session identity between calls. The generic worker runner creates a fresh toolkit for each request.
+The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls. The generic worker runner creates a fresh toolkit for each request.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed, subject to the limited `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` fallback described above.
 The `off`, `local`, and `disabled` modes do not override an explicit YAML list.

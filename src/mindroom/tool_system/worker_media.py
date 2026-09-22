@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import stat
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 from agno.media import Audio, File, Image, Video
@@ -15,9 +18,6 @@ from mindroom.tool_system import media_transport
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _read_file(path: str | Path, limit: int) -> bytes:
@@ -51,15 +51,40 @@ def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
                 msg = "Worker media exceeds the byte limit."
                 raise ValueError(msg)
             content.extend(chunk)
-        mime = response.headers.get("content-type", "").split(";", 1)[0].strip()
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     return bytes(content), mime or None
+
+
+def _resource_name(media: _Media) -> str:
+    if media.filepath is not None:
+        return Path(media.filepath).name
+    return Path(unquote(urlsplit(media.url or "").path)).name
+
+
+def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]:
+    """Retain provider-relevant resource identity before dropping its location."""
+    name = _resource_name(media)
+    if isinstance(media, File):
+        filename = media.filename or media.name or name or None
+        candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(name)[0])
+        mime = media.mime_type or next((value for value in candidates if value in File.valid_mime_types()), None)
+        return {"filename": filename, "mime_type": mime}
+    updates: dict[str, Any] = {}
+    if media.mime_type is None and media.format is None:
+        family = media_transport.MEDIA_MIME_FAMILIES[type(media)]
+        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, Image) else None
+        candidates = (declared_mime, inferred_mime)
+        updates["mime_type"] = next((value for value in candidates if value and value.startswith(family)), None)
+    if isinstance(media, (Audio, Video)) and media.format is None and name:
+        updates["format"] = Path(name).suffix.removeprefix(".").lower() or None
+    return updates
 
 
 def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
     if limit <= 0 or media.media_reference is not None or (isinstance(media, File) and media.external is not None):
         msg = "Unsupported worker media resource or exhausted byte limit."
         raise ValueError(msg)
-    mime = media.mime_type
+    declared_mime = None
     try:
         if media.content is not None:
             content = media.content
@@ -67,9 +92,6 @@ def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
             content = _read_file(media.filepath, limit)
         elif media.url is not None:
             content, declared_mime = _read_url(media.url, limit)
-            family = media_transport.MEDIA_MIME_FAMILIES.get(type(media))
-            if mime is None and declared_mime and (family is None or declared_mime.startswith(family)):
-                mime = declared_mime
         else:
             msg = "Worker media has no content source."
             raise ValueError(msg)
@@ -81,13 +103,17 @@ def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
     if not isinstance(content, bytes) or not content or len(content) > limit:
         msg = "Worker media must contain bytes within the byte limit."
         raise ValueError(msg)
-    return media.model_copy(update={"content": content, "url": None, "filepath": None, "mime_type": mime}), len(content)
+    updates = {"content": content, "url": None, "filepath": None, **_inline_metadata(media, declared_mime)}
+    return media.model_copy(update=updates), len(content)
 
 
 def serialize_worker_tool_result(result: object) -> object:
     """Resolve bounded media in the worker; ordinary results keep their JSON form."""
     if not isinstance(result, ToolResult):
-        return to_json_compatible(result)
+        result = to_json_compatible(result)
+        if media_transport.is_media_result_envelope(result):
+            return media_transport.encode_media_result(result)
+        return result
     sources = {
         "images": result.images or [],
         "audios": result.audios or [],

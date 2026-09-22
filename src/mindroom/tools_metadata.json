@@ -7504,6 +7504,7 @@
       "icon": "FaConnectdevelop",
       "icon_color": "text-blue-600",
       "name": "composio",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
@@ -8836,6 +8837,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "pandas",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "none",
       "status": "available"
@@ -9070,6 +9072,7 @@
       "icon": "Database",
       "icon_color": "text-blue-600",
       "name": "sql",
+      "requires_primary_runtime": true,
       "requires_room_context": false,
       "setup_type": "special",
       "status": "requires_config"

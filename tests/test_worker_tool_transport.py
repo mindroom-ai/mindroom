@@ -16,6 +16,7 @@ from agno.run import RunContext
 from agno.team import Team
 from agno.tools import openai as agno_openai
 from agno.tools.function import FunctionCall, ToolResult
+from agno.tools.sql import SQLTools
 from agno.tools.toolkit import Toolkit
 
 from mindroom.api import sandbox_runner
@@ -67,6 +68,127 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
     )
     monkeypatch.setenv("OPENAI_API_KEY", _TOOL_KEY)
     return requests
+
+
+@pytest.mark.parametrize(
+    "tool_result",
+    [
+        {"mindroom_tool_result": {"version": 1, "kind": "json", "value": 7}},
+        {"mindroom_tool_result": {"version": 777}},
+        {"mindroom_tool_result": "ordinary data", "other": [1, 2]},
+    ],
+)
+def test_ordinary_json_is_opaque_across_worker_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+    tool_result: dict[str, object],
+) -> None:
+    """A toolkit's JSON keys cannot turn its data into a transport control record."""
+
+    async def entrypoint(*_args: object, **_kwargs: object) -> object:
+        return tool_result
+
+    monkeypatch.setattr(sandbox_runner, "_run_toolkit_entrypoint", entrypoint)
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
+        },
+    )
+
+    result = sandbox_proxy._call_proxy_sync(
+        runtime_paths=paths,
+        tool_name="calculator",
+        function_name="add",
+        args=(),
+        kwargs={"a": 1, "b": 2},
+        credentials_manager=None,
+    )
+
+    assert len(worker_requests) == 1
+    assert result == tool_result
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_routing_preserves_pandas_frames_across_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: bool,
+) -> None:
+    """Named frames created by one call remain available to the next call."""
+
+    def no_worker(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("Stateful Pandas call was sent to a fresh worker toolkit")
+
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", no_worker)
+    agent = _create_routing_agent(
+        tmp_path,
+        {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+        agent_settings={"tools": ["pandas"], **({"worker_tools": ["pandas"]} if explicit else {})},
+    )
+    created = FunctionCall(
+        function=_function(agent, "create_pandas_dataframe"),
+        arguments={
+            "dataframe_name": "retained",
+            "create_using_function": "DataFrame",
+            "function_parameters": {"data": {"value": [42]}},
+        },
+    ).execute()
+    assert created.status == "success"
+    assert created.result == "retained"
+
+    operated = FunctionCall(
+        function=_function(agent, "run_dataframe_operation"),
+        arguments={"dataframe_name": "retained", "operation": "head", "operation_parameters": {}},
+    ).execute()
+    assert operated.status == "success"
+    assert "42" in operated.result
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_routing_preserves_sql_memory_database_across_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: bool,
+) -> None:
+    """An in-memory SQL engine must survive successive toolkit calls."""
+
+    def no_worker(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("SQL call was sent to a fresh worker toolkit")
+
+    monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", no_worker)
+    agent = _create_routing_agent(
+        tmp_path,
+        {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+        agent_settings={
+            "tools": [
+                {
+                    "sql": {
+                        "db_url": f"sqlite:///file:{tmp_path.name}?mode=memory&cache=shared&uri=true&check_same_thread=false",
+                    },
+                },
+            ],
+            **({"worker_tools": ["sql"]} if explicit else {}),
+        },
+    )
+    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, SQLTools))
+    try:
+        created = FunctionCall(
+            function=toolkit.functions["run_sql_query"],
+            arguments={"query": "CREATE TABLE retained (value INTEGER)"},
+        ).execute()
+        assert created.status == "success"
+        returned = FunctionCall(
+            function=toolkit.functions["run_sql_query"],
+            arguments={"query": "SELECT name FROM sqlite_master WHERE name='retained'"},
+        ).execute()
+        assert returned.status == "success"
+        assert json.loads(returned.result) == [{"name": "retained"}]
+    finally:
+        toolkit.db_engine.dispose()
 
 
 @pytest.mark.parametrize("media_kind", ["image", "audio"])
