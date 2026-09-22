@@ -82,7 +82,7 @@ MindRoom's architecture consists of several key components working together.
 | `participation_judgment.py` | Shared participation rubric and opt-in LLM or TypeSafe judgments with in-model fallback |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
-| `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
+| `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | STOP ordering, response cancellation, and terminal turn reconciliation |

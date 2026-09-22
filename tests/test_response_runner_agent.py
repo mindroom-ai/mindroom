@@ -3523,7 +3523,6 @@ class TestAdaptiveResponse(AgentBotTestBase):
             ),
             participation=RoomParticipationConfig.model_validate(
                 {
-                    "agent": bot.agent_name,
                     "judgment": (
                         {"provider": "typesafe"} if backend == "typesafe" else {"provider": "llm", "model": "default"}
                     )
@@ -3623,7 +3622,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 sources=ResponseSources(pending_event_ids=("$event",), logical_source_event_ids=("$event",)),
                 thread_history=[],
                 response_envelope=envelope,
-                participation=RoomParticipationConfig(agent=bot.agent_name),
+                participation=RoomParticipationConfig(),
                 requires_model_history_refresh=True,
                 payload_preparation=preparation if failure_stage == "payload" else None,
                 on_no_response_handled=settled,
@@ -3678,7 +3677,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
                     thread_id="$thread",
                     agent_name=bot.agent_name,
                 ),
-                participation=RoomParticipationConfig(agent=bot.agent_name),
+                participation=RoomParticipationConfig(),
                 on_no_response_handled=settled,
             ),
         )

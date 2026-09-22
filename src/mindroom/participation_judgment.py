@@ -18,6 +18,8 @@ def create_participation_decider(
     room: RoomParticipationConfig,
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    agent_name: str,
 ) -> ParticipationDecider | None:
     """Map the common yes/no/abstain outcome to the participation lifecycle."""
     settings = room.judgment
@@ -27,7 +29,7 @@ def create_participation_decider(
         settings,
         config,
         runtime_paths,
-        owner=f"{runtime_paths.storage_root}:{room.agent}",
+        owner=f"{runtime_paths.storage_root}:{agent_name}",
         question_id=PARTICIPATION_QUESTION.id,
     )
     if evaluate is None:

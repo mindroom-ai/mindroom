@@ -113,7 +113,7 @@ Matrix sync callback
 | `participation_judgment.py` | Shared participation rubric and opt-in LLM or TypeSafe judgments with in-model fallback |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
-| `config/participation.py` | Opt-in room participation settings: designated agent, bounded pause, and decision instructions |
+| `config/participation.py` | Opt-in participation settings for existing thread agents: bounded pause and decision instructions |
 | `dispatch_replay_guard.py` | Replay-guard checks for dispatch sequencing |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
 | `response_sources.py` | Immutable response-attempt source identity shared by runtime and persistence boundaries |

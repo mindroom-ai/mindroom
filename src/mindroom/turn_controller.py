@@ -891,7 +891,6 @@ class TurnController:
         participation = self.deps.runtime.config.get_room_participation(room.room_id, self.deps.runtime_paths)
         if (
             participation is None
-            or participation.agent != self.deps.agent_name
             or participation.debounce_seconds <= 0
             or key.thread_id is None
             or source_kind != MESSAGE_SOURCE_KIND

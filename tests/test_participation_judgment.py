@@ -52,7 +52,6 @@ def _gate(
     paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": key})
     room = RoomParticipationConfig.model_validate(
         {
-            "agent": "helper",
             "instructions": "Offer technical help.",
             "judgment": {"provider": "typesafe", "threshold": threshold, "timeout_seconds": timeout}
             if backend == "typesafe"
@@ -65,6 +64,7 @@ def _gate(
             room,
             Config(models={"cheap": {"provider": "test", "id": "cheap"}}),
             paths,
+            agent_name="helper",
         ),
     )
 

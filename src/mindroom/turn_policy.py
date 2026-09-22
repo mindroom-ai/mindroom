@@ -336,6 +336,14 @@ class TurnPolicy:
             return participation
         return None
 
+    def _is_participating_thread_agent(self, context: MessageContext) -> bool:
+        """Only individual agents that have already replied may judge continuation."""
+        return self.deps.agent_name in self.deps.runtime.config.agents and self.deps.matrix_id in get_agents_in_thread(
+            context.planning_thread_history,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+
     def adaptive_participation(
         self,
         *,
@@ -343,9 +351,9 @@ class TurnPolicy:
         room: nio.MatrixRoom,
         requester_user_id: str,
     ) -> RoomParticipationConfig | None:
-        """Select an authorized designated agent for a proven multi-human thread."""
+        """Select an authorized existing agent for a proven multi-human thread."""
         participation = self._adaptive_thread_participation(context, room.room_id, requester_user_id)
-        if participation is None or participation.agent != self.deps.agent_name:
+        if participation is None or not self._is_participating_thread_agent(context):
             return None
         candidates = classify_responder_candidates_from_cached_room(
             room,
@@ -771,7 +779,7 @@ class TurnPolicy:
         )
         if participation is None:
             return None
-        if participation.agent != self.deps.agent_name or self.deps.matrix_id not in available_responders:
+        if not self._is_participating_thread_agent(dispatch.context) or self.deps.matrix_id not in available_responders:
             return ResponseAction(kind="skip")
         return ResponseAction(kind="individual", participation=participation)
 

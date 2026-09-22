@@ -43,7 +43,7 @@ async def test_helpers_cannot_acquire_primary_decision(helper: str, streaming: b
 
     class Model(SyntheticModel):
         async def ainvoke(self, messages: list[Message], **kwargs: object) -> ModelResponse:
-            deciding = "Decide whether to participate" in str(messages[-1].content)
+            deciding = "action (respond or stay_silent)" in str(messages[-1].content)
             requests.append((deciding, deepcopy(messages), deepcopy(kwargs.get("tools"))))
             # Yield so Agno's parallel compression/learning requests overlap the check.
             await asyncio.sleep(0)
@@ -136,7 +136,7 @@ async def test_claude_wire_payload_preserves_prefix_with_transient_context() -> 
                     },
                 ),
             )
-            if "Decide whether to participate" in str(messages[-1].content):
+            if "action (respond or stay_silent)" in str(messages[-1].content):
                 return ModelResponse(content='{"action":"respond","reason":"Open question."}')
             return ModelResponse(content="Useful answer")
 
@@ -150,7 +150,7 @@ async def test_claude_wire_payload_preserves_prefix_with_transient_context() -> 
         await model.aresponse(messages, run_response=RunOutput(run_id="primary"))
     decision, reply = requests
     suffix = decision["messages"][-1]["content"].pop()
-    assert "Decide whether to participate" in suffix["text"]
+    assert "action (respond or stay_silent)" in suffix["text"]
     assert decision == reply
 
 
@@ -170,7 +170,7 @@ async def test_claude_native_tools_cannot_execute_during_decision(
     class Messages:
         async def create(self, **kwargs: Any) -> AnthropicMessage:  # noqa: ANN401
             requests.append(deepcopy(kwargs))
-            deciding = "Decide whether to participate" in json.dumps(kwargs["messages"])
+            deciding = "action (respond or stay_silent)" in json.dumps(kwargs["messages"])
             effective = {**kwargs, **kwargs.get("extra_body", {})}
             if deciding and effective.get("tool_choice") != {"type": "none"}:
                 unapproved_executions.append(native_source)

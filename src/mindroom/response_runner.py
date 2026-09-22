@@ -545,7 +545,12 @@ def _participation_for_request(
     if request.existing_event_id is not None:
         gate.approve_existing_response()
     else:
-        gate.decider = create_participation_decider(request.participation, config, runtime_paths)
+        gate.decider = create_participation_decider(
+            request.participation,
+            config,
+            runtime_paths,
+            agent_name=request.response_envelope.agent_name,
+        )
     return gate
 
 

@@ -21,16 +21,17 @@ mindroom config validate --path /path/to/config.yaml
 ## Adaptive Room Participation
 
 By default, threads with multiple human participants require explicit agent mentions.
-Opt a room into adaptive participation to let one designated agent decide whether an untagged message needs a response or should be left unanswered.
-The designated agent must be a configured individual agent with permission to reply to the sender.
+Opt a room into adaptive participation to let agents already involved in a thread decide whether to respond to an untagged message or stay silent.
+Each eligible individual agent must have already replied in that thread and still have permission to reply to the sender.
+Agents that are merely present in the room do not judge or join the conversation.
+If several individual agents have replied in the thread, each makes its own participation decision.
 Room keys can be concrete room IDs, managed room keys, or persisted full aliases.
 
 ```yaml
 room_participation:
   lobby:
-    agent: assistant
     debounce_seconds: 3.0
-    instructions: "Join when you can help; leave human conversation uninterrupted."
+    instructions: "Reply when you can help; leave human conversation uninterrupted."
 ```
 
 The pause applies only to eligible untagged text in threads with at least two human participants, including the current sender.
@@ -61,8 +62,7 @@ For a dedicated LLM, reference an existing alias in your `models:` configuration
 ```yaml
 room_participation:
   lobby:
-    agent: assistant
-    instructions: "Join when you can help; leave human conversation uninterrupted."
+    instructions: "Reply when you can help; leave human conversation uninterrupted."
     judgment:
       provider: llm
       model: fast
@@ -80,8 +80,7 @@ To switch to System One, change the judgment settings and set `TYPESAFE_API_KEY`
 ```yaml
 room_participation:
   lobby:
-    agent: assistant
-    instructions: "Join when you can help; leave human conversation uninterrupted."
+    instructions: "Reply when you can help; leave human conversation uninterrupted."
     judgment:
       provider: typesafe
       threshold: 0.8
