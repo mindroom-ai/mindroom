@@ -689,6 +689,8 @@ This is negligible with a local embedder but costs real money with paid embeddin
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID.
+A persisted `!thread_mode room` or `!thread_mode thread` override takes precedence for all entities in that room.
+Room admins can use `!thread_mode reset` to restore the static resolution rules below; see [Chat Commands](../chat-commands.md).
 For an agent, MindRoom checks `room_thread_modes` in this order.
 First, it checks an exact room ID key.
 Second, it checks the managed room key/alias associated with that room ID.
@@ -826,5 +828,5 @@ agents:
     display_name: Researcher
     role: Focus on deep research
     include_default_tools: false
-    tools: [web_search]
+    tools: [duckduckgo]
 ```

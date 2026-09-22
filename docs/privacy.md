@@ -139,11 +139,14 @@ Retention depends on the system component:
 
 - data stored on Matrix homeservers is retained according to the homeserver operator's policies
 - local app data remains on your device until you remove it or delete the app
-- runtime sessions, credentials, workspaces, files, and persistent volumes are retained until the installation operator removes them or applies its own retention policy
+- runtime sessions, credentials, workspaces, files, and persistent volumes are retained until the installation operator removes them or applies its own retention policy, except where component-specific cleanup applies
+- attachment metadata and eligible managed `incoming_media/` files older than 30 days are pruned opportunistically during new attachment registration
 - the hosted control plane schedules hard deletion of soft-deleted application accounts after a 7-day grace period
 - hosted non-critical audit logs are scheduled for deletion after 90 days and usage metrics after 365 days; selected security and deletion audit events are excluded from that ordinary cleanup
 - support emails and diagnostics may be retained for support and security purposes
 
+Attachment cleanup does not delete unmanaged source or workspace files or copies retained by Matrix homeservers.
+Active attachment references and filesystem failures can preserve local media beyond 30 days.
 Scheduled cleanup describes the repository's configured policy, not proof that a particular deployment has completed every cleanup run.
 
 ## Account Deactivation / Deletion

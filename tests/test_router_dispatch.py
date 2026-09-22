@@ -1008,7 +1008,9 @@ class TestAgentBot(AgentBotTestBase):
         assert "router is not a conversational AI agent" in content["body"]
         assert "mention a specific agent or team" in content["body"]
         assert "one human and one agent or team are already talking in a thread" in content["body"]
-        assert "thread has multiple human users or multiple agent/team participants" in content["body"]
+        assert "eligible ad-hoc team of participating individual agents" in content["body"]
+        assert "In multi-human threads, explicitly tag who should answer" in content["body"]
+        assert "adaptive participation, but teams do not form automatically" in content["body"]
         assert "automatic routing can still choose an agent or team" in content["body"]
 
     @pytest.mark.asyncio

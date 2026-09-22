@@ -587,6 +587,9 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         matrix_admin=context.matrix_admin,
         agent_reply_memberships=context.require_agent_reply_memberships(),
         responder_candidates_for_room=context.responder_candidates_for_current_room,
+        config_provider=lambda: (
+            context.orchestrator.config if context.orchestrator is not None else context.current_config
+        ),
     )
 
 

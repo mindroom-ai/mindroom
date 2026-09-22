@@ -49,16 +49,30 @@ Use the `just` commands from the repo root to drive everything. Below is a quick
 
 Use kind to spin up a throwaway local K8s cluster and install the platform chart for smoke testing and development.
 
-- Prereqs: `kind`, `kubectl`, `helm`, and Docker.
-- With Nix: use `nix-shell cluster/k8s/kind/shell.nix`, which includes `kind`, `kubectl`, and Helm.
-- Quickstart:
+The `just cluster-kind-*` recipes require `just`, Nix (`nix-shell`), and a running Docker daemon.
+Each recipe enters `cluster/k8s/kind/shell.nix`, which supplies `kind`, `kubectl`, Helm, and the Docker client.
+
+- Quickstart with Nix:
   - `just cluster-kind-up`
   - `just cluster-kind-build-load` (builds platform + MindRoom images and loads them into kind)
   - `just cluster-kind-install-platform`
-  - Or run the one-shot script: `cluster/k8s/kind/start-fresh.sh`
+  - Or run `just cluster-kind-fresh` for the complete setup.
   - Port-forward:
     - Backend: `just cluster-kind-port-backend` -> http://localhost:8000
     - Frontend: `just cluster-kind-port-frontend` -> http://localhost:3000
+
+With `kind`, `kubectl`, Helm, and Docker already installed, use the direct script from the repository root:
+
+```bash
+bash cluster/k8s/kind/start-fresh.sh
+```
+
+Then run each port-forward in a separate terminal:
+
+```bash
+kubectl -n mindroom-staging port-forward svc/platform-backend 8000:8000
+kubectl -n mindroom-staging port-forward svc/platform-frontend 3000:3000
+```
 
 Notes:
 - The Helm chart defaults reference a private registry. The `cluster-kind-build-load` step tags and loads images with those names so the cluster uses local images (no registry pull needed).
@@ -74,4 +88,5 @@ Notes:
 - Instances in Cluster should be created via the platform provisioner API. Avoid direct Helm installs except for debugging.
 - `saas-platform/.env` is the source of truth for Terraform + Helm deployment. It is not committed.
 - Local artifacts (backups, wgcf, etc.) are ignored by git.
-- Router-managed rooms in `multi_user` mode now reconcile `m.room.power_levels` so `com.mindroom.thread.tags` can be sent at PL0. If room reconciliation logs start failing, check that the service account is joined and allowed to update room power levels.
+- Managed rooms reconcile `m.room.power_levels` so `com.mindroom.thread.tags` can be sent at PL0.
+  If room reconciliation logs start failing, check that the service account is joined and allowed to update room power levels.

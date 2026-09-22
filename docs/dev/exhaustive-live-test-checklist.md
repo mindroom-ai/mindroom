@@ -118,8 +118,9 @@ Expected outcome: The router posts a welcome message only in the intended empty-
 - [ ] `ROOM-003` Send `!hi` in a managed room after startup.
 Expected outcome: The router reproduces the current welcome guidance without changing room state or duplicating bot setup.
 
-- [ ] `ROOM-004` Test `single_user_private`, `multi_user public`, `multi_user knock`, and invite-only exceptions.
-Expected outcome: Joinability, room directory visibility, and restricted-room exceptions all match the configured policy.
+- [ ] `ROOM-004` Test `room_defaults.join_policy` values `invite`, `knock`, and `public`, vary `room_defaults.listed` independently, and exercise `rooms.<key>` overrides.
+Expected outcome: Joinability and directory visibility match the effective defaults and per-room overrides.
+For migration coverage only, load legacy `matrix_room_access` modes and invite-only exceptions and verify their conversion to `room_defaults` and per-room overrides.
 
 - [ ] `ROOM-005` Put an agent in an external or unmanaged room and load the runtime plus dashboard.
 Expected outcome: External room state is discoverable and can later be left intentionally instead of being silently mutated on startup.
