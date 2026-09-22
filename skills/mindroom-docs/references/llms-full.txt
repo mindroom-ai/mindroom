@@ -22691,10 +22691,11 @@ cp cluster/k8s/platform/values-staging.example.yaml cluster/k8s/platform/values-
 
 helm upgrade --install platform ./cluster/k8s/platform \
   -f ./cluster/k8s/platform/values-staging.yaml \
-  --namespace mindroom-staging
+  --namespace staging --create-namespace
 ```
 
-The namespace must match `mindroom-{environment}` where `environment` is set in values.
+For a fresh install, `staging` stores Helm release records; the chart creates application resources in `mindroom-{environment}`, with `environment` set in values.
+For an existing release, retain its original release name and namespace when upgrading.
 Ingress hosts use `domain`, independently of the namespace; the base values use `mindroom.chat`, while the staging example uses `staging.mindroom.chat`.
 Populate the staging file's credentials before deploying and keep it private.
 For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
