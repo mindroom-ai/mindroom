@@ -505,33 +505,20 @@ class ConversationResolver:
         trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
         """Build the normalized inbound envelope consumed by message hooks."""
-        from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
-
-        resolved_source_kind, hook_source, message_received_depth = self._envelope_ingress_metadata(
+        return self._build_envelope(
             event=event,
-            source_kind=source_kind,
-            hook_source=hook_source,
-            message_received_depth=message_received_depth,
-        )
-        return MessageEnvelope(
-            source_event_id=event.event_id,
+            requester_user_id=requester_user_id,
             target=target,
-            body=body or event.body,
-            attachment_ids=tuple(
-                attachment_ids if attachment_ids is not None else parse_attachment_ids_from_event_source(event.source),
-            ),
-            mentioned_agents=self._mentioned_agent_names(context.mentioned_agents),
-            agent_name=agent_name or self.deps.agent_name,
+            attachment_ids=attachment_ids,
+            agent_name=agent_name,
+            body=body,
+            source_kind=source_kind,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
             hook_source=hook_source,
             message_received_depth=message_received_depth,
-            dispatch_policy_source_kind=dispatch_policy_source_kind,
-            origin=self._turn_origin_for_event(
-                event=event,
-                requester_user_id=requester_user_id,
-                source_kind=resolved_source_kind,
-                original_sender=original_sender,
-                trusted_user_relay=trusted_user_relay,
-            ),
+            mentioned_agents=context.mentioned_agents,
+            original_sender=original_sender,
+            trusted_user_relay=trusted_user_relay,
         )
 
     def build_ingress_envelope(
@@ -552,6 +539,40 @@ class ConversationResolver:
         trusted_user_relay: bool = False,
     ) -> MessageEnvelope:
         """Build one lightweight ingress envelope without extracting thread context."""
+        return self._build_envelope(
+            event=event,
+            requester_user_id=requester_user_id,
+            target=target,
+            attachment_ids=attachment_ids,
+            agent_name=agent_name,
+            body=body,
+            source_kind=source_kind,
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
+            hook_source=hook_source,
+            message_received_depth=message_received_depth,
+            mentioned_agents=mentioned_agents,
+            original_sender=original_sender,
+            trusted_user_relay=trusted_user_relay,
+        )
+
+    def _build_envelope(
+        self,
+        *,
+        event: DispatchEvent,
+        requester_user_id: str,
+        target: MessageTarget,
+        attachment_ids: list[str] | None,
+        agent_name: str | None,
+        body: str | None,
+        source_kind: str | None,
+        dispatch_policy_source_kind: str | None,
+        hook_source: str | None,
+        message_received_depth: int | None,
+        mentioned_agents: Sequence[MatrixID],
+        original_sender: str | None,
+        trusted_user_relay: bool,
+    ) -> MessageEnvelope:
+        """Construct the shared envelope after callers choose their mention inputs."""
         from mindroom.hooks import MessageEnvelope  # noqa: PLC0415
 
         resolved_source_kind, hook_source, message_received_depth = self._envelope_ingress_metadata(

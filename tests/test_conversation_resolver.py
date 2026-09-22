@@ -20,8 +20,8 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import SKIP_MENTIONS_KEY
-from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
+from mindroom.constants import ATTACHMENT_IDS_KEY, SKIP_MENTIONS_KEY
+from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ConversationCursor,
@@ -35,6 +35,7 @@ from mindroom.event_journal import (
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_hydration import ConversationHydrator
 from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
@@ -567,6 +568,51 @@ async def test_build_ingress_envelope_carries_event_identity(config: Config) -> 
     assert envelope.mentioned_agents == ()
     assert envelope.agent_name == "general"
     assert envelope.source_kind == "message"
+
+
+@pytest.mark.parametrize(("body", "expected_body"), [(None, "hello"), ("", "hello"), ("override", "override")])
+def test_full_and_lightweight_envelopes_share_fields(config: Config, body: str | None, expected_body: str) -> None:
+    """Both adapters preserve mentions, body fallback, attachments, and relay metadata."""
+    resolver = _resolver(config)
+    event = _event({"body": "hello", ATTACHMENT_IDS_KEY: [" a ", "a", "b"]})
+    target = MessageTarget.resolve(_ROOM_ID, _THREAD_ROOT, _EVENT_ID)
+    mentions = [MatrixID.parse(_BOT_USER_ID)]
+    context = MessageContext(
+        am_i_mentioned=True,
+        is_thread=True,
+        thread_id=_THREAD_ROOT,
+        thread_history=(),
+        mentioned_agents=mentions,
+        has_non_agent_mentions=False,
+    )
+    full = resolver.build_message_envelope(
+        event=event,
+        requester_user_id=_SENDER,
+        context=context,
+        target=target,
+        body=body,
+        hook_source="test-hook",
+        message_received_depth=2,
+        original_sender=_HUMAN_USER_ID,
+        trusted_user_relay=True,
+    )
+    lightweight = resolver.build_ingress_envelope(
+        event=event,
+        requester_user_id=_SENDER,
+        target=target,
+        body=body,
+        mentioned_agents=mentions,
+        hook_source="test-hook",
+        message_received_depth=2,
+        original_sender=_HUMAN_USER_ID,
+        trusted_user_relay=True,
+    )
+    assert full == lightweight
+    assert full.body == expected_body
+    assert full.attachment_ids == ("a", "b")
+    assert full.mentioned_agents == ("general",)
+    assert full.hook_source == "test-hook"
+    assert full.message_received_depth == 2
 
 
 def _parse(source: dict[str, Any]) -> nio.Event:
