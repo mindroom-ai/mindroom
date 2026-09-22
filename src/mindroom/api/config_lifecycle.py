@@ -346,9 +346,12 @@ def _raise_when_composed_from_includes(
     try:
         _, _source_digests, uses_includes = load_yaml_config_source_with_digests(runtime_paths.config_path)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
-        # Failed parses can still establish include usage. Keep monolithic
-        # configs recoverable when no include evidence was observed.
-        uses_includes = partial_source_uses_includes(exc) is True
+        uses_includes = partial_source_uses_includes(exc)
+        if uses_includes is None and not isinstance(exc, FileNotFoundError):
+            # An incomplete scan cannot establish that replacing the source is
+            # safe. Complete tag-free scans still allow monolith recovery.
+            msg = "could not determine whether configuration uses !include; edit the source files instead"
+            raise ConfigRuntimeValidationError(msg) from exc
     if uses_includes:
         raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
 
@@ -886,6 +889,10 @@ def _publish_runtime_config_into_app(
         runtime_paths,
         validated_payload,
     )
+    if uses_includes is None and runtime_config.uses_includes:
+        # A failed disk observation cannot erase the incoming source's include
+        # evidence. A newer committed source still wins under the lock below.
+        uses_includes = True
     with initial_state.config_lock:
         current_state = require_api_state(api_app)
         current = current_state.snapshot

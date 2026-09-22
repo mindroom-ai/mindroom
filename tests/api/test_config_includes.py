@@ -596,6 +596,20 @@ class TestEmptyDirectoryIncludes:
         pytest.param("agents: !include missing.yaml\n", id="missing-file"),
         pytest.param("agents: !include broken.yaml\n", id="malformed-child"),
         pytest.param("agents: !include_dir_merge_named missing/\n", id="missing-directory"),
+        pytest.param(
+            "teams: !include_dir_merge_named entries/\ndefaults: [broken\n",
+            id="malformed-root",
+        ),
+        pytest.param("agents: !include /outside.yaml\n", id="absolute-path"),
+        pytest.param("agents: !include ../outside.yaml\n", id="escaping-path"),
+        pytest.param("agents: !include .hidden.yaml\n", id="hidden-path"),
+        pytest.param("agents: !include [unexpected]\n", id="non-scalar-path"),
+        pytest.param("agents: !expand missing.yaml\n", id="misplaced-expand"),
+        pytest.param("agents: !<!include> missing.yaml\ndefaults: [broken\n", id="verbatim-tag"),
+        pytest.param(
+            "%TAG !cfg! !\n---\nagents: !cfg!include missing.yaml\ndefaults: [broken\n",
+            id="tag-directive",
+        ),
     ],
 )
 @pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
@@ -636,15 +650,26 @@ def test_structured_writes_recheck_includes_before_watcher_reload(
     assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
 
 
+@pytest.mark.parametrize(
+    "broken_source",
+    [
+        pytest.param("agents: [broken\n", id="plain"),
+        pytest.param("# agents: !include missing.yaml\nagents: [broken\n", id="comment"),
+        pytest.param("timezone: '!include missing.yaml'\nagents: [broken\n", id="single-quoted"),
+        pytest.param('timezone: "!expand missing.yaml"\nagents: [broken\n', id="double-quoted"),
+        pytest.param("role: |\n  !include missing.yaml\nagents: [broken\n", id="block-scalar"),
+    ],
+)
 @pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
 def test_structured_writes_recover_broken_monolith_before_watcher_reload(
     stale_monolith_app: FastAPI,
     write_kind: str,
+    broken_source: str,
 ) -> None:
     """A parse failure without include evidence must remain recoverable."""
     before = _snapshot(stale_monolith_app)
     runtime_paths = before.runtime_paths
-    runtime_paths.config_path.write_text("agents: [broken\n", encoding="utf-8")
+    runtime_paths.config_path.write_text(broken_source, encoding="utf-8")
     payload = copy.deepcopy(before.config_data)
     payload["timezone"] = "Europe/Amsterdam"
 
@@ -739,6 +764,207 @@ async def test_confirmed_config_change_preserves_new_includes_before_watcher_rel
     assert "Changes were NOT applied." in result
     assert before.runtime_paths.config_path.read_bytes() == source
     assert _snapshot(stale_monolith_app) is before
+
+
+@pytest.mark.parametrize(
+    "broken_source",
+    [
+        pytest.param(b'timezone: "\\q"\nagents: !include missing.yaml\n', id="scanner-before-include"),
+        pytest.param(b'timezone: "\\q"\nagents: {}\n', id="scanner-monolith"),
+        pytest.param(b"# \xff\nagents: !include missing.yaml\n", id="unicode-before-include"),
+        pytest.param(b"# \xff\nagents: {}\n", id="unicode-monolith"),
+    ],
+)
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_preserve_unknown_source_topology_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    write_kind: str,
+    broken_source: bytes,
+) -> None:
+    """Incomplete scans require source editing, even without a tag observed yet."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    runtime_paths.config_path.write_bytes(broken_source)
+    payload = copy.deepcopy(before.config_data)
+    payload["timezone"] = "Europe/Amsterdam"
+
+    if write_kind == "external":
+        with pytest.raises(config_lifecycle.ConfigRuntimeValidationError, match="could not determine"):
+            config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        with pytest.raises(HTTPException) as exc_info:
+            writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+        assert exc_info.value.status_code == 422
+        assert "could not determine" in str(exc_info.value.detail)
+        assert "edit the source files instead" in str(exc_info.value.detail)
+
+    assert runtime_paths.config_path.read_bytes() == broken_source
+    assert _snapshot(stale_monolith_app) is before
+    assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
+
+    config_lifecycle.replace_raw_config_source(
+        _request_for(stale_monolith_app),
+        yaml.safe_dump(payload),
+        error_prefix="Failed to save raw configuration",
+    )
+    assert load_config(runtime_paths).timezone == "Europe/Amsterdam"
+    assert _snapshot(stale_monolith_app).uses_includes is False
+
+
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_preserve_unreadable_existing_source(
+    stale_monolith_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    write_kind: str,
+) -> None:
+    """An unreadable existing root is not evidence that flattening is safe."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    path = runtime_paths.config_path
+    source = b"agents: !include missing.yaml\n"
+    path.write_bytes(source)
+    payload = copy.deepcopy(before.config_data)
+    payload["timezone"] = "Europe/Amsterdam"
+    original_read = Path.read_bytes
+
+    def deny_root_read(candidate: Path) -> bytes:
+        if candidate == path:
+            message = "Config root is temporarily unreadable"
+            raise PermissionError(message)
+        return original_read(candidate)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", deny_root_read)
+        if write_kind == "external":
+            with pytest.raises(config_lifecycle.ConfigRuntimeValidationError, match="could not determine"):
+                config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+        else:
+            writer = (
+                config_lifecycle.write_committed_config
+                if write_kind == "mutation"
+                else config_lifecycle.replace_committed_config
+            )
+            update = (
+                (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+            assert exc_info.value.status_code == 422
+            assert "could not determine" in str(exc_info.value.detail)
+
+    assert path.read_bytes() == source
+    assert _snapshot(stale_monolith_app) is before
+
+
+@pytest.mark.parametrize("initial_snapshot", ["fresh", "monolith"])
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_runtime_publication_preserves_incoming_includes_without_disk_source(
+    empty_include_runtime_paths: constants.RuntimePaths,
+    initial_snapshot: str,
+    write_kind: str,
+) -> None:
+    """A loaded runtime config must retain include evidence if its root disappears."""
+    runtime_paths = empty_include_runtime_paths
+    path = runtime_paths.config_path
+    include_source = path.read_text(encoding="utf-8")
+    api_app = _make_api_app(runtime_paths)
+    if initial_snapshot == "monolith":
+        path.write_text(
+            include_source.replace("agents: !include_dir_merge_named entries/", "agents: {}"),
+            encoding="utf-8",
+        )
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        path.write_text(include_source, encoding="utf-8")
+    assert _snapshot(api_app).uses_includes is not True
+    incoming = load_config(runtime_paths)
+    assert incoming.uses_includes is True
+    path.unlink()
+
+    assert config_lifecycle._publish_runtime_config_into_app(incoming, runtime_paths, api_app) is True
+    published = _snapshot(api_app)
+    assert published.runtime_config is incoming
+    assert published.uses_includes is True
+    assert published.config_load_result is not None
+    assert published.config_load_result.uses_includes is True
+    payload = incoming.authored_model_dump()
+    payload["timezone"] = "Europe/Amsterdam"
+    if write_kind == "external":
+        with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
+            config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        with pytest.raises(HTTPException) as exc_info:
+            writer(_request_for(api_app), update, error_prefix="Failed to save configuration")
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "config_composed_from_includes"
+    assert not path.exists()
+    assert _snapshot(api_app) is published
+
+
+def test_newer_raw_removal_overrides_incoming_include_evidence_after_failed_read(
+    empty_include_runtime_paths: constants.RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw commit during publication owns topology even when its payload is unchanged."""
+    runtime_paths = empty_include_runtime_paths
+    path = runtime_paths.config_path
+    incoming = load_config(runtime_paths)
+    monolith_source = path.read_text(encoding="utf-8").replace(
+        "agents: !include_dir_merge_named entries/",
+        "agents: {}",
+    )
+    api_app = _make_api_app(runtime_paths)
+    path.write_text(monolith_source, encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+    assert _snapshot(api_app).config_data == incoming.authored_model_dump()
+    path.unlink()
+    observe_source = config_lifecycle._source_fingerprint_for_published_runtime_config
+    raw_commits: list[config_lifecycle.ApiSnapshot] = []
+
+    def commit_raw_after_failed_read(
+        paths: constants.RuntimePaths,
+        payload: dict[str, Any],
+    ) -> tuple[str, frozenset[Path] | None, bool | None]:
+        observed = observe_source(paths, payload)
+        assert observed[2] is None
+        config_lifecycle.replace_raw_config_source(
+            _request_for(api_app),
+            monolith_source,
+            error_prefix="Failed to save raw configuration",
+        )
+        raw_commits.append(_snapshot(api_app))
+        return observed
+
+    monkeypatch.setattr(
+        config_lifecycle,
+        "_source_fingerprint_for_published_runtime_config",
+        commit_raw_after_failed_read,
+    )
+    assert config_lifecycle._publish_runtime_config_into_app(incoming, runtime_paths, api_app) is True
+    committed = raw_commits[0]
+    published = _snapshot(api_app)
+    assert published.uses_includes is False
+    assert published.source_fingerprint == committed.source_fingerprint
+    assert published.source_files == committed.source_files
+    assert published.config_load_result is not None
+    assert published.config_load_result.uses_includes is False
+    assert path.read_text(encoding="utf-8") == monolith_source
+    config_lifecycle.replace_committed_config(
+        _request_for(api_app),
+        copy.deepcopy(published.config_data),
+        error_prefix="Failed to save configuration",
+    )
 
 
 class TestIncludeAwareSnapshots:

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Never, cast
 
 import yaml
+from yaml.tokens import DirectiveToken, DocumentStartToken, TagToken
 
 from mindroom.yaml_io import SafeLoader
 
@@ -165,6 +166,29 @@ def _read_included_text(loader: _IncludeLoader, path: Path, node: yaml.Node) -> 
         raise _include_error(msg, node) from exc
 
 
+def _source_has_include_tags(source: str) -> bool | None:
+    """Return observed tag usage, or None when scanning cannot establish absence."""
+    default_prefixes = {"!": "!", "!!": "tag:yaml.org,2002:"}
+    tag_prefixes = default_prefixes
+    pending_prefixes: dict[str, str] = {}
+    try:
+        for token in yaml.scan(source, Loader=SafeLoader):
+            if isinstance(token, DirectiveToken) and token.name == "TAG":
+                handle, prefix = token.value
+                pending_prefixes[handle] = prefix
+            elif isinstance(token, DocumentStartToken):
+                tag_prefixes = default_prefixes | pending_prefixes
+                pending_prefixes = {}
+            elif isinstance(token, TagToken):
+                handle, suffix = token.value
+                tag = suffix if handle is None else tag_prefixes.get(handle, "") + suffix
+                if tag.startswith("!") and tag in _IncludeLoader.yaml_constructors:
+                    return True
+    except (yaml.YAMLError, UnicodeError):
+        return None
+    return False
+
+
 def _parse_yaml_file(
     path: Path,
     *,
@@ -187,7 +211,11 @@ def _parse_yaml_file(
     try:
         return loader.get_single_data(), loader.uses_includes
     except (yaml.YAMLError, OSError, UnicodeError) as exc:
-        attach_partial_source_files(exc, frozenset(files_read), uses_includes=loader.uses_includes)
+        attach_partial_source_files(
+            exc,
+            frozenset(files_read),
+            uses_includes=loader.uses_includes or _source_has_include_tags(text),
+        )
         raise
     finally:
         loader.dispose()
