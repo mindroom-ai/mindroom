@@ -141,6 +141,7 @@ Matrix sync callback
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
+| `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `tool_approval.py` | Tool-call approval rule evaluation and public approval API |
 | `approval_execution.py` | Agent reconstruction and exact-call execution for persisted native approval continuations |
@@ -157,6 +158,7 @@ Matrix sync callback
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
+| `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
@@ -204,6 +206,8 @@ Matrix sync callback
 | `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
 | `matrix/room_cleanup.py` | Orphaned bot cleanup from rooms |
+| `matrix/personal_rooms.py` | Target-agent service for eligible personal-room creation, ownership checks, invitations, and recoverable welcome delivery |
+| `matrix/personal_room_store.py` | Durable per-requester room ownership, operator adoption attestations, welcome receipts, and cleanup retention |
 | `matrix/event_info.py` | Event metadata parsing |
 | `matrix/reply_chain.py` | Reply chain context management |
 | `matrix/identity.py` | Matrix ID parsing and utilities |

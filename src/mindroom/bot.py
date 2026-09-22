@@ -42,7 +42,6 @@ from mindroom.hooks import (
     send_hook_message,
 )
 from mindroom.legacy_handled_turns import legacy_responses_file_path
-from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.decrypt_diagnostics import DecryptionDiagnostics
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from mindroom.matrix.durable_membership import change_local_membership
@@ -53,7 +52,6 @@ from mindroom.matrix.health import (
     mark_matrix_sync_success,
 )
 from mindroom.matrix.journal_ingress import replayable_redaction_target
-from mindroom.matrix.personal_room_store import personal_room_records
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.presence import build_agent_status_message, set_presence_status
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
@@ -66,8 +64,8 @@ from mindroom.matrix_rtc.call_manager import CallManager, maybe_build_call_manag
 from mindroom.memory import store_conversation_memory
 from mindroom.message_target import MessageTarget  # noqa: TC001
 from mindroom.model_catalog_receiver import register_model_catalog_receiver
+from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from mindroom.post_response_effects import PostResponseEffectsSupport
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
     ORDERLY_SHUTDOWN,
@@ -491,6 +489,20 @@ class AgentBot:
                 ),
             )
 
+        self.personal_rooms = PersonalRoomService(
+            self.agent_name,
+            self._runtime_view,
+            self.runtime_paths,
+            self.change_local_membership,
+        )
+        self._personal_room_lifecycle = PersonalRoomLifecycle(
+            self.agent_name,
+            self._runtime_view,
+            self.runtime_paths,
+            self.personal_rooms,
+            self._lookup_personal_room_target,
+            lambda event: self._ingress_validator.requester_user_id(sender=event.sender, source=event.source),
+        )
         self._room_lifecycle = BotRoomLifecycle(
             BotRoomLifecycleDeps(
                 agent_name=self.agent_name,
@@ -500,6 +512,8 @@ class AgentBot:
                 continuity_store=self._sync_continuity_store,
                 get_logger=lambda: self.logger,
                 get_configured_rooms=lambda: self.rooms,
+                get_retained_room_ids=self._personal_room_lifecycle.retained_room_ids,
+                get_cleanup_exclusions=self._personal_room_lifecycle.cleanup_exclusions,
                 send_response=send_room_lifecycle_response,
                 change_membership=self.change_local_membership,
                 admit_response=lambda: admitted_response_decision(
@@ -510,13 +524,6 @@ class AgentBot:
             ),
         )
         self._init_runtime_components()
-        self.personal_rooms = PersonalRoomService(
-            self.agent_name,
-            self._runtime_view,
-            self.runtime_paths,
-            self.change_local_membership,
-        )
-        self._personal_rooms_reconciled = False
 
     def journal_principal(self) -> PrincipalStore:
         """Return this bot's principal-bound projection view, once the journal is open."""
@@ -955,7 +962,7 @@ class AgentBot:
     def config(self, value: Config) -> None:
         """Update the canonical live config."""
         self._runtime_view.config = value
-        self._personal_rooms_reconciled = False
+        self._personal_room_lifecycle.config_changed()
         if self._call_manager is not None:
             self._call_manager.update_config(value)
 
@@ -1153,9 +1160,7 @@ class AgentBot:
 
     async def _emit_room_member_joined_hooks(self, join: RoomMemberJoin) -> None:
         """Emit room:member_joined for one live human Matrix room join."""
-        if self.config.personal_rooms is not None and join.prev_membership is None:
-            # Unknown prior membership needs the existing durable baseline gate.
-            await self._onboard_personal_room(join.user_id, join.room_id)
+        await self._personal_room_lifecycle.baseline_join(join)
         if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED):
             return
 
@@ -1596,7 +1601,7 @@ class AgentBot:
         self._schedule_delivery_recovery()
         if first_sync_response:
             await self._emit_agent_lifecycle_event(EVENT_BOT_READY)
-        await self._reconcile_personal_rooms()
+        await self._personal_room_lifecycle.reconcile()
 
         orchestrator = self.orchestrator
         if orchestrator is None:
@@ -2569,7 +2574,7 @@ class AgentBot:
         the sentence typed without the `/me`.
         """
         receipt_time = time.monotonic()
-        if await self._handle_personal_room_command(room, event):
+        if await self._personal_room_lifecycle.handle_command(room, event):
             return TurnDispatchOutcome.INTENTIONALLY_IGNORED
         self._log_matrix_event_callback_started(room, event, callback_name="message")
         semantic_consumer = self._journal_dispatcher.semantic_consumer()
@@ -2641,11 +2646,7 @@ class AgentBot:
         call_manager = self._call_manager
         if call_manager is not None and event.state_key != self.matrix_id.full_id:
             await call_manager.on_room_membership_event(room, event)
-        if self.config.personal_rooms is not None and event.membership == "join" and event.prev_membership != "join":
-            await self.personal_rooms.member_joined(room.room_id, event.state_key)
-            if self.agent_name == ROUTER_AGENT_NAME and event.prev_membership is not None:
-                # Definite new joins may reinvite even after a previous welcome.
-                await self._onboard_personal_room(event.state_key, room.room_id)
+        await self._personal_room_lifecycle.member_event(room, event)
         if self.agent_name != ROUTER_AGENT_NAME:
             return
         if self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_LEFT):
@@ -2658,7 +2659,10 @@ class AgentBot:
             if leave is not None:
                 await self._emit_room_member_left_hooks(leave)
                 return
-        if not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED) and self.config.personal_rooms is None:
+        if (
+            not self.hook_registry.has_hooks(EVENT_ROOM_MEMBER_JOINED)
+            and not self._personal_room_lifecycle.observes_onboarding_joins
+        ):
             return
 
         await emit_room_member_join_at_least_once(
@@ -2671,79 +2675,16 @@ class AgentBot:
             emit=self._emit_room_member_joined_hooks,
         )
 
-    def _personal_room_target(self) -> AgentBot | None:
-        """Resolve the selected live agent without exposing any private execution state."""
-        settings = self.config.personal_rooms
-        if self.agent_name != ROUTER_AGENT_NAME or settings is None:
-            return None
+    def _lookup_personal_room_target(self, agent_name: str) -> PersonalRoomTarget | None:
+        """Project a connected fleet member into its service and sync readiness."""
         orchestrator = self.orchestrator
         bots = orchestrator.agent_bots if orchestrator is not None else None
         if not isinstance(bots, dict):
             return None
-        target = cast("dict[str, object]", bots).get(settings.agent)
-        return target if isinstance(target, AgentBot) else None
-
-    async def _onboard_personal_room(self, user_id: str, source_room_id: str) -> None:
-        """Forward one trusted router-observed member to the room owner's service."""
-        settings = self.config.personal_rooms
-        if settings is None or source_room_id not in resolve_room_aliases(
-            settings.onboarding_rooms,
-            self.runtime_paths,
-        ):
-            return
-        if not is_human_requester_id(user_id, self.config, self.runtime_paths):
-            return
-        target = self._personal_room_target()
-        if target is None or target.client is None or self.client is None:
-            msg = "Personal-room target is not ready"
-            raise RuntimeError(msg)
-        await target.personal_rooms.ensure(user_id, source_room_id, self.client)
-
-    async def _handle_personal_room_command(self, room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> bool:
-        """Recognize exact self-onboarding commands using trusted ingress requester APIs."""
-        settings = self.config.personal_rooms
-        if (
-            self.agent_name != ROUTER_AGENT_NAME
-            or settings is None
-            or event.body.strip() not in settings.commands
-            or room.room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
-        ):
-            return False
-        requester = self._ingress_validator.requester_user_id(sender=event.sender, source=event.source)
-        if is_human_requester_id(
-            event.sender,
-            self.config,
-            self.runtime_paths,
-        ) and requester == resolve_human_requester_alias(
-            event.sender,
-            self.config,
-            self.runtime_paths,
-        ):
-            await self._onboard_personal_room(event.sender, room.room_id)
-        return True
-
-    async def _reconcile_personal_rooms(self) -> None:
-        """Retry existing lifecycle records and optionally backfill current lobby members."""
-        target = self._personal_room_target()
-        if self._personal_rooms_reconciled or target is None or target.client is None or not target.first_sync_complete:
-            return
-        settings = self.config.personal_rooms
-        assert settings is not None
-        assert self.client is not None
-        candidates = {
-            (record.user_id, record.source_room_id)
-            for record in personal_room_records(self.runtime_paths, settings.agent)
-        }
-        if settings.backfill:
-            for room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths):
-                members = await get_room_members(self.client, room_id)
-                if members is None:
-                    msg = "Personal-room backfill membership unavailable"
-                    raise RuntimeError(msg)
-                candidates.update((user_id, room_id) for user_id in members)
-        for user_id, room_id in sorted(candidates):
-            await self._onboard_personal_room(user_id, room_id)
-        self._personal_rooms_reconciled = True
+        target = cast("dict[str, object]", bots).get(agent_name)
+        if not isinstance(target, AgentBot) or target.client is None:
+            return None
+        return PersonalRoomTarget(target.personal_rooms, target.first_sync_complete)
 
     async def _reconcile_reply_membership_effects(self) -> None:
         """Run effects that depend on one committed reply-membership change."""

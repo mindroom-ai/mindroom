@@ -18,6 +18,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import EventClass, EventKind
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.handled_turns import TurnRecord
@@ -445,10 +446,10 @@ async def test_self_command_ignores_forged_requester_and_argument(
             },
         },
     )
-    assert await router._handle_personal_room_command(room, event)
+    assert await router._on_message(room, event) is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert [record.user_id for record in personal_room_records(router.runtime_paths, "helper")] == ["@alice:localhost"]
     event.body = "!personal @bob:localhost"
-    assert not await router._handle_personal_room_command(room, event)
+    assert not await router._personal_room_lifecycle.handle_command(room, event)
     assert server.create_count == 1
 
 
@@ -457,7 +458,7 @@ async def test_optional_backfill_and_cleanup_retention(tmp_path: Path, monkeypat
     """Backfill creates both rooms and ordinary cleanup retains them after disabling."""
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch, backfill=True)
-    await router._reconcile_personal_rooms()
+    await router._personal_room_lifecycle.reconcile()
     assert server.create_count == 2
     target.config.personal_rooms = None
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=list(server.state)))
@@ -478,9 +479,17 @@ async def test_retention_recovers_create_before_local_receipt(tmp_path: Path, mo
 
     monkeypatch.setattr("mindroom.matrix.personal_rooms.write_personal_room", fail_room_receipt)
     with pytest.raises(OSError, match="interrupted"):
-        await router._onboard_personal_room("@alice:localhost", "!lobby:localhost")
+        await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=list(server.state)))
     assert await target._room_lifecycle._rooms_to_leave() == []
+    # Alias resolution protects cleanup, but a missing room receipt cannot authorize a join.
+    target.config.personal_rooms = None
+    server.rooms.clear()
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
+    join_room = AsyncMock()
+    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
+    await target._room_lifecycle.join_configured_rooms()
+    join_room.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -561,7 +570,7 @@ async def test_default_backfill_does_not_create_for_existing_members(
     """Default startup touches only existing lifecycle records."""
     server = MatrixServer()
     router, _ = bots(tmp_path, server, monkeypatch)
-    await router._reconcile_personal_rooms()
+    await router._personal_room_lifecycle.reconcile()
     assert not server.state
 
 
@@ -570,11 +579,11 @@ async def test_config_reload_enables_backfill(tmp_path: Path, monkeypatch: pytes
     """A previously disabled backfill must run after an ordinary config reload."""
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch)
-    await router._reconcile_personal_rooms()
+    await router._personal_room_lifecycle.reconcile()
     config = personal_config(backfill=True)
     router.config = config
     target.config = config
-    await router._reconcile_personal_rooms()
+    await router._personal_room_lifecycle.reconcile()
     assert server.create_count == 2
 
 
@@ -587,7 +596,7 @@ async def test_private_welcome_requester_reaches_existing_ingress(
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch, welcome_dispatch=True)
     target.config.agents["helper"].private = AgentPrivateConfig(per="user")
-    await router._onboard_personal_room("@alice:localhost", "!lobby:localhost")
+    await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     server.set_member("!personal1:localhost", "@alice:localhost", "join")
     await target.personal_rooms.member_joined("!personal1:localhost", "@alice:localhost")
     content = next(iter(server.messages.values()))["content"]
@@ -818,7 +827,7 @@ async def test_router_retains_explicitly_adopted_membership_after_disable(
     """An adopted router member survives cleanup even after onboarding is disabled."""
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch)
-    await router._onboard_personal_room("@alice:localhost", "!lobby:localhost")
+    await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     room_id = "!personal1:localhost"
     path = personal_room_record_path(router.runtime_paths, "helper", "@alice:localhost")
     data = read_personal_room(path).model_dump()
@@ -945,11 +954,11 @@ async def test_self_command_accepts_human_bridge_alias_without_trusting_forged_r
         },
     )
     room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
-    assert await router._handle_personal_room_command(room, event)
+    assert await router._on_message(room, event) is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert [record.user_id for record in personal_room_records(router.runtime_paths, "helper")] == [
         "@bridge_alice:localhost",
     ]
-    await router._onboard_personal_room(event.sender, room.room_id)
+    await router._personal_room_lifecycle._onboard(event.sender, room.room_id)
     assert server.create_count == 1
 
 
@@ -965,7 +974,7 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     settings = {} if welcome is None else {"welcome": welcome}
     router, target = bots(tmp_path, server, monkeypatch, welcome_dispatch=True, **settings)
     target.config.agents["helper"].private = AgentPrivateConfig(per="user")
-    await router._onboard_personal_room("@alice:localhost", "!lobby:localhost")
+    await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     room_id = "!personal1:localhost"
     server.set_member(room_id, "@alice:localhost", "join")
     await target.personal_rooms.member_joined(room_id, "@alice:localhost")
@@ -1044,7 +1053,7 @@ async def test_self_command_rejects_service_account_original_sender_relays(
         },
     )
     room = nio.MatrixRoom("!lobby:localhost", router.agent_user.user_id)
-    assert await router._handle_personal_room_command(room, event)
+    assert await router._personal_room_lifecycle.handle_command(room, event)
     assert server.create_count == 0
 
 
@@ -1099,7 +1108,7 @@ async def test_bot_personal_service_observes_target_config_reload(
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch, welcome="Before")
     target.config = personal_config(welcome="After")
-    await router._onboard_personal_room("@alice:localhost", "!lobby:localhost")
+    await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     assert next(iter(server.messages.values()))["content"]["body"] == "After"
 
 
