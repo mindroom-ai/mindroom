@@ -105,6 +105,6 @@ def agentql_tools() -> type[AgentQLTools]:
     """Return AgentQL tools for AI-powered web scraping."""
     _ensure_agentql_playwright_stealth_compat()
 
-    from agno.tools.agentql import AgentQLTools
+    from mindroom.custom_tools.agno_compat_agentql import MindRoomAgentQLTools
 
-    return AgentQLTools
+    return MindRoomAgentQLTools

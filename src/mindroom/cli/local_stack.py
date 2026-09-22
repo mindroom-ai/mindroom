@@ -40,7 +40,7 @@ def local_stack_setup(
     synapse_dir: Path = typer.Option(  # noqa: B008
         Path("local/matrix"),
         "--synapse-dir",
-        help="Directory containing Synapse docker-compose.yml (from mindroom-stack settings).",
+        help="Directory containing Synapse docker-compose.yml (core MindRoom repo: local/matrix).",
     ),
     homeserver_url: str = typer.Option(
         "http://localhost:8008",

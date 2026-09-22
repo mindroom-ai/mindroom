@@ -122,6 +122,7 @@ eventCache:
       tag: "17"
       pullPolicy: IfNotPresent
     service:
+      # Shared by the PostgreSQL listener, probes, Service, and generated connection URL.
       port: 5432
       annotations: {}
     auth:

@@ -246,7 +246,7 @@ docker logs default-telegram-bridge
 - `data/registration.yaml` - Contains authentication tokens
 - `*.db` - Database files
 
-The `bridge_instances.json` file is automatically added to `.gitignore`.
+The generated `local/instances/deploy/bridge_instances.json` registry is covered by the `.gitignore` beside `bridge.py`.
 
 ## Support
 
