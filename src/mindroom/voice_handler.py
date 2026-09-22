@@ -571,10 +571,9 @@ async def _process_transcription(
         Formatted message with proper mentions and cleanup
 
     """
+    agent_names = available_agent_names if available_agent_names is not None else list(config.agents.keys())
+    team_names = available_team_names if available_team_names is not None else list(config.teams.keys())
     try:
-        # Get list of available agents and teams
-        agent_names = available_agent_names if available_agent_names is not None else list(config.agents.keys())
-        team_names = available_team_names if available_team_names is not None else list(config.teams.keys())
         agent_display_names = {name: config.agents[name].display_name for name in agent_names if name in config.agents}
         team_display_names = {name: config.teams[name].display_name for name in team_names if name in config.teams}
         registry = entity_identity_registry(config, runtime_paths)
@@ -631,7 +630,7 @@ async def _process_transcription(
                 "voice_transcription_normalizer_timeout",
                 timeout_seconds=_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS,
             )
-            return transcription
+            response = None
 
         # Extract the content from the response
         if response and response.content:
@@ -642,15 +641,15 @@ async def _process_transcription(
                 runtime_paths=runtime_paths,
             )
 
-    except Exception as e:
+    except Exception:
         logger.exception("Error processing transcription")
-        # Return error message so user knows what happened
-        from mindroom.error_handling import get_user_friendly_error_message  # noqa: PLC0415
 
-        return get_user_friendly_error_message(e, "VoiceProcessor")
-    else:
-        # Return original transcription if no valid response from model
-        return transcription
+    return _sanitize_unavailable_mentions(
+        transcription,
+        allowed_entities=set(agent_names) | set(team_names),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
 
 def _get_available_entities_for_sender(

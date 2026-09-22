@@ -16273,6 +16273,7 @@ MindRoom can surface Matrix voice messages as attachment-aware prompts for agent
 If STT is configured, MindRoom also transcribes the audio and routes it through the normal text pipeline.
 If STT is unavailable, disabled, or fails after media registration succeeds, the audio remains available as an attachment and falls back to `🎤 [Attached voice message]`.
 If media download itself fails, dispatch continues with that text-only fallback and no attachment metadata.
+If optional transcript cleanup fails or times out, MindRoom uses the recognized transcript without additional normalization.
 
 ## Overview
 
