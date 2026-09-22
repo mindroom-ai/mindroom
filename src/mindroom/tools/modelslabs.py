@@ -104,9 +104,10 @@ if TYPE_CHECKING:
 def modelslabs_tools() -> type[ModelsLabTools]:
     """Return ModelsLabs tool for AI-powered media generation."""
     from agno.models.response import FileType
-    from agno.tools.models_labs import ModelsLabTools
 
-    class MindRoomModelsLabTools(ModelsLabTools):
+    from mindroom.tools.agno_compat_modelslabs import ModelsLabCompletionTools
+
+    class MindRoomModelsLabTools(ModelsLabCompletionTools):
         """ModelsLab toolkit that accepts authored string file types."""
 
         def __init__(

@@ -451,7 +451,13 @@ image_to_video(
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
 For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
-If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint until the media is ready or the timeout is reached.
+If `wait_for_completion` is enabled and the response includes an integer ETA and a provider job ID, the tool polls that job at the provider fetch endpoint.
+Confirmed completion returns a success message; a provider error returns its message, and an exhausted wait reports a timeout while retaining queued media links.
+A timeout does not mean the remote job failed.
+If a queued response lacks the ID or integer ETA needed for polling, the tool reports that completion could not be checked.
+With completion waiting enabled, generation and fetch requests each use 60-second connect and read timeouts.
+These limit connection establishment and waiting for response bytes, not the overall wall-clock duration.
+HTTP request time remains additional to the polling-attempt budget.
 
 ### Configuration
 
@@ -463,8 +469,8 @@ If `wait_for_completion` is enabled, the tool polls the provider fetch endpoint 
 | `width` | `number` | `no` | `512` | Image or video width. |
 | `height` | `number` | `no` | `512` | Image or video height. |
 | `wait_for_completion` | `boolean` | `no` | `false` | Poll the provider fetch endpoint until the output is ready. |
-| `add_to_eta` | `number` | `no` | `15` | Extra seconds added to the provider ETA before timing out. |
-| `max_wait_time` | `number` | `no` | `60` | Maximum total wait time in seconds. |
+| `add_to_eta` | `number` | `no` | `15` | Extra one-second polling attempts added to the provider ETA, capped by `max_wait_time`. |
+| `max_wait_time` | `number` | `no` | `60` | Cap on one-second polling attempts; HTTP request time is additional. |
 
 ### Example
 
@@ -486,7 +492,9 @@ generate_media("A looping animation of messages flowing through a Matrix bridge.
 
 - Despite the broad provider branding, the current wrapper exposes one opinionated `generate_media()` path rather than a generic arbitrary-model interface.
 - MP4 and GIF generation use a provider-side video template whose model and dimensions can be overridden with `model_id`, `width`, and `height`.
-- Returned media are provider URLs, and the success message usually includes the provider ETA rather than immediate ready-to-view bytes.
+- Returned media are provider URLs.
+- Without completion waiting, the response retains the provider ETA; queued URLs may not be ready yet.
+- Local media artifact IDs remain separate from the provider job ID used for completion polling.
 
 ## Related Docs
 
