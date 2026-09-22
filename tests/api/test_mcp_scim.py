@@ -223,6 +223,79 @@ def test_success_and_authentication_failure_do_not_log_validation_diagnostics(cl
 
 
 @pytest.mark.parametrize(
+    ("fields", "value_type", "count", "recognized", "unknown", "non_strings"),
+    [
+        ({}, "missing", None, [], 0, 0),
+        ({"schemas": None}, "NoneType", None, [], 0, 1),
+        ({"schemas": USER_SCHEMA}, "str", None, [USER_SCHEMA], 0, 0),
+        ({"schemas": []}, "list", 0, [], 0, 0),
+        ({"schemas": [USER_SCHEMA, USER_SCHEMA]}, "list", 2, [USER_SCHEMA], 0, 0),
+        ({"schemas": ["urn:scim:schemas:core:1.0"]}, "list", 1, ["urn:scim:schemas:core:1.0"], 0, 0),
+        (
+            {"schemas": [USER_SCHEMA, "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"]},
+            "list",
+            2,
+            [USER_SCHEMA, "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"],
+            0,
+            0,
+        ),
+        ({"schemas": [PATCH_SCHEMA]}, "list", 1, [PATCH_SCHEMA], 0, 0),
+        ({"schemas": ["private-schema-marker"] * 1000}, "list", 1000, [], 1000, 0),
+        ({"schemas": [{"private-key": "private-value"}, 3, None, True]}, "list", 4, [], 0, 4),
+        ({"schemas": {"private-key": "private-value"}}, "dict", None, [], 0, 1),
+    ],
+)
+def test_schema_diagnostics_identify_shape_without_logging_arbitrary_values(
+    client: TestClient,
+    fields: dict[str, object],
+    value_type: str,
+    count: int | None,
+    recognized: list[str],
+    unknown: int,
+    non_strings: int,
+) -> None:
+    """Schema failures expose bounded standard identifiers, never arbitrary request values."""
+    account = _create(client).json()
+    path = BASE + "/Users/" + account["id"]
+    with capture_logs() as logs:
+        response = client.put(path, json={"userName": "private-profile@example.org", "active": False, **fields})
+
+    assert response.status_code == 400
+    assert client.get(path).json() == account
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0] == {
+        "event": "SCIM schema validation failed",
+        "log_level": "warning",
+        "method": "PUT",
+        "expected_schema": USER_SCHEMA,
+        "schemas_type": value_type,
+        "schemas_count": count,
+        "recognized_schemas": recognized,
+        "unknown_schema_count": unknown,
+        "non_string_schema_count": non_strings,
+    }
+    encoded = json.dumps(logs) + response.text
+    for private in (TOKEN, account["id"], "private-profile", "private-schema-marker", "private-key", "private-value"):
+        assert private not in encoded
+
+
+def test_schema_diagnostics_require_authentication_and_leave_valid_requests_quiet(client: TestClient) -> None:
+    """Schema metadata is logged only for authenticated schema failures, including PATCH envelopes."""
+    with capture_logs() as logs:
+        account = _create(client).json()
+        path = BASE + "/Users/" + account["id"]
+        assert client.patch(path, json={"schemas": [USER_SCHEMA], "Operations": []}).status_code == 400
+        client.headers.pop("Authorization")
+        assert _create(client, schemas=["private-schema-marker"]).status_code == 401
+    diagnostics = [entry for entry in logs if entry["event"] == "SCIM schema validation failed"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["method"] == "PATCH"
+    assert diagnostics[0]["expected_schema"] == PATCH_SCHEMA
+    assert diagnostics[0]["recognized_schemas"] == [USER_SCHEMA]
+
+
+@pytest.mark.parametrize(
     "query",
     [
         {"filter": "active eq true"},

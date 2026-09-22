@@ -21295,6 +21295,11 @@ Update email entries through the whole `emails` attribute; dotted email subattri
 An unsupported operation rolls back the entire PATCH, including any accompanying deactivation.
 Configure and test the connector's actual update and deactivation payloads against this profile before relying on provisioning for offboarding.
 
+Rejected schema declarations emit a `SCIM schema validation failed` warning with the expected schema, submitted value type and count, recognized standard schemas, and counts of unknown strings and non-string values.
+Only allowlisted public schema identifiers are logged; arbitrary schema strings, profile data, account identifiers, and credentials are omitted.
+Use these diagnostics to distinguish a missing or malformed `schemas` value from a SCIM 1.1 declaration, a wrong operation schema, or an additional enterprise schema.
+Diagnostics do not change which requests the restricted lifecycle profile accepts.
+
 Use the base URL `https://assistant.example.org/mcp/scim/v2` with the dedicated bearer token in a compatible custom SCIM connector.
 In built-in mode, provision an active test user, approve an MCP client through the existing portal login, then deactivate the provisioned user and verify that token refresh, tool use, and further consent are rejected.
 Account deactivation, user-name changes, and deletion remove all bound grants and pending consent atomically.

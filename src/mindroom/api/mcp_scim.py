@@ -35,6 +35,15 @@ _BASE = "/mcp/scim/v2"
 _CORE = "urn:ietf:params:scim:schemas:core:2.0:"
 _MESSAGES = "urn:ietf:params:scim:api:messages:2.0:"
 _USER_SCHEMA = _CORE + "User"
+# Only these public identifiers may be included in schema diagnostics.
+_DIAGNOSTIC_SCHEMAS = frozenset(
+    {
+        _USER_SCHEMA,
+        _MESSAGES + "PatchOp",
+        "urn:scim:schemas:core:1.0",
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User",
+    },
+)
 _HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
 _MAX_BODY = 65_536
 _FILTER = re.compile(r'\s*(userName|emails\.value|id)\s+eq\s+("(?:[^"\\]|\\.)*")\s*', re.IGNORECASE)
@@ -143,7 +152,20 @@ async def _body(request: Request, schema: str) -> dict[str, Any]:
         fields = canonical_fields(value)
     except (ValueError, RecursionError) as error:
         raise AccountValidationError from error
-    if fields.get("schemas") != [schema]:
+    schemas = fields.get("schemas")
+    if schemas != [schema]:
+        entries = schemas if isinstance(schemas, list) else [schemas] if "schemas" in fields else []
+        strings = [entry for entry in entries if isinstance(entry, str)]
+        logger.warning(
+            "SCIM schema validation failed",
+            method=request.method,
+            expected_schema=schema,
+            schemas_type=type(schemas).__name__ if "schemas" in fields else "missing",
+            schemas_count=len(schemas) if isinstance(schemas, list) else None,
+            recognized_schemas=sorted(_DIAGNOSTIC_SCHEMAS.intersection(strings)),
+            unknown_schema_count=sum(entry not in _DIAGNOSTIC_SCHEMAS for entry in strings),
+            non_string_schema_count=len(entries) - len(strings),
+        )
         raise AccountValidationError
     return fields
 
