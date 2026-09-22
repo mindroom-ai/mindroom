@@ -34,6 +34,7 @@ from mindroom.recurring_schedule import (
     complete_recurring_occurrence,
     plan_recurring_occurrence,
 )
+from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 
 if TYPE_CHECKING:
@@ -723,33 +724,48 @@ async def _get_pending_task_record(
     return task_record
 
 
-async def _scheduled_task_creator_is_joined(client: nio.AsyncClient, task: ScheduledTaskRecord) -> bool:
-    """Check current Matrix membership without trusting a partial or stale room cache."""
+async def _scheduled_task_creator_is_joined(
+    client: nio.AsyncClient,
+    task: ScheduledTaskRecord,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Check live membership for the creator or a permitted human alias."""
     creator = task.workflow.created_by
     if not creator:
         return True
-    try:
-        response = await client.room_get_state_event(
-            room_id=task.room_id,
-            event_type="m.room.member",
-            state_key=creator,
-        )
-    except Exception as exc:
-        msg = f"Failed to read schedule creator membership for {creator!r} in room {task.room_id!r}"
-        raise _ScheduledTaskStateReadError(msg) from exc
-    if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
-        membership = response.content.get("membership")
-        if membership in ("join", "leave", "ban", "invite", "knock"):
-            return membership == "join"
-    # Errors (including missing/inaccessible state) do not prove a departure.
-    msg = f"Could not establish schedule creator membership for {creator!r} in room {task.room_id!r}"
-    raise _ScheduledTaskStateReadError(msg)
+    requester_ids = equivalent_requester_ids(creator, config, runtime_paths)
+    membership_unknown = False
+    for requester_id in sorted(requester_ids, key=lambda user_id: (user_id != creator, user_id)):
+        try:
+            response = await client.room_get_state_event(
+                room_id=task.room_id,
+                event_type="m.room.member",
+                state_key=requester_id,
+            )
+        except Exception:
+            membership_unknown = True
+            continue
+        if isinstance(response, nio.RoomGetStateEventResponse) and isinstance(response.content, dict):
+            membership = response.content.get("membership")
+            if membership == "join":
+                return True
+            if membership in ("leave", "ban", "invite", "knock"):
+                continue
+        # Errors (including missing/inaccessible state) do not prove a departure.
+        membership_unknown = True
+    if membership_unknown:
+        msg = f"Could not establish schedule creator membership for {creator!r} in room {task.room_id!r}"
+        raise _ScheduledTaskStateReadError(msg)
+    return False
 
 
 async def _reconcile_runnable_task_retrying(
     client: nio.AsyncClient,
     room_id: str,
     task_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
     matrix_admin: HookMatrixAdmin | None = None,
 ) -> ScheduledTaskRecord | None:
     """Return runnable state, cancelling departed creators' tasks and retrying uncertainty."""
@@ -760,7 +776,7 @@ async def _reconcile_runnable_task_retrying(
             if task is None:
                 return None
             if departed_task != task:
-                if await _scheduled_task_creator_is_joined(client, task):
+                if await _scheduled_task_creator_is_joined(client, task, config, runtime_paths):
                     return task
                 departed_task = task
 
@@ -1111,6 +1127,8 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 client=client,
                 room_id=task_room_id,
                 task_id=task_id,
+                config=config,
+                runtime_paths=runtime_paths,
                 matrix_admin=matrix_admin,
             )
             if not latest_task:
@@ -1157,6 +1175,8 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         client=client,
                         room_id=task_room_id,
                         task_id=task_id,
+                        config=config,
+                        runtime_paths=runtime_paths,
                         matrix_admin=matrix_admin,
                     )
                     if not refreshed_task:
@@ -1181,6 +1201,8 @@ async def _run_cron_task(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     client=client,
                     room_id=task_room_id,
                     task_id=task_id,
+                    config=config,
+                    runtime_paths=runtime_paths,
                     matrix_admin=matrix_admin,
                 )
                 if not latest_before_execute:
@@ -1268,6 +1290,8 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
                 client=client,
                 room_id=task_room_id,
                 task_id=task_id,
+                config=config,
+                runtime_paths=runtime_paths,
                 matrix_admin=matrix_admin,
             )
             if not latest_task:
@@ -1293,6 +1317,8 @@ async def _run_once_task(  # noqa: C901, PLR0912, PLR0915
             client=client,
             room_id=task_room_id,
             task_id=task_id,
+            config=config,
+            runtime_paths=runtime_paths,
             matrix_admin=matrix_admin,
         )
         if not latest_before_execute:

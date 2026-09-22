@@ -9,9 +9,11 @@ Schedule agents or teams to perform tasks at specific times or intervals using n
 By default, tasks run in the same scope where they were created: the room timeline for room-level schedules, or the current thread for threaded schedules.
 The `schedule()` tool accepts `new_thread=True` to start a fresh thread per fire: each fire posts a room-level root and the responding agent answers in a new thread under it with a fresh session.
 
-Schedules with a recorded creator are automatically canceled when that creator leaves or is removed from the room, including when account deactivation removes their room membership.
+Schedules with a recorded creator are automatically canceled once live membership checks confirm that neither the creator nor any permitted human alias is joined to the room.
+Configured bot accounts and managed identities do not count as human aliases.
 The scheduler checks membership every 30 seconds while waiting and again before execution, including after a restart.
-If membership cannot be verified, execution waits for a successful lookup.
+A confirmed join for any equivalent human identity permits execution; otherwise, uncertain membership makes execution wait for a successful lookup.
+Each running schedule uses the alias configuration captured when its runner started; an authorization-only hot reload leaves that snapshot unchanged until the runner is recreated, such as after a restart.
 Legacy schedules without a recorded creator remain usable.
 
 ## Commands
