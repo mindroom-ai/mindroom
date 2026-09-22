@@ -51,7 +51,7 @@ def reset_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _reset(root: Path) -> subprocess.CompletedProcess[str]:
     just = shutil.which("just")
     if just is None:
-        pytest.skip("The just executable is required to exercise the reset recipe")
+        pytest.fail("Install just to run the reset recipe regressions (included in shell.nix)")
     return subprocess.run([just, "local-matrix-reset"], cwd=root, capture_output=True, text=True, check=False)
 
 

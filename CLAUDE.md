@@ -699,6 +699,7 @@ just local-matrix-up              # Boot Synapse + Postgres dev stack
 just local-platform-compose-up    # Full SaaS sandbox
 
 # Testing (IMPORTANT: enter the Node.js 24 `nix-shell shell.nix` first on NixOS hosts)
+# Recipe regression tests require just; shell.nix and CI install it.
 # If `uv run pytest` fails with 'module mindroom has no attribute bot',
 # use the repo dev shell so `libstdc++.so.6` is available:
 nix-shell shell.nix
