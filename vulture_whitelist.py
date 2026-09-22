@@ -403,6 +403,7 @@ delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
 _.require_adoption_room_id  # Pydantic model validator for explicit personal-room adoption
 
+_.embed_captions  # MoviePyVideoTools registers this caption-style override dynamically.
 # AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.
 _.scrape_website
 _.custom_scrape_website

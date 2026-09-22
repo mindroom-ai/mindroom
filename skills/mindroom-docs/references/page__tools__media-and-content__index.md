@@ -38,6 +38,9 @@ MindRoom treats `spotify` as a shared-only integration, so dashboard credential 
 Despite the `enable_process_video` config name, the current upstream method it enables is specifically `extract_audio()`, not a general-purpose video editing surface.
 `create_srt()` writes the provided transcription text directly to disk, so it expects the caller to already have SRT-formatted content.
 `embed_captions()` reads an SRT file, converts it to word timings, and renders word-highlighted captions onto a new MP4 output.
+`font_size` sets the pixel size of words and spaces; `font_color` sets the base text color, while the active word remains yellow.
+`stroke_color` and `stroke_width` apply to both base and highlighted words, with `stroke_width=0` disabling the outline.
+Caption boxes follow the rendered text height and align to the video bottom; a word or caption block that cannot fit at the requested size returns an error without replacing the output.
 This tool works entirely on local files, so it is only useful when the agent runtime can read the source media and write the output paths.
 
 ### Configuration
