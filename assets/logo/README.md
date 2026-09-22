@@ -36,7 +36,7 @@ The `logo-mark.svg` and `logo-mark-animated.svg` exports tightly frame the stati
 | `app-glass-material.svg` | Editable refraction filter, glowing panes, and glass tile lighting for the dark app icon. |
 | `social-preview.png` | AI-rendered ivory social card with a centered glass M and lowercase wordmark. |
 | `social-preview.prompt.md` | Sunburst model and prompts used for the social artwork. |
-| `menu-bar.svg` | Monochrome M source for the macOS menu bar's 18- and 36-pixel template images. |
+| `menu-bar.svg` | Optional monochrome outline variant of the M. |
 | `preview.html` | Browser preview with a pause/play control. |
 | `reference.png` | Cleaned raster design used as the lighting reference. |
 | `test_geometry.py` | Regression checks for closed junctions and angled terminal cuts. |
@@ -108,7 +108,7 @@ The dark icon takes inspiration from [Kube's liquid-glass article](https://kube.
 Directional specular highlights and broad cyan glows give the panes depth, while an inset illuminated rim defines the dark glass tile.
 This is a static approximation baked into the exported PNG, with no browser backdrop filter, embedded bitmap, or runtime effect.
 The native macOS app bundles the mark SVG and its matching PNG; AppKit uses the PNG to preserve the SVG's masked shading.
-Its menu bar icon uses dedicated 18- and 36-pixel renders of the outlined M and cube, with transparent interiors and automatic AppKit template tinting.
+Its menu bar icon uses dedicated 20- and 40-pixel renders of the full-color mark, preserving the original blue-and-gold shading without AppKit template tinting.
 The portal's public logo aliases resolve within its own public directory so container builds retain them.
 Application assets use the static version except for the connections page, which imports the existing `assets/logo/logo-mark-animated.svgz` directly.
 The frontend build bundles that compressed asset, and the backend and Vite servers send it with SVG and gzip response headers.
