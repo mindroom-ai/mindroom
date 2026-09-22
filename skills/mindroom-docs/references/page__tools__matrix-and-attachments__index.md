@@ -427,6 +427,7 @@ matrix_api(
 `view_file(attachment_id="att_...")` views an authorized conversation attachment without a registration/fetch sequence.
 Supply exactly one source; keep `read_file` for ordinary text and code.
 Workspace paths resolve inside the selected worker, or inside the configured workspace in local execution mode.
+Worker-routed viewing uses the same configured workspace as shell and file tools, even when the primary and worker mount storage at different paths.
 PNG, JPEG, GIF and WebP inputs are supported up to 20 MiB and 40 million pixels.
 The delivered image is bounded to 2048 pixels on its longest edge and 5 MiB; resizing, conversion, and first-frame-only animation handling are disclosed in metadata.
 Transparent images retain their transparency; images that cannot fit the payload limit return an explicit error while preserving the source artifact.

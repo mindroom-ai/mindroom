@@ -534,6 +534,7 @@ class SandboxRunnerViewFileRequest(BaseModel):
     routing_agent_name: str | None = None
     execution_identity: dict[str, Any] = Field(default_factory=dict)
     private_agent_names: list[str] | None = None
+    tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
     path: str
 
 
@@ -1715,7 +1716,7 @@ async def view_file_in_worker(
         try:
             prepared_worker = sandbox_worker_prep.prepare_worker_request(
                 worker_key=payload.worker_key,
-                tool_init_overrides={},
+                tool_init_overrides=payload.tool_init_overrides,
                 runtime_paths=runtime_paths,
                 private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
                 runner_token=runner_token,
