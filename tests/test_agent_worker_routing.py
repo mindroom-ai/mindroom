@@ -331,3 +331,19 @@ async def test_dedicated_routing_preserves_requester_isolation(
         assert alice.execution_identity.requester_id == "@alice:example.com"
         assert bob.execution_identity is not None
         assert bob.execution_identity.requester_id == "@bob:example.com"
+
+
+@pytest.mark.parametrize("backend", ["static_runner", "docker", "kubernetes"])
+def test_unknown_execution_mode_rejected_before_tool_materialization(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    """A typo must not silently make an isolation configuration execute locally."""
+    with pytest.raises(ValueError, match="MINDROOM_SANDBOX_EXECUTION_MODE"):
+        _create_routing_agent(
+            tmp_path,
+            {
+                "MINDROOM_WORKER_BACKEND": backend,
+                "MINDROOM_SANDBOX_EXECUTION_MODE": "sandobx_all",
+            },
+        )

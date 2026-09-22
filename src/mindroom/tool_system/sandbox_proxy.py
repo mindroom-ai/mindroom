@@ -219,6 +219,10 @@ def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
     normalized = raw.strip().lower()
     if not normalized:
         return None
+    supported = _SANDBOX_ALL_EXECUTION_MODES | _SANDBOX_SELECTIVE_EXECUTION_MODES | _UNSAFE_LOCAL_EXECUTION_MODES
+    if normalized not in supported:
+        msg = f"Invalid MINDROOM_SANDBOX_EXECUTION_MODE {raw!r}; expected one of {', '.join(sorted(supported))}"
+        raise ValueError(msg)
     return normalized
 
 
