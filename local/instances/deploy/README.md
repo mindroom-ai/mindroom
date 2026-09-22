@@ -71,6 +71,8 @@ This will start:
 - Authelia authentication server if enabled
 - PostgreSQL and Redis (if using Synapse)
 
+Before starting the sandbox runner, Compose initializes its scratch volume ownership using `UID` and `GID` (both default to `1000`).
+
 ### 4. Access Your Instance
 
 After starting, these direct host-port endpoints are exposed on the host:

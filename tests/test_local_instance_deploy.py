@@ -551,3 +551,79 @@ def test_matrix_only_start_excludes_runtime_and_sandbox(
     selected = set(deploy._get_services_to_start(instance, only_matrix=True).split())
     assert matrix_type.value in selected
     assert selected.isdisjoint({"mindroom", "sandbox-runner", "authelia"})
+
+
+def test_sandbox_runner_waits_for_workspace_ownership() -> None:
+    """The configured non-root runner must wait for isolated volume initialization."""
+    compose = yaml.safe_load(Path("local/instances/deploy/docker-compose.yml").read_text())
+    services = compose["services"]
+    runner = services["sandbox-runner"]
+
+    assert runner.get("depends_on", {}).get("sandbox-workspace-init") == {
+        "condition": "service_completed_successfully",
+    }
+    initializer = services["sandbox-workspace-init"]
+    assert initializer["user"] == "0:0"
+    assert initializer["command"] == ["chown", "-R", "${UID:-1000}:${GID:-1000}", "/app/workspace"]
+    assert runner["user"] == "${UID:-1000}:${GID:-1000}"
+    assert initializer["volumes"] == runner["volumes"] == ["sandbox-workspace:/app/workspace"]
+    assert initializer["image"] == runner["image"]
+    assert initializer["build"] == runner["build"]
+    assert initializer["restart"] == "no"
+    assert initializer["network_mode"] == "none"
+    assert "env_file" not in initializer
+
+
+@pytest.mark.parametrize("force_recreate", [False, True], ids=["start", "restart"])
+def test_failed_sandbox_initialization_preserves_instance_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_recreate: bool,
+) -> None:
+    """A failed Compose initialization must not publish the instance as running."""
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    (env_dir / "alpha.env").write_text("INSTANCE_NAME=alpha\n")
+    registry_file = tmp_path / "instances.json"
+    monkeypatch.setattr(deploy, "ENV_DIR", env_dir)
+    monkeypatch.setattr(deploy, "REGISTRY_FILE", registry_file)
+    instance = _instance("alpha", matrix_type=None, data_root=tmp_path)
+    instance.status = deploy.InstanceStatus.STOPPED
+    registry = deploy.Registry(instances={"alpha": instance})
+    deploy.save_registry(registry)
+    original_registry = registry_file.read_bytes()
+    commands: list[str] = []
+
+    def _run(cmd: str, **_kwargs: object) -> SimpleNamespace:
+        commands.append(cmd)
+        if cmd == "docker network inspect mynetwork" or cmd.startswith("docker ps --filter network=mynetwork "):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        assert " up -d" in cmd
+        assert cmd.endswith(" mindroom sandbox-runner")
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr='service "sandbox-workspace-init" did not complete successfully: exit 1',
+        )
+
+    monkeypatch.setattr(deploy.subprocess, "run", _run)
+
+    with pytest.raises(deploy.typer.Exit) as exc_info:
+        deploy._bring_up_instance(
+            "alpha",
+            instance,
+            registry,
+            only_matrix=False,
+            use_registry=False,
+            registry_url=deploy.DEFAULT_REGISTRY,
+            no_build=True,
+            status_message="Starting instance...",
+            success_verb="started",
+            force_recreate=force_recreate,
+        )
+
+    assert exc_info.value.exit_code == 1
+    assert len(commands) == 3
+    assert (" --force-recreate " in commands[-1]) is force_recreate
+    assert instance.status == deploy.InstanceStatus.STOPPED
+    assert registry_file.read_bytes() == original_registry
