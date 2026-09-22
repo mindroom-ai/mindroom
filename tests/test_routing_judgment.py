@@ -11,6 +11,7 @@ import httpx
 import pytest
 from agno.models.response import ModelResponse
 from pydantic import ValidationError
+from structlog.testing import capture_logs
 
 from mindroom import model_loading, routing
 from mindroom.config.main import Config
@@ -82,7 +83,8 @@ async def test_router_maps_choice_and_only_falls_back_when_needed(
         _config(),
         test_runtime_paths(tmp_path),
     )
-    assert result == expected
+    assert result is not None
+    assert result.entity_name == expected
     assert bool(legacy) is fallback
     assert len(model.requests) == 1
     payload = json.loads(model.requests[0]["messages"][1].content)
@@ -108,7 +110,8 @@ async def test_router_judge_sees_complete_recent_text_and_aliased_speakers(
         test_runtime_paths(tmp_path),
         history,
     )
-    assert result == "code"
+    assert result is not None
+    assert result.entity_name == "code"
     payload = json.loads(model.requests[0]["messages"][1].content)
     state = json.dumps(payload["state"])
     assert "oldest" not in state
@@ -127,8 +130,16 @@ async def test_unsafe_judgment_context_uses_existing_router_without_judge_call(
 ) -> None:
     """Unsafe judgment context uses existing router without judge call."""
     model, legacy = _providers(monkeypatch, '{"decision":"candidate_0"}')
-    result = await routing.suggest_responder(message, ["code", "research"], _config(), test_runtime_paths(tmp_path))
-    assert result == "research"
+    with capture_logs() as logs:
+        result = await routing.suggest_responder(message, ["code", "research"], _config(), test_runtime_paths(tmp_path))
+    failures = [entry for entry in logs if entry.get("failure") == "incomplete_state"]
+    assert len(failures) == 1
+    assert failures[0]["incomplete_reason"] == (
+        "essential_input_redacted" if message.startswith("token=") else "essential_input_too_large"
+    )
+    assert message not in json.dumps(failures)
+    assert result is not None
+    assert result.entity_name == "research"
     assert len(legacy) == 1
     assert model.requests == []
 
@@ -138,7 +149,8 @@ async def test_router_provider_failure_falls_back(tmp_path: Path, monkeypatch: p
     """Router provider failure falls back."""
     _, legacy = _providers(monkeypatch, RuntimeError("provider unavailable"))
     result = await routing.suggest_responder("Help", ["code", "research"], _config(), test_runtime_paths(tmp_path))
-    assert result == "research"
+    assert result is not None
+    assert result.entity_name == "research"
     assert len(legacy) == 1
 
 
@@ -149,7 +161,8 @@ async def test_disabled_judgment_keeps_existing_router(tmp_path: Path, monkeypat
     config = _config()
     config.router.judgment = None
     result = await routing.suggest_responder("Help", ["code", "research"], config, test_runtime_paths(tmp_path))
-    assert result == "research"
+    assert result is not None
+    assert result.entity_name == "research"
     assert len(legacy) == 1
     assert model.requests == []
 
@@ -207,7 +220,8 @@ async def test_typesafe_routing_uses_shared_client_and_fallback(
     )
     config = _config({"provider": "typesafe", "threshold": 0.0 if scenario == "tie" else 0.8})
     result = await routing.suggest_responder("Help with Python", ["code", "research"], config, paths)
-    assert result == ("code" if scenario == "select" else "research")
+    assert result is not None
+    assert result.entity_name == ("code" if scenario == "select" else "research")
     assert bool(legacy) is (scenario != "select")
     assert model.requests == []
     assert len(posted) == (0 if scenario == "missing_key" else 1)

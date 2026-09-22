@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class _RoutingJudgment:
+class ResponderSelection:
     """An accepted selection, including an explicit no-fit outcome."""
 
     entity_name: str | None
@@ -30,7 +30,7 @@ async def judge_responder(
     config: Config,
     runtime_paths: RuntimePaths,
     thread_context: Sequence[ResolvedVisibleMessage] | None,
-) -> _RoutingJudgment | None:
+) -> ResponderSelection | None:
     """Return None to use ordinary routing, or an accepted candidate/no-fit choice."""
     settings = config.router.judgment
     if settings is None or not 2 <= len(candidates) <= 253:
@@ -56,8 +56,6 @@ async def judge_responder(
         messages.append(JudgmentMessage("user", f"Recent conversation ({sender}):\n{item.body}"))
     messages.append(JudgmentMessage("user", f"Current request:\n{message}"))
     request = build_judgment_request(question, tuple(messages), instructions="Select only a supplied option.")
-    if not request.complete:
-        return None
     evaluate = create_choice_evaluator(
         settings,
         config,
@@ -71,6 +69,6 @@ async def judge_responder(
     if result.failure is not None or result.decision is None or result.decision.option == "multiple":
         return None
     if result.decision.option == "no_fit":
-        return _RoutingJudgment(None)
+        return ResponderSelection(None)
     name = choices.get(result.decision.option)
-    return _RoutingJudgment(name) if name is not None else None
+    return ResponderSelection(name) if name is not None else None

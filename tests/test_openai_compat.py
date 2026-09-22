@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from tests.conftest import seed_session
+from tests.participation_helpers import ParticipationModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -48,6 +49,7 @@ from mindroom.api.openai_compat import (
 )
 from mindroom.api.openai_request_parsing import _extract_content_text
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -63,6 +65,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.provider_media_fallback import install_provider_media_fallback
+from mindroom.routing import ResponderSelection
 from mindroom.team_exact_members import ResolvedExactTeamMembers
 from mindroom.teams import TeamMode
 from mindroom.tool_approval import shutdown_approval_runtime
@@ -2698,7 +2701,7 @@ class TestAutoRouting:
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", side_effect=respond),
         ):
-            mock_route.return_value = "code"
+            mock_route.return_value = ResponderSelection("code")
 
             response = app_client.post(
                 "/v1/chat/completions",
@@ -2715,6 +2718,32 @@ class TestAutoRouting:
         assert data["model"] == "code"
         assert data["choices"][0]["message"]["content"] == "Here is your code"
         assert observed == [("code", None)]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_auto_no_fit_does_not_fall_back_to_first_agent(
+        self,
+        app_client: TestClient,
+        test_config: Config,
+        monkeypatch: pytest.MonkeyPatch,
+        stream: bool,
+    ) -> None:
+        """An accepted no-fit returns an error before invoking any response agent."""
+        test_config.router.judgment = LLMJudgmentConfig(provider="llm", model="default")
+        judge = ParticipationModel(ModelResponse(content='{"decision":"no_fit"}'))
+        monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_: judge)
+        with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as response_agent:
+            response = app_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "auto",
+                    "messages": [{"role": "user", "content": "An unsupported request"}],
+                    "stream": stream,
+                },
+            )
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "no_suitable_responder"
+        assert len(judge.requests) == 1
+        response_agent.assert_not_called()
 
     def test_auto_fallback_when_routing_fails(self, app_client: TestClient) -> None:
         """When suggest_responder returns None, falls back to first agent."""
@@ -2743,7 +2772,7 @@ class TestAutoRouting:
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
-            mock_route.return_value = "general"
+            mock_route.return_value = ResponderSelection("general")
             mock_ai.return_value = "Response"
 
             app_client.post(
@@ -2777,7 +2806,7 @@ class TestAutoRouting:
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream),
         ):
-            mock_route.return_value = "research"
+            mock_route.return_value = ResponderSelection("research")
 
             response = app_client.post(
                 "/v1/chat/completions",
@@ -2835,7 +2864,7 @@ class TestAutoRouting:
             patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
             patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai,
         ):
-            mock_route.return_value = "code"
+            mock_route.return_value = ResponderSelection("code")
             mock_ai.return_value = "Response"
 
             app_client.post(

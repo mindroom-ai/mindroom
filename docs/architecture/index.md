@@ -87,7 +87,7 @@ MindRoom's architecture consists of several key components working together.
 | `mid_turn.py` / `mid_turn_judgment.py` | Per-response finish-or-wrap-up judgments for queued human messages, bound to interchangeable LLM or TypeSafe backends |
 | `config/mid_turn.py` | Opt-in agent settings for the mid-turn judgment backend and decision instructions |
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
-| `judgment/` | Backend-independent boolean questions, minimized context, shared execution limits, and LLM/System One adapters |
+| `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, and LLM/System One adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM or TypeSafe judge and map its result to a participation decision |
 | `provider_tool_policy.py` | Task-local restriction enforced by provider adapters before native tools can execute |
 | `groq_model.py` | Groq adapter enforcing provider tool restrictions for Compound systems |
@@ -113,6 +113,7 @@ MindRoom's architecture consists of several key components working together.
 | `visible_voice_echo.py` | Immediate router voice-placeholder delivery, replacement ordering, and deduplication |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `routing.py` | Intelligent agent or team selection when no entity is mentioned |
+| `routing_judgment.py` | Opt-in bounded responder selection through LLM or System One choices, with explicit no-fit outcomes and ordinary routing fallback |
 | `streaming.py` | Streaming state machine and progressive response state |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
 | `provider_media_fallback.py` | Retries provider requests without rejected inline media and remembers unsupported kinds per model route for the process lifetime |

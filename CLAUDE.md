@@ -110,7 +110,7 @@ Matrix sync callback
 | `turn_policy.py` | Pure turn policy: decide ignore, route, or respond for inbound turns |
 | `participation.py` | Framework-independent participation state: one immutable decision, concurrent checks, and approval-preserving settlement |
 | `agno_participation.py` | Agno participation adapter: prepared request checks, primary-run isolation, metrics, and scoped model interception |
-| `judgment/` | Backend-independent boolean questions, minimized context, shared execution limits, and LLM/System One adapters |
+| `judgment/` | Backend-independent boolean and choice questions, minimized context, shared execution limits, and LLM/System One adapters |
 | `participation_judgment.py` | Bind the participation rubric to an opt-in LLM or TypeSafe judge and map its result to a participation decision |
 | `mid_turn.py` | Per-response finish-or-wrap-up decisions over immutable queued-message snapshots |
 | `mid_turn_judgment.py` | Bind the active request and agent settings to the shared LLM or TypeSafe judgment backend |
@@ -158,6 +158,7 @@ Matrix sync callback
 | `agents.py` | Agent creation and configuration |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `routing.py` | Intelligent responder selection when no agent or team is mentioned |
+| `routing_judgment.py` | Opt-in bounded responder selection through LLM or System One choices, with explicit no-fit outcomes and ordinary routing fallback |
 | `teams.py` | Multi-agent collaboration (coordinate vs collaborate modes) |
 | `agent_policy.py` | Canonical execution-policy derivation from authored agent config |
 | `memory/` | Mem0 memory: agent and team-scoped |

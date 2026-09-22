@@ -14,7 +14,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.identity import MatrixID
-from mindroom.routing_judgment import judge_responder
+from mindroom.routing_judgment import ResponderSelection, judge_responder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,7 +43,7 @@ async def suggest_responder(
     *,
     room_id: str | None = None,
     thread_id: str | None = None,
-) -> str | None:
+) -> ResponderSelection | None:
     """Use AI to suggest which configured responder should answer a message.
 
     This is the core routing logic, independent of any transport layer.
@@ -59,14 +59,14 @@ async def suggest_responder(
         thread_id: Optional Matrix thread whose model override takes precedence.
 
     Returns:
-        The suggested responder name, or None if routing fails.
+        An accepted selection (entity_name=None means no fit), or None if routing fails.
 
     """
     try:
         if config.router.judgment is not None:
             selection = await judge_responder(message, available_entity_names, config, runtime_paths, thread_context)
             if selection is not None:
-                return selection.entity_name
+                return selection
         entity_descriptions = []
         for entity_name in available_entity_names:
             description = describe_agent(entity_name, config)
@@ -135,7 +135,7 @@ async def suggest_responder(
         logger.exception("Routing failed", error=str(e))
         return None
     else:
-        return suggestion.entity_name
+        return ResponderSelection(suggestion.entity_name)
 
 
 async def suggest_responder_for_message(
@@ -172,7 +172,7 @@ async def suggest_responder_for_message(
                 sender = sender_name if sender_name is not None else MatrixID.parse(sender).domain
             resolved_context.append(replace_visible_message(msg, sender=sender))
 
-    return await suggest_responder(
+    selection = await suggest_responder(
         message,
         entity_names,
         config,
@@ -182,8 +182,11 @@ async def suggest_responder_for_message(
         thread_id=thread_id,
     )
 
+    return selection.entity_name if selection is not None else None
+
 
 __all__ = [
+    "ResponderSelection",
     "suggest_responder",
     "suggest_responder_for_message",
 ]

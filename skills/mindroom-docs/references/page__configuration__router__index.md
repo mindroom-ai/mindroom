@@ -49,7 +49,7 @@ Set `router.judgment` to make one bounded choice among the already eligible agen
 This is optional; omitting it or setting it to `null` preserves existing behavior, even when a TypeSafe API key is present.
 Explicit mentions, existing thread participation rules, authorization, and deterministic single-candidate routing are unchanged.
 
-Use a configured model alias for an LLM judgment:
+Use a configured model alias for an LLM judgment.
 
 ```yaml
 router:
@@ -60,7 +60,7 @@ router:
     timeout_seconds: 5.0
 ```
 
-Or use System One with `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
+Or use System One with `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`.
 
 ```yaml
 router:
@@ -78,7 +78,8 @@ Messages are not cut off to fit: sensitive or oversized input uses ordinary rout
 The complete judgment request is limited to 16,000 UTF-8 bytes and at most 253 candidate responders (plus two special choices).
 
 A selected candidate routes through the existing delivery path.
-A confident `no_fit` produces the existing message asking the user to mention a responder or rephrase.
+A confident `no_fit` produces the existing Matrix message asking the user to mention a responder or rephrase.
+For OpenAI-compatible `model: auto` requests, it returns HTTP 400 with error code `no_suitable_responder` instead of selecting the first agent.
 The `multiple` choice means no single candidate can cover the request; it falls back to ordinary single-responder routing and does not launch several agents.
 Low confidence, abstention, invalid output, missing credentials, capacity exhaustion, or a timeout also falls back to ordinary routing using the existing runtime model resolution.
 The judgment's configured model alias is independent of room/thread model overrides; those overrides still apply to the fallback router.
