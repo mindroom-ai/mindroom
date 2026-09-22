@@ -20,10 +20,11 @@ _REQUEST_TIMEOUT_SECONDS = 60
 
 @dataclass(frozen=True)
 class _JobWaitResult:
-    """Keep terminal provider rejection separate from the displayed outcome."""
+    """Carry completed URLs and distinguish rejection from an unresolved wait."""
 
     content: str
     rejected: bool = False
+    output_urls: tuple[str, ...] = ()
 
 
 def _check_provider_http_status(response: requests.Response, result: object) -> None:
@@ -36,18 +37,20 @@ def _check_provider_http_status(response: requests.Response, result: object) -> 
 
 
 # AGNO_COMPAT: ModelsLab polling loses provider identity and reports unsuccessful waits as success.
-# Reason: Agno 3.0.9 sends the artifact UUID to fetch and discards the wait outcome.
+# Reason: Agno 3.0.9 sends the artifact UUID to fetch and discards the wait outcome and completed URLs.
 # Upstream issue: Tracking gap; no matching issue found on September 22, 2026.
 # Upstream PR: No matching fix identified.
 # Remove when: Agno polls the provider ID and distinguishes completion, timeout,
-# and provider rejection; retain bounded transport waits, authored file-type normalization, and media helpers.
+# and terminal rejection, retains completed URLs, and accepts numeric ETAs;
+# retain bounded transport waits, authored file-type normalization, and media helpers.
 # Coverage: tests/test_modelslabs_tool.py::test_queued_media_fetches_provider_job_id,
 # ::test_queued_media_wait_timeout_does_not_claim_generation_success,
 # ::test_queued_media_reports_provider_failure,
 # ::test_transport_timeout_returns_an_honest_outcome,
 # ::test_http_provider_rejection_preserves_explanation,
 # ::test_fractional_polling_settings_from_runtime_config,
-# ::test_zero_eta_checks_once, and nonwaiting/error controls.
+# ::test_zero_eta_checks_once, ::test_completed_fetch_urls_replace_queued_links,
+# ::test_numeric_provider_eta_is_polled, ::test_retryable_fetch_error_preserves_job, and nonwaiting/error controls.
 class ModelsLabCompletionTools(ModelsLabTools):
     """Repair completion waiting while retaining upstream media construction."""
 
@@ -81,6 +84,24 @@ class ModelsLabCompletionTools(ModelsLabTools):
             url_links = result.get("output") or result.get("future_links", [])
         else:
             url_links = result.get("future_links") or result.get("output", [])
+        content = f"{self.file_type.value.capitalize()} generated successfully"
+        if result.get("status") != "success":
+            if isinstance(eta, int | float) and not isinstance(eta, bool) and math.isfinite(eta):
+                job_id = result.get("id")
+                if job_id is None:
+                    content = "Cannot wait for media: provider response has no job ID. The job may still complete."
+                else:
+                    wait_result = self._wait_for_job(str(job_id), eta)
+                    if wait_result.rejected:
+                        return ToolResult(content=wait_result.content)
+                    content = wait_result.content
+                    if wait_result.output_urls:
+                        url_links = wait_result.output_urls
+            else:
+                content = (
+                    "Cannot wait for media: provider response has no finite numeric ETA. The job may still complete."
+                )
+
         media_id = str(uuid4())
         all_images = []
         all_videos = []
@@ -91,19 +112,6 @@ class ModelsLabCompletionTools(ModelsLabTools):
             all_videos.extend(artifacts["videos"])
             all_audios.extend(artifacts["audios"])
 
-        content = f"{self.file_type.value.capitalize()} generated successfully"
-        if result.get("status") != "success":
-            if isinstance(eta, int):
-                job_id = result.get("id")
-                if job_id is None:
-                    content = "Cannot wait for media: provider response has no job ID. The job may still complete."
-                else:
-                    wait_result = self._wait_for_job(str(job_id), eta)
-                    if wait_result.rejected:
-                        return ToolResult(content=wait_result.content)
-                    content = wait_result.content
-            else:
-                content = "Cannot wait for media: provider response has no integer ETA. The job may still complete."
         return ToolResult(
             content=content,
             images=all_images or None,
@@ -111,9 +119,10 @@ class ModelsLabCompletionTools(ModelsLabTools):
             audios=all_audios or None,
         )
 
-    def _wait_for_job(self, job_id: str, eta: int) -> _JobWaitResult:
+    def _wait_for_job(self, job_id: str, eta: float) -> _JobWaitResult:
         """Poll one provider job and describe the actual completion outcome."""
         attempt_count = min(max(1, math.ceil(eta + self.add_to_eta)), math.ceil(self.max_wait_time))
+        last_fetch_error: str | None = None
         for attempt in range(attempt_count):
             try:
                 response = requests.post(
@@ -124,21 +133,38 @@ class ModelsLabCompletionTools(ModelsLabTools):
                 )
                 result = response.json()
                 _check_provider_http_status(response, result)
-                if result.get("status") == "error":
+                if (
+                    response.status_code == 429
+                    or response.status_code >= 500
+                    or result.get("code")
+                    in (
+                        "rate_limited",
+                        "upstream_unavailable",
+                        "server_error",
+                    )
+                ):
+                    last_fetch_error = str(
+                        result.get("message")
+                        or result.get("error")
+                        or result.get("code")
+                        or "Provider status unavailable",
+                    )
+                elif result.get("status") == "error" or "error" in result:
                     return _JobWaitResult(
                         content=f"Error: {result.get('message') or result.get('error') or 'Media generation failed'}",
                         rejected=True,
                     )
-                if "error" in result:
-                    return _JobWaitResult(content=f"Error: {result['error']}", rejected=True)
-                if result.get("status") == "success":
-                    return _JobWaitResult(content=f"{self.file_type.value.capitalize()} generated successfully")
-            except RequestException:
+                elif result.get("status") == "success":
+                    return _JobWaitResult(
+                        content=f"{self.file_type.value.capitalize()} generated successfully",
+                        output_urls=tuple(result.get("output") or result.get("future_links") or ()),
+                    )
+            except RequestException as exc:
                 # A failed status check does not establish the remote job's outcome.
-                if attempt + 1 == attempt_count:
-                    break
+                last_fetch_error = str(exc)
             if attempt + 1 < attempt_count:
                 time.sleep(1)
-        return _JobWaitResult(
-            content="Waiting for media timed out. The provider job may still complete; queued media links are retained.",
-        )
+        content = "Waiting for media timed out. The provider job may still complete; queued media links are retained."
+        if last_fetch_error:
+            content += f" Last status-check error: {last_fetch_error}"
+        return _JobWaitResult(content=content)

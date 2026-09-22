@@ -482,10 +482,12 @@ image_to_video(
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
 For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
-If `wait_for_completion` is enabled and the response includes an integer ETA and a provider job ID, the tool polls that job at the provider fetch endpoint.
-Confirmed completion returns a success message; a provider error returns its message without unavailable media artifacts, and an exhausted wait reports a timeout while retaining queued media links.
+If `wait_for_completion` is enabled and the response includes a finite numeric ETA and a provider job ID, the tool polls that job at the provider fetch endpoint.
+Confirmed completion returns the fetched output URLs, replacing queued placeholders when present.
+A terminal provider rejection returns its message without unavailable media artifacts.
+Retryable service and rate-limit errors use the remaining polling attempts; exhaustion retains queued media links and the last status-check error.
 A timeout does not mean the remote job failed.
-If a queued response lacks the ID or integer ETA needed for polling, the tool reports that completion could not be checked.
+If a queued response lacks the ID or finite numeric ETA needed for polling, the tool reports that completion could not be checked.
 With completion waiting enabled, generation and fetch requests each use 60-second connect and read timeouts.
 These limit connection establishment and waiting for response bytes, not the overall wall-clock duration.
 HTTP request time remains additional to the polling-attempt budget.

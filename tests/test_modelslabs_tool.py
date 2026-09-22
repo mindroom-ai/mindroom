@@ -241,11 +241,12 @@ def test_transport_timeout_returns_an_honest_outcome(provider: _ModelsLabTranspo
 
 
 @pytest.mark.parametrize("stage", ["generation", "fetch"])
-@pytest.mark.parametrize("http_status", [200, 400, 401, 404, 500])
+@pytest.mark.parametrize("http_status", [200, 400, 401, 404])
 @pytest.mark.parametrize(
     ("body", "explanation"),
     [
         ({"status": "error", "message": "Generation rejected"}, "Generation rejected"),
+        ({"status": "error", "code": "content_moderated", "message": "Generation rejected"}, "Generation rejected"),
         ({"status": "error", "error": "Generation rejected"}, "Generation rejected"),
         ({"status": "error", "message": "", "error": "Generation rejected"}, "Generation rejected"),
         ({"error": "Generation rejected"}, "Generation rejected"),
@@ -259,7 +260,7 @@ def test_http_provider_rejection_preserves_explanation(
     body: dict[str, object],
     explanation: str,
 ) -> None:
-    """Structured rejections remain terminal regardless of the HTTP status."""
+    """Non-retryable provider rejections preserve their explanation and stop."""
     media_url = "https://media.example.test/result.gif"
     if stage == "fetch":
         provider.payloads.append({"status": "processing", "id": 74123, "eta": 2, "future_links": [media_url]})
@@ -329,10 +330,11 @@ def test_failed_status_check_can_recover(
     failure: _ModelsLabReply | requests.exceptions.RequestException,
 ) -> None:
     """An inconclusive fetch is retried within the configured attempt budget."""
+    media_url = "https://media.example.test/result.mp4"
     provider.payloads = [
         {"status": "processing", "id": 74123, "eta": 2},
         failure,
-        {"status": "success"},
+        {"status": "success", "output": [media_url]},
     ]
     tool = modelslabs_tools()(
         api_key="test-api-key",
@@ -346,6 +348,8 @@ def test_failed_status_check_can_recover(
     assert "success" in result.content.lower()
     assert len(provider.requests) == 3
     assert provider.sleeps == [1]
+    assert result.videos is not None
+    assert [item.url for item in result.videos] == [media_url]
 
 
 @pytest.mark.parametrize(
@@ -456,3 +460,152 @@ def test_zero_poll_cap_skips_fetch_and_retains_queued_links(provider: _ModelsLab
     assert "may still" in result.content.lower()
     assert result.images is not None
     assert [item.url for item in result.images] == [media_url]
+
+
+@pytest.mark.parametrize(
+    ("file_type", "media_field"),
+    [("png", "images"), ("jpg", "images"), ("gif", "images"), ("mp4", "videos"), ("mp3", "audios"), ("wav", "audios")],
+)
+@pytest.mark.parametrize("queued_links", [False, True])
+def test_completed_fetch_urls_replace_queued_links(
+    provider: _ModelsLabTransport,
+    file_type: str,
+    media_field: str,
+    queued_links: bool,
+) -> None:
+    """Completed outputs are returned even when queued URLs are absent or differ."""
+    processing: dict[str, object] = {"status": "processing", "id": 74123, "eta": 1}
+    if queued_links:
+        processing["future_links"] = [f"https://media.example.test/queued.{file_type}"]
+    output_urls = [f"https://media.example.test/completed-{index}.{file_type}" for index in range(2)]
+    provider.payloads = [processing, {"status": "success", "id": 74123, "output": output_urls}]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type=file_type,
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=1,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    media = {"images": result.images, "videos": result.videos, "audios": result.audios}[media_field]
+    assert media is not None
+    assert [item.url for item in media] == output_urls
+    assert all(item.id != "74123" for item in media)
+    assert "success" in result.content.lower()
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.parametrize("eta", [1.5, 10.0])
+def test_numeric_provider_eta_is_polled(provider: _ModelsLabTransport, eta: float) -> None:
+    """Finite JSON numbers reach image polling and honor the existing attempt cap."""
+    media_url = "https://media.example.test/result.png"
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": eta},
+        {"status": "processing"},
+        {"status": "success", "output": [media_url]},
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="png",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 3
+    assert all(request.url == "https://modelslab.com/api/v6/images/fetch/74123" for request in provider.requests[1:])
+    assert all(json.loads(request.body) == {"key": "test-api-key"} for request in provider.requests[1:])
+    assert provider.sleeps == [1]
+    assert "success" in result.content.lower()
+    assert result.images is not None
+    assert [item.url for item in result.images] == [media_url]
+
+
+@pytest.mark.parametrize("eta", [None, True, "unknown", float("nan"), float("inf"), -float("inf")])
+def test_invalid_provider_eta_does_not_start_polling(provider: _ModelsLabTransport, eta: object) -> None:
+    """Non-numeric and non-finite ETAs cannot become a polling attempt count."""
+    provider.payloads = [{"status": "processing", "id": 74123, "eta": eta}]
+    tool = modelslabs_tools()(api_key="test-api-key", file_type="png", wait_for_completion=True)
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 1
+    assert "success" not in result.content.lower()
+    assert provider.sleeps == []
+
+
+@pytest.mark.parametrize("http_status", [500, 503])
+def test_initial_service_error_preserves_explanation(provider: _ModelsLabTransport, http_status: int) -> None:
+    """An initial submission failure preserves its message without resubmitting."""
+    provider.payloads = [
+        _ModelsLabReply(http_status, {"status": "error", "message": "Provider temporarily unavailable"}),
+    ]
+    tool = modelslabs_tools()(api_key="test-api-key", wait_for_completion=True)
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert result.content == "Error: Provider temporarily unavailable"
+    assert len(provider.requests) == 1
+    assert provider.sleeps == []
+    assert not result.images
+    assert not result.videos
+    assert not result.audios
+
+
+@pytest.mark.parametrize(
+    ("http_status", "error_code"),
+    [
+        (500, None),
+        (503, None),
+        (429, None),
+        (200, "server_error"),
+        (200, "upstream_unavailable"),
+        (200, "rate_limited"),
+    ],
+)
+@pytest.mark.parametrize("recovers", [False, True])
+def test_retryable_fetch_error_preserves_job(
+    provider: _ModelsLabTransport,
+    http_status: int,
+    error_code: str | None,
+    recovers: bool,
+) -> None:
+    """Service errors retry within budget and preserve queued media if unresolved."""
+    queued_url = "https://media.example.test/queued.gif"
+    output_url = "https://media.example.test/completed.gif"
+    error_body: dict[str, object] = {"status": "error", "message": "Provider temporarily unavailable"}
+    if error_code is not None:
+        error_body["code"] = error_code
+    failure = _ModelsLabReply(http_status, error_body)
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 2, "future_links": [queued_url]},
+        failure,
+        {"status": "success", "output": [output_url]} if recovers else failure,
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 3
+    assert provider.sleeps == [1]
+    assert result.images is not None
+    if recovers:
+        assert "success" in result.content.lower()
+        assert [item.url for item in result.images] == [output_url]
+        assert "Provider temporarily unavailable" not in result.content
+    else:
+        assert "timed out" in result.content.lower()
+        assert "may still" in result.content.lower()
+        assert "Provider temporarily unavailable" in result.content
+        assert "success" not in result.content.lower()
+        assert [item.url for item in result.images] == [queued_url]
