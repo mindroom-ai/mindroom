@@ -26,7 +26,9 @@ describe("Generic OAuth integration provider", () => {
     });
   });
 
-  it("resolves connect when the OAuth popup posts a completion message", async () => {
+  it("resolves connect once and releases observers after popup completion", async () => {
+    vi.useFakeTimers();
+    const removeListener = vi.spyOn(window, "removeEventListener");
     const authWindowState = { closed: false };
     const authWindow = {
       get closed() {
@@ -61,8 +63,25 @@ describe("Generic OAuth integration provider", () => {
     );
 
     await connectPromise;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "mindroom:oauth-complete",
+          provider: "google_drive",
+          status: "connected",
+        },
+        source: authWindow,
+        origin: window.location.origin,
+      }),
+    );
 
-    expect(authWindow.close).toHaveBeenCalled();
+    expect(authWindow.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(removeListener).toHaveBeenCalledWith(
+      "message",
+      expect.any(Function),
+    );
+    removeListener.mockRestore();
   });
 
   it("accepts OAuth completion from the backend origin returned by connect", async () => {

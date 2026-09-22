@@ -11,6 +11,7 @@ import {
   SiGooglesheets,
 } from "react-icons/si";
 import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { watchOAuthCompletion } from "@/lib/oauthCompletion";
 import type { WorkerScope } from "@/types/config";
 import {
   Integration,
@@ -20,8 +21,6 @@ import {
 } from "./types";
 import { spotifyIntegration } from "./spotify";
 import { homeAssistantIntegration } from "./homeassistant";
-
-const OAUTH_COMPLETE_MESSAGE_TYPE = "mindroom:oauth-complete";
 
 type OAuthStatus = {
   connected: boolean;
@@ -34,28 +33,6 @@ type OAuthStatus = {
   resetRequired: boolean;
   statusError?: string;
 };
-
-function isOAuthCompleteMessage(
-  event: MessageEvent,
-  authWindow: Window,
-  providerId: string,
-  expectedOrigin: string,
-): boolean {
-  if (
-    event.origin !== expectedOrigin ||
-    event.source !== authWindow ||
-    event.data === null ||
-    typeof event.data !== "object"
-  ) {
-    return false;
-  }
-  const data = event.data as Record<string, unknown>;
-  return (
-    data.type === OAUTH_COMPLETE_MESSAGE_TYPE &&
-    data.provider === providerId &&
-    data.status === "connected"
-  );
-}
 
 function oauthCompletionOrigin(rawOrigin: unknown): string {
   if (typeof rawOrigin === "string" && rawOrigin.length > 0) {
@@ -238,51 +215,20 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
       throw new Error("OAuth popup was blocked");
     }
     return new Promise((resolve, reject) => {
-      let completed = false;
-      let receivedCompletion = false;
-      let pollInterval = 0;
-      const finish = (error?: Error) => {
-        if (completed) {
-          return;
-        }
-        completed = true;
-        window.clearInterval(pollInterval);
-        window.removeEventListener("message", handleMessage);
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve();
-      };
-      const handleMessage = (event: MessageEvent) => {
-        if (
-          !isOAuthCompleteMessage(
-            event,
-            authWindow,
-            this.providerId,
-            expectedCompletionOrigin,
-          )
-        ) {
-          return;
-        }
-        receivedCompletion = true;
-        if (!authWindow.closed) {
-          authWindow.close();
-        }
-        finish();
-      };
-      pollInterval = window.setInterval(() => {
-        if (authWindow.closed) {
-          finish(
-            receivedCompletion
-              ? undefined
-              : new Error(
-                  `${this.integration.name} authorization was cancelled`,
-                ),
-          );
-        }
-      }, 1000);
-      window.addEventListener("message", handleMessage);
+      watchOAuthCompletion(authWindow, {
+        provider: this.providerId,
+        expectedOrigin: () => expectedCompletionOrigin,
+        pollIntervalMs: 1000,
+        cancellationMessage: `${this.integration.name} authorization was cancelled`,
+        onSettled: (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          if (!authWindow.closed) authWindow.close();
+          resolve();
+        },
+      });
     });
   }
 }

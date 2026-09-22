@@ -1,3 +1,5 @@
+import { watchOAuthCompletion } from "@/lib/oauthCompletion";
+
 export interface OAuthAuthorization {
   provider: string;
   auth_url: string;
@@ -46,49 +48,33 @@ export async function connectWithPopup(
     throw new Error("The popup was blocked. Allow popups and try again.");
 
   return new Promise((resolve, reject) => {
-    let finished = false;
     let expectedOrigin: string | null = null;
-    const finish = (error?: Error) => {
-      if (finished) return;
-      finished = true;
-      window.clearInterval(poll);
-      window.clearTimeout(deadline);
-      window.removeEventListener("message", onMessage);
-      signal.removeEventListener("abort", onAbort);
-      if (!popup.closed) popup.close();
-      if (error) reject(error);
-      else resolve();
-    };
-    const onAbort = () => finish(new Error("Authorization was cancelled."));
-    const onMessage = (event: MessageEvent) => {
-      if (
-        expectedOrigin === null ||
-        event.origin !== expectedOrigin ||
-        event.source !== popup ||
-        event.data === null ||
-        typeof event.data !== "object"
-      )
-        return;
-      const data = event.data as Record<string, unknown>;
-      if (
-        data.type === "mindroom:oauth-complete" &&
-        data.provider === provider &&
-        data.status === "connected"
-      )
-        finish();
-    };
-    const poll = window.setInterval(() => {
-      if (popup.closed) onAbort();
-    }, 500);
+    const completion = watchOAuthCompletion(popup, {
+      provider,
+      expectedOrigin: () => expectedOrigin,
+      pollIntervalMs: 500,
+      cancellationMessage: "Authorization was cancelled.",
+      onSettled: (error) => {
+        window.clearTimeout(deadline);
+        signal.removeEventListener("abort", onAbort);
+        if (!popup.closed) popup.close();
+        if (error) reject(error);
+        else resolve();
+      },
+    });
+    const onAbort = () =>
+      completion.finish(new Error("Authorization was cancelled."));
     const deadline = window.setTimeout(
-      () => finish(new Error("Authorization timed out. Try connecting again.")),
+      () =>
+        completion.finish(
+          new Error("Authorization timed out. Try connecting again."),
+        ),
       OAUTH_FLOW_TIMEOUT_MS,
     );
-    window.addEventListener("message", onMessage);
     signal.addEventListener("abort", onAbort, { once: true });
     void authorize()
       .then((data) => {
-        if (finished) return;
+        if (completion.finished) return;
         const authUrl = new URL(data.auth_url);
         const completionUrl = new URL(data.completion_origin);
         if (
@@ -101,7 +87,7 @@ export async function connectWithPopup(
         popup.location.href = authUrl.href;
       })
       .catch((error) =>
-        finish(
+        completion.finish(
           error instanceof Error
             ? error
             : new Error("Could not start the connection. Try again."),
