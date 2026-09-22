@@ -37,6 +37,7 @@ from tests.test_thread_summary import _make_summary_notice_message, _make_thread
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
@@ -60,6 +61,35 @@ def _human_notice(
         pinned=True,
         generated_at=generated_at,
     )
+
+
+async def _run_automatic_summary(
+    config: Config,
+    history: list[ResolvedVisibleMessage],
+    source_history: list[ResolvedVisibleMessage],
+) -> tuple[AsyncMock, AsyncMock]:
+    """Exercise real pin, authorization, vocabulary, and tag reads with empty room state."""
+    client = make_matrix_client_mock()
+    client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id="!room:x")
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
+    reader = make_conversation_reader_mock()
+    serve_conversation_reader(reader, history, thread_id="$thread1")
+    with (
+        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")) as generate,
+        patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=source_history)),
+    ):
+        await maybe_generate_thread_summary(
+            client,
+            "!room:x",
+            "$thread1",
+            config,
+            runtime_paths_for(config),
+            conversation_reader=reader,
+            delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
+            entity_name="talent",
+            membership_index=AgentReplyMembershipIndex(),
+        )
+    return client, generate
 
 
 @pytest.mark.asyncio
@@ -104,33 +134,76 @@ async def test_authorized_human_pin_survives_restart(tmp_path: Path, sender: str
 async def test_human_pin_uses_responder_authority(tmp_path: Path, authorized: bool, pin_source: str) -> None:
     """Source recheck honors allowed users and rejects spoofed unauthorized notices."""
     config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
-    client = make_matrix_client_mock()
-    client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
-    reader = make_conversation_reader_mock()
     notice = _human_notice("@owner:example.com" if authorized else "@outsider:example.com")
     notice.content["io.mindroom.original_sender"] = "@owner:example.com"
     history = _make_thread_history(12)
     if pin_source == "history":
         history.append(notice)
-    serve_conversation_reader(reader, history, thread_id="$thread1")
-    with (
-        patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")),
-        patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=[notice])),
-    ):
-        await maybe_generate_thread_summary(
-            client,
-            "!room:x",
-            "$thread1",
-            config,
-            runtime_paths_for(config),
-            conversation_reader=reader,
-            delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-            entity_name="talent",
-            membership_index=AgentReplyMembershipIndex(),
-        )
+    client, generate = await _run_automatic_summary(config, history, [notice])
     assert client.room_send.await_count == (0 if authorized else 1)
+    assert generate.await_count == (0 if authorized and pin_source == "history" else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pin_source", ["history", "source"])
+@pytest.mark.parametrize("edited_pin", [False, True])
+async def test_later_human_pin_overrides_unseen_future_release(
+    tmp_path: Path,
+    pin_source: str,
+    edited_pin: bool,
+) -> None:
+    """A cold client's pin wins even when it missed an older future-dated release."""
+    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    release = _make_summary_notice_message(
+        "$thread1",
+        message_count=1,
+        event_id="$old-release",
+        sender=next(iter(current_internal_sender_ids(config, runtime_paths_for(config)))),
+        pinned=False,
+        generated_at="2099-01-01T00:00:00+00:00",
+    )
+    release.timestamp = 1000
+    notice = _human_notice()
+    notice.timestamp = 500 if edited_pin else 2000
+    if edited_pin:
+        notice.edited_timestamp = 2000
+        notice.latest_event_id = "$pin-edit"
+    history = [*_make_thread_history(12), release]
+    if pin_source == "history":
+        history.append(notice)
+    # Source reads can have a different order than the projected history.
+    source_history = [notice, release]
+    for _ in range(2):
+        _last_summary_counts.clear()
+        client, generate = await _run_automatic_summary(config, history, source_history)
+        client.room_send.assert_not_awaited()
+        assert generate.await_count == (0 if pin_source == "history" else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edited_release", [False, True])
+async def test_later_agent_release_overrides_future_human_pin(tmp_path: Path, edited_release: bool) -> None:
+    """The same event chronology lets an agent intentionally release a skewed human pin."""
+    config = membership_config(tmp_path, access={"users": ["@owner:example.com"]})
+    future = datetime(2099, 1, 1, tzinfo=UTC)
+    notice = _human_notice(generated_at=future.isoformat())
+    notice.timestamp = 1000
+    release = _make_summary_notice_message(
+        "$thread1",
+        message_count=1,
+        event_id="$later-release",
+        sender=next(iter(current_internal_sender_ids(config, runtime_paths_for(config)))),
+        pinned=False,
+    )
+    release.timestamp = 500 if edited_release else 2000
+    if edited_release:
+        release.edited_timestamp = 2000
+        release.latest_event_id = "$release-edit"
+    history = [*_make_thread_history(12), notice, release]
+    client, _ = await _run_automatic_summary(config, history, [release, notice])
+    client.room_send.assert_awaited_once()
+    sent = client.room_send.call_args.kwargs["content"]["io.mindroom.thread_summary"]
+    assert datetime.fromisoformat(sent["generated_at"]) > future
 
 
 @pytest.mark.asyncio
@@ -332,27 +405,7 @@ async def test_automatic_summary_advances_past_future_explicit_release(tmp_path:
     history = _make_thread_history(12)
     if release_source == "history":
         history.append(release)
-    client = make_matrix_client_mock()
-    client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
-    reader = make_conversation_reader_mock()
-    serve_conversation_reader(reader, history, thread_id="$thread1")
-    with (
-        patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-        patch("mindroom.thread_summary._generate_summary", new=AsyncMock(return_value="Automatic")),
-        patch("mindroom.thread_summary.fetch_thread_messages_from_source", new=AsyncMock(return_value=[release])),
-    ):
-        await maybe_generate_thread_summary(
-            client,
-            "!room:x",
-            "$thread1",
-            config,
-            runtime_paths,
-            conversation_reader=reader,
-            delivered_response=DeliveredResponse(event_id="$event0", body="Message 0"),
-            entity_name="talent",
-            membership_index=AgentReplyMembershipIndex(),
-        )
+    client, _ = await _run_automatic_summary(config, history, [release])
     sent = client.room_send.call_args.kwargs["content"]["io.mindroom.thread_summary"]
     assert datetime.fromisoformat(sent["generated_at"]) > future
 

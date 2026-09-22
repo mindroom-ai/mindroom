@@ -370,14 +370,14 @@ def _recover_pin_state(
     pinned, so the newest decision has to win. Summaries that omit the key state
     no intent and are ignored entirely.
 
-    Ordering comes from ``generated_at`` rather than the position of the message
-    in the history, because history position does not always reflect Matrix
-    order: ``_sort_thread_items_root_first`` breaks equal ``origin_server_ts``
-    ties with backward-scan input order, which is newest-first. ``generated_at``
-    is also what the client uses to choose the summary it displays, so the pin
-    decision and the visible title are resolved by the same clock.
+    Pin intent follows Matrix event time, so a cold client's later pin wins
+    even if it never loaded an earlier release with a skewed ``generated_at``.
+    An edit reasserts the pin metadata in its replacement content at edit time.
+    ``generated_at`` breaks equal event-time ties because history position can
+    reflect a backward scan rather than send order. It remains the separate
+    display clock used by summary readers and writers.
     """
-    newest_decision: tuple[datetime, int] | None = None
+    newest_decision: tuple[int, datetime, int] | None = None
     pinned = False
     for position, message in enumerate(thread_history):
         metadata = _summary_pin_metadata(
@@ -394,7 +394,8 @@ def _recover_pin_state(
         generated_at = _parse_summary_generated_at(metadata)
         if generated_at is None:
             continue
-        decision = (generated_at, position)
+        event_timestamp = message.edited_timestamp if message.edited_timestamp is not None else message.timestamp
+        decision = (event_timestamp, generated_at, position)
         if newest_decision is None or decision > newest_decision:
             newest_decision = decision
             pinned = recorded
