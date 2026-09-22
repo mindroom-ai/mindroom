@@ -7932,7 +7932,7 @@ image_to_video(
 The current wrapper chooses one of several provider endpoints based on `file_type` and sends a fixed payload template for that media class.
 For PNG and JPG it uses the image endpoint; MP4 and GIF use the text-to-video endpoint and return future-link URLs with an ETA.
 For MP3 and WAV generation, it uses provider voice endpoints and returns audio URLs.
-If `wait_for_completion` is enabled and the response includes a finite numeric ETA and a provider job ID, the tool polls that job at the provider fetch endpoint.
+If `wait_for_completion` is enabled and the response includes a finite numeric ETA (as a number or numeric string) and a provider job ID, the tool polls that job at the provider fetch endpoint.
 Confirmed completion returns the fetched output URLs, replacing queued placeholders when present.
 A terminal provider rejection returns its message without unavailable media artifacts.
 Retryable service and rate-limit errors use the remaining polling attempts; exhaustion retains queued media links and the last status-check error.

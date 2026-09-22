@@ -80,6 +80,11 @@ class ModelsLabCompletionTools(ModelsLabTools):
             return ToolResult(content=f"Error: {result['error']}")
 
         eta = result.get("eta")
+        if isinstance(eta, str):
+            try:
+                eta = float(eta)
+            except ValueError:
+                eta = None
         if self.file_type in (FileType.PNG, FileType.JPG, FileType.WAV):
             url_links = result.get("output") or result.get("future_links", [])
         else:

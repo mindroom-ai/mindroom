@@ -497,9 +497,9 @@ def test_completed_fetch_urls_replace_queued_links(
     assert len(provider.requests) == 2
 
 
-@pytest.mark.parametrize("eta", [1.5, 10.0])
-def test_numeric_provider_eta_is_polled(provider: _ModelsLabTransport, eta: float) -> None:
-    """Finite JSON numbers reach image polling and honor the existing attempt cap."""
+@pytest.mark.parametrize("eta", [1.5, 10.0, "1.5", "10", " 2.0 "])
+def test_numeric_provider_eta_is_polled(provider: _ModelsLabTransport, eta: float | str) -> None:
+    """Finite numeric ETAs reach image polling and honor the existing attempt cap."""
     media_url = "https://media.example.test/result.png"
     provider.payloads = [
         {"status": "processing", "id": 74123, "eta": eta},
@@ -525,7 +525,7 @@ def test_numeric_provider_eta_is_polled(provider: _ModelsLabTransport, eta: floa
     assert [item.url for item in result.images] == [media_url]
 
 
-@pytest.mark.parametrize("eta", [None, True, "unknown", float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("eta", [None, True, "unknown", "", "nan", "inf", float("nan"), float("inf"), -float("inf")])
 def test_invalid_provider_eta_does_not_start_polling(provider: _ModelsLabTransport, eta: object) -> None:
     """Non-numeric and non-finite ETAs cannot become a polling attempt count."""
     provider.payloads = [{"status": "processing", "id": 74123, "eta": eta}]
