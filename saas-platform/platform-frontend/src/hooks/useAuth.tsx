@@ -1,10 +1,18 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { User } from '@supabase/supabase-js'
 import { useRouter } from 'next/navigation'
 import { clearSsoCookie } from '@/lib/api'
+
+type AuthContextType = {
+  user: User | null
+  loading: boolean
+  signOut: () => Promise<void>
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 // Development-only mock user - only active when NEXT_PUBLIC_DEV_AUTH=true
 const DEV_USER: User | null =
@@ -20,7 +28,8 @@ const DEV_USER: User | null =
       } as User
     : null
 
-export function useAuth() {
+// Own the auth lifecycle once for the dashboard, including its loading gate.
+export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const supabase = createClient()
@@ -71,9 +80,17 @@ export function useAuth() {
     }
   }
 
-  return {
-    user,
-    loading,
-    signOut,
+  return (
+    <AuthContext.Provider value={{ user, loading, signOut }}>
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext)
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider')
   }
+  return context
 }
