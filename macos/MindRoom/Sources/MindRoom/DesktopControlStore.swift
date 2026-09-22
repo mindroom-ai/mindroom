@@ -141,16 +141,17 @@ final class DesktopControlStore: ObservableObject {
         applications = InstalledApplicationCatalog.applications()
     }
 
-    func addApplication(at url: URL) {
+    func addApplication(at url: URL) -> String? {
         guard let application = InstalledApplicationCatalog.application(at: url) else {
             errorMessage = "Choose a macOS application with a bundle identifier."
             recovery = nil
-            return
+            return nil
         }
         applications.removeAll { $0.id == application.id }
         applications.append(application)
         applications.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         selectedAppIDs.insert(application.id)
+        return application.id
     }
 
     func importSetupDescriptor() {

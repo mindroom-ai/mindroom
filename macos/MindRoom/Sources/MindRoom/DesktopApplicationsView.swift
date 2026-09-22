@@ -93,8 +93,7 @@ struct DesktopApplicationsView: View {
         }
         .fileImporter(isPresented: $showingAppPicker, allowedContentTypes: [.applicationBundle]) { result in
             if case let .success(url) = result {
-                store.addApplication(at: url)
-                search = ""
+                if let id = store.addApplication(at: url) { search = id }
             }
         }
         .confirmationDialog("Stop computer access and save apps?", isPresented: $confirmingStop) {

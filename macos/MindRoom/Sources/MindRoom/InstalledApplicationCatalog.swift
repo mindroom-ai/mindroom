@@ -28,7 +28,7 @@ enum InstalledApplicationCatalog {
                 found[app.id] = app
             }
         }
-        for app in NSWorkspace.shared.runningApplications {
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard let url = app.bundleURL, let entry = application(at: url, runningIDs: runningIDs) else { continue }
             found[entry.id] = entry
         }
