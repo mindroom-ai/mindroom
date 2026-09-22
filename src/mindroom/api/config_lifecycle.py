@@ -277,10 +277,11 @@ def _source_fingerprint_for_published_runtime_config(
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
 ) -> tuple[str, frozenset[Path] | None, bool | None]:
-    """Return disk source metadata when the file still matches the runtime config.
+    """Return the runtime fingerprint and source metadata safe to publish.
 
-    The source set and include usage are ``None`` when the published config cannot
-    be tied to disk, so the caller keeps the snapshot's last known metadata.
+    Unmatched disk bytes cannot identify the runtime config, so their source set
+    stays unpublished. Observed include usage still blocks structured writes;
+    a negative or missing observation cannot clear the previous include guard.
     """
     canonical_source = yaml.dump(
         validated_payload,
@@ -292,7 +293,7 @@ def _source_fingerprint_for_published_runtime_config(
     result, disk_payload, _disk_config, disk_fingerprint, disk_source_files = _load_config_result(runtime_paths)
     if result.success and disk_payload == validated_payload and disk_fingerprint is not None:
         return disk_fingerprint, disk_source_files, result.uses_includes
-    return canonical_fingerprint, None, None
+    return canonical_fingerprint, None, True if result.uses_includes else None
 
 
 def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:

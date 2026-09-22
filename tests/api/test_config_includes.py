@@ -299,6 +299,62 @@ class TestEmptyDirectoryIncludes:
         assert exc_info.value.status_code == 409
         assert empty_include_runtime_paths.config_path.read_text(encoding="utf-8") == broken_source
 
+    @pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+    @pytest.mark.parametrize("invalid_disk", [False, True], ids=["valid-new-source", "invalid-new-source"])
+    def test_runtime_publication_cannot_erase_new_disk_include_guard(
+        self,
+        empty_include_runtime_paths: constants.RuntimePaths,
+        write_kind: str,
+        invalid_disk: bool,
+    ) -> None:
+        """Publishing an older monolith must preserve includes observed in newer disk bytes."""
+        runtime_paths = empty_include_runtime_paths
+        path = runtime_paths.config_path
+        included_source = path.read_text(encoding="utf-8") + "defaults:\n  markdown: false\n"
+        if invalid_disk:
+            included_source = included_source.replace("markdown: false", "markdown: [invalid]")
+        path.write_text(
+            "models:\n  default: {provider: ollama, id: test-model}\nagents: {}\ndefaults:\n  markdown: true\n",
+            encoding="utf-8",
+        )
+        api_app = _make_api_app(runtime_paths)
+        assert config_lifecycle.load_config_into_app(runtime_paths, api_app) is True
+        previous = _snapshot(api_app)
+        assert previous.runtime_config is not None
+        assert previous.uses_includes is False
+        path.write_text(included_source, encoding="utf-8")
+
+        assert config_lifecycle._publish_runtime_config_into_app(previous.runtime_config, runtime_paths, api_app)
+        assert _snapshot(api_app).config_data == previous.config_data
+
+        payload = copy.deepcopy(previous.config_data)
+        if write_kind == "external":
+            with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
+                config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+        else:
+            if write_kind == "replacement":
+                with pytest.raises(HTTPException) as exc_info:
+                    config_lifecycle.replace_committed_config(
+                        _request_for(api_app),
+                        payload,
+                        error_prefix="Failed to save configuration",
+                    )
+            else:
+                with pytest.raises(HTTPException) as exc_info:
+                    config_lifecycle.write_committed_config(
+                        _request_for(api_app),
+                        lambda config: config["defaults"].update({"markdown": False}),
+                        error_prefix="Failed to save configuration",
+                    )
+            assert exc_info.value.status_code == 409
+            assert exc_info.value.detail["code"] == "config_composed_from_includes"
+
+        published = _snapshot(api_app)
+        assert published.uses_includes is True
+        assert published.config_load_result is not None
+        assert published.config_load_result.uses_includes is True
+        assert path.read_text(encoding="utf-8") == included_source
+
     def test_reinitialization_retains_only_matching_runtime_include_metadata(
         self,
         empty_include_runtime_paths: constants.RuntimePaths,
