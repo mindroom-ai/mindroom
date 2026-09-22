@@ -1,26 +1,23 @@
-"""Bounded direct HTTP adapter for TypeSafe System One participation judgments."""
+"""Bounded direct HTTP adapter for TypeSafe System One boolean judgments."""
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import json
 import math
-from dataclasses import dataclass
-from threading import Lock
-from time import perf_counter
 from typing import cast
 
 import httpx
 
 from mindroom.judgment.answers import (
-    JudgmentFailure,
+    JudgmentError,
     JudgmentResponse,
     JudgmentResult,
-    NoulAnswer,
     TokenUsage,
 )
-from mindroom.judgment.state import MAX_REQUEST_BYTES, PINNED_MODEL, JudgmentRequest
+from mindroom.judgment.execution import SHARED_CAPACITY, JudgmentCapacity, run_judgment
+from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentRequest
+
+PINNED_MODEL = "jev-1.13.0"
 
 _TYPE_SAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 _MAX_RESPONSE_BYTES = 64 * 1024
@@ -36,52 +33,6 @@ class _ResponseTooLargeError(ValueError):
 
 class _JudgmentModelDriftError(_InvalidJudgmentResponseError):
     """The provider returned a model other than the evaluated pin."""
-
-
-@dataclass(frozen=True, slots=True)
-class _CapacityLease:
-    capacity: _JudgmentCapacity
-    owner: str
-
-    def release(self) -> None:
-        self.capacity.release(self.owner)
-
-
-class _JudgmentCapacity:
-    """One process-safe, non-waiting global and per-owner request budget."""
-
-    def __init__(self, *, max_concurrent: int, max_per_owner: int) -> None:
-        if max_concurrent < 1 or max_per_owner < 1 or max_per_owner > max_concurrent:
-            msg = "judgment capacity limits must be positive and per-owner must not exceed global"
-            raise ValueError(msg)
-        self._max_concurrent = max_concurrent
-        self._max_per_owner = max_per_owner
-        self._active = 0
-        self._active_by_owner: dict[str, int] = {}
-        self._lock = Lock()
-
-    def _acquire_nowait(self, owner: str) -> _CapacityLease | None:
-        """Acquire immediately or return none without creating a waiter."""
-        with self._lock:
-            owner_active = self._active_by_owner.get(owner, 0)
-            if self._active >= self._max_concurrent or owner_active >= self._max_per_owner:
-                return None
-            self._active += 1
-            self._active_by_owner[owner] = owner_active + 1
-        return _CapacityLease(self, owner)
-
-    def release(self, owner: str) -> None:
-        """Release one acquired owner slot."""
-        with self._lock:
-            owner_active = self._active_by_owner[owner]
-            self._active -= 1
-            if owner_active == 1:
-                del self._active_by_owner[owner]
-            else:
-                self._active_by_owner[owner] = owner_active - 1
-
-
-_SHARED_CAPACITY = _JudgmentCapacity(max_concurrent=8, max_per_owner=1)
 
 
 def _reject_constant(_value: str) -> object:
@@ -154,17 +105,19 @@ def _decode_envelope(body: bytes, *, expected_model: str) -> tuple[dict[str, obj
     return root, token_usage
 
 
-def _decode_response(body: bytes, *, expected_model: str) -> JudgmentResponse:
+def _decode_response(body: bytes, *, expected_model: str, expected_question: str, threshold: float) -> JudgmentResponse:
     """Accept only the requested participation probability, never a generated decision."""
     root, usage = _decode_envelope(body, expected_model=expected_model)
-    answers = _exact_keys(root["answers"], {"participation"}, "question map")
-    answer = _exact_keys(answers["participation"], {"type", "noul"}, "participation answer")
+    answers = _exact_keys(root["answers"], {expected_question}, "question map")
+    answer = _exact_keys(answers[expected_question], {"type", "noul"}, "participation answer")
     if answer["type"] != "noul":
         msg = "response answer type is not noul"
         raise _InvalidJudgmentResponseError(msg)
+    probability = _number(answer["noul"], "judgment probability")
     return JudgmentResponse(
         model=expected_model,
-        answer=NoulAnswer(probability=_number(answer["noul"], "participation probability")),
+        decision=probability >= threshold,
+        probability=probability,
         usage=usage,
     )
 
@@ -178,8 +131,9 @@ class SystemOneClient:
         api_key: str,
         model: str,
         timeout_seconds: float = 1.5,
+        threshold: float = 0.8,
         transport: httpx.AsyncBaseTransport | None = None,
-        capacity: _JudgmentCapacity = _SHARED_CAPACITY,
+        capacity: JudgmentCapacity = SHARED_CAPACITY,
     ) -> None:
         if not api_key:
             msg = "a TypeSafe API key is required"
@@ -190,29 +144,15 @@ class SystemOneClient:
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             msg = "the judgment timeout must be finite and positive"
             raise ValueError(msg)
+        if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+            msg = "the judgment threshold must be between zero and one"
+            raise ValueError(msg)
+        self._threshold = threshold
         self._api_key = api_key
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._transport = transport
         self._capacity = capacity
-
-    @staticmethod
-    def _result(
-        request: JudgmentRequest,
-        started: float,
-        *,
-        failure: JudgmentFailure | None,
-        response: JudgmentResponse | None = None,
-    ) -> JudgmentResult:
-        return JudgmentResult(
-            answer=None if response is None else response.answer,
-            failure=failure,
-            model_id=None if response is None else response.model,
-            latency_ms=max(0, round((perf_counter() - started) * 1000)),
-            input_tokens=None if response is None else response.usage.input_tokens,
-            output_tokens=None if response is None else response.usage.output_tokens,
-            state_bytes=request.state_bytes,
-        )
 
     async def _post(self, body: bytes) -> bytes:
         async with httpx.AsyncClient(
@@ -241,29 +181,48 @@ class SystemOneClient:
             finally:
                 await response.aclose()
 
-    async def _evaluate(
-        self,
-        body: bytes,
-    ) -> tuple[JudgmentResponse | None, JudgmentFailure | None]:
-        response: JudgmentResponse | None = None
-        failure: JudgmentFailure | None = None
+    async def _evaluate(self, request: JudgmentRequest) -> JudgmentResponse:
+        assert request.body is not None
+        payload = json.loads(request.body)
+        question = payload["question"]
+        body = json.dumps(
+            {
+                "model": self._model,
+                "state": payload["state"],
+                "questions": {
+                    question["id"]: {
+                        "type": "noul",
+                        "instructions": {"question": question["instructions"], "guidance": payload["guidance"]},
+                        "criteria": question["criteria"],
+                    },
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        if len(body) > MAX_REQUEST_BYTES:
+            raise JudgmentError(failure="incomplete_state")
         try:
-            async with asyncio.timeout(self._timeout_seconds):
-                response_body = await self._post(body)
-                response = _decode_response(response_body, expected_model=self._model)
-        except (TimeoutError, httpx.TimeoutException):
-            failure = "timeout"
-        except _ResponseTooLargeError:
-            failure = "response_too_large"
-        except httpx.HTTPStatusError as exc:
-            failure = "rate_limited" if exc.response.status_code in {429, 529} else "http_error"
-        except httpx.HTTPError:
-            failure = "transport_error"
-        except _JudgmentModelDriftError:
-            failure = "model_drift"
-        except _InvalidJudgmentResponseError:
-            failure = "invalid_response"
-        return response, failure
+            response_body = await self._post(body)
+            return _decode_response(
+                response_body,
+                expected_model=self._model,
+                expected_question=question["id"],
+                threshold=self._threshold,
+            )
+        except httpx.TimeoutException as error:
+            raise JudgmentError(failure="timeout") from error
+        except _ResponseTooLargeError as error:
+            raise JudgmentError(failure="response_too_large") from error
+        except httpx.HTTPStatusError as error:
+            failure = "rate_limited" if error.response.status_code in {429, 529} else "http_error"
+            raise JudgmentError(failure) from error
+        except httpx.HTTPError as error:
+            raise JudgmentError(failure="transport_error") from error
+        except _JudgmentModelDriftError as error:
+            raise JudgmentError(failure="model_drift") from error
+        except _InvalidJudgmentResponseError as error:
+            raise JudgmentError(failure="invalid_response") from error
 
     async def judge(
         self,
@@ -272,28 +231,12 @@ class SystemOneClient:
         owner: str,
         allow_network: bool = False,
     ) -> JudgmentResult:
-        """Evaluate one complete request; failures return categories and cancellation propagates."""
-        started = perf_counter()
-        if not request.complete or request.body is None:
-            return self._result(request, started, failure="incomplete_state")
-        if (
-            request.model != self._model
-            or request.state_bytes != len(request.body)
-            or len(request.body) > MAX_REQUEST_BYTES
-            or hashlib.sha256(request.body).hexdigest() != request.request_hash
-        ):
-            return self._result(request, started, failure="invalid_request")
-        if not allow_network:
-            return self._result(request, started, failure="network_disabled")
-        if not owner:
-            return self._result(request, started, failure="invalid_request")
-        lease = self._capacity._acquire_nowait(owner)
-        if lease is None:
-            return self._result(request, started, failure="capacity_exhausted")
-        try:
-            response, failure = await self._evaluate(request.body)
-            if perf_counter() - started > self._timeout_seconds:
-                response, failure = None, "timeout"
-            return self._result(request, started, failure=failure, response=response)
-        finally:
-            lease.release()
+        """Evaluate one question with the shared deadline and concurrency limits."""
+        return await run_judgment(
+            request,
+            self._evaluate,
+            owner=owner,
+            timeout_seconds=self._timeout_seconds,
+            allow_network=allow_network,
+            capacity=self._capacity,
+        )

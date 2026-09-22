@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mindroom.judgment.state import JudgmentQuestion
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -16,6 +17,17 @@ if TYPE_CHECKING:
     from mindroom.judgment.state import JudgmentMessage
 
 logger = get_logger(__name__)
+
+
+PARTICIPATION_QUESTION = JudgmentQuestion(
+    id="participation",
+    instructions=(
+        "Decide whether to participate in this conversation now. Multiple humans are talking "
+        "and nobody explicitly addressed the assistant in the latest messages."
+    ),
+    when_true="Add clear value: answer an open question, provide requested help, or correct a consequential misunderstanding.",
+    when_false="Acknowledgements, human-to-human coordination, unfinished thoughts, already answered questions, or repeating yourself.",
+)
 
 
 class ParticipationDecision(BaseModel):

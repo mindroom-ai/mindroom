@@ -80,10 +80,12 @@ def test_room_participation_rejects_unknown_settings() -> None:
 
 def test_typesafe_requires_room_opt_in() -> None:
     """Ordinary adaptive rooms must not send conversation text to another provider."""
-    assert RoomParticipationConfig(agent="helper").typesafe is None
-    room = RoomParticipationConfig.model_validate({"agent": "helper", "typesafe": {"threshold": 0.9}})
-    assert room.typesafe is not None
-    assert room.typesafe.threshold == 0.9
+    assert RoomParticipationConfig(agent="helper").judgment is None
+    room = RoomParticipationConfig.model_validate(
+        {"agent": "helper", "judgment": {"provider": "typesafe", "threshold": 0.9}},
+    )
+    assert room.judgment is not None
+    assert room.judgment.threshold == 0.9
 
 
 @pytest.mark.parametrize(
@@ -101,4 +103,54 @@ def test_typesafe_requires_room_opt_in() -> None:
 def test_typesafe_rejects_invalid_settings(settings: dict[str, object]) -> None:
     """Invalid thresholds, unbounded waits, and typos must fail config loading."""
     with pytest.raises(ValidationError):
-        RoomParticipationConfig.model_validate({"agent": "helper", "typesafe": settings})
+        RoomParticipationConfig.model_validate({"agent": "helper", "judgment": {"provider": "typesafe", **settings}})
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"provider": "llm", "model": "cheap"},
+        {"provider": "typesafe", "threshold": 0.9},
+    ],
+)
+def test_judgment_backend_is_explicit_and_model_alias_is_validated(settings: dict[str, object]) -> None:
+    """A dedicated decision backend is separate from the responding agent's model."""
+    config = Config.model_validate(
+        {
+            "agents": {"helper": {"display_name": "Helper"}},
+            "models": {"cheap": {"provider": "test", "id": "cheap-model"}},
+            "room_participation": {"lobby": {"agent": "helper", "judgment": settings}},
+        },
+    )
+    assert config.room_participation["lobby"].judgment.provider == settings["provider"]
+
+
+def test_judgment_rejects_unknown_model_alias() -> None:
+    """Misspelled judge models must fail configuration instead of silently falling back."""
+    with pytest.raises(ValidationError, match="Unknown judgment model"):
+        Config.model_validate(
+            {
+                "agents": {"helper": {"display_name": "Helper"}},
+                "room_participation": {
+                    "lobby": {"agent": "helper", "judgment": {"provider": "llm", "model": "missing"}},
+                },
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"provider": "unknown"},
+        {"provider": "llm"},
+        {"provider": "llm", "model": ""},
+        {"provider": "llm", "model": "cheap", "threshold": 0.8},
+        {"provider": "llm", "model": "cheap", "timeout_seconds": 0},
+        {"provider": "llm", "model": "cheap", "timeout_seconds": float("nan")},
+        {"provider": "typesafe", "model": "cheap"},
+    ],
+)
+def test_judgment_rejects_mixed_backend_settings(settings: dict[str, object]) -> None:
+    """A provider switch must not silently ignore settings meant for the old backend."""
+    with pytest.raises(ValidationError):
+        RoomParticipationConfig.model_validate({"agent": "helper", "judgment": settings})

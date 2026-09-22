@@ -53,36 +53,69 @@ If an interrupted turn already owns a visible response, recovery retains its app
 Commands and scheduled work do not opt into adaptive participation.
 Omit `room_participation` to keep the default behavior.
 
-### TypeSafe participation
+### Participation judgment backends
 
-To use TypeSafe for the participation decision, add `typesafe` to an opted-in room and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env` file.
-Omitting `typesafe` (or setting it to `null`) keeps the existing in-model check, even when a key is present.
+Participation can use a separate decision model while the configured agent model generates the reply.
+Set `judgment.provider` to `llm` for a configured model alias or `typesafe` for System One.
+Both backends receive the same participation question, criteria, room guidance, and minimized conversation context, and return a yes/no decision or abstain.
+Their predictions can differ; switching providers preserves the decision contract and response lifecycle, not identical judgments.
+
+For a dedicated LLM, reference an existing alias in your `models:` configuration:
 
 ```yaml
 room_participation:
   lobby:
     agent: assistant
     instructions: "Join when you can help; leave human conversation uninterrupted."
-    typesafe:
+    judgment:
+      provider: llm
+      model: fast
+      timeout_seconds: 5
+```
+
+The decision model uses that alias's normal provider credentials and can be cheaper than the replying agent's model.
+It receives no executable tools, agent system prompt, or agent memory.
+It must return a structured boolean decision; an explicit abstention or invalid response triggers the existing in-model fallback.
+No self-reported confidence score is requested or treated as a probability.
+Provider modes whose automatic native tools cannot be disabled are refused for decision calls.
+
+To switch to System One, change the judgment settings and set `TYPESAFE_API_KEY` in the instance environment or config-adjacent `.env`:
+
+```yaml
+room_participation:
+  lobby:
+    agent: assistant
+    instructions: "Join when you can help; leave human conversation uninterrupted."
+    judgment:
+      provider: typesafe
       threshold: 0.8
       timeout_seconds: 1.5
 ```
 
-This setting authorizes sending room guidance and up to eight recent prepared user/assistant messages to `https://api.typesafe.ai/v1/systemone`.
-System prompts, tool definitions/results, and media are excluded; Matrix message metadata is replaced with request-local speaker aliases.
-Message bodies can still contain identifying or private text.
-If the selected context contains media, non-text content, detected secrets, or exceeds the 16 KB request limit, the check falls back without sending that context to TypeSafe.
-The client pins `jev-1.13.0` and accepts only the documented [Noul probability response](https://docs.typesafe.ai/api).
+The TypeSafe client pins `jev-1.13.0` and accepts only the requested question's documented [Noul probability response](https://docs.typesafe.ai/api).
 A probability at or above `threshold` approves participation; a lower value stays quiet.
 The threshold accepts finite values from zero to one and defaults to `0.8`; this default has not been calibrated against a representative participation corpus.
-`timeout_seconds` accepts finite positive values up to thirty seconds and defaults to `1.5`.
-This is an additional request deadline after the normal participation debounce, not a deadline for the fallback model call.
-Missing credentials, exhausted concurrency, timeout, HTTP/transport failure, malformed output, or model drift use the existing in-model decision and its quiet-on-failure behavior.
+`threshold` is specific to TypeSafe and is rejected for the LLM backend.
+
+Omitting `judgment` (or setting it to `null`) preserves the existing reply-model decision, even when a TypeSafe key is present.
+Selecting either backend authorizes sending room guidance and up to eight recent prepared user/assistant messages to that backend.
+System prompts, transient memory/hook context, tool definitions/results, and media are excluded; Matrix message metadata is replaced with request-local speaker aliases.
+Message bodies can still contain identifying or private text.
+Media, attachment references, compressed or non-text content, detected secrets, malformed Unicode, and oversized input trigger fallback without sending that context to the separate judge.
+Requests are bounded to 16 KB; TypeSafe responses are bounded while streaming, and LLM decision text is validated against a 64 KiB limit after the provider returns.
+
+Both backends share a process-wide limit of eight concurrent judgments and one per instance/agent owner, with no waiting queue.
+`timeout_seconds` accepts finite positive values up to thirty seconds; defaults are five seconds for LLMs and 1.5 seconds for TypeSafe.
+This is an additional deadline after participation debounce and includes model loading, inference, and parsing; it does not cover the fallback model call.
+There are no application-level judgment retries; configured LLM providers retain their SDK behavior within the deadline.
+Missing credentials, exhausted concurrency, timeout, provider errors, malformed output, or TypeSafe model drift fall back to the existing in-model decision and its quiet-on-failure behavior.
 Cancellation propagates without starting a fallback call.
-Valid TypeSafe decisions bypass the reply provider's tool-free decision restrictions, so providers with automatic native tools can answer after approval.
-The fallback retains the provider restrictions described above.
-Only one decision runs per turn, including retries; recovery of an already-visible response retains its approval.
-Logs record probability, threshold, model, latency, token usage, and failure category without logging request text or credentials.
+Valid judgments bypass the reply provider's tool-free decision restrictions, so providers with automatic native tools can answer after approval.
+Only one decision settles per turn, including retries; recovery of an already-visible response retains its approval.
+
+Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category; TypeSafe also records probability and threshold.
+These outcome logs omit request text and credentials; separately enabled LLM request debug logging still follows the normal model configuration.
+Use these measurements alongside observed decision quality and provider pricing to compare backends; token counts alone do not establish cost or quality advantages.
 
 ## Splitting the Configuration Into Multiple Files
 

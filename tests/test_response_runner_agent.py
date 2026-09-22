@@ -58,8 +58,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.inbound_turn_normalizer import DispatchPayload
-from mindroom.judgment.client import SystemOneClient
-from mindroom.judgment.state import PINNED_MODEL
+from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -3428,7 +3427,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [False, True])
     @pytest.mark.parametrize("action", ["respond", "stay_silent", "compression_failure", "sync_restart"])
-    @pytest.mark.parametrize("backend", ["model", "typesafe"])
+    @pytest.mark.parametrize("backend", ["model", "typesafe", "llm"])
     async def test_participation_precedes_every_visible_effect(  # noqa: PLR0915 - full delivery lifecycle assertions
         self,
         mock_agent_user: AgentMatrixUser,
@@ -3466,7 +3465,13 @@ class TestAdaptiveResponse(AgentBotTestBase):
             ).encode()
 
         monkeypatch.setattr(SystemOneClient, "_post", post)
-        if backend == "typesafe":
+        judge = ParticipationModel(
+            asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
+            if action == "sync_restart"
+            else ModelResponse(content=json.dumps({"decision": action == "respond"})),
+        )
+        monkeypatch.setattr("mindroom.model_loading.get_model_instance", lambda *_: judge)
+        if backend != "model":
             model.decision = ModelResponse(content="Useful answer")
         model.cache_response = True
         monkeypatch.setattr(
@@ -3519,7 +3524,11 @@ class TestAdaptiveResponse(AgentBotTestBase):
             participation=RoomParticipationConfig.model_validate(
                 {
                     "agent": bot.agent_name,
-                    "typesafe": {} if backend == "typesafe" else None,
+                    "judgment": (
+                        {"provider": "typesafe"} if backend == "typesafe" else {"provider": "llm", "model": "default"}
+                    )
+                    if backend != "model"
+                    else None,
                 },
             ),
             on_no_response_handled=settled,
@@ -3539,13 +3548,14 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 assert source_settled == ["quiet"]
             assert memory_queued == []
-            assert len(model.requests) == (0 if action == "compression_failure" or backend == "typesafe" else 1)
+            assert len(model.requests) == (0 if action == "compression_failure" or backend != "model" else 1)
         else:
             assert result == "$response"
             assert any("Useful answer" in body for body in bodies)
             assert source_settled == []
-            assert len(model.requests) == (1 if backend == "typesafe" else 2)
+            assert len(model.requests) == (1 if backend != "model" else 2)
         assert len(typesafe_calls) == (1 if backend == "typesafe" and action != "compression_failure" else 0)
+        assert len(judge.requests) == (1 if backend == "llm" and action != "compression_failure" else 0)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_stage", ["history", "payload", "runtime", "knowledge"])

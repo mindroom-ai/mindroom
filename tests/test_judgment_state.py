@@ -7,14 +7,15 @@ import json
 
 import pytest
 
-from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, build_participation_judgment_request
+from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, build_judgment_request
+from mindroom.participation import PARTICIPATION_QUESTION
 
 
 def test_participation_request_has_stable_hashes_and_complete_context() -> None:
     """Identical inputs produce identical wire bytes; conversation changes invalidate them."""
     messages = (JudgmentMessage("user", "How does it work?"), JudgmentMessage("assistant", "Like this."))
-    request = build_participation_judgment_request(messages, instructions="Help when useful.")
-    assert request == build_participation_judgment_request(messages, instructions="Help when useful.")
+    request = build_judgment_request(PARTICIPATION_QUESTION, messages, instructions="Help when useful.")
+    assert request == build_judgment_request(PARTICIPATION_QUESTION, messages, instructions="Help when useful.")
     assert request.complete
     assert request.body is not None
     payload = json.loads(request.body)
@@ -22,10 +23,11 @@ def test_participation_request_has_stable_hashes_and_complete_context() -> None:
         {"role": "user", "text": "How does it work?"},
         {"role": "assistant", "text": "Like this."},
     ]
-    assert payload["questions"]["participation"]["instructions"]["room_guidance"] == "Help when useful."
+    assert payload["guidance"] == "Help when useful."
     assert request.request_hash == hashlib.sha256(request.body).hexdigest()
     assert request.state_bytes == len(request.body) <= MAX_REQUEST_BYTES
-    changed = build_participation_judgment_request(
+    changed = build_judgment_request(
+        PARTICIPATION_QUESTION,
         (JudgmentMessage("user", "New question"),),
         instructions="Help when useful.",
     )
@@ -54,7 +56,7 @@ def test_incomplete_participation_input_never_produces_wire_bytes(
     instructions: str,
 ) -> None:
     """Unsupported, oversized, secret-bearing, or unencodable input must fall back locally."""
-    request = build_participation_judgment_request(messages, instructions=instructions)
+    request = build_judgment_request(PARTICIPATION_QUESTION, messages, instructions=instructions)
     assert not request.complete
     assert request.body is None
     assert request.incomplete_reason

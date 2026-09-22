@@ -1,1 +1,1 @@
-"""Bounded request construction and transport for TypeSafe participation judgments."""
+"""Bounded boolean judgments with interchangeable LLM and System One backends."""

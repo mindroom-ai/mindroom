@@ -17,14 +17,16 @@ type JudgmentFailure = Literal[
     "response_too_large",
     "timeout",
     "transport_error",
+    "provider_error",
 ]
 
 
-@dataclass(frozen=True, slots=True)
-class NoulAnswer:
-    """A strictly validated probability that participation would be useful."""
+class JudgmentError(ValueError):
+    """A backend failure safe to expose without provider text or credentials."""
 
-    probability: float
+    def __init__(self, failure: JudgmentFailure) -> None:
+        super().__init__(failure)
+        self.failure = failure
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,18 +39,20 @@ class TokenUsage:
 
 @dataclass(frozen=True, slots=True)
 class JudgmentResponse:
-    """One complete response from the pinned evaluated model."""
+    """One validated backend response, including an explicit abstention."""
 
     model: str
-    answer: NoulAnswer
-    usage: TokenUsage
+    decision: bool | None
+    probability: float | None
+    usage: TokenUsage | None
 
 
 @dataclass(frozen=True, slots=True)
 class JudgmentResult:
     """A successful answer or one closed failure category."""
 
-    answer: NoulAnswer | None
+    decision: bool | None
+    probability: float | None
     failure: JudgmentFailure | None
     model_id: str | None
     latency_ms: int

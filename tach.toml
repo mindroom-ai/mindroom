@@ -714,7 +714,7 @@ depends_on = [
     "mindroom.prompt_cache_key",
     "mindroom.vertex_claude_compat",
 ]
-visibility = [
+visibility = ["mindroom.judgment.llm",
     "mindroom.ai",
     "mindroom.agents",
     "mindroom.history.runtime",
@@ -2133,7 +2133,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
-    "mindroom.typesafe_participation",
+    "mindroom.participation_judgment",
     "mindroom.config.participation",
     "mindroom.participation",
     "mindroom.response_activity",
@@ -2344,6 +2344,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.main"
 depends_on = [
+    "mindroom.config.judgment",
     "mindroom.config.participation",
     "mindroom.agent_policy",
     "mindroom.config.agent",
@@ -6039,8 +6040,8 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_call"]
 
 [[modules]]
 path = "mindroom.participation"
-depends_on = ["mindroom.logging_config"]
-visibility = ["mindroom.agno_participation", "mindroom.response_runner", "mindroom.response_turn", "mindroom.typesafe_participation"]
+depends_on = ["mindroom.judgment.state", "mindroom.logging_config"]
+visibility = ["mindroom.agno_participation", "mindroom.response_runner", "mindroom.response_turn", "mindroom.participation_judgment"]
 
 [[modules]]
 path = "mindroom.agno_participation"
@@ -6050,12 +6051,12 @@ visibility = ["mindroom.ai"]
 [[modules]]
 path = "mindroom.json_utils"
 depends_on = []
-visibility = ["mindroom.agno_participation", "mindroom.private_instance_identity_store", "mindroom.api.mcp_scim"]
+visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.private_instance_identity_store", "mindroom.api.mcp_scim"]
 
 [[modules]]
 path = "mindroom.provider_tool_policy"
 depends_on = []
-visibility = ["mindroom.agno_participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model", "mindroom.cerebras_model", "mindroom.ollama_model"]
+visibility = ["mindroom.judgment.llm", "mindroom.agno_participation", "mindroom.claude_prompt_cache", "mindroom.openai_models", "mindroom.google_gemini", "mindroom.groq_model", "mindroom.cerebras_model", "mindroom.ollama_model"]
 
 [[modules]]
 path = "mindroom.groq_model"
@@ -6064,7 +6065,7 @@ visibility = ["mindroom.model_loading"]
 
 [[modules]]
 path = "mindroom.config.participation"
-depends_on = []
+depends_on = ["mindroom.config.judgment"]
 visibility = ["mindroom.config.main", "mindroom.turn_policy", "mindroom.response_runner"]
 
 [[modules]]
@@ -6533,9 +6534,25 @@ depends_on = ["mindroom.redaction"]
 
 [[modules]]
 path = "mindroom.judgment.client"
+depends_on = ["mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.judgment.state"]
+
+[[modules]]
+path = "mindroom.participation_judgment"
+depends_on = ["mindroom.judgment.evaluator", "mindroom.judgment.state", "mindroom.participation"]
+visibility = ["mindroom.response_runner"]
+
+[[modules]]
+path = "mindroom.config.judgment"
+depends_on = []
+
+[[modules]]
+path = "mindroom.judgment.execution"
 depends_on = ["mindroom.judgment.answers", "mindroom.judgment.state"]
 
 [[modules]]
-path = "mindroom.typesafe_participation"
-depends_on = ["mindroom.judgment.client", "mindroom.judgment.state", "mindroom.logging_config", "mindroom.participation"]
-visibility = ["mindroom.response_runner"]
+path = "mindroom.judgment.llm"
+depends_on = ["mindroom.model_loading", "mindroom.json_utils", "mindroom.judgment.answers", "mindroom.judgment.execution", "mindroom.provider_tool_policy"]
+
+[[modules]]
+path = "mindroom.judgment.evaluator"
+depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.logging_config"]

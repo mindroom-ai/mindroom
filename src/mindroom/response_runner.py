@@ -80,6 +80,7 @@ from mindroom.orchestration.runtime import (
     request_task_cancel,
 )
 from mindroom.participation import ParticipationGate
+from mindroom.participation_judgment import create_participation_decider
 from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
 from mindroom.response_shutdown_diagnostics import (
@@ -134,7 +135,6 @@ from mindroom.tool_system.worker_routing import (
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_record import EditPreparation, RevisionSnapshotChangedError
-from mindroom.typesafe_participation import create_participation_decider
 from mindroom.user_turn_time import prefix_user_turn_time
 
 from .delivery_gateway import (
@@ -533,7 +533,11 @@ class ResponseRequest:
         return self.response_envelope.target.resolved_thread_id
 
 
-def _participation_for_request(request: ResponseRequest, runtime_paths: RuntimePaths) -> ParticipationGate | None:
+def _participation_for_request(
+    request: ResponseRequest,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> ParticipationGate | None:
     """Own one participation decision from locked preparation through delivery."""
     if request.participation is None:
         return None
@@ -541,7 +545,7 @@ def _participation_for_request(request: ResponseRequest, runtime_paths: RuntimeP
     if request.existing_event_id is not None:
         gate.approve_existing_response()
     else:
-        gate.decider = create_participation_decider(request.participation, runtime_paths)
+        gate.decider = create_participation_decider(request.participation, config, runtime_paths)
     return gate
 
 
@@ -4427,7 +4431,7 @@ class ResponseRunner:
             tool_dispatch=tool_dispatch,
             participation=participation
             if participation is not None
-            else _participation_for_request(request, self.deps.runtime_paths),
+            else _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
         )
 
     @timed("non_streaming_response_generation")
@@ -5029,7 +5033,7 @@ class ResponseRunner:
         early_placeholder_state: _EarlyPlaceholderState | None = None,
     ) -> str | None:
         """Own participation before any fallible locked request preparation."""
-        participation = _participation_for_request(request, self.deps.runtime_paths)
+        participation = _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths)
         placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
         try:
             return await self._generate_response_with_participation_locked(

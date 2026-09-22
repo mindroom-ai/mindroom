@@ -15,14 +15,15 @@ from agno.models.response import ModelResponse
 from agno.run.agent import RunOutput
 from groq import AsyncGroq
 
+from mindroom import model_loading
 from mindroom.agno_participation import participation_model
+from mindroom.config.main import Config
 from mindroom.config.participation import RoomParticipationConfig
 from mindroom.groq_model import MindRoomGroq
 from mindroom.hooks.enrichment import render_transient_context
-from mindroom.judgment.client import SystemOneClient
-from mindroom.judgment.state import PINNED_MODEL
+from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
 from mindroom.participation import ParticipationGate
-from mindroom.typesafe_participation import create_participation_decider
+from mindroom.participation_judgment import create_participation_decider
 from tests.conftest import test_runtime_paths
 from tests.participation_helpers import ParticipationModel
 
@@ -46,18 +47,25 @@ def _gate(
     threshold: float = 0.8,
     key: str = "test-secret",
     timeout: float = 1.5,
+    backend: str = "typesafe",
 ) -> ParticipationGate:
     paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": key})
     room = RoomParticipationConfig.model_validate(
         {
             "agent": "helper",
             "instructions": "Offer technical help.",
-            "typesafe": {"threshold": threshold, "timeout_seconds": timeout},
+            "judgment": {"provider": "typesafe", "threshold": threshold, "timeout_seconds": timeout}
+            if backend == "typesafe"
+            else {"provider": "llm", "model": "cheap", "timeout_seconds": timeout},
         },
     )
     return ParticipationGate(
         instructions=room.instructions,
-        decider=create_participation_decider(room, paths),
+        decider=create_participation_decider(
+            room,
+            Config(models={"cheap": {"provider": "test", "id": "cheap"}}),
+            paths,
+        ),
     )
 
 
@@ -278,3 +286,96 @@ async def test_typesafe_gates_groq_native_tools_before_any_provider_call(
     if requests:
         assert requests[0]["model"] == "groq/compound"
         assert requests[0].get("tool_choice") != "none"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_dedicated_llm_uses_same_gate_without_calling_reply_model_for_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    approved: bool,
+) -> None:
+    """Changing the judge backend must preserve visible behavior and isolate the reply model."""
+    judge = ParticipationModel(ModelResponse(content=json.dumps({"decision": approved})))
+    selected: list[str] = []
+
+    def load(_config: Config, _paths: object, model_name: str) -> ParticipationModel:
+        selected.append(model_name)
+        return judge
+
+    monkeypatch.setattr(model_loading, "get_model_instance", load)
+    reply = ParticipationModel(ModelResponse(content="Useful answer"))
+    gate = _gate(tmp_path, backend="llm", key="")
+    messages = [Message(role="system", content="Private system prompt"), Message(role="user", content="Any ideas?")]
+    with participation_model(reply, gate, run_id="primary"):
+        if stream:
+            content = "".join(
+                [
+                    item.content or ""
+                    async for item in reply.aresponse_stream(messages, run_response=RunOutput(run_id="primary"))
+                ],
+            )
+        else:
+            content = (await reply.aresponse(messages, run_response=RunOutput(run_id="primary"))).content
+    assert content == ("Useful answer" if approved else "")
+    assert gate.approved is approved
+    assert selected == ["cheap"]
+    assert len(judge.requests) == 1
+    assert len(reply.requests) == int(approved)
+    request = judge.requests[0]
+    assert not request["tools"]
+    assert request["tool_choice"] == "none"
+    assert "Private system prompt" not in str(request["messages"])
+    assert "Offer technical help." in str(request["messages"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output",
+    [
+        ModelResponse(content='{"decision": null}'),
+        ModelResponse(content='{"decision": "yes"}'),
+        ModelResponse(
+            content='{"decision": true}',
+            tool_calls=[{"id": "call", "type": "function", "function": {"name": "unsafe", "arguments": "{}"}}],
+        ),
+        RuntimeError("Provider failed"),
+    ],
+)
+async def test_dedicated_llm_abstention_uses_existing_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output: ModelResponse | BaseException,
+) -> None:
+    """Both explicit abstention and judge failures preserve the existing fallback policy."""
+    judge = ParticipationModel(output)
+    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    reply = ParticipationModel(ModelResponse(content='{"action":"respond","reason":"Useful help."}'))
+    gate = _gate(tmp_path, backend="llm")
+    with participation_model(reply, gate, run_id="primary"):
+        response = await reply.aresponse(
+            [Message(role="user", content="Any ideas?")],
+            run_response=RunOutput(run_id="primary"),
+        )
+    assert response.content == "Useful answer"
+    assert gate.approved
+    assert len(judge.requests) == 1
+    assert len(reply.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_dedicated_llm_cancellation_does_not_start_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation has the same unsettled outcome for either backend."""
+    judge = ParticipationModel(asyncio.CancelledError())
+    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    reply = ParticipationModel(ModelResponse(content="Must not run"))
+    gate = _gate(tmp_path, backend="llm")
+    with pytest.raises(asyncio.CancelledError), participation_model(reply, gate, run_id="primary"):
+        await reply.aresponse([Message(role="user", content="Any ideas?")], run_response=RunOutput(run_id="primary"))
+    assert gate.decision is None
+    assert reply.requests == []

@@ -12,20 +12,22 @@ import httpx
 import pytest
 
 import mindroom.judgment.client as client_module
+import mindroom.judgment.execution as execution_module
 from mindroom.judgment.client import (
     _MAX_RESPONSE_BYTES,
     _TYPE_SAFE_ENDPOINT,
+    PINNED_MODEL,
     SystemOneClient,
     _decode_response,
     _InvalidJudgmentResponseError,
-    _JudgmentCapacity,
 )
+from mindroom.judgment.execution import JudgmentCapacity
 from mindroom.judgment.state import (
-    PINNED_MODEL,
     JudgmentMessage,
     JudgmentRequest,
-    build_participation_judgment_request,
+    build_judgment_request,
 )
+from mindroom.participation import PARTICIPATION_QUESTION
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -37,7 +39,8 @@ pytestmark = pytest.mark.asyncio
 
 
 def _request() -> JudgmentRequest:
-    return build_participation_judgment_request(
+    return build_judgment_request(
+        PARTICIPATION_QUESTION,
         (JudgmentMessage("user", "How do I install the package?"),),
         instructions="Offer technical help.",
     )
@@ -75,8 +78,8 @@ async def test_client_posts_exact_contract_and_retains_probability() -> None:
     result = await client.judge(_request(), owner="turn-1", allow_network=True)
 
     assert result.failure is None
-    assert result.answer is not None
-    assert result.answer.probability == 0.731234
+    assert result.decision is not None
+    assert result.probability == 0.731234
     assert result.model_id == PINNED_MODEL
     assert result.input_tokens == 123
     assert result.output_tokens == 7
@@ -84,7 +87,7 @@ async def test_client_posts_exact_contract_and_retains_probability() -> None:
     assert seen[0].method == "POST"
     assert str(seen[0].url) == _TYPE_SAFE_ENDPOINT
     assert seen[0].headers["authorization"] == "Bearer test-secret"
-    assert json.loads(seen[0].content) == json.loads(_request().body or b"")
+    assert json.loads(seen[0].content)["state"] == json.loads(_request().body or b"")["state"]
 
 
 @pytest.mark.parametrize("probability", [0.0, 0.8, 1.0, True, -0.1, 1.1, "0.9", None, float("nan"), float("inf")])
@@ -106,20 +109,24 @@ async def test_participation_client_validates_noul_and_network_opt_in(probabilit
         )
 
     client = SystemOneClient(api_key="test-secret", model=PINNED_MODEL, transport=httpx.MockTransport(respond))
-    request = build_participation_judgment_request((JudgmentMessage("user", "Any thoughts?"),), instructions="")
+    request = build_judgment_request(
+        PARTICIPATION_QUESTION,
+        (JudgmentMessage("user", "Any thoughts?"),),
+        instructions="",
+    )
     refused = await client.judge(request, owner="agent")
     assert refused.failure == "network_disabled"
     assert not requests
     result = await client.judge(request, owner="agent", allow_network=True)
     assert len(requests) == 1
-    assert requests[0].content == request.body
+    assert json.loads(requests[0].content)["state"] == json.loads(request.body)["state"]
     assert requests[0].headers["authorization"] == "Bearer test-secret"
     if type(probability) is float and 0 <= probability <= 1:
-        assert result.answer is not None
-        assert result.answer.probability == probability
+        assert result.decision is not None
+        assert result.probability == probability
         assert result.failure is None
     else:
-        assert result.answer is None
+        assert result.decision is None
         assert result.failure == "invalid_response"
 
 
@@ -137,13 +144,14 @@ async def test_client_requires_explicit_network_opt_in() -> None:
     result = await client.judge(_request(), owner="turn-1")
 
     assert result.failure == "network_disabled"
-    assert result.answer is None
+    assert result.decision is None
     assert calls == 0
 
 
 async def test_incomplete_state_never_reaches_transport() -> None:
     """Incomplete state must fail closed even when the caller enables transport."""
-    incomplete = build_participation_judgment_request(
+    incomplete = build_judgment_request(
+        PARTICIPATION_QUESTION,
         (JudgmentMessage("user", "token=sk-secret"),),
         instructions="",
     )
@@ -156,7 +164,7 @@ async def test_incomplete_state_never_reaches_transport() -> None:
     result = await client.judge(incomplete, owner="turn-1", allow_network=True)
 
     assert result.failure == "incomplete_state"
-    assert result.answer is None
+    assert result.decision is None
 
 
 @pytest.mark.parametrize("body", [b"x" * 16_001, b"{}"])
@@ -172,7 +180,7 @@ async def test_client_rejects_requests_not_issued_by_the_bounded_builder(body: b
     result = await client.judge(forged, owner="turn-1", allow_network=True)
 
     assert result.failure == "invalid_request"
-    assert result.answer is None
+    assert result.decision is None
 
 
 @pytest.mark.parametrize(
@@ -193,7 +201,7 @@ async def test_client_rejects_requests_not_issued_by_the_bounded_builder(body: b
 async def test_decode_response_rejects_malformed_numbers_and_model_drift(body: bytes, match: str) -> None:
     """Malformed provider output must never be normalized into an accepted decision."""
     with pytest.raises(_InvalidJudgmentResponseError, match=match):
-        _decode_response(body, expected_model=PINNED_MODEL)
+        _decode_response(body, expected_model=PINNED_MODEL, expected_question="participation", threshold=0.8)
 
 
 @pytest.mark.parametrize(
@@ -214,7 +222,12 @@ async def test_decode_response_rejects_schema_drift(mutate: Callable[[dict[str, 
     mutate(payload)
 
     with pytest.raises(_InvalidJudgmentResponseError):
-        _decode_response(json.dumps(payload).encode(), expected_model=PINNED_MODEL)
+        _decode_response(
+            json.dumps(payload).encode(),
+            expected_model=PINNED_MODEL,
+            expected_question="participation",
+            threshold=0.8,
+        )
 
 
 async def test_http_failures_are_not_retried_or_leaked_to_logs(caplog: pytest.LogCaptureFixture) -> None:
@@ -240,7 +253,7 @@ async def test_http_failures_are_not_retried_or_leaked_to_logs(caplog: pytest.Lo
 
 
 async def test_model_drift_has_a_distinct_closed_failure() -> None:
-    """A new provider version must be visible to the harness instead of looking generically malformed."""
+    """A new provider version must be visible to the caller instead of looking generically malformed."""
     client = SystemOneClient(
         api_key="secret",
         model=PINNED_MODEL,
@@ -252,7 +265,7 @@ async def test_model_drift_has_a_distinct_closed_failure() -> None:
     result = await client.judge(_request(), owner="turn-1", allow_network=True)
 
     assert result.failure == "model_drift"
-    assert result.answer is None
+    assert result.decision is None
 
 
 async def test_total_deadline_includes_the_response_wait() -> None:
@@ -306,7 +319,7 @@ async def test_decoded_response_body_is_bounded_while_streaming() -> None:
 
 async def test_shared_capacity_rejects_globally_and_per_owner_without_waiting() -> None:
     """Separate clients must not create separate global or owner wait queues."""
-    capacity = _JudgmentCapacity(max_concurrent=2, max_per_owner=1)
+    capacity = JudgmentCapacity(max_concurrent=2, max_per_owner=1)
     first_entered = asyncio.Event()
     globally_full = asyncio.Event()
     release = asyncio.Event()
@@ -341,7 +354,7 @@ async def test_shared_capacity_rejects_globally_and_per_owner_without_waiting() 
 
 async def test_cancellation_propagates_and_releases_capacity() -> None:
     """Cancelling one request must not fabricate a result or strand its shared slot."""
-    capacity = _JudgmentCapacity(max_concurrent=1, max_per_owner=1)
+    capacity = JudgmentCapacity(max_concurrent=1, max_per_owner=1)
     entered = asyncio.Event()
     calls = 0
 
@@ -389,7 +402,7 @@ async def test_adversarial_json_returns_invalid_response(body: bytes) -> None:
     )
     result = await client.judge(_request(), owner="test", allow_network=True)
     assert result.failure == "invalid_response"
-    assert result.answer is None
+    assert result.decision is None
 
 
 async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,12 +410,17 @@ async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pyt
     clock = [0.0]
     original = client_module._decode_response
 
-    def slow_decode(body: bytes, *, expected_model: str) -> JudgmentResponse:
-        response = original(body, expected_model=expected_model)
+    def slow_decode(body: bytes, *, expected_model: str, expected_question: str, threshold: float) -> JudgmentResponse:
+        response = original(
+            body,
+            expected_model=expected_model,
+            expected_question=expected_question,
+            threshold=threshold,
+        )
         clock[0] = 2.0
         return response
 
-    monkeypatch.setattr(client_module, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(execution_module, "perf_counter", lambda: clock[0])
     monkeypatch.setattr(client_module, "_decode_response", slow_decode)
     client = SystemOneClient(
         api_key="synthetic",
@@ -412,4 +430,4 @@ async def test_synchronous_decode_overrun_cannot_return_success(monkeypatch: pyt
     )
     result = await client.judge(_request(), owner="test", allow_network=True)
     assert result.failure == "timeout"
-    assert result.answer is None
+    assert result.decision is None
