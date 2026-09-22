@@ -131,22 +131,41 @@ In non-Vertex mode, the tool uses the Gemini API through `GOOGLE_API_KEY`.
 | `enable_generate_video` | `boolean` | `no` | `true` | Enable `generate_video()`. |
 | `all` | `boolean` | `no` | `false` | Enable both generation functions. |
 
-### Example
+### Examples
+
+Each `gemini` toolkit instance uses one client and one Vertex location for both generation methods.
+Google's current model cards list `global`, `us`, and `eu` for [Gemini 3.1 Flash Image](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-1-flash-image) and `us-central1` for [Veo 3.1](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/veo/3-1-generate).
+These models have no documented shared serving location, so configure separate agents and disable the unused method in each toolkit.
 
 ```yaml
 agents:
-  studio:
+  illustrator:
+    tools:
+      - gemini:
+          vertexai: true
+          project_id: my-gcp-project
+          location: global
+          image_generation_model: gemini-3.1-flash-image
+          enable_generate_video: false
+  filmmaker:
     tools:
       - gemini:
           vertexai: true
           project_id: my-gcp-project
           location: us-central1
-          image_generation_model: gemini-3.1-flash-image
           video_generation_model: veo-3.1-generate-001
+          enable_generate_image: false
 ```
+
+The `illustrator` agent can call:
 
 ```python
 generate_image("A minimal poster for a Matrix developer conference.")
+```
+
+The `filmmaker` agent can call:
+
+```python
 generate_video("A slow cinematic flythrough of a neon data center.")
 ```
 
