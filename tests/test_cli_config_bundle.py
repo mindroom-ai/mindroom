@@ -9,7 +9,10 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from mindroom.cli.config import activate_cli_runtime
+from mindroom.cli.config_bundle import initialize_runtime_bundle
 from mindroom.cli.main import app
+from mindroom.config.main import load_config
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -17,6 +20,38 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 runner = CliRunner()
+
+
+@pytest.mark.parametrize("override", [None, "process", "cli"])
+def test_bootstrap_validates_against_the_startup_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    override: str | None,
+) -> None:
+    """Staged environment state controls validation unless process or CLI explicitly overrides it."""
+    monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+    source = tmp_path / "source"
+    source.mkdir()
+    storage = tmp_path / "bundle-state"
+    storage.mkdir()
+    (storage / "matrix_state.yaml").write_text("accounts:\n  agent_router:\n    username: duplicate\n")
+    (source / ".env").write_text(f"MINDROOM_STORAGE_PATH={storage}\n")
+    (source / "config.yaml").write_text("agents: {}\nmindroom_user:\n  username: duplicate\n")
+    target = tmp_path / "active"
+    explicit_storage = tmp_path / "explicit-state"
+    if override == "process":
+        monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(explicit_storage))
+    cli_storage = explicit_storage if override == "cli" else None
+    if override is None:
+        with pytest.raises(typer.Exit) as exc:
+            initialize_runtime_bundle(source, target / "config.yaml", cli_storage)
+        assert exc.value.exit_code == 2
+        assert not target.exists()
+    else:
+        initialize_runtime_bundle(source, target / "config.yaml", cli_storage)
+        runtime = activate_cli_runtime(target / "config.yaml", storage_path=cli_storage)
+        assert runtime.storage_root == explicit_storage
+        assert load_config(runtime).mindroom_user.username == "duplicate"
 
 
 def test_install_receipt_matches_existing_fingerprint_command(tmp_path: Path) -> None:

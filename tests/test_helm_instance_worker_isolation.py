@@ -477,6 +477,32 @@ def test_runtime_chart_rejects_unsafe_native_bootstrap(settings: tuple[str, ...]
     assert "config.bootstrapBundlePath" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("source", "allowed"),
+    [
+        ("/app/agent_data/active", False),
+        ("/app/agent_data/active/../active/", False),
+        ("/app/agent_data", False),
+        ("/", False),
+        ("/app/agent_data/active/incoming", False),
+        ("/app/agent_data/active-copy", True),
+        ("/app/agent_data/act", True),
+    ],
+)
+def test_runtime_chart_checks_bootstrap_path_boundaries(source: str, allowed: bool) -> None:
+    """Bootstrap paths cannot overlap after normalization; shared name prefixes remain valid."""
+    result = _run_helm_template(
+        Path("cluster/k8s/runtime"),
+        "workers.backend=kubernetes",
+        "config.source=file",
+        "config.path=/app/agent_data/active/config.yaml",
+        f"config.bootstrapBundlePath={source}",
+    )
+    assert (result.returncode == 0) is allowed, result.stderr
+    if not allowed:
+        assert "overlap" in result.stderr
+
+
 def test_runtime_chart_rejects_duplicate_content_bundle_names() -> None:
     """Generated init container names must stay unique."""
     completed = _run_helm_template(

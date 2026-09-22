@@ -9,7 +9,7 @@ import shutil
 import stat
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +20,20 @@ from mindroom.file_locks import advisory_file_lock
 __all__ = ["BundleInstallResult", "install_config_bundle"]
 
 _METADATA = ".mindroom-bundle.json"
+
+
+@dataclass(frozen=True)
+class _IdleTransaction:
+    previous: str | None
+
+
+@dataclass(frozen=True)
+class _ActiveTransaction:
+    pending: str | None
+    retired: str | None
+
+
+type _Transaction = _IdleTransaction | _ActiveTransaction
 
 
 @dataclass(frozen=True)
@@ -55,43 +69,49 @@ def _directory_digest(path: Path) -> str | None:
     return _tree_digest(path) if path.exists() else None
 
 
-def _read_transaction(journal: Path) -> dict[str, str | None]:
+def _read_transaction(journal: Path) -> _Transaction:
     """Read the content digests owned by an interrupted publication."""
     try:
         owned = json.loads(journal.read_text())
     except ValueError as exc:
         msg = "Invalid bundle recovery transaction; no files were changed."
         raise ValueError(msg) from exc
-    if not isinstance(owned, dict) or set(owned) not in ({"previous"}, {"pending", "retired"}):
+    if (
+        not isinstance(owned, dict)
+        or set(owned) not in ({"previous"}, {"pending", "retired"})
+        or any(value is not None and not isinstance(value, str) for value in owned.values())
+    ):
         msg = "Invalid bundle recovery transaction; no files were changed."
         raise ValueError(msg)
-    return owned
+    if "previous" in owned:
+        return _IdleTransaction(previous=owned["previous"])
+    return _ActiveTransaction(pending=owned["pending"], retired=owned["retired"])
 
 
-def _write_transaction(journal: Path, owned: dict[str, str | None]) -> None:
+def _write_transaction(journal: Path, owned: _Transaction) -> None:
     """Publish complete bookkeeping atomically, retaining old state on write failure."""
     descriptor, name = tempfile.mkstemp(prefix=f"{journal.name}-", dir=journal.parent)
     temporary = Path(name)
     try:
         with os.fdopen(descriptor, "w") as stream:
-            json.dump(owned, stream)
+            json.dump(asdict(owned), stream)
         temporary.replace(journal)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def _recovery_transaction(target: Path) -> dict[str, str | None] | None:
+def _recovery_transaction(target: Path) -> _ActiveTransaction | None:
     """Require persisted ownership before any previous or recovery tree can move."""
     journal = target.with_name(f".{target.name}.transaction")
-    owned = _read_transaction(journal) if journal.exists() else {"previous": None}
+    owned = _read_transaction(journal) if journal.exists() else _IdleTransaction(previous=None)
     previous = target.with_name(f"{target.name}.previous")
     previous_digest = _directory_digest(previous)
-    if "previous" not in owned:
-        if previous_digest is not None and previous_digest not in owned.values():
+    if isinstance(owned, _ActiveTransaction):
+        if previous_digest is not None and previous_digest not in (owned.pending, owned.retired):
             msg = "Unowned previous bundle directory during recovery; no files were changed."
             raise ValueError(msg)
         return owned
-    if previous_digest != owned["previous"]:
+    if previous_digest != owned.previous:
         msg = "Unowned previous bundle directory; no files were changed."
         raise ValueError(msg)
     if any(target.with_name(f".{target.name}.{suffix}").exists() for suffix in ("pending", "retired")):
@@ -109,8 +129,8 @@ def _finish_rotation(target: Path) -> None:
     owned = _recovery_transaction(target)
     if owned is None:
         return
-    for path, key in ((pending, "pending"), (retired, "retired")):
-        if path.exists() and _directory_digest(path) != owned[key]:
+    for path, digest in ((pending, owned.pending), (retired, owned.retired)):
+        if path.exists() and _directory_digest(path) != digest:
             msg = f"Unowned bundle recovery directory: {path}"
             raise ValueError(msg)
     if pending.exists():
@@ -118,14 +138,14 @@ def _finish_rotation(target: Path) -> None:
             pending.rename(target)
         else:
             if previous.exists():
-                if _directory_digest(previous) != owned["retired"]:
+                if _directory_digest(previous) != owned.retired:
                     msg = "Previous bundle changed during recovery; no files were changed."
                     raise ValueError(msg)
                 previous.rename(retired)
             pending.rename(previous)
     if retired.exists():
         shutil.rmtree(retired)
-    _write_transaction(journal, {"previous": _directory_digest(previous)})
+    _write_transaction(journal, _IdleTransaction(previous=_directory_digest(previous)))
 
 
 def _publish_bundle(stage: Path, target: Path) -> bool:
@@ -133,7 +153,10 @@ def _publish_bundle(stage: Path, target: Path) -> bool:
     pending = target.with_name(f".{target.name}.pending")
     previous = target.with_name(f"{target.name}.previous")
     journal = target.with_name(f".{target.name}.transaction")
-    _write_transaction(journal, {"pending": _directory_digest(target), "retired": _directory_digest(previous)})
+    _write_transaction(
+        journal,
+        _ActiveTransaction(pending=_directory_digest(target), retired=_directory_digest(previous)),
+    )
     if target.exists():
         target.rename(pending)
     try:

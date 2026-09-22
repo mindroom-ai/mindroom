@@ -1215,19 +1215,69 @@ mindroom config check-applied --path ./active/config.yaml --fingerprint <receipt
 mindroom config install-bundle ./active.previous --target ./active --expected-digest <previous-receipt-digest> --json
 ```
 
-`--config` selects a relative file inside the bundle (default `config.yaml`). The installer copies into a sibling staging directory and uses the native loader for include, environment, and config validation before publication. Native includes must remain inside the selected config file's directory. Run the installer with the runtime's environment and filesystem access; external resources referenced by config are outside the bundle's drift protection. Relative paths resolve within the staged candidate during validation. Automatic config migrations affect the staged copy only.
+`--config` selects a relative file inside the bundle (default `config.yaml`).
+The installer copies into a sibling staging directory and uses the native loader for include, environment, and config validation before publication.
+Native includes must remain inside the selected config file's directory.
+Run the installer with the runtime's environment and filesystem access; external resources referenced by config are outside the bundle's drift protection.
+Relative paths resolve within the staged candidate during validation.
+Automatic config migrations affect the staged copy only.
 
-`--initialize-only` preserves any existing target directory, even when the supplied revision changes or the existing files have been edited. It does not validate that existing tree and returns `initialized` with no fingerprint. Without this flag, unchanged trees return `unchanged`. Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation. This covers `.env` and files outside the YAML include graph too. An unmanaged or edited tree requires explicit `--force`; this never bypasses validation. `--force` cannot be combined with `--initialize-only`.
+`--initialize-only` preserves any existing target directory, even when the supplied revision changes or the existing files have been edited.
+It does not validate that existing tree and returns `initialized` with no fingerprint.
+Without this flag, unchanged trees return `unchanged`.
+Changed managed trees replace the active tree only if its file names, modes, and contents still match the last installation.
+This covers `.env` and files outside the YAML include graph too.
+An unmanaged or edited tree requires explicit `--force`; this never bypasses validation.
+`--force` cannot be combined with `--initialize-only`.
 
-Successful replacement retains the complete former tree at `TARGET.previous`. Invalid candidates and failed copies leave active and previous trees untouched. Symlinks and special files are rejected. Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
+Successful replacement retains the complete former tree at `TARGET.previous`.
+Invalid candidates and failed copies leave active and previous trees untouched.
+Symlinks and special files are rejected.
+Reserve `.mindroom-bundle.json` inside the tree for installer metadata; keep runtime state and other frequently modified files outside the bundle.
 
-Rollback uses the same validated installation operation with `TARGET.previous` as its source. Keep each installation receipt and pass the previous revision's `digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets. The rejected active revision then becomes the new previous tree. Repeating the pinned rollback after a lost receipt fails safely instead of toggling back to the rejected revision. The native fingerprint alone cannot distinguish revisions that only change `.env` or unrelated assets. The guard can pin any mutable candidate source. If the active revision has since been authored, rollback also requires explicit `--force`. A failed or missing runtime receipt does not automatically roll back filesystem state.
+Rollback uses the same validated installation operation with `TARGET.previous` as its source.
+Keep each installation receipt and pass the previous revision's `digest` as `--expected-digest`; the guard compares the staged whole-tree digest before replacing active files, including `.env` and unrelated assets.
+The rejected active revision then becomes the new previous tree.
+Repeating the pinned rollback after a lost receipt fails safely instead of toggling back to the rejected revision.
+The native fingerprint alone cannot distinguish revisions that only change `.env` or unrelated assets.
+The guard can pin any mutable candidate source.
+If the active revision has since been authored, rollback also requires explicit `--force`.
+A failed or missing runtime receipt does not automatically roll back filesystem state.
 
-For startup, `mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` runs initialize-only installation before loading the runtime environment. The target directory is derived from the selected config path, and the source must contain the same config filename at its root. Startup then resolves paths and `.env` again from the installed tree. Existing target directories are preserved, so changed source revisions never overwrite authored edits on restart. Keep storage outside this dedicated config directory.
+For startup, `mindroom run --bootstrap-config-bundle SOURCE --config TARGET/config.yaml` runs initialize-only installation before loading the runtime environment.
+The target directory is derived from the selected config path, and the source must contain the same config filename at its root.
+Validation reads the staged `.env`, with exported process values and explicit `--storage-path` taking precedence.
+Startup then resolves paths and `.env` again from the installed tree.
+Existing target directories are preserved, so changed source revisions never overwrite authored edits on restart.
+Keep storage outside this dedicated config directory.
 
-**Filesystem limits:** directory replacement uses two renames on the target filesystem. Readers can briefly see a missing target between renames, but never a partly copied tree. This is not a transaction across concurrent reads or external writers, nor a power-loss durability guarantee. Installer calls serialize using a sibling lock. A failed publication rename restores the former active tree. Interrupted operations leave complete trees at `.TARGET.pending` and `.TARGET.retired`; `.TARGET.transaction` records whole-tree content digests and persists ownership of `TARGET.previous` between installations. Journal updates use atomic replacement; partial writes preserve the prior record. Recovery accepts copied or restored trees with identical file names, modes, and bytes, even on another mount; it rejects changed previous or recovery contents. Reserved regular `.mindroom-bundle.json` metadata is excluded from these digests, but links and special files are always rejected. This verifies preserved content, not filesystem object identity. Hashing previous and recovery trees adds filesystem reads during installation and bootstrap. Retry the command to recover before proceeding. Do not manually modify these reserved recovery paths. If retired cleanup deletes some files before failing, its content no longer matches the journal; retry fails closed and requires manual inspection. A process killed while copying may leave an unused `.TARGET.stage-*` directory for manual cleanup. The target must be a directory below a writable mount, not the mount point itself.
+**Filesystem limits:** directory replacement uses two renames on the target filesystem.
+Readers can briefly see a missing target between renames, but never a partly copied tree.
+This is not a transaction across concurrent reads or external writers, nor a power-loss durability guarantee.
+Installer calls serialize using a sibling lock.
+A failed publication rename restores the former active tree.
+Interrupted operations leave complete trees at `.TARGET.pending` and `.TARGET.retired`; `.TARGET.transaction` records whole-tree content digests and persists ownership of `TARGET.previous` between installations.
+Journal updates use atomic replacement; partial writes preserve the prior record.
+Recovery accepts copied or restored trees with identical file names, modes, and bytes, even on another mount; it rejects changed previous or recovery contents.
+Reserved regular `.mindroom-bundle.json` metadata is excluded from these digests, but links and special files are always rejected.
+This verifies preserved content, not filesystem object identity.
+Hashing previous and recovery trees adds filesystem reads during installation and bootstrap.
+Retry the command to recover before proceeding.
+Do not manually modify these reserved recovery paths.
+If retired cleanup deletes some files before failing, its content no longer matches the journal; retry fails closed and requires manual inspection.
+A process killed while copying may leave an unused `.TARGET.stage-*` directory for manual cleanup.
+The target must be a directory below a writable mount, not the mount point itself.
 
-JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, and `recovery_pending`. The whole-tree `digest` identifies file names, modes, and contents, excluding installer metadata; initialize-only preservation returns no digest or fingerprint. Exit `0` confirms filesystem installation or preservation; exit `2` reports an installation error. An `installed` receipt with `recovery_pending: true` means publication succeeded but previous-tree rotation or cleanup needs a retry. A failure writing the receipt after publication does not undo activation; retrying an immutable source is idempotent. Pin mutable rollback sources as above. The fingerprint identifies native YAML/include sources, so use the existing `check-applied` command to confirm runtime application. The installer advances the root config mtime on changed activation for the existing watcher. Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart. Preserve `TARGET.previous` until runtime confirmation succeeds.
+JSON receipts contain `status`, `config_path`, `digest`, `fingerprint`, and `recovery_pending`.
+The whole-tree `digest` identifies file names, modes, and contents, excluding installer metadata; initialize-only preservation returns no digest or fingerprint.
+Exit `0` confirms filesystem installation or preservation; exit `2` reports an installation error.
+An `installed` receipt with `recovery_pending: true` means publication succeeded but previous-tree rotation or cleanup needs a retry.
+A failure writing the receipt after publication does not undo activation; retrying an immutable source is idempotent.
+Pin mutable rollback sources as above.
+The fingerprint identifies native YAML/include sources, so use the existing `check-applied` command to confirm runtime application.
+The installer advances the root config mtime on changed activation for the existing watcher.
+Environment files and arbitrary bundle assets are not covered by that reload receipt; environment changes can require a runtime restart.
+Preserve `TARGET.previous` until runtime confirmation succeeds.
 
 ### config fingerprint and config check-applied
 

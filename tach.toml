@@ -5921,7 +5921,7 @@ depends_on = ["mindroom.config.main", "mindroom.constants", "mindroom.file_locks
 
 [[modules]]
 path = "mindroom.cli.config_bundle"
-depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bundle"]
+depends_on = ["mindroom.cli.config", "mindroom.config.main", "mindroom.config_bundle", "mindroom.constants"]
 
 [[modules]]
 path = "mindroom.api.config_reload"

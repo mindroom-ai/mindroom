@@ -50,6 +50,10 @@
 {{- if not (hasPrefix "/" .Values.config.bootstrapBundlePath) -}}
 {{- fail "config.bootstrapBundlePath must be absolute" -}}
 {{- end -}}
+{{- $source := clean .Values.config.bootstrapBundlePath -}}
+{{- if or (eq $source $target) (hasPrefix (printf "%s/" (trimSuffix "/" $source)) $target) (hasPrefix (printf "%s/" $target) $source) -}}
+{{- fail "config.bootstrapBundlePath must not overlap the config.path directory" -}}
+{{- end -}}
 {{- end -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
 {{- fail "config.source must be either configMap or file" -}}

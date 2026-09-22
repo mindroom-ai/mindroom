@@ -11,21 +11,27 @@ from pathlib import Path
 import typer
 
 from mindroom.cli.config import activate_cli_runtime
+from mindroom.constants import exported_process_env
 
 
 def initialize_runtime_bundle(source: Path, config_path: Path | None, storage_path: Path | None) -> None:
     """Initialize the selected config directory before the runtime captures its environment."""
+    # Both modules load Pydantic config models and cryptography-backed credentials;
+    # keep that graph out of CLI help startup (see tests/test_import_graph.py).
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
     from mindroom.config_bundle import install_config_bundle  # noqa: PLC0415
 
     runtime = activate_cli_runtime(config_path, storage_path=storage_path)
+    process_env = exported_process_env()
+    if storage_path is not None:
+        process_env["MINDROOM_STORAGE_PATH"] = str(storage_path.expanduser().resolve())
     try:
         install_config_bundle(
             source,
             runtime.config_dir,
             config=Path(runtime.config_path.name),
             initialize_only=True,
-            process_env=dict(runtime.process_env),
+            process_env=process_env,
         )
     except (*CONFIG_LOAD_USER_ERROR_TYPES, ValueError) as exc:
         typer.echo(f"Bundle initialization failed: {exc}", err=True)
@@ -42,6 +48,8 @@ def config_install_bundle(
     json_output: bool = typer.Option(False, "--json", help="Print a filesystem receipt as JSON."),
 ) -> None:
     """Validate and install a complete tree; use check-applied to confirm runtime reload."""
+    # Defer the Pydantic/cryptography config graph until this command runs,
+    # preserving the slim CLI import contract.
     from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
     from mindroom.config_bundle import install_config_bundle  # noqa: PLC0415
 

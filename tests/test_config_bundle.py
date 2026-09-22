@@ -454,6 +454,18 @@ def test_partial_transaction_write_preserves_retry(tmp_path: Path, monkeypatch: 
     assert (tmp_path / "active.previous/prompts/helper.md").read_text() == "First prompt"
 
 
+def test_malformed_transaction_values_fail_closed(tmp_path: Path) -> None:
+    """A record with valid keys but invalid digest types cannot authorize recovery."""
+    source = _bundle(tmp_path / "source")
+    journal = tmp_path / ".active.transaction"
+    content = '{"pending": [], "retired": null}'
+    journal.write_text(content)
+    with pytest.raises(ValueError, match="Invalid bundle recovery"):
+        install_config_bundle(source, tmp_path / "active", process_env={})
+    assert journal.read_text() == content
+    assert not (tmp_path / "active").exists()
+
+
 def test_final_journal_write_failure_returns_success_and_recovers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
