@@ -35,7 +35,9 @@ Next.js application serving:
 Each MindRoom instance consists of:
 - **Backend Container**: Runs bot, serves the bundled dashboard, and exposes the APIs (port 8765)
 - **Persistent Storage**: Config files and conversation data
-- **Environment Isolation**: Separate namespace and secrets
+- **Tenant Resources**: Separate releases, workloads, PVCs, and Secrets in the shared `mindroom-instances` namespace
+
+Customer labels and NetworkPolicy rules control the specified instance traffic; tenants do not receive separate Kubernetes namespaces.
 
 ### Instance Lifecycle
 1. Customer signs up and subscribes
@@ -50,12 +52,12 @@ Each MindRoom instance consists of:
 - **accounts**: User accounts with subscription status
 - **instances**: Customer instance configurations
 - **subscriptions**: Stripe subscription records
-- **webhooks**: Payment event tracking
+- **webhook_events**: Stripe event payloads and processing status
 
 ### Key Relationships
 - One account can have multiple instances
 - Each instance has one active subscription
-- Webhook events linked to subscriptions
+- Webhook events optionally reference an account; subscription details can appear in the Stripe payload, without a subscription foreign key
 
 ## Infrastructure Components
 
@@ -78,8 +80,11 @@ Each MindRoom instance consists of:
 ### Stripe Integration
 - Subscription creation and management
 - Payment method handling
-- Usage-based billing support
+- Fixed monthly/yearly subscriptions with trials for configured plans
 - Webhook event processing
+
+Applicable plans use scoped OpenRouter keys configured with a monthly AI spending limit.
+Usage reporting is separate from Stripe checkout, which uses one configured recurring price at quantity one.
 
 ### Supabase Integration
 - User authentication and sessions
