@@ -260,6 +260,8 @@ The tool itself consumes an `access_token`, but MindRoom also provides a dedicat
 That OAuth flow stores `access_token` plus extra metadata such as `refresh_token`, `expires_at`, and `username`.
 By default the connect flow requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, and `user-top-read`.
 The upstream playlist and playback methods need additional Spotify scopes beyond that base dashboard flow, so manual token provisioning or a broadened OAuth scope set is still required if you want playlist modification or playback control to succeed.
+`get_track_recommendations()` also requires a Spotify application eligible for the Recommendations endpoint; additional OAuth scopes do not grant that access.
+Spotify's [endpoint access notice](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api) restricts new and affected Development Mode apps while preserving access for qualifying existing Extended Quota Mode apps.
 
 ### Configuration
 
