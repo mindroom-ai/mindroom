@@ -161,6 +161,7 @@ These agent paths describe ordinary shared agents; private agents use their reso
 `MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
 
 Keep `tracking/` on persistent storage and include it in backups.
+Include the primary storage directory in backups, with any `learning/` and Mem0 `chroma/` directories under shared-agent or resolved private-instance state roots.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
 
 Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
