@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.authorization import ResponderCandidatePermissions
-    from mindroom.config.participation import RoomParticipationConfig
+    from mindroom.config.participation import ParticipationConfig
     from mindroom.conversation_resolver import MessageContext
     from mindroom.dispatch_handoff import DispatchEvent, MediaDispatchEvent, PreparedIngress
     from mindroom.matrix.identity import MatrixID
@@ -81,7 +81,7 @@ class ResponseAction:
     kind: Literal["skip", "team", "individual", "reject"]
     form_team: TeamResolution | None = None
     rejection_message: str | None = None
-    participation: RoomParticipationConfig | None = None
+    participation: ParticipationConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -314,11 +314,11 @@ class TurnPolicy:
     def _adaptive_thread_participation(
         self,
         context: MessageContext,
-        room_id: str,
         requester_user_id: str,
-    ) -> RoomParticipationConfig | None:
-        """Resolve room participation for proven untagged multi-human context."""
-        participation = self.deps.runtime.config.get_room_participation(room_id, self.deps.runtime_paths)
+    ) -> ParticipationConfig | None:
+        """Resolve this agent's participation for proven untagged multi-human context."""
+        agent = self.deps.runtime.config.agents.get(self.deps.agent_name)
+        participation = agent.participation if agent is not None else None
         if (
             participation is not None
             and context.is_thread
@@ -350,9 +350,9 @@ class TurnPolicy:
         context: MessageContext,
         room: nio.MatrixRoom,
         requester_user_id: str,
-    ) -> RoomParticipationConfig | None:
+    ) -> ParticipationConfig | None:
         """Select an authorized existing agent for a proven multi-human thread."""
-        participation = self._adaptive_thread_participation(context, room.room_id, requester_user_id)
+        participation = self._adaptive_thread_participation(context, requester_user_id)
         if participation is None or not self._is_participating_thread_agent(context):
             return None
         candidates = classify_responder_candidates_from_cached_room(
@@ -691,11 +691,7 @@ class TurnPolicy:
                     rejection_message=_ROUTER_ONLY_MENTION_GUIDANCE,
                 ),
             )
-        elif (
-            context.mentioned_agents
-            or context.has_non_agent_mentions
-            or self._adaptive_thread_participation(context, room.room_id, requester_user_id) is not None
-        ):
+        elif context.mentioned_agents or context.has_non_agent_mentions:
             plan = _DispatchPlan(kind="ignore", ignore_reason="router")
         elif context.planning_thread_history_unavailable:
             self.deps.logger.info("Skipping routing: thread policy history unavailable")
@@ -766,7 +762,6 @@ class TurnPolicy:
     def _adaptive_response_action(
         self,
         dispatch: PreparedDispatch,
-        room: nio.MatrixRoom,
         available_responders: list[MatrixID],
     ) -> ResponseAction | None:
         """Select participation for ambient turns, including coalesced active follow-ups."""
@@ -774,7 +769,6 @@ class TurnPolicy:
             return None
         participation = self._adaptive_thread_participation(
             dispatch.context,
-            room.room_id,
             dispatch.requester_user_id,
         )
         if participation is None:
@@ -845,11 +839,7 @@ class TurnPolicy:
             if should_continue_active_thread or single_visible_self:
                 return ResponseAction(kind="individual")
             return ResponseAction(kind="skip")
-        participation_action = self._adaptive_response_action(
-            dispatch,
-            room,
-            available_responders_in_room,
-        )
+        participation_action = self._adaptive_response_action(dispatch, available_responders_in_room)
         if participation_action is not None:
             return participation_action
         agents_in_thread = get_agents_in_thread(

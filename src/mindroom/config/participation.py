@@ -5,8 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.config.judgment import JudgmentConfig
 
 
-class RoomParticipationConfig(BaseModel):
-    """Pause and judgment settings for existing agents in one room's threads."""
+class ParticipationConfig(BaseModel):
+    """Pause and judgment settings for an agent's existing threads in any room."""
 
     model_config = ConfigDict(extra="forbid")
 

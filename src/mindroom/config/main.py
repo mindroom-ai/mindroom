@@ -64,7 +64,6 @@ from mindroom.config.models import (
     RouterConfig,
     ToolConfigEntry,
 )
-from mindroom.config.participation import RoomParticipationConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.runtime_overlays import (
     apply_runtime_approved_egress_overlay,
@@ -88,7 +87,6 @@ from mindroom.constants import (
     resolve_config_relative_path,
     runtime_matrix_homeserver,
 )
-from mindroom.entity_resolution import resolve_room_scoped_override
 from mindroom.git_urls import credential_free_repo_url
 
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
@@ -162,7 +160,6 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "teams",
     "rooms",
     "room_models",
-    "room_participation",
     "room_thread_summary_models",
     "knowledge_bases",
     "mcp_servers",
@@ -425,7 +422,6 @@ class Config(BaseModel):
     agents: dict[str, AgentConfig] = Field(default_factory=dict, description="Agent configurations")
     teams: dict[str, TeamConfig] = Field(default_factory=dict, description="Team configurations")
     rooms: dict[str, RoomConfig] = Field(default_factory=dict, description="Managed Matrix room metadata")
-    room_participation: dict[str, RoomParticipationConfig] = Field(default_factory=dict)
     room_models: dict[str, str] = Field(default_factory=dict, description="Room-specific model overrides")
     room_thread_summary_models: dict[str, str] = Field(
         default_factory=dict,
@@ -1864,18 +1860,16 @@ class Config(BaseModel):
         return "thread"
 
     @model_validator(mode="after")
-    def validate_room_participation(self) -> Config:
-        """Validate dedicated judgment model aliases for opted-in rooms."""
-        for room, participation in self.room_participation.items():
-            judgment = participation.judgment
+    def validate_agent_participation(self) -> Config:
+        """Validate dedicated judgment model aliases for opted-in agents."""
+        for agent_name, agent in self.agents.items():
+            if agent.participation is None:
+                continue
+            judgment = agent.participation.judgment
             if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
-                msg = f"Unknown judgment model for room {room!r}: {judgment.model!r}"
+                msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
                 raise ValueError(msg)
         return self
-
-    def get_room_participation(self, room_id: str, runtime_paths: RuntimePaths) -> RoomParticipationConfig | None:
-        """Resolve participation by concrete room ID or persisted room alias."""
-        return resolve_room_scoped_override(self.room_participation, room_id, runtime_paths, allow_raw_room_id=True)
 
     def _entity_model_name(self, entity_name: str) -> str:
         """Get the model name for an agent, team, or router.
