@@ -23,6 +23,7 @@ from mindroom.file_locks import advisory_file_lock
 __all__ = ["BundleInstallResult", "install_config_bundle"]
 
 _METADATA = ".mindroom-bundle.json"
+_MAX_REVISION_LENGTH = 128
 
 
 class _NestedMountError(ValueError):
@@ -205,11 +206,11 @@ def _publish_bundle(stage: Path, target: Path) -> bool:
     return False
 
 
-def _unchanged_or_replaceable(target: Path, candidate_digest: str, *, force: bool) -> bool:
+def _unchanged_or_replaceable(target: Path, candidate_digest: str, *, force: bool, require_managed: bool) -> bool:
     if not target.exists():
         return False
     active_digest = _tree_digest(target)
-    if active_digest == candidate_digest:
+    if active_digest == candidate_digest and not require_managed:
         return True
     try:
         metadata = json.loads((target / _METADATA).read_text())
@@ -219,7 +220,45 @@ def _unchanged_or_replaceable(target: Path, candidate_digest: str, *, force: boo
     if not force and active_digest != baseline:
         msg = "Target contains authored edits or is unmanaged; use --force to replace it explicitly."
         raise ValueError(msg)
-    return False
+    return active_digest == candidate_digest
+
+
+def _validate_revision(revision: str | None) -> None:
+    if revision is not None and (
+        not isinstance(revision, str)
+        or not revision.strip()
+        or any(0xD800 <= ord(char) <= 0xDFFF for char in revision)
+        or len(revision.encode("utf-8")) > _MAX_REVISION_LENGTH
+        or any(ord(char) < 32 or ord(char) == 127 for char in revision)
+    ):
+        msg = "Bundle revision must be a nonempty string of at most 128 UTF-8 bytes without control characters."
+        raise ValueError(msg)
+
+
+def _active_revision(target: Path) -> str | None:
+    try:
+        metadata = json.loads((target / _METADATA).read_text())
+    except (OSError, ValueError):
+        return None
+    revision = metadata.get("revision") if isinstance(metadata, dict) else None
+    try:
+        _validate_revision(revision)
+    except ValueError:
+        return None
+    return revision
+
+
+def _replace_metadata(target: Path, digest: str, revision: str) -> None:
+    """Publish a revision change without exposing partial active metadata."""
+    descriptor, name = tempfile.mkstemp(prefix=f".{target.name}.metadata-", dir=target.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump({"digest": digest, "revision": revision}, stream)
+            stream.write("\n")
+        temporary.replace(target / _METADATA)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _validate_target(target: Path, config: Path, *, initialize_only: bool, force: bool) -> Path:
@@ -260,6 +299,7 @@ def install_config_bundle(
     initialize_only: bool = False,
     force: bool = False,
     expected_digest: str | None = None,
+    revision: str | None = None,
     process_env: dict[str, str] | None = None,
 ) -> BundleInstallResult:
     """Stage, validate and publish a tree; keep the prior tree at TARGET.previous.
@@ -267,13 +307,14 @@ def install_config_bundle(
     Directory replacement uses two renames, with a brief missing-target window.
     Installer calls serialize, but readers and external writers do not. Retry
     recovers interrupted renames; this is not a power-loss durability guarantee.
-    Initialize-only preserves any existing directory without validating it.
+    Initialize-only preserves an existing directory when the revision is absent or matches.
     Force permits authored replacement, never invalid configuration.
     """
+    _validate_revision(revision)
     target = _validate_target(target, config, initialize_only=initialize_only, force=force)
     with advisory_file_lock(target.with_name(f".{target.name}.lock")):
         _finish_rotation(target)
-        if initialize_only and target.exists():
+        if initialize_only and target.exists() and (revision is None or _active_revision(target) == revision):
             return BundleInstallResult("initialized", target / config)
         source = source.expanduser().absolute()
         if source.is_symlink() or not source.is_dir():
@@ -298,9 +339,19 @@ def install_config_bundle(
             if expected_digest is not None and digest != expected_digest:
                 msg = "Candidate tree digest does not match --expected-digest; no replacement was made."
                 raise ValueError(msg)
-            if _unchanged_or_replaceable(target, digest, force=force):
+            unchanged = _unchanged_or_replaceable(target, digest, force=force, require_managed=revision is not None)
+            if unchanged and revision is None:
                 return BundleInstallResult("unchanged", target / config, loaded.source_fingerprint, digest)
-            (stage / _METADATA).write_text(json.dumps({"digest": digest}) + "\n")
+            active_revision = _active_revision(target) if target.exists() else None
+            if unchanged:
+                if revision is not None and active_revision != revision:
+                    _replace_metadata(target, digest, revision)
+                return BundleInstallResult("unchanged", target / config, loaded.source_fingerprint, digest)
+            installed_revision = revision if revision is not None else active_revision
+            metadata = {"digest": digest}
+            if installed_revision is not None:
+                metadata["revision"] = installed_revision
+            (stage / _METADATA).write_text(json.dumps(metadata) + "\n")
             # The existing runtime watcher polls mtimes. Reproducible bundles
             # can change bytes while preserving every source timestamp.
             active_config = target / config

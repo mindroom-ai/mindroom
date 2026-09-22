@@ -198,3 +198,64 @@ def test_run_invalid_bootstrap_never_starts_runtime(tmp_path: Path, monkeypatch:
     )
     assert result.exit_code == 2, result.output
     assert not target.exists()
+
+
+def test_run_revision_requires_source(tmp_path: Path) -> None:
+    """Startup cannot declare a revision without a candidate source."""
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--no-api",
+            "--config",
+            str(tmp_path / "active/config.yaml"),
+            "--bootstrap-config-bundle-revision",
+            "one",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--bootstrap-config-bundle" in result.output
+
+
+def test_run_revision_replaces_changed_bundle_before_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A changed declared revision installs before runtime path resolution."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.yaml").write_text("agents: {}\n")
+    target = tmp_path / "active"
+    observed: list[str] = []
+
+    async def start_runtime(*, runtime_paths: RuntimePaths, **_kwargs: object) -> None:
+        observed.append(runtime_paths.env_value("BUNDLE_VALUE") or "missing")
+
+    monkeypatch.setattr("mindroom.orchestrator.main", start_runtime)
+    monkeypatch.setattr("mindroom.cli.main.check_env_keys", lambda *_args, **_kwargs: None)
+    args = [
+        "run",
+        "--no-api",
+        "--config",
+        str(target / "config.yaml"),
+        "--bootstrap-config-bundle",
+        str(source),
+        "--bootstrap-config-bundle-revision",
+        "one",
+    ]
+    assert runner.invoke(app, args).exit_code == 0
+    (source / ".env").write_text("BUNDLE_VALUE=updated\n")
+    assert runner.invoke(app, [*args[:-1], "two"]).exit_code == 0
+    assert observed == ["missing", "updated"]
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "two"
+
+
+def test_install_bundle_cli_revision_is_stored(tmp_path: Path) -> None:
+    """The native CLI passes an explicit revision to the installer."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.yaml").write_text("agents: {}\n")
+    target = tmp_path / "active"
+    result = runner.invoke(
+        app,
+        ["config", "install-bundle", str(source), "--target", str(target), "--revision", "one", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "one"

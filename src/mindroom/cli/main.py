@@ -127,6 +127,10 @@ def run(
         None,
         help="Initialize the selected config directory from this bundle only when the directory is absent.",
     ),
+    bootstrap_config_bundle_revision: str | None = typer.Option(
+        None,
+        help="Install a changed bootstrap revision through native validation; preserve a matching active revision.",
+    ),
     api: bool = typer.Option(
         True,
         "--api/--no-api",
@@ -151,8 +155,11 @@ def run(
     - Manages agent room memberships
     - Starts the bundled dashboard/API server (disable with --no-api)
     """
+    if bootstrap_config_bundle_revision is not None and bootstrap_config_bundle is None:
+        typer.echo("--bootstrap-config-bundle-revision requires --bootstrap-config-bundle.", err=True)
+        raise typer.Exit(2)
     if bootstrap_config_bundle is not None:
-        initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path)
+        initialize_runtime_bundle(bootstrap_config_bundle, config_path, storage_path, bootstrap_config_bundle_revision)
     asyncio.run(
         _run(
             log_level=log_level.upper(),

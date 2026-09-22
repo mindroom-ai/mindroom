@@ -163,6 +163,10 @@ spec:
             - --bootstrap-config-bundle
             - {{ .Values.config.bootstrapBundlePath | quote }}
             {{- end }}
+            {{- if .Values.config.bootstrapBundleRevision }}
+            - --bootstrap-config-bundle-revision
+            - {{ .Values.config.bootstrapBundleRevision | quote }}
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.runtime.apiPort }}
