@@ -31,7 +31,7 @@ The frontend test count changes frequently; use `rg --files frontend/src | rg '\
 cd frontend
 
 # Run tests in watch mode (default vitest behavior)
-bun test
+bun run test
 
 # Run all tests once (no watch)
 bun run test:unit

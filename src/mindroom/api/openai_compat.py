@@ -239,7 +239,7 @@ class _ChatCompletionChoice(BaseModel):
 
 
 class _UsageInfo(BaseModel):
-    """Token usage information (always zeros — Agno doesn't expose counts)."""
+    """Token usage fields default to zero and are not populated from run metrics."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0

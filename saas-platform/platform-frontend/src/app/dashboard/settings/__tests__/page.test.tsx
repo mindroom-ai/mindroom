@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import { useRouter } from 'next/navigation'
 import SettingsPage from '../page'
@@ -208,7 +208,7 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(api.requestAccountDeletion).toHaveBeenCalledWith(true)
         expect(screen.getByText(/account deletion scheduled/i)).toBeInTheDocument()
-        expect(screen.getByText(/Within 7 days, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
+        expect(screen.getByText(/While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings/i)).toBeInTheDocument()
       })
 
       // Should sign out and redirect after 3 seconds
@@ -273,6 +273,112 @@ describe('SettingsPage', () => {
       await waitFor(() => {
         expect(screen.getByText(/failed to cancel deletion/i)).toBeInTheDocument()
       })
+    })
+  })
+
+  describe('Deletion sign-out timer', () => {
+    beforeEach(() => {
+      jest.useFakeTimers()
+      ;(api.requestAccountDeletion as jest.Mock).mockResolvedValue({
+        status: 'deletion_scheduled',
+        grace_period_days: 7
+      })
+      ;(api.cancelAccountDeletion as jest.Mock).mockResolvedValue({ status: 'success' })
+      mockSupabase.auth.signOut.mockResolvedValue(undefined)
+    })
+
+    afterEach(() => {
+      cleanup()
+      jest.clearAllTimers()
+      jest.useRealTimers()
+    })
+
+    async function scheduleDeletion() {
+      fireEvent.click(screen.getByRole('button', { name: /^delete account$/i }))
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /yes, delete my account/i }))
+      })
+      expect(screen.getByText('Account Deletion Pending')).toBeInTheDocument()
+    }
+
+    async function cancelDeletion() {
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /cancel deletion request/i }))
+      })
+    }
+
+    it('keeps a restored account signed in after immediate cancellation', async () => {
+      await act(async () => { render(<SettingsPage />) })
+      await scheduleDeletion()
+      await cancelDeletion()
+
+      expect(screen.getByText('Account deletion has been cancelled.')).toBeInTheDocument()
+      expect(screen.getByText('Danger Zone')).toBeInTheDocument()
+      expect(screen.queryByText('Account Deletion Pending')).not.toBeInTheDocument()
+      await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
+
+      expect(mockSupabase.auth.signOut).not.toHaveBeenCalled()
+      expect(mockRouter.push).not.toHaveBeenCalled()
+    })
+
+    it('clears sign-out before the restored account reload finishes', async () => {
+      await act(async () => { render(<SettingsPage />) })
+      await scheduleDeletion()
+      let resolveAccount!: (account: typeof mockAccount) => void
+      ;(api.getAccount as jest.Mock).mockImplementationOnce(() => new Promise(resolve => {
+        resolveAccount = resolve
+      }))
+      await cancelDeletion()
+
+      expect(screen.getByText('Account deletion has been cancelled.')).toBeInTheDocument()
+      await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
+      expect(mockSupabase.auth.signOut).not.toHaveBeenCalled()
+      expect(mockRouter.push).not.toHaveBeenCalled()
+      await act(async () => { resolveAccount(mockAccount) })
+      expect(screen.getByText('Danger Zone')).toBeInTheDocument()
+    })
+
+    it('still signs out when cancellation fails', async () => {
+      ;(api.cancelAccountDeletion as jest.Mock).mockRejectedValueOnce(new Error('Failed'))
+      await act(async () => { render(<SettingsPage />) })
+      await scheduleDeletion()
+      await cancelDeletion()
+
+      expect(screen.getByText(/failed to cancel deletion/i)).toBeInTheDocument()
+      expect(screen.getByText('Account Deletion Pending')).toBeInTheDocument()
+      await act(async () => { await jest.advanceTimersByTimeAsync(3000) })
+
+      expect(mockSupabase.auth.signOut).toHaveBeenCalledTimes(1)
+      expect(mockRouter.push).toHaveBeenCalledTimes(1)
+      expect(mockRouter.push).toHaveBeenCalledWith('/login')
+    })
+
+    it('clears pending sign-out on unmount', async () => {
+      const view = render(<SettingsPage />)
+      await act(async () => {})
+      await scheduleDeletion()
+      view.unmount()
+      await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
+
+      expect(mockSupabase.auth.signOut).not.toHaveBeenCalled()
+      expect(mockRouter.push).not.toHaveBeenCalled()
+    })
+
+    it('signs out for a new deletion request after cancelling the previous one', async () => {
+      await act(async () => { render(<SettingsPage />) })
+      await scheduleDeletion()
+      await cancelDeletion()
+      await act(async () => { await jest.advanceTimersByTimeAsync(3001) })
+      expect(mockSupabase.auth.signOut).not.toHaveBeenCalled()
+      expect(mockRouter.push).not.toHaveBeenCalled()
+
+      await scheduleDeletion()
+      await act(async () => { await jest.advanceTimersByTimeAsync(2999) })
+      expect(mockSupabase.auth.signOut).not.toHaveBeenCalled()
+      await act(async () => { await jest.advanceTimersByTimeAsync(1) })
+      expect(mockSupabase.auth.signOut).toHaveBeenCalledTimes(1)
+      expect(mockRouter.push).toHaveBeenCalledTimes(1)
+      expect(mockRouter.push).toHaveBeenCalledWith('/login')
     })
   })
 
@@ -355,6 +461,8 @@ describe('SettingsPage', () => {
       expect(screen.getByText(/scheduled application-database cleanup attempts deletion when enabled; completion is not guaranteed/)).toBeInTheDocument()
       expect(screen.getByText(/Payment records:/, { exact: false })).toBeInTheDocument()
       expect(screen.getByText(/They are not removed by account cleanup and can prevent deletion/)).toBeInTheDocument()
+      expect(screen.getByText(/Deletion audit record:/, { exact: false })).toBeInTheDocument()
+      expect(screen.getByText(/After successful account deletion, a deletion audit record retains your account UUID/)).toBeInTheDocument()
       expect(screen.getByText(/External data:/, { exact: false })).toBeInTheDocument()
       expect(screen.getByText(/Account cleanup does not delete the authentication user, Stripe customer or subscription data, Matrix data, or persistent volumes/)).toBeInTheDocument()
     })

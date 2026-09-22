@@ -70,6 +70,7 @@ export default function SettingsPage() {
     return () => {
       if (deletionTimeoutRef.current) {
         clearTimeout(deletionTimeoutRef.current)
+        deletionTimeoutRef.current = null
       }
     }
   }, [])
@@ -140,7 +141,7 @@ export default function SettingsPage() {
       if (result.status === 'deletion_scheduled') {
         setMessage({
           type: 'info',
-          text: `Account deletion scheduled. Within ${result.grace_period_days} days, sign in and select Cancel Deletion Request in Settings. Signing in alone does not cancel deletion.`
+          text: `Account deletion scheduled. Scheduled cleanup becomes eligible after ${result.grace_period_days} days. While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings. Signing in alone does not cancel deletion.`
         })
         setIsDeletionPending(true)
 
@@ -178,6 +179,10 @@ export default function SettingsPage() {
       const result = await cancelAccountDeletion()
 
       if (result.status === 'success') {
+        if (deletionTimeoutRef.current !== null) {
+          clearTimeout(deletionTimeoutRef.current)
+          deletionTimeoutRef.current = null
+        }
         setMessage({ type: 'success', text: 'Account deletion has been cancelled.' })
         setIsDeletionPending(false)
         await loadAccountInfo()
@@ -261,7 +266,7 @@ export default function SettingsPage() {
               <p className="text-red-700 dark:text-red-200 text-sm mb-4">
                 Your account is scheduled for deletion with a 7-day recovery period.
                 After that, application-database cleanup runs when enabled, subject to the retention limits below.
-                Select Cancel Deletion Request within 7 days of your request to cancel it; signing in alone does not cancel deletion.
+                While your account is still pending deletion, select Cancel Deletion Request to cancel it; signing in alone does not cancel deletion.
               </p>
               <button
                 onClick={handleCancelDeletion}
@@ -357,6 +362,12 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2">
               <Shield className="h-4 w-4 text-green-600 dark:text-green-400" />
               <span className="text-gray-700 dark:text-gray-300">
+                <strong>Deletion audit record:</strong> After successful account deletion, a deletion audit record retains your account UUID. Separate audit-log cleanup may remove it later.
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Shield className="h-4 w-4 text-green-600 dark:text-green-400" />
+              <span className="text-gray-700 dark:text-gray-300">
                 <strong>External data:</strong> Account cleanup does not delete the authentication user, Stripe customer or subscription data, Matrix data, or persistent volumes. Separate processor and operator policies apply.
               </span>
             </div>
@@ -382,7 +393,7 @@ export default function SettingsPage() {
                   Are you absolutely sure?
                 </p>
                 <p className="text-red-700 dark:text-red-300 text-sm mb-4">
-                  This schedules your account for deletion. To cancel within 7 days, sign in and select Cancel Deletion Request in Settings. Signing in alone does not cancel deletion.
+                  This schedules your account for deletion. While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings to cancel it. Signing in alone does not cancel deletion.
                 </p>
                 <div className="flex gap-3">
                   <button

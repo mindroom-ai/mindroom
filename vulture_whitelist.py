@@ -398,3 +398,8 @@ session_status  # FastAPI Computer endpoint
 stream_ticket  # FastAPI Computer endpoint
 delete_session  # FastAPI Computer endpoint
 _.config_identity  # ComputerTarget dataclass equality field
+
+# AgentQL and Agno invoke these owner-local overrides through inherited SDK methods.
+_.scrape_website
+_.custom_scrape_website
+_._execute_query

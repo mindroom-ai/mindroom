@@ -99,6 +99,10 @@ async def export_user_data(user: Annotated[dict, Depends(verify_user)]) -> dict[
                 "Account deletion starts with a 7-day recovery period. After that, scheduled application-database "
                 "cleanup attempts deletion when enabled; completion is not guaranteed."
             ),
+            "audit_logs": (
+                "After successful account deletion, a deletion audit record retains your account UUID. "
+                "Separate audit-log cleanup may remove it later."
+            ),
             "payment_info": "Payment and webhook records retain account references and payment identifiers.",
             "invoices": "Payment and webhook records are not removed by account cleanup and can prevent deletion.",
             "external_data": (
@@ -130,7 +134,8 @@ async def request_account_deletion(
             "status": "confirmation_required",
             "message": "Please confirm deletion by setting confirmation=true",
             "warning": (
-                "You have a 7-day recovery period to cancel this request explicitly. "
+                "Scheduled cleanup becomes eligible after 7 days. "
+                "You can request cancellation while your account is still pending deletion. "
                 "Completed application-database deletion cannot be undone; "
                 "retained and external data have separate limits."
             ),
@@ -166,14 +171,16 @@ async def request_account_deletion(
             "completion is not guaranteed"
         ),
         "cancellation": (
-            "Within 7 days, sign in and select Cancel Deletion Request in Settings, "
+            "While your account is still pending deletion, sign in and select Cancel Deletion Request in Settings, "
             "or call POST /my/gdpr/cancel-deletion. Signing in alone does not cancel deletion."
         ),
         "data_deleted": (
-            "Cleanup targets application-database account, subscription, instance, audit-log, "
-            "and subscription-linked usage records"
+            "Cleanup targets application-database account, subscription, instance, "
+            "existing account-linked audit-log, and subscription-linked usage records"
         ),
         "data_retained": (
+            "After successful account deletion, a deletion audit record retains your account UUID. "
+            "Separate audit-log cleanup may remove it later. "
             "Payment and webhook records retain account references and can prevent cleanup. "
             "Cleanup does not delete the authentication user, Stripe customer or subscription data, "
             "Matrix data, or persistent volumes; separate processor and operator policies apply."

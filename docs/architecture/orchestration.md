@@ -50,30 +50,26 @@ main() entry
 └────────┬─────────┘
          │
          ▼
-┌──────────────────────────────────────┐
-│  Auxiliary Tasks (auto-restart)      │
-│ ─────────────────────────────────────│
-│ • config watcher (file polling)      │
-│ • skills watcher (skill cache)       │
-│ • API server (if enabled)            │
-│  (each wrapped in                    │
-│   _run_auxiliary_task_forever)        │
-└───────────────┬──────────────────────┘
-                │
-                ▼
-┌──────────────────────────────────────┐
-│  Bot Sync Tasks (asyncio.gather)     │
-│ ─────────────────────────────────────│
-│ • One sync loop per bot              │
-│ • sync_forever_with_restart()        │
-│ • Awaited until shutdown             │
-└──────────────────────────────────────┘
+┌───────────────────────────────────────────┐
+│ Auxiliary watchers (auto-restart)         │
+│ • config, plugins, and skills             │
+│ • _run_auxiliary_task_forever             │
+└─────────────────────┬─────────────────────┘
+                      │
+                      ▼
+┌───────────────────────────────────────────┐
+│ Runtime completion monitor                │
+│ • asyncio.wait(..., FIRST_COMPLETED)      │
+│ • orchestrator, shutdown, optional API    │
+│ • unexpected API exit fails the runtime   │
+└───────────────────────────────────────────┘
 ```
 
 **Key details:**
 
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Resolve/create rooms and the root Space, join the router, reconcile managed policy once, then invite and join the remaining identities
+- **Runtime lifetime**: The orchestrator waits for explicit shutdown while individual bot sync tasks can be replaced; the completion monitor does not await only the original sync-task generation.
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
@@ -213,7 +209,8 @@ When no agent or team is mentioned, routing selects the appropriate agent or tea
 **`_on_reaction`**: Handles `ReactionEvent` for the interactive Q&A system (e.g., confirming or rejecting agent suggestions) and config confirmation workflows.
 
 **Routing** (when no agent or team is mentioned): Router narrows candidates from room configuration or joined MindRoom entities, filters them by sender permissions, lets one remaining candidate answer directly, and uses `suggest_responder_for_message()` only when multiple candidates remain.
-In threads where multiple non-agent users have posted, routing is skipped entirely — an explicit `@mention` is required.
+In threads where multiple humans have posted, the router stays silent and explicit targeting is the default.
+Authorized, materializable individual agents that already replied may opt into [Adaptive Participation](../configuration/agents.md#adaptive-participation) for untagged turns; an approved decision can produce an individual reply, without automatic team formation.
 Non-MindRoom bots listed in `bot_accounts` are excluded from this detection.
 
 ## Concurrency

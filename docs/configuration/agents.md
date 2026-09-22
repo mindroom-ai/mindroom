@@ -163,7 +163,7 @@ agents:
 | `private` | object | `null` | Optional requester-private state for one shared agent definition |
 | `knowledge_bases` | list | `[]` | Knowledge base IDs from top-level `knowledge_bases`; semantic bases add indexed RAG search while file-mode bases expose workspace file paths for agents with file-aware tools |
 | `access` | object | `null` | Conversation-access policy with `current_room_members`, `members_of_rooms`, and `users`. Omitting it grants members of this agent's own managed `rooms`. See [Authorization](../authorization.md) |
-| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and OAuth connections. Independent of `access`: a credential manager gains no conversation access, and a responder user gains no credential authority |
+| `credential_managers` | list | `[]` | Concrete Matrix user IDs allowed to manage this agent's credentials and shared OAuth connections. Does not grant conversation access. Eligible requesters manage their own isolated OAuth connections separately; see [OAuth authorization](../oauth-framework.md) |
 | `context_files` | list | `[]` | File paths (relative to the agent's workspace) loaded into each agent instance and prepended to role context (under `Personality Context`) |
 | `thread_mode` | string | `"thread"` | `thread`: responses are sent in Matrix threads (default). `room`: responses are sent as plain room messages with a single persistent session per room — ideal for bridges (Telegram, Signal, WhatsApp) and mobile |
 | `room_thread_modes` | map | `{}` | Per-room thread mode overrides keyed by room alias/name or Matrix room ID. Values are `thread` or `room`. Overrides apply before `thread_mode` fallback |
@@ -686,6 +686,8 @@ This is negligible with a local embedder but costs real money with paid embeddin
 ## Thread Mode Resolution
 
 Thread mode is resolved per message using the current room ID.
+A persisted `!thread_mode room` or `!thread_mode thread` override takes precedence for all entities in that room.
+Room admins can use `!thread_mode reset` to restore the static resolution rules below; see [Chat Commands](../chat-commands.md).
 For an agent, MindRoom checks `room_thread_modes` in this order.
 First, it checks an exact room ID key.
 Second, it checks the managed room key/alias associated with that room ID.
@@ -823,5 +825,5 @@ agents:
     display_name: Researcher
     role: Focus on deep research
     include_default_tools: false
-    tools: [web_search]
+    tools: [duckduckgo]
 ```

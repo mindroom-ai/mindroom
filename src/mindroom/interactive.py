@@ -327,6 +327,17 @@ def _remove_inline_unparsed_interactive_fences(text: str) -> str:
     return cleaned_text.strip()
 
 
+def _first_valid_interactive_payload(
+    matches: list[re.Match[str]],
+) -> tuple[int, str, list[dict[str, str]]] | None:
+    """Select the earliest matched block with usable question options."""
+    for index, match in enumerate(matches):
+        payload = _coerce_interactive_payload(match.group(1))
+        if payload is not None:
+            return index, *payload
+    return None
+
+
 def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:
     """Parse and format interactive content from response text.
 
@@ -353,10 +364,10 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
             )
         return _InteractiveResponse(response_text)
 
-    first_payload = _coerce_interactive_payload(matches[0].group(1))
+    first_payload = _first_valid_interactive_payload(matches)
     if first_payload is None:
         return _InteractiveResponse(response_text)
-    question, options = first_payload
+    first_index, question, options = first_payload
 
     option_map: dict[str, str] | None = {} if extract_mapping else None
     option_labels: dict[str, str] | None = {} if extract_mapping else None
@@ -376,17 +387,18 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         question_text=question,
         option_labels=option_labels,
     )
-    rendered = [
+    rendered = [(match, "") for match in matches[:first_index]]
+    rendered.append(
         (
-            matches[0],
+            matches[first_index],
             _render_question_text(
                 question,
                 options,
                 include_instruction=not extract_mapping or interactive_metadata is not None,
             ),
         ),
-    ]
-    for extra_match in matches[1:]:
+    )
+    for extra_match in matches[first_index + 1 :]:
         extra_payload = _coerce_interactive_payload(extra_match.group(1))
         if extra_payload is None:
             rendered.append((extra_match, ""))

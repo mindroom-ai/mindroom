@@ -115,13 +115,20 @@ class TestScheduledTaskRestoration:
 
             # Verify router agent called restore_scheduled_tasks
             mock_join.assert_awaited_once_with(router_bot.client, "lobby")
+            assert mock_restore.await_args is not None
+            config_provider = mock_restore.await_args.kwargs["config_provider"]
             mock_restore.assert_awaited_once_with(
                 router_bot.client,
                 "lobby",
                 config,
                 runtime_paths_for(config),
                 router_bot._conversation_reader,
+                config_provider=config_provider,
             )
+            assert config_provider() is config
+            replacement_config = config.model_copy(deep=True)
+            router_bot.config = replacement_config
+            assert config_provider() is replacement_config
 
     @pytest.mark.asyncio
     async def test_non_router_agents_dont_restore_tasks(self, tmp_path: Path) -> None:
@@ -215,13 +222,20 @@ class TestScheduledTaskRestoration:
             await router_bot.join_configured_rooms()
 
         mock_join.assert_not_awaited()
+        assert mock_restore.await_args is not None
+        config_provider = mock_restore.await_args.kwargs["config_provider"]
         mock_restore.assert_awaited_once_with(
             router_bot.client,
             "lobby",
             config,
             runtime_paths_for(config),
             router_bot._conversation_reader,
+            config_provider=config_provider,
         )
+        assert config_provider() is config
+        replacement_config = config.model_copy(deep=True)
+        router_bot.config = replacement_config
+        assert config_provider() is replacement_config
         mock_restore_configs.assert_awaited_once_with(router_bot.client, "lobby")
         mock_welcome.assert_awaited_once_with("lobby")
 
@@ -259,12 +273,19 @@ class TestScheduledTaskRestoration:
             assert router_bot._deferred_overdue_task_drain_task is not None
             await router_bot._deferred_overdue_task_drain_task
 
+            assert mock_drain.await_args is not None
+            config_provider = mock_drain.await_args.kwargs["config_provider"]
             mock_drain.assert_awaited_once_with(
                 router_bot.client,
                 config,
                 runtime_paths_for(config),
                 router_bot._conversation_reader,
+                config_provider=config_provider,
             )
+            assert config_provider() is config
+            replacement_config = config.model_copy(deep=True)
+            router_bot.config = replacement_config
+            assert config_provider() is replacement_config
 
             await _complete_frame(router_bot, 1)
             mock_drain.assert_awaited_once()

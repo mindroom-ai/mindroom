@@ -17,7 +17,6 @@ This directory contains utility scripts for MindRoom self-hosting.
 - **`utilities/forward-ports.sh`** - Forward ports from remote servers for local testing
 - **`utilities/rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
 - **`utilities/rewrite_git_history_apply.py`** - Apply git history rewrites
-- **`utilities/setup_cleanup_cron.sh`** - Setup cron job for periodic cleanup
 
 ## For SaaS Platform Scripts
 
@@ -47,13 +46,16 @@ No runtime module imports this utility, and the normal reader remains unchanged.
 Once the affected messages have been repaired and a fresh import has been verified, this utility and its tests can be removed without a runtime or schema migration.
 
 ### Clean up agent edits
+
 ```bash
-# For Docker setup
-./scripts/utilities/cleanup_agent_edits_docker.sh
+# For the local Matrix Docker stack
+POSTGRES_CONTAINER=mindroom-postgres ./scripts/utilities/cleanup_agent_edits_docker.sh --dry-run
 
 # For direct database access
 ./scripts/utilities/cleanup_agent_edits.py --dry-run
 ```
+
+For another Docker deployment, set `POSTGRES_CONTAINER` to its PostgreSQL container name.
 
 ### Benchmark Matrix performance
 ```bash

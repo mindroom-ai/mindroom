@@ -1468,6 +1468,11 @@ export function ModelConfig() {
       icon={Settings}
       title="Model Configuration"
       isDirty={false}
+      isBusy={Object.entries(models).some(
+        ([name, model]) =>
+          model.provider !== "ollama" &&
+          (!modelKeys[name] || !providerKeys[model.provider]),
+      )}
       onSave={handleSaveAllChanges}
       onDelete={() => {}}
       showActions={false}
