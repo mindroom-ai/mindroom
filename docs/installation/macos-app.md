@@ -84,14 +84,15 @@ Opening MindRoom presents its window and Dock icon.
 Closing the window leaves the app available in the menu bar and keeps its background work running.
 Reopen the window with **Open MindRoom…** in the menu or by opening the application again.
 
-The menu shows separate status for local agents and computer access, plus chat, start/stop, settings, and quit actions.
+The menu shows local-agent and computer-access status as clickable shortcuts to their app sections, plus chat, start/stop, settings, and quit actions.
 **Service running** reports the local process state; use Chat or the dashboard to confirm that agents are ready.
 
 In **Settings**, **Open menu bar app at login** launches the menu app quietly.
 Local agents use their own launchd service and start independently at login.
 Computer access always requires an explicit start in the app.
 
-**Quit MindRoom App** stops computer access owned by the app and closes its menu.
+**Quit MindRoom** stops computer access owned by the app and closes its menu.
+Hover over that item for a reminder of its effect on background work.
 The local-agent launchd service keeps running after the app quits.
 Use **Stop Local Agents** when you want to stop that service.
 If a runtime action is still in progress, let it finish before quitting.
