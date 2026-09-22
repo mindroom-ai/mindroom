@@ -104,7 +104,7 @@ def lumalabs_tools() -> type[LumaLabTools]:
             enable_generate_video: bool = True,
             enable_image_to_video: bool = True,
             all: bool = False,  # noqa: A002 - Preserve the upstream toolkit configuration key.
-            model: Literal["ray-2", "ray-flash-2"] = "ray-2",
+            model: Literal["ray-2", "ray-flash-2"] | None = "ray-2",
             **kwargs: object,
         ) -> None:
             super().__init__(
@@ -117,6 +117,8 @@ def lumalabs_tools() -> type[LumaLabTools]:
                 all=all,
                 **kwargs,
             )
+            if model is None:
+                model = "ray-2"
             # AGNO_COMPAT: Luma video creation omits the SDK's required model.
             # Reason: Agno 3.0.9 omits model in both creation methods; lumaai 1.21.0 requires it.
             # Upstream issue: Tracking gap; no matching issue has been verified for this omission.

@@ -101,7 +101,12 @@ def _invoke(tool: agno_lumalab.LumaLabTools, method: str) -> ToolResult:
 @pytest.mark.parametrize("method", _METHODS)
 @pytest.mark.parametrize(
     ("overrides", "expected_model"),
-    [pytest.param({}, "ray-2", id="default"), pytest.param({"model": "ray-flash-2"}, "ray-flash-2", id="configured")],
+    [
+        pytest.param({}, "ray-2", id="default"),
+        pytest.param({"model": None}, "ray-2", id="null-model"),
+        pytest.param({"model": "ray-2"}, "ray-2", id="configured-ray-2"),
+        pytest.param({"model": "ray-flash-2"}, "ray-flash-2", id="configured-ray-flash-2"),
+    ],
 )
 def test_lumalabs_generation_sends_model_and_returns_video(
     tmp_path: Path,

@@ -412,7 +412,7 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Luma AI API key, with `LUMAAI_API_KEY` as the upstream fallback. |
-| `model` | `select` | `no` | `ray-2` | Dream Machine video model: `ray-2` or `ray-flash-2`. |
+| `model` | `select` | `no` | `ray-2` | Dream Machine video model: `ray-2` or `ray-flash-2`; explicit `null` uses the default `ray-2`. |
 | `wait_for_completion` | `boolean` | `no` | `true` | Poll until the provider job completes. Setting it to `false` is not useful on this branch because async return is not implemented. |
 | `poll_interval` | `number` | `no` | `3` | Seconds between status polls. |
 | `max_wait_time` | `number` | `no` | `300` | Maximum wait time in seconds before timing out. |
