@@ -140,6 +140,7 @@ These models have no documented shared serving location, so configure separate a
 ```yaml
 agents:
   illustrator:
+    display_name: Illustrator
     tools:
       - gemini:
           vertexai: true
@@ -148,6 +149,7 @@ agents:
           image_generation_model: gemini-3.1-flash-image
           enable_generate_video: false
   filmmaker:
+    display_name: Filmmaker
     tools:
       - gemini:
           vertexai: true
