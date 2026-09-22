@@ -20835,6 +20835,8 @@ The feature is disabled by default and requires both `MINDROOM_TRUSTED_UPSTREAM_
 ## Choose exposed agents and tools
 
 Connections lists agents in a searchable table, with filters for personal, shared, and MCP-enabled agents.
+When managed account provisioning is enabled, signed-in users without an active MCP account see an access notice instead of retryable MCP loading errors.
+Their ordinary agent connections remain available; MCP selection and client controls stay unavailable until an administrator provisions an active account.
 The table includes agents you can use or manage credentials for; agents you can only manage have no MCP selection controls.
 Expand an agent to see each tool with a connection, and expand **Other tools** for tools that need no additional setup.
 Under **MCP gateway**, select all compatible tools for an agent or choose tools individually.

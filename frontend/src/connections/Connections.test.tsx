@@ -150,6 +150,58 @@ afterEach(() => {
 });
 
 describe("connections", () => {
+  it("keeps service connections usable when MCP access is not provisioned", async () => {
+    installApi({
+      "/api/connections/mcp/selection": async () =>
+        json({
+          enabled: false,
+          agents: {},
+          unavailable_reason: "account_required",
+        }),
+    });
+    render(<Connections />);
+    expect(
+      await screen.findByText(/MCP access isn't enabled for your account/),
+    ).toBeInTheDocument();
+    await expandAgent();
+    expect(
+      await screen.findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("table", { name: "Personal assistant tools" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reload selection" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Connected MCP clients" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryAllByRole("checkbox", { name: /Expose .* through MCP/ }),
+    ).toHaveLength(0);
+  });
+
+  it("keeps service connections usable alongside a retryable MCP failure", async () => {
+    installApi({
+      "/api/connections/mcp/selection": async () =>
+        json({ detail: "Request timed out" }, 408),
+    });
+    render(<Connections />);
+    expect(
+      await screen.findByText(/Could not load MCP selection/),
+    ).toBeInTheDocument();
+    await expandAgent();
+    expect(
+      await screen.findByRole("button", { name: "Connect Mail" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Reload selection" }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByText(/MCP access isn't enabled for your account/),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps agents collapsed and loads connections only after expansion", async () => {
     render(<Connections />);
     expect(
@@ -317,55 +369,64 @@ describe("connections", () => {
     ).toBeEnabled();
   });
 
-  it("opens popup before requesting authorization and reloads authoritative status", async () => {
-    const popup = {
-      closed: false,
-      close: vi.fn(),
-      location: { href: "about:blank" },
-    };
-    const open = vi
-      .spyOn(window, "open")
-      .mockReturnValue(popup as unknown as Window);
-    let connected = false;
-    installApi({
-      "/api/connections/agents/personal/mail/status": async () =>
-        json({ ...status, connected }),
-      "/api/connections/agents/personal/mail/connect": async () => {
-        expect(open).toHaveBeenCalledOnce();
-        return json({
-          provider: "mail",
-          auth_url: "https://auth.example.com/start",
-          completion_origin: window.location.origin,
-        });
-      },
-    });
-    render(<Connections />);
-    await expandAgent();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Connect Mail" }),
-    );
-    expect(open).toHaveBeenCalledOnce();
-    await waitFor(() =>
-      expect(popup.location.href).toBe("https://auth.example.com/start"),
-    );
-    connected = true;
-    act(() =>
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          origin: window.location.origin,
-          source: popup as unknown as Window,
-          data: {
-            type: "mindroom:oauth-complete",
+  it.each([undefined, "account_required"])(
+    "completes service authorization with MCP availability %s",
+    async (unavailableReason) => {
+      const popup = {
+        closed: false,
+        close: vi.fn(),
+        location: { href: "about:blank" },
+      };
+      const open = vi
+        .spyOn(window, "open")
+        .mockReturnValue(popup as unknown as Window);
+      let connected = false;
+      installApi({
+        "/api/connections/mcp/selection": async () =>
+          json({
+            enabled: false,
+            agents: {},
+            unavailable_reason: unavailableReason,
+          }),
+        "/api/connections/agents/personal/mail/status": async () =>
+          json({ ...status, connected }),
+        "/api/connections/agents/personal/mail/connect": async () => {
+          expect(open).toHaveBeenCalledOnce();
+          return json({
             provider: "mail",
-            status: "connected",
-          },
-        }),
-      ),
-    );
-    expect(
-      await screen.findByRole("button", { name: "Disconnect Mail" }),
-    ).toBeEnabled();
-  });
+            auth_url: "https://auth.example.com/start",
+            completion_origin: window.location.origin,
+          });
+        },
+      });
+      render(<Connections />);
+      await expandAgent();
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Connect Mail" }),
+      );
+      expect(open).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(popup.location.href).toBe("https://auth.example.com/start"),
+      );
+      connected = true;
+      act(() =>
+        window.dispatchEvent(
+          new MessageEvent("message", {
+            origin: window.location.origin,
+            source: popup as unknown as Window,
+            data: {
+              type: "mindroom:oauth-complete",
+              provider: "mail",
+              status: "connected",
+            },
+          }),
+        ),
+      );
+      expect(
+        await screen.findByRole("button", { name: "Disconnect Mail" }),
+      ).toBeEnabled();
+    },
+  );
 
   it("shows an empty state for no configured services", async () => {
     installApi({

@@ -5,6 +5,7 @@ import { requestConnection } from "./request";
 interface McpSelection {
   enabled: boolean;
   agents: Record<string, string[] | null>;
+  unavailable_reason?: "account_required";
 }
 
 const selectionPath = "/api/connections/mcp/selection";

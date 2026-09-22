@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi.testclient import TestClient
 
-from mindroom.api import config_lifecycle
+from mindroom.api import config_lifecycle, connections
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
     ORIGIN,
@@ -80,6 +80,53 @@ def _provision(client: TestClient, user: str) -> str:
     )
     assert response.status_code == 201, response.text
     return response.json()["id"]
+
+
+@pytest.mark.parametrize("inactive", [False, True], ids=["unprovisioned", "deactivated"])
+def test_unavailable_mcp_account_preserves_connections_without_granting_access(
+    gateway_app: FastAPI,
+    managed_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    inactive: bool,
+) -> None:
+    """A signed portal user can connect services without being provisioned for MCP."""
+    gateway_app.include_router(connections.router)
+    headers = signed_headers("alice")
+    if inactive:
+        account_id = _provision(managed_client, "alice")
+        response = managed_client.patch(
+            f"{SCIM}/{account_id}",
+            headers={"Authorization": f"Bearer {SCIM_TOKEN}"},
+            json={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{"op": "replace", "path": "active", "value": False}],
+            },
+        )
+        assert response.status_code == 200
+
+    catalog = managed_client.get("/api/connections", headers=headers)
+    assert catalog.status_code == 200
+    assert any(agent["agent_name"] == "personal" for agent in catalog.json()["agents"])
+    selection_path = "/api/connections/mcp/selection"
+    selection = managed_client.get(selection_path, headers=headers)
+    assert selection.status_code == 200
+    assert selection.json() == {"enabled": False, "agents": {}, "unavailable_reason": "account_required"}
+    clients = managed_client.get(CLIENTS, headers=headers)
+    assert clients.status_code == 200
+    assert clients.json() == {"enabled": False, "clients": []}
+    for path in (selection_path, CLIENTS):
+        assert "no-store" in managed_client.get(path, headers=headers).headers["cache-control"]
+        assert managed_client.head(path, headers=headers).status_code == 200
+        assert managed_client.get(path).status_code == 401
+    for path, body in (
+        (selection_path, {"agents": {"personal": None}}),
+        (f"{CLIENTS}/revoke-all", {}),
+        (f"{CLIENTS}/unknown/revoke", {}),
+    ):
+        denied = managed_client.post(path, headers={**headers, "Origin": ORIGIN}, json=body)
+        assert denied.status_code == 403
+    _, consent_url = _authorize(managed_client)
+    assert managed_client.get(consent_url, headers=headers).status_code == 403
 
 
 def test_client_management_is_owner_scoped_and_preserves_other_client_access(

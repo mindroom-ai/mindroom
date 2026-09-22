@@ -12,7 +12,7 @@ from starlette.routing import Route
 from mindroom.api.auth import require_connections_user, require_same_origin
 from mindroom.api.config_lifecycle import app_state, rebind_current_request_snapshot
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS, resolve_connection_user
-from mindroom.api.mcp_identity import resolve_gateway_browser_owner
+from mindroom.api.mcp_identity import GatewayAccountRequiredError, resolve_gateway_browser_owner
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
 from mindroom.mcp_gateway.server import read_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
@@ -107,7 +107,15 @@ async def _handle_selection(
     if request.query_params:
         raise HTTPException(400, "Selection target overrides are not accepted")
     choices = await _selection_choices(request, runtime.origin) if request.method == "POST" else None
-    owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
+    try:
+        owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
+    except GatewayAccountRequiredError:
+        if request.method not in {"GET", "HEAD"}:
+            raise
+        return JSONResponse(
+            {"enabled": False, "agents": {}, "unavailable_reason": "account_required"},
+            headers=CONNECTIONS_HEADERS,
+        )
     context = resolve_connection_user(
         rebind_current_request_snapshot(request),
         owner.authenticated_user_id,

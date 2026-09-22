@@ -17,6 +17,13 @@ if TYPE_CHECKING:
     from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 
 
+class GatewayAccountRequiredError(HTTPException):
+    """A signed browser user does not have an active provisioned MCP account."""
+
+    def __init__(self) -> None:
+        super().__init__(403, "An active provisioned account is required")
+
+
 async def resolve_gateway_browser_owner(
     request: Request,
     user: dict[str, Any],
@@ -28,7 +35,7 @@ async def resolve_gateway_browser_owner(
         email = user.get("email")
         account_id = await GatewayAccounts(provider.store).resolve_active(email) if isinstance(email, str) else None
         if account_id is None:
-            raise HTTPException(403, "An active provisioned account is required")
+            raise GatewayAccountRequiredError
     snapshot = rebind_current_request_snapshot(request)
     if snapshot.runtime_config is None:
         raise HTTPException(503, "Client connections are unavailable")
