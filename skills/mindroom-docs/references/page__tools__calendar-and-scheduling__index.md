@@ -91,6 +91,7 @@ The per-method enable flags let you narrow the exposed call surface when an agen
 | `api_key` | `password` | `no` | `null` | Cal.com API key. Configure this through the dashboard or credential store rather than inline YAML. |
 | `event_type_id` | `number` | `no` | `null` | Default Cal.com event type ID used for slot lookup and new bookings. |
 | `user_timezone` | `text` | `no` | `null` | IANA timezone used when formatting returned booking times. |
+| `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 | `enable_get_available_slots` | `boolean` | `no` | `true` | Enable `get_available_slots()`. |
 | `enable_create_booking` | `boolean` | `no` | `true` | Enable `create_booking()`. |
 | `enable_get_upcoming_bookings` | `boolean` | `no` | `true` | Enable `get_upcoming_bookings()`. |
