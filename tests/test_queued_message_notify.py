@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Protocol, Self, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -930,6 +930,22 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
+    client.room_messages.return_value = nio.RoomMessagesResponse(
+        room_id="!room:localhost",
+        chunk=[
+            nio.RoomMessageText.from_dict(
+                {
+                    "type": "m.room.message",
+                    "event_id": "$thread",
+                    "sender": "@user0:localhost",
+                    "origin_server_ts": 0,
+                    "content": {"msgtype": "m.text", "body": "Thread root"},
+                },
+            ),
+        ],
+        start="",
+        end=None,
+    )
     runtime = BotRuntimeState(
         client=client,
         config=config,
@@ -1028,6 +1044,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         "default",
         conversation_reader,
         initial_enrichment_complete=None,
+        generated_at=ANY,
     )
 
 

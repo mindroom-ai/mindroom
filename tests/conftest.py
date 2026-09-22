@@ -1242,8 +1242,14 @@ def serve_conversation_reader(
                 sender=message.sender,
                 # `or ordinal` would rewrite a real timestamp of 0.
                 created_ts=ordinal if message.timestamp is None else message.timestamp,
-                revision_event_id=message.event_id,
-                revision_ts=ordinal if message.timestamp is None else message.timestamp,
+                revision_event_id=message.latest_event_id,
+                revision_ts=(
+                    message.edited_timestamp
+                    if message.edited_timestamp is not None
+                    else ordinal
+                    if message.timestamp is None
+                    else message.timestamp
+                ),
                 content=dict(message.content),
             )
             for ordinal, message in enumerate(messages, start=1)
