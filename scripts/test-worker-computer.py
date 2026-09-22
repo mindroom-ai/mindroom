@@ -36,6 +36,7 @@ from mindroom.api import computers, config_lifecycle
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import WorkerRuntimeContext, worker_runtime_context
 from mindroom.tool_system.worker_routing import (
@@ -44,7 +45,6 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     tool_execution_identity,
 )
-from mindroom.worker_computer.mcp_results import decode_browser_mcp_result
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
@@ -308,7 +308,7 @@ class Fixture:
         """Call the actual native entrypoint and retain a bounded text transcript."""
         body = await self.execute("browser_mcp", tool_function, kwargs)
         assert body["ok"], body
-        result = decode_browser_mcp_result(body["result"])
+        result = decode_media_result(body["result"])
         assert isinstance(result, ToolResult), result
         with (self.args.output / "native-transcript.jsonl").open("a") as transcript:
             transcript.write(

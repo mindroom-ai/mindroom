@@ -904,6 +904,7 @@ visibility = [
 [[modules]]
 path = "mindroom.oauth.credential_store"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.credentials",
     "mindroom.oauth.legacy_credentials",
     "mindroom.oauth.providers",
@@ -1383,6 +1384,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_exec"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.constants",
     "mindroom.tool_system.worker_routing",
 ]
@@ -1402,10 +1404,10 @@ depends_on = []
 [[modules]]
 path = "mindroom.api.computer_browser_binding"
 depends_on = [
+    "mindroom.tool_system.media_transport",
     "mindroom.custom_tools.browser_mcp",
     "mindroom.tools.browser_mcp",
     "mindroom.worker_computer.mcp_catalog",
-    "mindroom.worker_computer.mcp_results",
     "mindroom.worker_computer.protocol",
 ]
 visibility = ["mindroom.api.sandbox_runner"]
@@ -1417,6 +1419,9 @@ visibility = ["mindroom.api.sandbox_runner"]
 [[modules]]
 path = "mindroom.api.sandbox_runner"
 depends_on = [
+    "mindroom.path_confinement",
+    "mindroom.media_delivery",
+    "mindroom.tool_system.media_transport",
     "mindroom.api.computer_browser_binding",
     "mindroom.worker_browser",
     "mindroom.worker_computer.runtime",
@@ -1459,6 +1464,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_runner_scripts"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.api.sandbox_env_assembly",
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
@@ -1471,6 +1477,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_worker_prep"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.api.sandbox_exec",
     "mindroom.logging_config",
     "mindroom.private_storage_paths",
@@ -1483,7 +1490,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.script_runs.shim"
-depends_on = []
+depends_on = ["mindroom.path_confinement"]
 
 [[modules]]
 path = "mindroom.script_runs.legacy_schema"
@@ -1559,6 +1566,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.attachments"
 depends_on = [
+    "mindroom.media_delivery",
+    "mindroom.tool_system.media_attachments",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.media",
     "mindroom.tool_system.output_files",
@@ -1756,7 +1765,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.history.agno_compat_message_builder"
-depends_on = []
+depends_on = ["mindroom.history.message_content"]
 visibility = ["mindroom.agents", "mindroom.teams"]
 
 [[modules]]
@@ -3131,7 +3140,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.thread_export.storage"
-depends_on = ["mindroom.atomic_file"]
+depends_on = ["mindroom.path_confinement", "mindroom.atomic_file"]
 visibility = [
     "mindroom.thread_export",
     "mindroom.thread_export.execution",
@@ -3859,6 +3868,7 @@ visibility = [
 [[modules]]
 path = "mindroom.provider_media_fallback"
 depends_on = [
+    "mindroom.media_delivery",
     "mindroom.agno_compat_provider_errors",
     "mindroom.agno_compat_model_hooks",
     "mindroom.error_handling",
@@ -3943,6 +3953,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.tool_system.output_files"
 depends_on = [
+    "mindroom.path_confinement",
     "mindroom.atomic_file",
     "mindroom.tool_system.agno_compat_function_schema",
     "mindroom.constants",
@@ -4006,7 +4017,8 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
-    "mindroom.worker_computer.mcp_results",
+    "mindroom.tool_system.media_transport",
+    "mindroom.tool_system.media_attachments",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registry_state",
@@ -4071,6 +4083,26 @@ depends_on = [
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.registry_state",
     "mindroom.tool_system.skills",
+]
+
+[[modules]]
+path = "mindroom.tool_system.media_attachments"
+depends_on = ["mindroom.tool_system.runtime_context", "mindroom.provider_media_fallback"]
+
+[[modules]]
+path = "mindroom.tool_system.media_transport"
+depends_on = []
+
+[[modules]]
+path = "mindroom.media_delivery"
+depends_on = ["mindroom.path_confinement"]
+visibility = [
+    "mindroom.api.sandbox_runner",
+    "mindroom.custom_tools.attachments",
+    "mindroom.custom_tools.browser",
+    "mindroom.history.message_content",
+    "mindroom.provider_media_fallback",
+    "mindroom.worker_computer.mcp_provider",
 ]
 
 [[modules]]
@@ -5694,6 +5726,7 @@ expose = [
     "sandbox_proxy_config",
     "sandbox_proxy_enabled_for_tool",
     "save_attachment_to_worker",
+    "view_file_from_worker",
     "to_json_compatible",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
@@ -5967,8 +6000,8 @@ visibility = ["mindroom.history.compaction", "mindroom.history.summary_input"]
 
 [[modules]]
 path = "mindroom.history.message_content"
-depends_on = ["mindroom.token_budget"]
-visibility = ["mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models", "mindroom.agno_participation"]
+depends_on = ["mindroom.media_delivery", "mindroom.token_budget"]
+visibility = ["mindroom.history.agno_compat_message_builder", "mindroom.history.replay", "mindroom.history.summary_input", "mindroom.openai_models", "mindroom.agno_participation"]
 
 [[modules]]
 path = "mindroom.agno_compat_provider_errors"
@@ -6317,10 +6350,6 @@ path = "mindroom.worker_computer.mcp_catalog"
 depends_on = []
 
 [[modules]]
-path = "mindroom.worker_computer.mcp_results"
-depends_on = []
-
-[[modules]]
 path = "mindroom.worker_computer.browser_guard"
 depends_on = []
 
@@ -6331,7 +6360,7 @@ visibility = ["mindroom.custom_tools.browser", "mindroom.custom_tools.browser_mc
 
 [[modules]]
 path = "mindroom.worker_computer.mcp_provider"
-depends_on = ["mindroom.browser_profile", "mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
+depends_on = ["mindroom.path_confinement", "mindroom.media_delivery", "mindroom.browser_profile", "mindroom.worker_computer.browser_bundle", "mindroom.playwright_mcp_session", "mindroom.worker_computer.mcp_catalog", "mindroom.worker_computer.browser_guard", "mindroom.worker_computer.browser_proxy"]
 
 [[modules]]
 path = "mindroom.custom_tools.browser_mcp"
@@ -6556,3 +6585,7 @@ depends_on = ["mindroom.model_loading", "mindroom.json_utils", "mindroom.judgmen
 [[modules]]
 path = "mindroom.judgment.evaluator"
 depends_on = ["mindroom.config.judgment", "mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.logging_config"]
+
+[[modules]]
+path = "mindroom.path_confinement"
+depends_on = []

@@ -310,6 +310,7 @@ Completed HTTP reports include `schema_version: 1` and a UTC ISO 8601 `generated
 Cached polls return the original timestamp for that completed scan.
 
 The completed organization-wide HTTP JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
+Organization reports include retained configured and ad hoc team sessions, including teams no longer present in the current configuration.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
 Counters include input, output, total, cache read/write, reasoning, and audio tokens.
 Models include their provider.
@@ -318,9 +319,10 @@ Malformed or inconsistent model details retain the run's tokens under `unknown` 
 Requester aliases are combined; `user_id: null` holds unattributed usage.
 
 Each entity in `breakdown` also has `retained_run_totals`, `run_count`, and a `user_breakdown` with the same requester/model structure.
-These fields show which requesters used each agent or team, using the same deduplicated top-level runs as the report.
+These fields show which requesters used each agent or team, using the same deduplicated usage snapshots as the report, including saved team member runs.
 Entity rows combine shared and private instances; `private_agent_breakdown` identifies the private contribution separately.
-Run counts measure retained runs with usable token metrics, not messages or conversations, and can undercount historical activity.
+Run counts measure retained top-level runs with usable token metrics, not messages or conversations, and can undercount historical activity.
+Team member tokens contribute to model, requester, daily, and request detail without adding replies to `run_count`; cumulative team session totals already include those members.
 Requester totals sum to the entity's `retained_run_totals`, which can differ from its cumulative `totals`.
 The report-level `model_coverage` and `user_coverage` also apply to entity retained detail.
 
@@ -378,14 +380,15 @@ Individual helper requests are exported only when returned message counters reco
 Usage from exceptions or cancellation before Agno returns a helper run output remains unavailable.
 Historical helper costs were not retained and cannot be reconstructed.
 
-User and model breakdowns cover stored top-level usage snapshots.
-Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
+User and model breakdowns cover stored usage snapshots, including each saved team member's own counters once.
+Provider execution saves record content-free usage in the same database transaction; later provider saves replace that run's snapshot.
+Conversation-only rewrites preserve existing usage snapshots.
 Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.
 Explicit whole-session erasure removes its usage too.
 Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
 The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
 Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
-Breakdowns can still differ from session totals because history lost before migration and nested team-member usage may lack detailed attribution.
+Breakdowns can still differ from session totals when history lost before migration or unrecorded member usage lacks detailed attribution.
 Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
 `scanned_sources` counts discovered database candidates, including absent configured databases.

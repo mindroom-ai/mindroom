@@ -618,7 +618,7 @@ async def test_script_shim_does_not_mask_directory_token_validation(tmp_path: Pa
     assert token_path.is_dir()
 
 
-@pytest.mark.parametrize("cleanup_operation", ["lstat", "unlink"])
+@pytest.mark.parametrize("cleanup_operation", ["stat", "unlink"])
 def test_script_shim_cleanup_permission_error_preserves_source_validation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -636,21 +636,31 @@ def test_script_shim_cleanup_permission_error_preserves_source_validation(
     monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
 
     def reject_source(_source_path: Path) -> None:
-        if cleanup_operation == "lstat":
+        if cleanup_operation == "stat":
+            original_stat = os.stat
 
-            def deny_lstat(_path: Path) -> os.stat_result:
-                message = "cleanup denied"
-                raise PermissionError(message)
+            def deny_stat(
+                path: str | Path,
+                *,
+                dir_fd: int | None = None,
+                follow_symlinks: bool = True,
+            ) -> os.stat_result:
+                if dir_fd is not None:
+                    message = "cleanup denied"
+                    raise PermissionError(message)
+                return original_stat(path, follow_symlinks=follow_symlinks)
 
-            monkeypatch.setattr(Path, "lstat", deny_lstat)
+            monkeypatch.setattr(os, "stat", deny_stat)
         else:
+            original_unlink = os.unlink
 
-            def deny_unlink(_path: Path, *, missing_ok: bool = False) -> None:
-                del missing_ok
-                message = "cleanup denied"
-                raise PermissionError(message)
+            def deny_unlink(path: str | Path, *, dir_fd: int | None = None) -> None:
+                if dir_fd is not None:
+                    message = "cleanup denied"
+                    raise PermissionError(message)
+                original_unlink(path)
 
-            monkeypatch.setattr(Path, "unlink", deny_unlink)
+            monkeypatch.setattr(os, "unlink", deny_unlink)
         msg = "Script source digest does not match the launch receipt."
         raise ValueError(msg)
 

@@ -881,6 +881,7 @@ Completed HTTP reports include `schema_version: 1` and a UTC ISO 8601 `generated
 Cached polls return the original timestamp for that completed scan.
 
 The completed organization-wide HTTP JSON includes overall `totals`, an entity `breakdown`, a `model_breakdown`, a `cumulative_model_breakdown`, and `user_breakdown`.
+Organization reports include retained configured and ad hoc team sessions, including teams no longer present in the current configuration.
 Each user has a canonical `user_id`, token `totals`, `run_count`, and their own `model_breakdown`.
 Counters include input, output, total, cache read/write, reasoning, and audio tokens.
 Models include their provider.
@@ -889,9 +890,10 @@ Malformed or inconsistent model details retain the run's tokens under `unknown` 
 Requester aliases are combined; `user_id: null` holds unattributed usage.
 
 Each entity in `breakdown` also has `retained_run_totals`, `run_count`, and a `user_breakdown` with the same requester/model structure.
-These fields show which requesters used each agent or team, using the same deduplicated top-level runs as the report.
+These fields show which requesters used each agent or team, using the same deduplicated usage snapshots as the report, including saved team member runs.
 Entity rows combine shared and private instances; `private_agent_breakdown` identifies the private contribution separately.
-Run counts measure retained runs with usable token metrics, not messages or conversations, and can undercount historical activity.
+Run counts measure retained top-level runs with usable token metrics, not messages or conversations, and can undercount historical activity.
+Team member tokens contribute to model, requester, daily, and request detail without adding replies to `run_count`; cumulative team session totals already include those members.
 Requester totals sum to the entity's `retained_run_totals`, which can differ from its cumulative `totals`.
 The report-level `model_coverage` and `user_coverage` also apply to entity retained detail.
 
@@ -949,14 +951,15 @@ Individual helper requests are exported only when returned message counters reco
 Usage from exceptions or cancellation before Agno returns a helper run output remains unavailable.
 Historical helper costs were not retained and cannot be reconstructed.
 
-User and model breakdowns cover stored top-level usage snapshots.
-Each run save records its content-free usage in the same database transaction; later saves replace that run's snapshot.
+User and model breakdowns cover stored usage snapshots, including each saved team member's own counters once.
+Provider execution saves record content-free usage in the same database transaction; later provider saves replace that run's snapshot.
+Conversation-only rewrites preserve existing usage snapshots.
 Compaction, edits, and regeneration keep usage already incurred; a regenerated reply with a new run ID contributes separately.
 Explicit whole-session erasure removes its usage too.
 Startup imports available old run rows and session blobs once, without reconstructing missing history from logs or inventing dates or requester identity.
 The usage table and imported records commit atomically; an interrupted import rolls back and retries on the next startup.
 Historical conversion lives in `legacy_usage_storage.py`; reporting reads the current usage table only.
-Breakdowns can still differ from session totals because history lost before migration and nested team-member usage may lack detailed attribution.
+Breakdowns can still differ from session totals when history lost before migration or unrecorded member usage lacks detailed attribution.
 Deleted sessions are unavailable.
 The `coverage`, `model_coverage`, and `user_coverage` fields describe missing sources and these limits.
 `scanned_sources` counts discovered database candidates, including absent configured databases.
@@ -6479,6 +6482,8 @@ It creates tabs, records console entries, and resolves temporary element refs fr
 The host target's `snapshot()` can return either `ai` or `aria` format, while the desktop target returns Playwright MCP's native accessibility snapshot.
 `act()` currently supports `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, and `close`.
 The desktop target uses the browser's real signed-in state and requires the Matrix desktop bridge, the local extension option, and a local control lease for interactive actions.
+Host screenshots return model-visible image content by default plus their retained path; `saveOnly=True` preserves an explicit save-only mode.
+Host captures and `view_file` use shared bounded image delivery, with any resizing or first-frame handling disclosed.
 Desktop screenshots are model-visible by default, while `returnAttachment=true` additionally returns a current-turn `att_*` handle that can be sent through `matrix_message` without creating a separate plaintext attachment copy or uploading the encrypted media again.
 Agno's normal agent-session persistence can retain model-visible screenshot pixels in the session database.
 Playwright MCP briefly writes its requested screenshot into the local browser workspace, and MindRoom reads and removes that exact scratch file before returning the tool result.
@@ -6701,7 +6706,11 @@ Upstream workspace file restrictions remain enabled.
 File upload and drop paths are resolved before dispatch and must name existing regular files inside the canonical worker workspace.
 This rejects symlinks to files outside the workspace while allowing symlinks to files inside it.
 This path check does not protect against concurrent filesystem changes by malicious shell code.
-Screenshots without a native `filename` return inline model-visible images; a native filename produces the upstream file result instead.
+Screenshots without a native `filename` return inline model-visible images and retain a workspace file; a native filename is the explicit save-only mode.
+The host action-based provider also returns model-visible images by default with `browser_control(action="screenshot")`; set `saveOnly=True` to retain the capture without viewing.
+Both providers use the same bounded image delivery as `view_file` from the `attachments` toolkit.
+Use the returned workspace path with `view_file(path=...)` on later turns, or the returned attachment handle for reopening and optional sharing during the current tool run.
+Capturing and viewing never post an image into Matrix automatically.
 MindRoom's `mindroom_output_path` redirects text; redirecting media returns the established unsupported-media receipt.
 The primary never fetches worker paths to reconstruct images.
 
@@ -8390,11 +8399,26 @@ matrix_api(
 
 ### What It Does
 
-`attachments` exposes `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
+`attachments` exposes `view_file(path=None, attachment_id=None)`, `list_attachments(target=None)`, `get_attachment()`, and `register_attachment()`.
+`view_file(path="plots/result.png")` delivers an image directly to the calling model in one call.
+`view_file(attachment_id="att_...")` views an authorized conversation attachment without a registration/fetch sequence.
+Supply exactly one source; keep `read_file` for ordinary text and code.
+Workspace paths resolve inside the selected worker, or inside the configured workspace in local execution mode.
+PNG, JPEG, GIF and WebP inputs are supported up to 20 MiB and 40 million pixels.
+The delivered image is bounded to 2048 pixels on its longest edge and 5 MiB; resizing, conversion, and first-frame-only animation handling are disclosed in metadata.
+Transparent images retain their transparency; images that cannot fit the payload limit return an explicit error while preserving the source artifact.
+Viewing preserves the source path and retains a reusable attachment handle when context storage is available.
+A retained handle identifies the delivered image copy and follows existing attachment authority: it is available during the current tool run, or when supplied by conversation metadata.
+For later turns, reopen the original workspace path; model history replays up to four recent viewed images within a 10 MiB aggregate limit.
+Older or oversized replay images are omitted with an explicit notice; their saved artifacts remain available.
+Viewing does not publish, upload to a separate vision service, open a user-facing panel, or post into Matrix.
+Adapters that cannot deliver tool images return an explicit limitation while retaining the artifact.
+Share only when requested, using `matrix_message(attachments=["att_..."])` with the returned handle.
 `list_attachments()` returns the attachment IDs currently available in tool runtime context, the resolved metadata payloads, and any `missing_attachment_ids`.
 Pass a context-available attachment ID as `target` to return only that attachment; an ID outside the current context returns an error.
 `get_attachment()` returns a single attachment record, including the runtime-local path, when called with only an attachment ID.
 `get_attachment(attachment_id, view=True)` sends image, audio, video, or document content (including PDF) to the model, including local files and attachments from earlier in the conversation.
+Image viewing uses the same preparation, size limits, transformation disclosures, and history replay as `view_file` and browser screenshots.
 Viewing requires a model and provider adapter that support the media type, and a readable, context-scoped file no larger than 20 MiB.
 Rejected media requests retry without the media and give the agent explicit guidance to use the attachment ID/path with other available tools; known adapter omissions receive the same guidance.
 It cannot be combined with `mindroom_output_path`.
@@ -8885,7 +8909,7 @@ Chrome and Brave are supported by the local command through an explicit browser 
 
 ## Native macOS setup
 
-Open **Desktop Control** from the MindRoom menu app.
+Open MindRoom and select **Computer access**, or use **Computer Access…** in the menu bar.
 In the requester-agent chat, run `!desktop setup` and paste its JSON setup data into the app.
 Review the displayed controller fingerprint, requester, and agent, then sign in and choose allowed applications.
 Save the setup, confirm that exact identity locally, and claim pairing.
@@ -10895,14 +10919,14 @@ agents:
 
 All three functions accept an optional `include_daily` boolean, which defaults to `false`.
 `get_my_usage()` reports requester-attributed direct runs for a shared agent or the isolated session aggregate for a private agent.
-`get_all_usage()` reports all retained Agno session aggregates across configured agents and teams.
+`get_all_usage()` reports retained Agno session aggregates across configured agents and all stored teams, including ad hoc teams and teams removed from configuration.
 
 ### Daily Token Usage
 
 Call `get_my_usage(include_daily=True)`, `get_my_private_usage(include_daily=True)`, or `get_all_usage(include_daily=True)` to include token usage per day.
 The response adds `daily_breakdown`, with one row per UTC calendar date containing `date` (`YYYY-MM-DD`), token `totals`, `run_count`, and a `model_breakdown` grouped by provider and model.
 Dates use individual request timestamps when all counters reconcile to the recorded run and one model; older or unreconciled details fall back to run creation time.
-Each run counts once on its first request date, so tokens on later days do not add extra replies.
+Each top-level run counts once on its first request date, so tokens on later days or from saved team members do not add extra replies.
 Dates are sorted oldest first and omit days without usable retained usage.
 The daily breakdown follows the same requester and administrator access rules as the rest of the report.
 Each day's combined totals and each model's totals separately include `input_tokens`, `output_tokens`, `cache_read_tokens`, and `cache_write_tokens`, alongside total, reasoning, and audio tokens.
@@ -10914,7 +10938,7 @@ Requester aliases share one user's daily history, and `user_id: null` contains u
 Usage with neither valid request timestamps nor a usable run creation timestamp is excluded from daily rows and marks its source as partially unavailable, while its tokens remain eligible for the other totals.
 The run-date fallback cannot provide exact provider billing dates for historical or incomplete request detail.
 This coverage applies to both overall and per-user daily rows; a user with only undated runs has an empty daily breakdown.
-Daily rows use retained top-level runs, so they do not necessarily sum to session totals that include compacted history or nested team-member usage.
+Daily rows include saved team member usage, but may differ from session totals when historical usage lacks retained counters or dates.
 Both daily fields are omitted unless `include_daily=True`.
 
 ### Response And Coverage
@@ -10923,21 +10947,22 @@ All three functions return a JSON custom-tool envelope with `status` and `tool` 
 A successful response also includes `scope`, token `totals`, `session_count`, an entity `breakdown`, `coverage`, a `model_breakdown`, and `model_coverage`.
 Token totals separately report input, output, cache-read, cache-write, reasoning, and audio dimensions.
 
-The admin response groups session aggregates by configured agent or team ID.
+The admin response groups session aggregates by configured agent or stored team ID.
 Self reports leave the entity `breakdown` empty; they still include `model_breakdown` and `model_coverage`.
-Admin breakdown rows include every configured entity with retained usage and are sorted by total tokens.
-Each entity also includes `retained_run_totals`, `run_count`, and `user_breakdown`, grouping retained top-level usage by canonical requester and model.
+Admin breakdown rows include every configured agent and stored team with retained usage and are sorted by total tokens.
+Each entity also includes `retained_run_totals`, `run_count`, and `user_breakdown`, grouping retained usage by canonical requester and model.
 With `include_daily=True`, these requester rows include daily detail too; the report's model, user, and daily coverage applies to them.
 Shared and private instances of the same entity are combined; `private_agent_breakdown` separately identifies the private contribution.
-Run counts describe retained runs with usable metrics, not message counts, and requester totals sum to `retained_run_totals` rather than cumulative session `totals`.
-Both responses group stored top-level usage snapshots by provider and model in `model_breakdown`.
+Run counts describe retained top-level runs with usable metrics, not message counts, and requester totals sum to `retained_run_totals` rather than cumulative session `totals`.
+Both responses group stored usage snapshots by provider and model in `model_breakdown`.
+Organization detail includes each saved team member's own counters once, without adding replies to `run_count` or adding its tokens again to cumulative team session totals.
 When a run stores detailed metrics for several models, each model receives its own tokens; repeated uses of the same provider and model within a run are combined.
 Older runs without detailed metrics use their recorded provider and model, with missing identities reported as `unknown`.
 Malformed model details or details that do not account for the run's token totals put the run's tokens under `unknown` and mark model and daily coverage as partially unavailable.
 Model rows include token totals and run counts and are sorted by total tokens.
-Each model counts a run once, while daily and user run counts count that run once across all its models.
+Each model counts a top-level run once, while daily and user run counts count that run once across all its models.
 Coverage reports scanned sources, unavailable or partially unreadable sources, and the retained-history limitation.
-Model coverage is reported separately because history lost before usage migration and nested team-member usage can contribute to report totals without model attribution.
+Model coverage is reported separately because history lost before usage migration and unrecorded member usage can contribute to report totals without model attribution.
 Consequently, model rows do not necessarily sum to the top-level totals.
 The tool does not change Agno persistence settings.
 The HTTP usage routes add `schema_version: 1` and a UTC ISO 8601 `generated_at` timestamp when a scan finishes; cached responses retain that scan timestamp.
@@ -12756,8 +12781,8 @@ OAuth-backed MCP servers always expose a stable bridge surface:
 
 The bridge functions let an agent trigger the normal MindRoom OAuth connect flow before the remote server has revealed a catalog for the active credential scope.
 When credentials are missing, the bridge returns the same structured OAuth-required payload used by built-in OAuth tools.
-When token refresh fails without a terminal credential rejection, the bridge returns the standard `oauth_connection_required: true` payload with `reason: refresh_failed`, the provider, and a scoped `connect_url` instead of collapsing the failure into a bare error string.
-MindRoom retains the credential in that case, so callers should retry after a temporary provider failure before offering the link to reconnect.
+When token refresh fails without a terminal credential rejection, the bridge raises an ordinary tool error that says OAuth token refresh failed and asks callers to retry shortly.
+MindRoom retains the credentials and does not return an OAuth-required payload or reconnect link for that temporary failure.
 Until the active credential scope is connected, the bridge functions are the only model-visible surface for the server, and their generic descriptions say nothing about what the server offers.
 Set the per-server `description` option to tell the model what connecting would unlock; it is appended to all three bridge tool descriptions.
 After the connection is established, `list_tools` returns the remote catalog and `call_tool` sends the access token resolved for the active credential scope to the MCP server.
@@ -18503,6 +18528,22 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
 
 See [Bot Runtime](https://docs.mindroom.chat/architecture/bot-runtime/) for the module boundaries and the ongoing simplification roadmap.
 
+## Confined filesystem paths
+
+`mindroom.path_confinement.resolve_path_within_root` is the shared implementation for workspace and artifact path containment.
+Callers supply an authorized root and explicitly choose `internal` (allow links targeting that root), `reject` (reject descendant links), or `preserve_leaf` (reject linked parents while preserving the final entry for unlink or atomic replacement).
+Existing workspace and tool wrappers retain their input rules and error messages.
+Do not add another `resolve()` plus containment check when implementing a file consumer.
+
+Path resolution is a point-in-time check, not protection for a later file open.
+For local I/O requiring protection against symlink swaps, use `open_directory_within_root` or `open_regular_file_within_root` and keep operations relative to the returned descriptor.
+Publish bytes using `atomic_file.atomic_write_bytes_at`, or stream through `atomic_write_file_at`; both use the same atomic transaction and descriptor-relative cleanup.
+The action-based browser publishes captures and completed downloads through these helpers and snapshots upload sources through confined descriptors.
+Upload snapshots remain private until tab or profile teardown because Playwright reads selected files lazily.
+Drive downloads stream into a confined atomic file rooted at the authorized workspace.
+Caller-owned root authorization, directory identity checks, filesystem permissions, and requester isolation remain required.
+These helpers do not prevent hard-link aliasing or arbitrary directory relocation, and do not protect subsequent pathname opens by native MCP browser tools, Drive uploads, shell commands, or ordinary file-tool implementations.
+
 # Matrix Integration
 
 MindRoom uses the Matrix protocol for all agent communication. The integration is implemented in `src/mindroom/matrix/`.
@@ -19614,7 +19655,7 @@ Related workarounds can share one module, but keep separate removal conditions w
 | `agno_compat_approval.py` | Private rejected-tool result creation and temporary continuation tool-lookup interception. | `approval_tools.py` retains exact call/run identity, authorization, and denial state. |
 | `agno_compat_model_hooks.py` | Model message projection, post-tool formatting/media and resumed-response callbacks, permanent and scoped invocation/retry bindings, answer-cache bypass, and provider client factories. | Approval receipts, queued notices, request logging, media fallback, provider stream retries, prompt caching, and participation decisions remain in their owning modules. |
 | `agno_compat_prepared_tools.py` | Private Agent/Team tool preparation and temporary Team instruction restoration. | `history/prompt_tokens.py` owns estimation/cache policy; `matrix_rtc/call_tools.py` owns execution context, authorization, and LiveKit conversion. |
-| `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners retain replay policy. |
+| `history/agno_compat_message_builder.py` | Roleful Team input and history-media message-builder bindings. | Agent/Team construction installs the patch; history owners keep the newest four marked viewed images within a 10 MiB aggregate limit, disclose omissions without changing stored artifacts, and charge provider visual estimates or a conservative fallback in replay planning. |
 | `tool_system/agno_compat_tool_hooks.py` | Private FunctionCall sync/async hook-chain adaptation. | `tool_system/tool_hooks.py` owns deferred-result handling, synchronous execution, approvals, dispatch, and cancellation. |
 | `tool_system/agno_compat_function_schema.py` | Per-Function schema processor binding and rebinding after copies. | `tool_system/output_files.py` retains schema transformation, workspace/path rules, execution, and receipts. |
 | `agno_compat_openai_chat.py` | OpenAI Chat parser repairs, retained terminal metadata, and cache-write usage preservation. | `openai_models.py` retains provider classes and canonical history/replay policy. |
@@ -22136,10 +22177,33 @@ tool_approval:
 You can assign `approved_egress` to individual agents instead of `defaults.tools` if only some agents should request network access.
 The toolkit is built into MindRoom and uses the chart-provided policy API URL, token, allowlist path, and TTL settings.
 
+### Temporary Full Access
+
+The `allow_full_access` tool option defaults to `false`.
+Enable it in the tool's settings or an authored tool entry to allow temporary access to all public hostnames:
+
+```yaml
+defaults:
+  tools:
+    - approved_egress:
+        allow_full_access: true
+```
+
+The same option can be set on an individual agent's `approved_egress` tool entry.
+With this option enabled, agents can call `request_network_access(hostnames=["*"], ttl_minutes=5, reason="Install dependencies")`.
+The `"*"` must be the only entry; partial wildcards and mixed hostname batches are rejected.
+Full-access requests use the same Matrix approval rule and deployment TTL cap as hostname requests, and never qualify for the static-allowlist approval exemption.
+The grant applies only to the requesting agent or requester-owned worker, using the same scope rules as hostname grants.
+
+This requires an approved egress proxy build that supports `hostname: "*"` grants; older proxy images reject these requests.
+It opens access to all public hostnames through the HTTP proxy on its allowed ports (80 and 443), while retaining private-network, internal-hostname, and DNS destination checks.
+It does not enable arbitrary protocols or ports.
+After the TTL expires, new requests need a static allowlist match or another active grant; already established connections, including HTTPS CONNECT tunnels, are not forcibly closed.
+
 ## Runtime Behavior
 
 Agents call `request_network_access(hostnames, ttl_minutes, reason)` with every blocked external hostname the task needs, and a single Matrix approval covers the whole batch.
-The tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API, and one bad hostname fails the whole batch before any grant is created.
+For exact-host requests, the tool rejects schemes, ports, paths, wildcards, IP literals, single-label names, localhost names, cluster-local names, and known metadata hostnames before it calls the policy API, and one bad hostname fails the whole batch before any grant is created.
 The tool creates one policy grant per blocked hostname and skips hostnames the static allowlist already covers.
 If every requested hostname already matches the static allowlist, the tool reports that no dynamic grant is needed without sending a Matrix approval card.
 When `worker_scope: user_agent` is active, the tool creates a `worker_key` grant for the exact requester-owned worker.

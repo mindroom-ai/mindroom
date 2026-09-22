@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from threading import Lock
 from time import perf_counter
@@ -16,13 +17,16 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class _CapacityLease:
     capacity: JudgmentCapacity
     owner: str
+    references: int = 1
 
     def release(self) -> None:
-        self.capacity.release(self.owner)
+        self.references -= 1
+        if self.references == 0:
+            self.capacity.release(self.owner)
 
 
 class JudgmentCapacity:
@@ -60,6 +64,23 @@ class JudgmentCapacity:
 
 
 SHARED_CAPACITY = JudgmentCapacity(max_concurrent=8, max_per_owner=1)
+_CURRENT_LEASE: ContextVar[_CapacityLease] = ContextVar("judgment_capacity_lease")
+
+
+async def run_judgment_thread[T](function: Callable[[], T]) -> T:
+    """Keep uncancellable synchronous work charged until its worker actually finishes."""
+    lease = _CURRENT_LEASE.get()
+    future = asyncio.get_running_loop().run_in_executor(None, copy_context().run, function)
+    lease.references += 1
+
+    def finished(done: asyncio.Future[T]) -> None:
+        # Retrieve late failures even when the caller already timed out or was cancelled.
+        if not done.cancelled():
+            done.exception()
+        lease.release()
+
+    future.add_done_callback(finished)
+    return await asyncio.shield(future)
 
 
 def _result(
@@ -90,7 +111,7 @@ async def run_judgment(
     allow_network: bool,
     capacity: JudgmentCapacity = SHARED_CAPACITY,
 ) -> JudgmentResult:
-    """Run one bounded attempt; failures abstain and cancellation releases capacity."""
+    """Run one bounded attempt; abandoned worker threads retain their capacity."""
     started = perf_counter()
     if not request.complete or request.body is None:
         return _result(request, started, "incomplete_state")
@@ -108,6 +129,7 @@ async def run_judgment(
         return _result(request, started, "capacity_exhausted")
     response: JudgmentResponse | None = None
     failure: JudgmentFailure | None = None
+    token = _CURRENT_LEASE.set(lease)
     try:
         async with asyncio.timeout(timeout_seconds):
             response = await evaluate(request)
@@ -122,5 +144,6 @@ async def run_judgment(
         # SDK errors can include request bodies and credentials. Only expose a category.
         failure = "provider_error"
     finally:
+        _CURRENT_LEASE.reset(token)
         lease.release()
     return _result(request, started, failure, response)

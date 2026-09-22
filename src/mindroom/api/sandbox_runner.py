@@ -35,7 +35,9 @@ from mindroom.config.main import Config, load_config, normalized_config_data
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.logging_config import get_logger
+from mindroom.media_delivery import view_image_path
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     SANDBOX_RUNTIME_ENV_BY_KEY,
@@ -57,6 +59,7 @@ from mindroom.tool_system.catalog import (
     sanitize_tool_init_overrides,
     validate_authored_tool_entry_overrides,
 )
+from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
@@ -524,6 +527,25 @@ class SandboxRunnerSaveAttachmentResponse(BaseModel):
     failure_kind: Literal["tool", "worker"] | None = None
 
 
+class SandboxRunnerViewFileRequest(BaseModel):
+    """Worker routing fields plus one path in the prepared workspace."""
+
+    worker_key: str | None = None
+    routing_agent_name: str | None = None
+    execution_identity: dict[str, Any] = Field(default_factory=dict)
+    private_agent_names: list[str] | None = None
+    path: str
+
+
+class SandboxRunnerViewFileResponse(BaseModel):
+    """Bounded image result read inside one prepared worker."""
+
+    ok: bool
+    result: Any | None = None
+    error: str | None = None
+    failure_kind: Literal["tool", "worker"] | None = None
+
+
 @dataclass(frozen=True)
 class _SandboxRunnerContext:
     runtime_paths: RuntimePaths
@@ -604,10 +626,15 @@ def resolve_script_state_workspace(
         state_storage_path=state_root,
         use_state_storage_path=is_private,
     )
-    workspace = (resolved_workspace.root if resolved_workspace is not None else state_root / "workspace").resolve()
-    if not workspace.is_relative_to(state_root):
+    try:
+        workspace = resolve_path_within_root(
+            state_root,
+            resolved_workspace.root if resolved_workspace is not None else state_root / "workspace",
+            symlinks="internal",
+        )
+    except ValueError as exc:
         msg = "Script workspace escapes its mounted state scope."
-        raise ValueError(msg)
+        raise ValueError(msg) from exc
     workspace.mkdir(parents=True, exist_ok=True)
     return workspace
 
@@ -1145,7 +1172,20 @@ async def _execute_prepared_request_inprocess(
                 failure_kind="tool",
             )
 
-    return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
+    return SandboxRunnerExecuteResponse(
+        ok=True,
+        result=_serialize_runner_tool_result(prepared.tool_name, result),
+    )
+
+
+def _serialize_runner_tool_result(tool_name: str, result: object) -> object:
+    """Preserve bounded browser images across generic runner transports."""
+    if tool_name in {"browser", "browser_mcp"}:
+        from agno.tools.function import ToolResult  # noqa: PLC0415
+
+        if isinstance(result, ToolResult):
+            return encode_media_result(result)
+    return to_json_compatible(result)
 
 
 async def _execute_request_inprocess(
@@ -1659,6 +1699,66 @@ async def save_attachment_to_worker(  # noqa: C901, PLR0911
     )
 
 
+@router.post("/view-file", response_model=SandboxRunnerViewFileResponse)
+async def view_file_in_worker(
+    request: Request,
+    payload: SandboxRunnerViewFileRequest,
+) -> SandboxRunnerViewFileResponse:
+    """View an image only after resolving its prepared worker workspace."""
+    runtime_paths = app_runtime_paths(request.app)
+    config = app_runtime_config(request.app)
+    runner_token = app_runner_token(request.app)
+    payload.worker_key = sandbox_worker_prep.normalize_request_worker_key(payload.worker_key, runtime_paths)
+
+    prepared_worker: sandbox_worker_prep.PreparedWorkerRequest | None = None
+    if payload.worker_key is not None:
+        try:
+            prepared_worker = sandbox_worker_prep.prepare_worker_request(
+                worker_key=payload.worker_key,
+                tool_init_overrides={},
+                runtime_paths=runtime_paths,
+                private_agent_names=_freeze_private_agent_names(payload.private_agent_names),
+                runner_token=runner_token,
+            )
+        except sandbox_worker_prep.WorkerRequestPreparationError as exc:
+            if exc.failure_kind == "worker":
+                return SandboxRunnerViewFileResponse(ok=False, error=str(exc), failure_kind="worker")
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    execution_identity = ToolExecutionIdentity(**payload.execution_identity) if payload.execution_identity else None
+    runtime_overrides = sandbox_worker_prep.ready_runtime_overrides(
+        prepared_worker.runtime_overrides if prepared_worker is not None else None,
+    )
+    workspace_root: Path | None = None
+    prepared_base_dir = runtime_overrides.get("base_dir") if runtime_overrides is not None else None
+    if isinstance(prepared_base_dir, Path):
+        workspace_root = prepared_base_dir
+    elif isinstance(prepared_base_dir, str):
+        workspace_root = Path(prepared_base_dir)
+    if workspace_root is None:
+        workspace_root = _runner_tool_output_workspace_root(
+            config=config,
+            runtime_paths=runtime_paths,
+            runtime_overrides=runtime_overrides,
+            execution_identity=execution_identity,
+            routing_agent_name=payload.routing_agent_name,
+        )
+    if workspace_root is None:
+        return SandboxRunnerViewFileResponse(
+            ok=False,
+            error="Worker output workspace is unavailable.",
+            failure_kind="worker",
+        )
+
+    result = await asyncio.to_thread(_view_file_result_envelope, payload.path, workspace_root)
+    return SandboxRunnerViewFileResponse(ok=True, result=result)
+
+
+def _view_file_result_envelope(path: str, workspace: Path) -> dict[str, object]:
+    """Read, decode, and encode one image outside the runner event loop."""
+    return encode_media_result(view_image_path(path, workspace=workspace))
+
+
 async def _execute_worker_browser(
     computer: WorkerComputerRuntime | WorkerBrowserRuntime,
     payload: SandboxRunnerExecuteRequest,
@@ -1755,7 +1855,7 @@ async def _execute_worker_browser(
                     (browser_config_key, tuple(sorted(process_env.items()))),
                     execute_current,
                 )
-                return SandboxRunnerExecuteResponse(ok=True, result=to_json_compatible(result))
+                return SandboxRunnerExecuteResponse(ok=True, result=provider.encode_result(result))
 
             async def invoke(
                 retained_toolkit: Toolkit,

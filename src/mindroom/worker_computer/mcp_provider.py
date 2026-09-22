@@ -6,13 +6,17 @@ import asyncio
 import contextlib
 import os
 import stat
+from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from mcp import StdioServerParameters
 from mcp.client.stdio import get_default_environment
 
 from mindroom.browser_profile import clear_stale_singleton_locks
 from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.media_delivery import image_result
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.worker_computer.browser_bundle import (
     COMPUTER_BROWSER_EXECUTABLE,
@@ -24,9 +28,8 @@ from mindroom.worker_computer.browser_proxy import COMPUTER_PROXY_BYPASS, Browse
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agno.tools.function import ToolResult
+    from mcp.types import CallToolResult
 
 
 class WorkerBrowserMCP:
@@ -105,6 +108,7 @@ class WorkerBrowserMCP:
             msg = "Unsupported native browser MCP function."
             raise ValueError(msg)
         output = self._automatic_output_path()
+        inline_screenshot = function_name == "browser_take_screenshot" and "filename" not in arguments
         arguments = self._file_arguments(function_name, arguments)
         try:
             if not self._ready:
@@ -126,7 +130,66 @@ class WorkerBrowserMCP:
         except BaseException:
             await self.close()
             raise
+        if inline_screenshot:
+            return await asyncio.to_thread(self._inline_screenshot_result, output, result)
         return tool_result_from_call_result("browser_mcp", result)
+
+    def _inline_screenshot_result(self, output: Path, result: CallToolResult) -> ToolResult:
+        """Decode, retain, and bound one inline capture away from browser control."""
+        converted = tool_result_from_call_result("browser_mcp", result)
+        metadata: dict[str, object] = {"result": converted.content}
+        if not converted.images:
+            return image_result(b"", metadata=metadata)
+        image = converted.images[0]
+        assert isinstance(image.content, bytes)
+        path = self._persist_inline_screenshot(output, image.content, image.mime_type)
+        metadata["path"] = path.relative_to(self._workspace).as_posix()
+        return image_result(image.content, metadata=metadata)
+
+    def _persist_inline_screenshot(self, output: Path, data: bytes, mime_type: str | None) -> Path:
+        """Retain original MCP pixels once under a new confined workspace path."""
+        extension = "jpg" if mime_type == "image/jpeg" else "png" if mime_type == "image/png" else "img"
+        with contextlib.ExitStack() as descriptors:
+            directory = self._open_output_directory(output, descriptors)
+            for _attempt in range(3):
+                filename = f"page-{uuid4().hex}.{extension}"
+                try:
+                    descriptor = os.open(
+                        filename,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=directory,
+                    )
+                except FileExistsError:
+                    continue
+                try:
+                    with os.fdopen(descriptor, "wb") as screenshot:
+                        screenshot.write(data)
+                except OSError:
+                    with contextlib.suppress(OSError):
+                        os.unlink(filename, dir_fd=directory)
+                    raise
+                return output / filename
+        msg = "Native browser screenshot output could not be reserved."
+        raise OSError(msg)
+
+    def _open_output_directory(self, output: Path, descriptors: contextlib.ExitStack) -> int:
+        """Open a canonical workspace descendant without following swapped links."""
+        msg = "Native browser screenshot output directory is unsafe."
+        try:
+            parts = output.relative_to(self._workspace).parts
+        except ValueError as exc:
+            raise OSError(msg) from exc
+        if not parts:
+            raise OSError(msg)
+        try:
+            parent = descriptors.enter_context(open_directory_within_root(self._workspace, Path(*parts[:-1])))
+            directory = descriptors.enter_context(
+                open_directory_within_root(parent, parts[-1], create=True, mode=0o700),
+            )
+        except OSError as exc:
+            raise OSError(msg) from exc
+        return directory
 
     def _file_arguments(self, function_name: str, arguments: dict[str, object]) -> dict[str, object]:
         """Confine native files before startup; retain cancellation and default outputs."""
@@ -150,8 +213,8 @@ class WorkerBrowserMCP:
                 raise ValueError(msg)
             msg = "Native browser files must be existing regular files within the worker workspace."
             try:
-                path = (self._workspace / value).resolve(strict=True)
-                allowed = path.is_relative_to(self._workspace) and path.is_file()
+                path = resolve_path_within_root(self._workspace, value, symlinks="internal", strict=True)
+                allowed = path.is_file()
             except (OSError, RuntimeError, ValueError) as exc:
                 raise ValueError(msg) from exc
             if not allowed:
@@ -177,7 +240,7 @@ class WorkerBrowserMCP:
         """Resolve existing links and missing descendants within the workspace."""
         msg = "Native browser output must stay within the worker workspace and have the expected file type."
         try:
-            canonical = path.resolve()
+            canonical = resolve_path_within_root(self._workspace, path, symlinks="internal")
             # stat still reports symlink loops and invalid parents on Python
             # versions where non-strict resolve suppresses those errors.
             try:
@@ -186,8 +249,6 @@ class WorkerBrowserMCP:
                 mode = None
         except (OSError, RuntimeError, ValueError) as exc:
             raise ValueError(msg) from exc
-        if not canonical.is_relative_to(self._workspace):
-            raise ValueError(msg)
         if mode is not None and not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
             raise ValueError(msg)
         return canonical

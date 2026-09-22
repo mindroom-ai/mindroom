@@ -1,15 +1,21 @@
 """Native output paths are confined before MCP startup or dispatch."""
 
+import asyncio
+import base64
+import json
 import os
+import threading
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from agno.tools.function import ToolResult
 from mcp import StdioServerParameters
-from mcp.types import CallToolResult, Tool
+from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
 from mindroom.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.worker_computer import mcp_provider
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
 
@@ -22,6 +28,165 @@ _OUTPUT_FUNCTIONS = [
     "browser_take_screenshot",
     "browser_snapshot",
 ]
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+)
+
+
+@pytest.mark.asyncio
+async def test_inline_screenshot_is_prepared_and_persisted_once(tmp_path: Path) -> None:
+    """Inline MCP pixels use bounded delivery and retain the exact captured artifact."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    session = AsyncMock(spec=PlaywrightMCPSession)
+    session.call_tool.return_value = CallToolResult(
+        content=[
+            TextContent(type="text", text="Screenshot captured"),
+            ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png"),
+        ],
+    )
+    provider._session = session
+    provider._ready = True
+
+    result = await provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"})
+
+    assert result.images
+    assert result.images[0].content == PNG_BYTES
+    receipt = json.loads(result.content)
+    assert receipt["result"] == "Screenshot captured"
+    assert receipt["view_status"] == "ready"
+    saved_path = workspace / receipt["path"]
+    assert saved_path.parent == workspace / "browser"
+    assert saved_path.read_bytes() == PNG_BYTES
+    session.call_tool.assert_awaited_once_with("browser_take_screenshot", {"type": "png", "scale": "css"})
+
+
+@pytest.mark.asyncio
+async def test_inline_screenshot_preparation_does_not_block_browser_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Filesystem persistence and bounded image decoding run away from browser control."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    session = AsyncMock(spec=PlaywrightMCPSession)
+    session.call_tool.return_value = CallToolResult(
+        content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png")],
+    )
+    provider._session = session
+    provider._ready = True
+    preparation_started = threading.Event()
+    release_preparation = threading.Event()
+
+    original_image_result = mcp_provider.image_result
+
+    def slow_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
+        preparation_started.set()
+        release_preparation.wait(timeout=1)
+        return original_image_result(data, metadata=metadata)
+
+    monkeypatch.setattr(mcp_provider, "image_result", slow_image_result)
+    release_timer = threading.Timer(0.2, release_preparation.set)
+    release_timer.start()
+    try:
+        task = asyncio.create_task(provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"}))
+        await asyncio.sleep(0.05)
+
+        assert preparation_started.is_set()
+        assert not release_preparation.is_set()
+        assert not task.done()
+        release_preparation.set()
+        await task
+    finally:
+        release_preparation.set()
+        release_timer.join(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_inline_screenshot_is_created_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retained pixels are private from the file creation syscall onward."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    session = AsyncMock(spec=PlaywrightMCPSession)
+    session.call_tool.return_value = CallToolResult(
+        content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png")],
+    )
+    provider._session = session
+    provider._ready = True
+    creation_modes: list[int] = []
+    original_open = os.open
+
+    def tracked_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if isinstance(path, str) and path.startswith("page-"):
+            creation_modes.append(mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+
+    result = await provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"})
+
+    assert result.images
+    assert creation_modes == [0o600]
+
+
+@pytest.mark.asyncio
+async def test_inline_screenshot_rejects_output_directory_swap(tmp_path: Path) -> None:
+    """A post-validation symlink swap cannot redirect retained pixels outside the workspace."""
+    workspace = tmp_path / "workspace"
+    output = workspace / "browser"
+    output.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    session = AsyncMock(spec=PlaywrightMCPSession)
+
+    async def swap_output(_name: str, _arguments: dict[str, object]) -> CallToolResult:
+        output.rmdir()
+        output.symlink_to(outside, target_is_directory=True)
+        return CallToolResult(
+            content=[ImageContent(type="image", data=base64.b64encode(PNG_BYTES).decode(), mimeType="image/png")],
+        )
+
+    session.call_tool.side_effect = swap_output
+    provider._session = session
+    provider._ready = True
+
+    with pytest.raises(OSError, match="output directory"):
+        await provider.execute("browser_take_screenshot", {"type": "png", "scale": "css"})
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_screenshot_filename_remains_save_only(tmp_path: Path) -> None:
+    """A caller-provided filename keeps upstream save-only behavior without inline media."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    provider = WorkerBrowserMCP(display=":99", workspace=workspace, storage_root=tmp_path / "storage")
+    session = AsyncMock(spec=PlaywrightMCPSession)
+    session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text="Screenshot saved")],
+    )
+    provider._session = session
+    provider._ready = True
+
+    result = await provider.execute("browser_take_screenshot", {"filename": "captures/page.png"})
+
+    assert result.content == "Screenshot saved"
+    assert not result.images
+    session.call_tool.assert_awaited_once_with(
+        "browser_take_screenshot",
+        {"filename": str(workspace / "captures" / "page.png")},
+    )
 
 
 @pytest.mark.asyncio

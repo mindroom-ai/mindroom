@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
@@ -38,9 +40,10 @@ from mindroom.oauth.service import build_oauth_connect_instruction, build_oauth_
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+    from typing import Any
 
     from mindroom.constants import RuntimePaths
+    from mindroom.credentials import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
 
 GOOGLE_AUTHORIZATION_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -451,6 +454,115 @@ def _paired_runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_LOCAL_CLIENT_SECRET": "local-secret",
         },
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("custom_client", "observed_operation"),
+    [(True, "read"), (False, "read"), (False, "manager"), (False, "save")],
+    ids=["custom-read", "provisioned-read", "provisioned-manager", "provisioned-save"],
+)
+async def test_google_bootstrap_client_storage_stays_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    custom_client: bool,
+    observed_operation: str,
+) -> None:
+    """Custom config reads and provisioned config reads/writes leave the owner loop free."""
+    owner_thread = threading.get_ident()
+    requests = _install_provisioning_transport(monkeypatch)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    service = "google_drive_oauth_client" if custom_client else "google_oauth_client"
+    manager.save_credentials(
+        service,
+        {
+            "client_id": "previous-client.apps.googleusercontent.com",
+            "client_secret": "previous-secret",
+            RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY: not custom_client,
+            _GOOGLE_PROVISIONED_CLIENT_FETCHED_AT_KEY: 0.0,
+        },
+    )
+    client_path = manager.get_credentials_path(service)
+    original_read = Path.read_bytes
+    original_save = manager.save_credentials
+    operations: set[str] = set()
+
+    def observed_read(path: Path) -> bytes:
+        if path == client_path:
+            assert threading.get_ident() != owner_thread, "Google client read blocked the event loop"
+            operations.add("read")
+        return original_read(path)
+
+    def observed_manager(paths: RuntimePaths) -> CredentialsManager:
+        assert threading.get_ident() != owner_thread, "Google client path resolution blocked the event loop"
+        operations.add("manager")
+        return get_runtime_credentials_manager(paths)
+
+    def observed_save(saved_service: str, credentials: dict[str, Any]) -> None:
+        assert threading.get_ident() != owner_thread, "Google client write blocked the event loop"
+        operations.add("save")
+        original_save(saved_service, credentials)
+
+    with monkeypatch.context() as storage_patch:
+        if observed_operation == "read":
+            storage_patch.setattr(Path, "read_bytes", observed_read)
+        elif observed_operation == "manager":
+            storage_patch.setattr("mindroom.oauth.google.get_runtime_credentials_manager", observed_manager)
+        else:
+            storage_patch.setattr(manager, "save_credentials", observed_save)
+        endpoints = await google_drive_oauth_provider().runtime_endpoints(runtime_paths)
+
+    assert operations == {observed_operation}
+    assert endpoints.authorization_url == GOOGLE_AUTHORIZATION_URL
+    assert endpoints.token_url == GOOGLE_TOKEN_URL
+    stored = manager.load_credentials(service)
+    assert stored is not None
+    if custom_client:
+        assert stored["client_id"] == "previous-client.apps.googleusercontent.com"
+        assert requests == []
+    else:
+        assert stored["client_id"] == PROVISIONED_CLIENT_ID
+        assert stored["client_secret"] == PROVISIONED_CLIENT_SECRET
+        assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_google_bootstrap_drains_client_publication_before_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation cannot abandon an accepted client-config publication."""
+    _install_provisioning_transport(monkeypatch)
+    runtime_paths = _paired_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(runtime_paths)
+    original_save = manager.save_credentials
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_save(service: str, credentials: dict[str, Any]) -> None:
+        entered.set()
+        assert release.wait(5), "Client publication gate was not released"
+        original_save(service, credentials)
+
+    monkeypatch.setattr(manager, "save_credentials", blocked_save)
+    bootstrap = asyncio.create_task(google_drive_oauth_provider().runtime_endpoints(runtime_paths))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        bootstrap.cancel()
+        await asyncio.sleep(0)
+        bootstrap.cancel()
+        await asyncio.sleep(0)
+        assert not bootstrap.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await bootstrap
+
+    stored = manager.load_credentials("google_oauth_client")
+    assert stored is not None
+    assert stored["client_id"] == PROVISIONED_CLIENT_ID
+    assert stored["client_secret"] == PROVISIONED_CLIENT_SECRET
 
 
 def test_google_oauth_provider_bootstraps_client_for_paired_install(

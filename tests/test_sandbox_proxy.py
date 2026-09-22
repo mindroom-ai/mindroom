@@ -450,7 +450,7 @@ def _recording_client_class(
     *,
     captured: dict[str, Any] | None = None,
     captured_calls: list[tuple[str, dict[str, Any]]] | None = None,
-    responder: Callable[[str, dict[str, Any]], dict[str, object]] | None = None,
+    responder: Callable[[str, dict[str, Any]], object] | None = None,
 ) -> type:
     class _FakeClient:
         def __init__(self, *, timeout: float) -> None:
@@ -1325,6 +1325,123 @@ def test_save_attachment_to_worker_posts_with_worker_token_and_size_cap(
             mime_type=None,
             filename=None,
         )
+
+
+def test_view_file_from_worker_posts_and_decodes_bounded_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary file viewing should route to the selected worker and restore image bytes."""
+    from agno.media import Image  # noqa: PLC0415
+    from agno.tools.function import ToolResult  # noqa: PLC0415
+
+    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
+
+    captured: dict[str, Any] = {}
+    manager = _TrackingWorkerManager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"file"},
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    envelope = encode_media_result(
+        ToolResult(content='{"view_status":"ready"}', images=[Image(content=b"png", mime_type="image/png")]),
+    )
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(
+            captured=captured,
+            responder=lambda _url, _json: {"ok": True, "result": envelope},
+        ),
+    )
+
+    result = sandbox_proxy_module.view_file_from_worker(
+        runtime_paths=runtime_paths,
+        worker_target=worker_target,
+        path="plots/result.png",
+    )
+
+    assert result is not None
+    assert result.images is not None
+    assert result.images[0].content == b"png"
+    assert captured["url"] == "http://worker/api/sandbox-runner/view-file"
+    assert captured["json"]["path"] == "plots/result.png"
+    assert captured["json"]["worker_key"] == worker_target.worker_key
+    assert manager.touched == [worker_target.worker_key]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("non_object", [True, False])
+async def test_view_file_reports_malformed_worker_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    non_object: bool,
+) -> None:
+    """Malformed worker replies remain structured file-view errors at the public tool boundary."""
+    from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
+    from tests.test_attachments_tool import _tool_context  # noqa: PLC0415
+
+    manager = _TrackingWorkerManager()
+    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
+    runtime_paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"file"},
+    )
+    execution_identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="session-1",
+    )
+    worker_target = _worker_target(runtime_paths, "shared", "code", execution_identity)
+    reply = ["unexpected"] if non_object else {"ok": True, "result": encode_media_result({"value": "not media"})}
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "lease_primary_worker_manager",
+        lambda *_args, **_kwargs: _static_worker_manager_lease(manager),
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured={}, responder=lambda _url, _json: reply),
+    )
+    toolkit = AttachmentTools(runtime_paths=runtime_paths, worker_target=worker_target)
+
+    with tool_runtime_context(_tool_context(tmp_path)):
+        result = await toolkit.view_file(path="plots/result.png")
+
+    assert not result.images
+    receipt = json.loads(result.content)
+    assert receipt["view_status"] == "error"
+    assert receipt["path"] == "plots/result.png"
+    assert receipt["message"] == (
+        "Sandbox view-file returned a non-object response."
+        if non_object
+        else "Sandbox view-file returned a non-media result."
+    )
 
 
 @pytest.mark.parametrize(
@@ -6366,9 +6483,9 @@ def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
     from agno.media import Image  # noqa: PLC0415
     from agno.tools.function import ToolResult  # noqa: PLC0415
 
-    from mindroom.worker_computer.mcp_results import encode_browser_mcp_result  # noqa: PLC0415
+    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
 
-    envelope = encode_browser_mcp_result(
+    envelope = encode_media_result(
         ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")]),
     )
     result = execute_worker_proxy_request(
@@ -6391,7 +6508,7 @@ def test_worker_client_returns_raw_browser_envelopes(tool_name: str) -> None:
     assert result == envelope
 
 
-@pytest.mark.parametrize("tool_name", ["browser_mcp", "shell"])
+@pytest.mark.parametrize("tool_name", ["browser_mcp", "browser", "shell"])
 @pytest.mark.parametrize("valid", [True, False])
 def test_proxy_composition_decodes_only_native_browser_results(
     monkeypatch: pytest.MonkeyPatch,
@@ -6429,10 +6546,10 @@ def test_proxy_composition_decodes_only_native_browser_results(
             credentials_manager=None,
         )
 
-    if tool_name == "browser_mcp" and not valid:
+    if tool_name in {"browser_mcp", "browser"} and not valid:
         with pytest.raises(ValueError, match="browser MCP result"):
             call()
-    elif tool_name == "browser_mcp":
+    elif tool_name in {"browser_mcp", "browser"}:
         result = call()
         assert isinstance(result, ToolResult)
         assert result.content == "screen"

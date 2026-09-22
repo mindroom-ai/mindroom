@@ -12,6 +12,9 @@ from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 
+import httpx
+from requests import exceptions as requests_exceptions
+
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_store import (
@@ -43,6 +46,22 @@ _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 _OAUTH_REFRESH_FAILED_MESSAGE = "OAuth credential refresh failed"
 _OAUTH_TRANSACTION_REENTRY_MESSAGE = "OAuth provider adapters cannot re-enter the credential lifecycle"
 _UNRECOGNIZED_OAUTH_ERROR_CODE = "unrecognized"
+_OAUTH_REFRESH_TRANSPORT_ERRORS = (
+    (httpx.ConnectTimeout, "timeout"),
+    (httpx.ReadTimeout, "timeout"),
+    (httpx.WriteTimeout, "timeout"),
+    (httpx.PoolTimeout, "timeout"),
+    (httpx.TimeoutException, "timeout"),
+    (httpx.NetworkError, "network"),
+    (httpx.HTTPStatusError, "http_status"),
+    (httpx.HTTPError, "transport"),
+    (requests_exceptions.ConnectTimeout, "timeout"),
+    (requests_exceptions.ReadTimeout, "timeout"),
+    (requests_exceptions.Timeout, "timeout"),
+    (requests_exceptions.ConnectionError, "network"),
+    (requests_exceptions.HTTPError, "http_status"),
+    (requests_exceptions.RequestException, "transport"),
+)
 _LOGGABLE_OAUTH_ERROR_CODES = frozenset(
     {
         "access_denied",
@@ -364,7 +383,7 @@ async def _oauth_reset_operation_result_read(
     operation_id: str,
 ) -> bool | None:
     async with oauth_credential_reader(context) as reader:
-        return reader.reset_operation_result(operation_id)
+        return await reader.reset_operation_result(operation_id)
 
 
 def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
@@ -405,14 +424,14 @@ async def load_oauth_reset_connection_generation(context: OAuthCredentialContext
 
 async def _load_oauth_reset_connection_generation_read(context: OAuthCredentialContext) -> str:
     async with oauth_credential_reader(context) as reader:
-        return reader.generations().connection_generation
+        return (await reader.generations()).connection_generation
 
 
 async def _load_oauth_credentials_snapshot_read(
     context: OAuthCredentialContext,
 ) -> OAuthCredentialsSnapshot:
     async with oauth_credential_reader(context) as reader:
-        stored = reader.snapshot()
+        stored = await reader.snapshot()
         return OAuthCredentialsSnapshot(
             credentials=stored.credentials,
             generation=stored.generation,
@@ -451,14 +470,15 @@ async def _refresh_oauth_credentials_locked(
     scope_validator: Callable[[dict[str, Any]], bool] | None = None,
     expected_connection_generation: str | None = None,
 ) -> OAuthCredentialsRefreshResult:
-    snapshot = transaction.snapshot()
+    snapshot = await transaction.snapshot()
     if expected_connection_generation is not None and snapshot.connection_generation != expected_connection_generation:
         msg = "OAuth connection state is stale because this credential changed"
         raise OAuthCredentialConflictError(msg)
     credentials = snapshot.credentials
     if credentials is None:
         skipped_reason = "missing_credentials"
-    elif not oauth_credentials_usable(
+    elif not await asyncio.to_thread(
+        oauth_credentials_usable,
         context.provider,
         context.runtime_paths,
         credentials,
@@ -473,7 +493,7 @@ async def _refresh_oauth_credentials_locked(
             await _raise_normalized_refresh_error(context, credentials, exc, transaction=transaction)
         finally:
             _oauth_provider_adapter_active.reset(adapter_scope)
-        result = _publish_refresh_result(
+        result = await _publish_refresh_result(
             context,
             credentials,
             refreshed_credentials,
@@ -548,7 +568,7 @@ async def _exchange_and_store_oauth_credentials_transaction(
     expected_connection_generation: str,
 ) -> dict[str, Any]:
     async with oauth_credential_transaction(context) as transaction:
-        if transaction.generations().connection_generation != expected_connection_generation:
+        if (await transaction.generations()).connection_generation != expected_connection_generation:
             msg = "OAuth connection state is stale because this credential changed"
             raise OAuthCredentialConflictError(msg)
         return await _exchange_and_store_oauth_credentials_locked(
@@ -578,10 +598,10 @@ async def _exchange_and_store_oauth_credentials_locked(
     finally:
         _oauth_provider_adapter_active.reset(adapter_scope)
     token_data = _token_data_preserving_refresh_token(
-        transaction.snapshot().credentials,
+        (await transaction.snapshot()).credentials,
         safe_result.token_data,
     )
-    published = transaction.publish(
+    published = await transaction.publish(
         token_data,
         advance_connection_generation=True,
     )
@@ -612,23 +632,23 @@ async def _reset_oauth_credentials_transaction(
     expected_connection_generation: str | None,
 ) -> bool:
     async with oauth_credential_transaction(context) as transaction:
-        completed = transaction.reset_operation_result(operation_id) if operation_id is not None else None
+        completed = (await transaction.reset_operation_result(operation_id)) if operation_id is not None else None
         if completed is not None:
             await transaction.commit()
             return completed
-        generations = transaction.generations()
+        generations = await transaction.generations()
         if (
             expected_connection_generation is not None
             and generations.connection_generation != expected_connection_generation
         ):
             msg = "OAuth connection state is stale because this credential changed"
             raise OAuthCredentialConflictError(msg)
-        deleted = transaction.reset(operation_id)
+        deleted = await transaction.reset(operation_id)
         await transaction.commit()
         return deleted
 
 
-def _publish_refresh_result(
+async def _publish_refresh_result(
     context: OAuthCredentialContext,
     credentials: dict[str, Any],
     refreshed_credentials: dict[str, Any] | None,
@@ -636,7 +656,7 @@ def _publish_refresh_result(
     transaction: OAuthCredentialTransaction,
 ) -> OAuthCredentialsRefreshResult:
     if refreshed_credentials is None:
-        generations = transaction.generations()
+        generations = await transaction.generations()
         _log_oauth_refresh_skipped(context, credentials, reason="not_needed")
         return OAuthCredentialsRefreshResult(
             credentials=credentials,
@@ -644,7 +664,7 @@ def _publish_refresh_result(
             generation=generations.generation,
             connection_generation=generations.connection_generation,
         )
-    published = transaction.publish(
+    published = await transaction.publish(
         refreshed_credentials,
         advance_connection_generation=False,
     )
@@ -669,7 +689,7 @@ async def _invalidate_rejected_credentials(
     transaction: OAuthCredentialTransaction,
 ) -> None:
     _attach_oauth_refresh_failure_context(exc, credentials)
-    transaction.reset(None)
+    await transaction.reset(None)
     await transaction.commit()
     _log_oauth_refresh_failed(context, credentials, exc, reason="refresh_rejected")
 
@@ -682,6 +702,7 @@ async def _raise_normalized_refresh_error(
     transaction: OAuthCredentialTransaction,
 ) -> NoReturn:
     normalized_error = _normalized_refresh_error(exc)
+    normalized_error.__cause__ = exc
     if isinstance(normalized_error, OAuthRefreshRejectedError):
         await _invalidate_rejected_credentials(
             context,
@@ -736,7 +757,35 @@ def _log_oauth_refresh_failed(
         reason=reason,
         error_type=type(exc).__name__,
         oauth_error=_safe_oauth_error_code_for_logging(exc.oauth_error),
+        **_oauth_refresh_failure_diagnostics(exc),
     )
+
+
+def _oauth_refresh_failure_diagnostics(exc: BaseException) -> dict[str, str | int]:
+    """Extract allowlisted transport facts without logging provider-controlled text."""
+    cause: BaseException | None = exc
+    for _ in range(8):
+        if cause is None:
+            break
+        for error_type, category in _OAUTH_REFRESH_TRANSPORT_ERRORS:
+            if not isinstance(cause, error_type):
+                continue
+            diagnostics: dict[str, str | int] = {
+                "transport_error_category": category,
+                "transport_error_type": error_type.__name__,
+            }
+            if isinstance(cause, httpx.HTTPStatusError | requests_exceptions.HTTPError):
+                try:
+                    response = cause.response
+                    status_code = response.status_code if response is not None else None
+                    if isinstance(status_code, int) and not isinstance(status_code, bool) and 100 <= status_code <= 599:
+                        diagnostics["http_status_code"] = status_code
+                except Exception:
+                    # Optional provider metadata must not replace the original refresh error.
+                    return diagnostics
+            return diagnostics
+        cause = cause.__cause__
+    return {}
 
 
 def _oauth_refresh_log_context(

@@ -5,6 +5,8 @@ from __future__ import annotations
 from glob import has_magic
 from pathlib import Path
 
+from mindroom.path_confinement import resolve_path_within_root
+
 _BASE_DIR_ESCAPE_HINT = "Set restrict_to_base_dir=false to allow access outside base_dir."
 
 
@@ -29,7 +31,7 @@ def format_path_for_output(path: str | Path, base_dir: Path) -> str:
 def is_within_base_dir(path: Path, base_dir: Path) -> bool:
     """Check whether a resolved path stays within base_dir."""
     try:
-        path.resolve().relative_to(base_dir.resolve())
+        resolve_path_within_root(base_dir, path.resolve(), symlinks="internal")
     except (OSError, ValueError):
         return False
     return True
@@ -39,16 +41,13 @@ def resolve_base_dir_path(base_dir: Path, path: str, restrict_to_base_dir: bool 
     """Resolve a path relative to base_dir, optionally preventing traversal."""
     requested = Path(path)
     candidate = requested if requested.is_absolute() else base_dir / requested
-    resolved = candidate.resolve()
     if not restrict_to_base_dir:
-        return resolved
+        return candidate.resolve()
 
-    base_resolved = base_dir.resolve()
     try:
-        resolved.relative_to(base_resolved)
+        return resolve_path_within_root(base_dir, requested, symlinks="internal")
     except ValueError:
-        raise ValueError(_blocked_base_dir_message(path, resolved, base_resolved)) from None
-    return resolved
+        raise ValueError(_blocked_base_dir_message(path, candidate.resolve(), base_dir.resolve())) from None
 
 
 def split_search_pattern(base_dir: Path, pattern: str) -> tuple[Path, str]:

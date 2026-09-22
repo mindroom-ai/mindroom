@@ -1,16 +1,16 @@
 """Native desktop host lifecycle tests."""
 
 # Compact fakes keep the wire-level lifecycle assertions readable.
-# ruff: noqa: C416, D101, D102, D103, EM101, S106, TC001, TC003, TRY003
+# ruff: noqa: C416, D101, D102, D103, EM101, S106, TC001, TRY003
 
 from __future__ import annotations
 
 import asyncio
 import io
 import json
-from pathlib import Path
+import os
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
@@ -25,6 +25,10 @@ from mindroom.desktop.native_host import (
 )
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest
 from mindroom.desktop.protocol import DesktopCommand
+from mindroom.desktop.session import DesktopMatrixSession, save_desktop_session
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _config_payload() -> dict[str, object]:
@@ -92,6 +96,101 @@ class FakeRuntime:
 
 def _request(action: str, **parameters: object) -> NativeRequest:
     return NativeRequest(str(uuid4()), action, parameters)
+
+
+def test_status_restores_saved_identity_without_exposing_or_changing_session(tmp_path: Path) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    save_desktop_session(path, DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"))
+    original = path.read_bytes()
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    status = host.status()
+
+    assert status["pairing"] == {
+        "state": "unpaired",
+        "session_state": "ready",
+        "homeserver": "https://example.org",
+        "user_id": "@me:example.org",
+        "device_id": "LOCAL",
+        "controller_fingerprint": None,
+    }
+    assert status["bridge"]["state"] == "stopped"
+    assert "secret-token" not in repr(status)
+    assert path.read_bytes() == original
+
+
+def test_status_detects_session_created_and_removed_while_helper_runs(tmp_path: Path) -> None:
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    assert host.status()["pairing"]["session_state"] == "missing"
+
+    save_desktop_session(path, DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"))
+
+    assert host.status()["pairing"]["device_id"] == "LOCAL"
+    path.unlink()
+    assert host.status()["pairing"]["session_state"] == "missing"
+    assert host.status()["pairing"]["device_id"] is None
+
+
+@pytest.mark.parametrize("invalid", ["malformed", "exposed", "directory"])
+def test_status_keeps_invalid_saved_session_recoverable_without_trusting_identity(tmp_path: Path, invalid: str) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    save_desktop_session(path, DesktopMatrixSession("https://example.org", "@me:example.org", "LOCAL", "secret-token"))
+    if invalid == "malformed":
+        path.write_text("invalid-secret-json")
+    elif invalid == "exposed":
+        path.chmod(0o644)
+    else:
+        path.unlink()
+        path.mkdir()
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    status = host.status()
+
+    assert status["pairing"]["session_state"] == "invalid"
+    assert status["pairing"]["device_id"] is None
+    assert status["pairing"]["user_id"] is None
+    assert "secret" not in repr(status)
+    assert status["helper"]["state"] == "running"
+    assert path.exists()
+
+
+def test_status_does_not_open_a_fifo_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    path.parent.mkdir()
+    os.mkfifo(path, 0o600)
+    open_file = os.open
+
+    def guarded_open(file: Path, flags: int) -> int:
+        if file == path:
+            assert flags & os.O_NONBLOCK, "Opening the session FIFO would block all helper requests"
+        return open_file(file, flags)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    assert host.status()["pairing"]["session_state"] == "invalid"
+
+
+def test_replacing_directory_session_rejects_before_authentication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    path.mkdir(parents=True)
+    sentinel = path / "keep.txt"
+    sentinel.write_text("keep")
+    host = NativeDesktopHost(SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None), helper_version="1")
+
+    async def unexpected_authentication(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("Authentication must not start for an unreplaceable session path")
+
+    monkeypatch.setattr("mindroom.desktop.session.resolve_desktop_login_method", unexpected_authentication)
+
+    with pytest.raises(NativeProtocolError, match="regular file"):
+        asyncio.run(host.handle(_request("login", homeserver="https://example.org", replace=True)))
+
+    assert sentinel.read_text() == "keep"
 
 
 def test_host_configure_start_control_and_shutdown(tmp_path: Path) -> None:

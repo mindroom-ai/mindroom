@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from threading import Event
 from typing import TYPE_CHECKING
 
 import httpx
@@ -17,6 +18,7 @@ from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.groq_model import MindRoomGroq
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.execution import SHARED_CAPACITY
 from mindroom.judgment.llm import judge_with_llm
 from mindroom.judgment.state import JudgmentMessage, JudgmentQuestion, build_judgment_request
 from mindroom.provider_tool_policy import provider_tools_disabled
@@ -210,3 +212,80 @@ async def test_llm_native_tool_mode_is_refused_before_network(tmp_path: Path, mo
     assert result.failure == "provider_error"
     assert requests == []
     assert not provider_tools_disabled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+@pytest.mark.parametrize("loader_fails", [False, True])
+async def test_abandoned_model_load_retains_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cancel: bool,
+    loader_fails: bool,
+) -> None:
+    """Timeouts and cancellation cannot admit more work while a loader still runs."""
+    entered = asyncio.Event()
+    finished = asyncio.Event()
+    release = Event()
+    loop = asyncio.get_running_loop()
+    judge = ParticipationModel(ModelResponse(content='{"decision": true}'))
+
+    def load(*_: object) -> ParticipationModel:
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(timeout=5)
+            if loader_fails:
+                msg = "late loader failure"
+                raise RuntimeError(msg)
+            return judge
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(model_loading, "get_model_instance", load)
+    monkeypatch.setattr(SHARED_CAPACITY, "_max_concurrent", 1)
+    settings = LLMJudgmentConfig(provider="llm", model="cheap", timeout_seconds=0.1 if not cancel else 5)
+    task = asyncio.create_task(
+        judge_with_llm(_request(), settings, Config(), test_runtime_paths(tmp_path), owner="loading"),
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+        else:
+            assert (await asyncio.wait_for(task, timeout=1)).failure == "timeout"
+        client = SystemOneClient(
+            api_key="synthetic",
+            model=PINNED_MODEL,
+            transport=httpx.MockTransport(lambda _: httpx.Response(500)),
+        )
+        for owner in ("loading", "another-owner"):
+            blocked = await client.judge(_request(), owner=owner, allow_network=True)
+            assert blocked.failure == "capacity_exhausted"
+        assert not finished.is_set()
+        assert judge.requests == []
+    finally:
+        release.set()
+        await asyncio.wait_for(finished.wait(), timeout=2)
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
+    async with asyncio.timeout(2):
+        while True:
+            recovered = await judge_with_llm(
+                _request(),
+                settings,
+                Config(),
+                test_runtime_paths(tmp_path),
+                owner="loading",
+            )
+            if recovered.failure != "capacity_exhausted":
+                break
+            await asyncio.sleep(0)
+    assert recovered.decision is True
+    assert len(judge.requests) == 1

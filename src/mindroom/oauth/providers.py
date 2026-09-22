@@ -659,13 +659,13 @@ class OAuthProvider:
         runtime_paths: RuntimePaths,
     ) -> OAuthClientConfigResolution | None:
         """Return stored client settings, after any lazy runtime bootstrap."""
-        resolution = self.client_config_resolution(runtime_paths)
+        resolution = await asyncio.to_thread(self.client_config_resolution, runtime_paths)
         if resolution is not None:
             return resolution
         if self.runtime_bootstrapper is None:
             return None
         await self.runtime_endpoints(runtime_paths)
-        return self.client_config_resolution(runtime_paths)
+        return await asyncio.to_thread(self.client_config_resolution, runtime_paths)
 
     def _stored_client_config_from_service(
         self,

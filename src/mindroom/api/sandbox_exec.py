@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
+from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
@@ -391,16 +392,16 @@ def resolve_workspace_env_hook_path(base_dir: Path | str | None) -> Path | None:
     if not candidate.exists():
         return None
     try:
-        candidate_resolved = candidate.resolve()
+        candidate_resolved = resolve_path_within_root(base_resolved, candidate, symlinks="internal")
     except OSError as exc:
         msg = f"Failed to resolve .mindroom/worker-env.sh: {exc}"
         raise WorkspaceEnvHookError(msg) from exc
-    if not candidate_resolved.is_relative_to(base_resolved):
+    except ValueError:
         msg = (
             f".mindroom/worker-env.sh resolves outside of {base_resolved}; "
             "agent-editable workspace hooks must stay inside the resolved tool workspace."
         )
-        raise WorkspaceEnvHookError(msg)
+        raise WorkspaceEnvHookError(msg) from None
     if not candidate_resolved.is_file():
         return None
     try:

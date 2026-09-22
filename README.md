@@ -136,9 +136,9 @@ uv run mindroom run
 The web dashboard is available at http://localhost:8765.
 Matrix E2EE support is installed by default.
 
-### macOS menu bar app
+### macOS app
 
-The menu bar app runs the local MindRoom service without keeping a terminal open.
+The macOS app provides a native window and menu bar companion for local agents and computer access.
 It bundles `uv`, uses `~/.mindroom` for config and state, and manages the `mindroom service` launchd service.
 The signed universal app supports both Apple silicon and Intel Macs.
 
@@ -146,7 +146,7 @@ The signed universal app supports both Apple silicon and Intel Macs.
 brew install --cask mindroom-ai/tap/mindroom
 ```
 
-Open **MindRoom** from `/Applications` and use the menu bar item to install the runtime, pair with the hosted chat UI, and open the dashboard.
+Open **MindRoom** from `/Applications` to set up local agents, manage computer access, or open chat and the configuration dashboard.
 See the [macOS app guide](docs/installation/macos-app.md) for setup, updates, and uninstall instructions.
 
 ### First steps

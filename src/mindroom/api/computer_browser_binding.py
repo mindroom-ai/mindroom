@@ -81,10 +81,10 @@ def select_browser_provider(
     # Browser SDK imports remain lazy for slim runner startup.
     from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
     from mindroom.custom_tools.browser_mcp import BrowserMCPTools  # noqa: PLC0415
+    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
     from mindroom.tools.browser import browser_tools  # noqa: PLC0415
     from mindroom.tools.browser_mcp import browser_mcp_tools  # noqa: PLC0415
     from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog  # noqa: PLC0415
-    from mindroom.worker_computer.mcp_results import encode_browser_mcp_result  # noqa: PLC0415
 
     if tool_name == "browser_mcp":
         if function_name not in browser_mcp_catalog():
@@ -93,11 +93,22 @@ def select_browser_provider(
         provider = _ComputerBrowserProvider(
             BrowserMCPTools,
             frozenset(browser_mcp_catalog()),
-            encode_browser_mcp_result,
+            encode_media_result,
         )
     elif tool_name == "browser" and function_name == "browser_control":
+        from agno.tools.function import ToolResult  # noqa: PLC0415
+
+        def encode_action_browser_result(result: object) -> object:
+            if isinstance(result, ToolResult):
+                return encode_media_result(result)
+            return encode_json(result)
+
         expected_factory = browser_tools
-        provider = _ComputerBrowserProvider(BrowserTools, frozenset({"browser_control"}), encode_json)
+        provider = _ComputerBrowserProvider(
+            BrowserTools,
+            frozenset({"browser_control"}),
+            encode_action_browser_result,
+        )
     else:
         raise HTTPException(status_code=400, detail="Unsupported worker browser function.")
     if factory is not expected_factory:

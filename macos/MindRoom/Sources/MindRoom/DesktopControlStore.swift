@@ -37,6 +37,7 @@ final class DesktopControlStore: ObservableObject {
     private var countdownTimer: Timer?
     @Published private var confirmedIdentity: String?
     private var observedConfigRevision = 0
+    private var didHydrateSession = false
     private var pendingOperationCount = 0
 
     init(helper: DesktopBridgeProcess? = nil) {
@@ -90,6 +91,7 @@ final class DesktopControlStore: ObservableObject {
     func saveConfiguration() {
         guard identityConfirmed else {
             errorMessage = "Confirm the displayed controller, requester, and agent before saving."
+            recovery = nil
             return
         }
         let config: [String: Any] = [
@@ -257,6 +259,13 @@ final class DesktopControlStore: ObservableObject {
     }
 
     func hydrateConfiguration(from value: DesktopStatus) {
+        if !didHydrateSession, value.pairing.sessionState == .ready {
+            didHydrateSession = true
+            if matrixUserID.isEmpty, homeserver == "https://mindroom.chat" {
+                homeserver = value.pairing.homeserver ?? homeserver
+                matrixUserID = value.pairing.userID ?? ""
+            }
+        }
         let shouldHydrateBrowser = value.config.state == "ready" && observedConfigRevision != value.config.revision
         if observedConfigRevision != value.config.revision {
             confirmedIdentity = nil

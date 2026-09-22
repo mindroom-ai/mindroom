@@ -32,6 +32,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_proxy_client import (
     SANDBOX_PROXY_SAVE_ATTACHMENT_PATH,
+    SANDBOX_PROXY_VIEW_FILE_PATH,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
     post_worker_proxy_json,
@@ -56,7 +57,7 @@ from mindroom.workers.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from agno.tools.function import Function
+    from agno.tools.function import Function, ToolResult
     from agno.tools.toolkit import Toolkit
 
     from mindroom.constants import RuntimePaths
@@ -636,6 +637,96 @@ def save_attachment_to_worker(
         raise RuntimeError(str(error))
 
 
+def view_file_from_worker(
+    *,
+    runtime_paths: RuntimePaths,
+    worker_target: ResolvedWorkerTarget | None,
+    worker_tools_override: list[str] | None = None,
+    path: str,
+) -> ToolResult | None:
+    """View one file in the selected worker, returning None when no worker endpoint exists."""
+    if not attachment_save_uses_worker(
+        runtime_paths=runtime_paths,
+        worker_tools_override=worker_tools_override,
+    ):
+        return None
+
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    manager_context = _primary_worker_manager_context(runtime_paths)
+    with lease_primary_worker_manager(
+        runtime_paths,
+        proxy_url=proxy_config.proxy_url,
+        proxy_token=proxy_config.proxy_token,
+        storage_root=manager_context.storage_root,
+        dedicated_worker_validation_snapshot=manager_context.dedicated_worker_validation_snapshot,
+        kubernetes_config_snapshot=manager_context.kubernetes_config_snapshot,
+        worker_grantable_credentials=manager_context.worker_grantable_credentials,
+    ) as worker_manager:
+        worker_payload, worker_handle = _build_worker_routing_payload(
+            runtime_paths=runtime_paths,
+            tool_name="attachments",
+            function_name="view_file",
+            worker_target=worker_target,
+            progress_sink=None,
+            worker_manager=worker_manager,
+        )
+        if worker_handle is None and proxy_config.proxy_url is None:
+            return None
+
+        data = post_worker_proxy_json(
+            config=_worker_proxy_client_config(proxy_config),
+            payload={**worker_payload, "path": path},
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            proxy_path=SANDBOX_PROXY_VIEW_FILE_PATH,
+            worker_operation="view-file",
+            client_factory=httpx.Client,
+        )
+        if not isinstance(data, dict):
+            msg = "Sandbox view-file returned a non-object response."
+            _record_worker_save_failure(
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+                error=msg,
+            )
+            raise TypeError(msg)
+        response_data = {str(key): value for key, value in data.items()}
+        if response_data.get("ok") is True:
+            from agno.tools.function import ToolResult  # noqa: PLC0415
+
+            from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
+
+            try:
+                result = decode_media_result(response_data.get("result"))
+            except ValueError as exc:
+                _record_worker_save_failure(
+                    worker_handle=worker_handle,
+                    worker_manager=worker_manager,
+                    error=str(exc),
+                )
+                raise
+            if not isinstance(result, ToolResult):
+                msg = "Sandbox view-file returned a non-media result."
+                _record_worker_save_failure(
+                    worker_handle=worker_handle,
+                    worker_manager=worker_manager,
+                    error=msg,
+                )
+                raise TypeError(msg)
+            if worker_handle is not None:
+                worker_manager.touch_worker(worker_handle.worker_key)
+            return result
+
+        error = response_data.get("error") or "Sandbox file view failed."
+        record_proxy_response_failure_for_worker(
+            worker_handle=worker_handle,
+            worker_manager=worker_manager,
+            error=str(error),
+            failure_kind=response_data.get("failure_kind"),
+        )
+        raise RuntimeError(str(error))
+
+
 def _make_progress_sink(
     pump: WorkerProgressPump,
     *,
@@ -843,10 +934,15 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
             client_factory=httpx.Client,
         )
-        if tool_name == "browser_mcp":
-            from mindroom.worker_computer.mcp_results import decode_browser_mcp_result  # noqa: PLC0415
+        if tool_name in {"browser_mcp", "browser"}:
+            from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
+            from mindroom.tool_system.media_transport import (  # noqa: PLC0415
+                decode_media_result,
+                is_media_result_envelope,
+            )
 
-            return decode_browser_mcp_result(result)
+            if tool_name == "browser_mcp" or is_media_result_envelope(result):
+                return finalize_tool_media(decode_media_result(result))
         return result
 
 

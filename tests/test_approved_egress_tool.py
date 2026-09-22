@@ -13,8 +13,10 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ToolConfigEntry
+from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tools import approved_egress as approved_egress_module
 
 if TYPE_CHECKING:
@@ -25,6 +27,91 @@ if TYPE_CHECKING:
 
 def _approved_egress_tool() -> Toolkit:
     return approved_egress_module.approved_egress_tools()()
+
+
+def test_full_access_requires_opt_in() -> None:
+    """A full-access request must fail before reaching the policy API by default."""
+    with pytest.raises(ValueError, match="allow_full_access"):
+        asyncio.run(_approved_egress_tool().request_network_access(["*"], 5, "Install dependencies"))
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1])
+def test_full_access_rejects_non_boolean_credentials(tmp_path: Path, value: object) -> None:
+    """Stored credential values must not enable broad access through Python truthiness."""
+    with pytest.raises(TypeError, match="allow_full_access must be a boolean"):
+        get_tool_by_name(
+            "approved_egress",
+            resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+            credential_overrides={"allow_full_access": value},
+            disable_sandbox_proxy=True,
+            worker_target=None,
+        )
+
+
+def test_full_access_posts_one_scoped_timed_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opted-in full access uses the existing scoped grant API and deployment TTL cap."""
+    payloads: list[dict[str, object]] = []
+
+    def post_grant(payload: dict[str, object]) -> dict[str, object]:
+        payloads.append(payload)
+        return {"expires_at": 123}
+
+    monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+    monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", _shared_worker_context)
+    monkeypatch.setenv("MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS", "120")
+    tool = approved_egress_module.approved_egress_tools()(allow_full_access=True)
+
+    result = asyncio.run(tool.request_network_access(["*"], 5, "Install dependencies"))
+
+    assert payloads == [
+        {
+            "hostname": "*",
+            "subject_type": "agent",
+            "subject": "assistant",
+            "agent_name": "assistant",
+            "requester_id": "@user:server",
+            "room_id": "!room:server",
+            "thread_id": "$thread",
+            "ttl_seconds": 120,
+            "approved_by": "@user:server",
+            "reason": "Install dependencies",
+        },
+    ]
+    assert "all public hostnames for 2 minutes" in result
+    assert "Expires at Unix time 123" in result
+    assert "Deployment policy capped" in result
+
+
+@pytest.mark.parametrize("hostnames", [["*", "docs.example.com"], ["*.example.com"], ["*", "*"]])
+def test_full_access_rejects_ambiguous_or_partial_wildcards(hostnames: list[str]) -> None:
+    """Full access must be an explicit standalone request, never a mixed batch or pattern."""
+    tool = approved_egress_module.approved_egress_tools()(allow_full_access=True)
+    with pytest.raises(ValueError, match="wildcards are not supported"):
+        asyncio.run(tool.request_network_access(hostnames, 5, "Install dependencies"))
+
+
+@pytest.mark.parametrize("ttl_minutes", [0, -1])
+def test_full_access_rejects_nonpositive_ttl(ttl_minutes: int) -> None:
+    """Full access must always carry a positive finite lifetime."""
+    tool = approved_egress_module.approved_egress_tools()(allow_full_access=True)
+    with pytest.raises(ValueError, match="ttl_minutes must be positive"):
+        asyncio.run(tool.request_network_access(["*"], ttl_minutes, "Install dependencies"))
+
+
+def test_full_access_option_is_configurable(tmp_path: Path) -> None:
+    """Authored per-tool options must accept the opt-in and expose it to the model."""
+    config = Config.model_validate({"defaults": {"tools": [{"approved_egress": {"allow_full_access": True}}]}})
+    entry = config.defaults.tools[0]
+    assert isinstance(entry, ToolConfigEntry)
+    tool = get_tool_by_name(
+        entry.name,
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+        tool_config_overrides=entry.overrides,
+        disable_sandbox_proxy=True,
+        worker_target=None,
+    )
+    assert 'hostnames=["*"]' in tool.async_functions["request_network_access"].description
+    assert 'hostnames=["*"]' not in _approved_egress_tool().async_functions["request_network_access"].description
 
 
 @pytest.fixture(autouse=True)
@@ -167,8 +254,10 @@ def test_request_network_access_skips_grant_when_static_allowed(
     assert "No temporary grant was created" in result
 
 
+@pytest.mark.parametrize("full_access", [False, True])
 def test_request_network_access_posts_worker_key_grant(
     monkeypatch: pytest.MonkeyPatch,
+    full_access: bool,
 ) -> None:
     """User-agent workers should receive worker-key scoped grants."""
     captured: dict[str, object] = {}
@@ -223,8 +312,8 @@ def test_request_network_access_posts_worker_key_grant(
 
     try:
         result = asyncio.run(
-            _approved_egress_tool().request_network_access(
-                ["docs.example.com"],
+            approved_egress_module.approved_egress_tools()(allow_full_access=full_access).request_network_access(
+                ["*"] if full_access else ["docs.example.com"],
                 5,
                 "Need docs",
             ),
@@ -234,13 +323,14 @@ def test_request_network_access_posts_worker_key_grant(
         thread.join(timeout=2)
         server.server_close()
 
-    assert result.startswith("Approved temporary network access to docs.example.com")
+    destination = "all public hostnames" if full_access else "docs.example.com"
+    assert result.startswith(f"Approved temporary network access to {destination}")
     assert captured["path"] == "/grants"
     assert captured["authorization"] == "Bearer token"
     assert captured["payload"] == {
         "agent_name": "assistant",
         "approved_by": "@user:server",
-        "hostname": "docs.example.com",
+        "hostname": "*" if full_access else "docs.example.com",
         "reason": "Need docs",
         "requester_id": "@user:server",
         "room_id": "!room:server",

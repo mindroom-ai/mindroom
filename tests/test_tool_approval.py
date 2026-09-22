@@ -1901,6 +1901,8 @@ async def test_evaluate_tool_approval_rule_action_requires_approval(tmp_path: Pa
         (["docs.example.com", "api.example.com"], False),
         (["docs.example.com", "docs.other.test"], True),
         (["docs.other.test"], True),
+        (["*"], True),
+        (["*", "docs.example.com"], True),
         ([123], True),
         (["https://docs.example.com"], True),
         ("docs.example.com", True),

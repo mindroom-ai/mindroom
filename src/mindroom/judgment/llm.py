@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import TYPE_CHECKING
 
@@ -11,7 +10,7 @@ from agno.models.message import Message
 from mindroom import model_loading
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.answers import JudgmentError, JudgmentResponse, JudgmentResult, TokenUsage
-from mindroom.judgment.execution import run_judgment
+from mindroom.judgment.execution import run_judgment, run_judgment_thread
 from mindroom.provider_tool_policy import without_provider_tools
 
 if TYPE_CHECKING:
@@ -60,7 +59,9 @@ async def judge_with_llm(
 
     async def evaluate(prepared: JudgmentRequest) -> JudgmentResponse:
         assert prepared.body is not None
-        model = await asyncio.to_thread(model_loading.get_model_instance, config, runtime_paths, settings.model)
+        model = await run_judgment_thread(
+            lambda: model_loading.get_model_instance(config, runtime_paths, settings.model),
+        )
         messages = [
             Message(role="system", content=_INSTRUCTION),
             Message(role="user", content=prepared.body.decode()),

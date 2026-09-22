@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,7 +90,6 @@ class NativeDesktopHost:
         self._helper_state = "running"
         self._last_error: dict[str, object] | None = None
         self._pairing_state = "unpaired"
-        self._pairing_details: dict[str, object] = {}
         self._config: NativeDesktopConfig | None = None
         self._config_error_revision = 0
         try:
@@ -112,6 +112,7 @@ class NativeDesktopHost:
     def status(self) -> dict[str, object]:
         """Return complete redacted process state."""
         config = self._config
+        session_state, session_identity = _saved_session_identity(self._runtime_paths)
         runtime_status = self._runtime.status() if self._runtime is not None else {}
         mode = str(runtime_status.get("mode", "stopped"))
         bridge_state = mode if mode in {"stopped", "observe_only", "control", "stopping", "faulted"} else "faulted"
@@ -131,9 +132,10 @@ class NativeDesktopHost:
             },
             "pairing": {
                 "state": self._pairing_state,
-                "homeserver": self._pairing_details.get("homeserver"),
-                "user_id": self._pairing_details.get("user_id"),
-                "device_id": self._pairing_details.get("device_id"),
+                "session_state": session_state,
+                "homeserver": session_identity.get("homeserver"),
+                "user_id": session_identity.get("user_id"),
+                "device_id": session_identity.get("device_id"),
                 "controller_fingerprint": config.controller.ed25519 if config is not None else None,
             },
             "helper": {"state": self._helper_state, "version": self._helper_version},
@@ -244,9 +246,8 @@ class NativeDesktopHost:
                     recovery="Check the account, homeserver, and login method, then retry.",
                     retryable=True,
                 ) from exc
-            self._pairing_details = _redacted_identity(details)
             self._pairing_state = "unpaired"
-            return {**self._pairing_details, "status": self.status()}
+            return {**_redacted_identity(details), "status": self.status()}
         if action == "pair":
             if self._runtime is not None:
                 raise NativeProtocolError("busy", "Stop the desktop bridge before pairing.")
@@ -639,12 +640,23 @@ async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> 
     replace_existing = parameters.get("replace", False)
     if not isinstance(replace_existing, bool):
         raise NativeProtocolError("invalid_request", "Login replace must be a boolean.")
-    if session_path.exists() and not replace_existing:
-        raise NativeProtocolError(
-            "login_failed",
-            "A desktop Matrix session already exists.",
-            recovery="Choose Replace session only when creating a new device.",
-        )
+    try:
+        session_mode = session_path.lstat().st_mode
+    except FileNotFoundError:
+        session_mode = None
+    if session_mode is not None:
+        if not replace_existing:
+            raise NativeProtocolError(
+                "login_failed",
+                "A desktop Matrix session already exists.",
+                recovery="Choose Replace session only when creating a new device.",
+            )
+        if not stat.S_ISREG(session_mode):
+            raise NativeProtocolError(
+                "login_failed",
+                "The saved Matrix session path is not a regular file.",
+                recovery="Move the directory, link, or special file aside before signing in again.",
+            )
     method = await resolve_desktop_login_method(requested, homeserver=homeserver, runtime_paths=runtime_paths)
     password, login_token = _optional_text(parameters, "password"), _optional_text(parameters, "login_token")
     if method is DesktopLoginMethod.PASSWORD:
@@ -902,6 +914,29 @@ def _required_int(parameters: dict[str, object], key: str, *, minimum: int, maxi
     ):
         raise NativeProtocolError("invalid_request", f"Native desktop {key} is outside its allowed range.")
     return value
+
+
+def _saved_session_identity(runtime_paths: RuntimePaths) -> tuple[str, dict[str, str]]:
+    """Read only the saved device identity, without opening a Matrix connection."""
+    # Keep the Matrix/crypto imports in session out of native protocol startup.
+    from mindroom.desktop.session import (
+        DesktopSessionError,
+        DesktopSessionNotFoundError,
+        desktop_session_path,
+        load_desktop_session,
+    )
+
+    try:
+        session = load_desktop_session(desktop_session_path(runtime_paths))
+    except DesktopSessionNotFoundError:
+        return "missing", {}
+    except (DesktopSessionError, OSError):
+        return "invalid", {}
+    return "ready", {
+        "homeserver": session.homeserver,
+        "user_id": session.user_id,
+        "device_id": session.device_id,
+    }
 
 
 def _redacted_identity(details: dict[str, object]) -> dict[str, object]:

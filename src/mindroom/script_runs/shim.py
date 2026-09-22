@@ -11,6 +11,8 @@ import stat
 import sys
 from pathlib import Path
 
+from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+
 _CONTROL_STATE_PATH_ENV = "MINDROOM_CONTROL_STATE_PATH"
 _SOURCE_DIGEST_ENV = "MINDROOM_SCRIPT_SOURCE_DIGEST"
 _SNAPSHOT_ROOT_ENV = "MINDROOM_SCRIPT_SNAPSHOT_ROOT"
@@ -31,10 +33,11 @@ def _validated_file(
     if path.is_symlink():
         msg = f"{label} must not be a symbolic link."
         raise ValueError(msg)
-    resolved = path.resolve(strict=True)
-    if not resolved.is_relative_to(workspace_root):
+    try:
+        resolved = resolve_path_within_root(workspace_root, path, symlinks="internal", strict=True)
+    except ValueError as exc:
         msg = f"{label} must stay inside the worker workspace."
-        raise ValueError(msg)
+        raise ValueError(msg) from exc
     metadata = resolved.stat()
     if not stat.S_ISREG(metadata.st_mode):
         msg = f"{label} must be a regular file."
@@ -68,16 +71,10 @@ def _remove_token_entry(token_entry: Path | None, *, workspace_root: Path) -> No
     if token_entry is None:
         return
     try:
-        relative_parent = token_entry.parent.relative_to(workspace_root)
-        current_parent = workspace_root
-        for part in relative_parent.parts:
-            current_parent /= part
-            if current_parent.is_symlink():
-                return
-        metadata = token_entry.lstat()
-        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
-            return
-        token_entry.unlink()
+        with open_directory_within_root(workspace_root, token_entry.parent.relative_to(workspace_root)) as directory:
+            metadata = os.stat(token_entry.name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                os.unlink(token_entry.name, dir_fd=directory)
     except OSError:
         return
 

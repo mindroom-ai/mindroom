@@ -47,7 +47,7 @@ def publish_oauth_credentials(
 
     async def publish() -> None:
         async with oauth_credential_transaction(context) as transaction:
-            transaction.publish(credentials, advance_connection_generation=True)
+            await transaction.publish(credentials, advance_connection_generation=True)
             await transaction.commit()
 
     with ThreadPoolExecutor(max_workers=1) as executor:

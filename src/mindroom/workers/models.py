@@ -72,6 +72,7 @@ def worker_api_endpoint(
         "workers",
         "cleanup",
         "save-attachment",
+        "view-file",
         "script-run",
         "script-status",
         "script-cancel",

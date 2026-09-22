@@ -5,6 +5,81 @@
         <link>https://github.com/mindroom-ai/mindroom</link>
         <description>Signed MindRoom macOS app updates.</description>
         <item>
+            <title>2026.9.220</title>
+            <pubDate>Tue, 22 Sep 2026 00:11:08 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1537</sparkle:version>
+            <sparkle:shortVersionString>2026.9.220</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.220
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Deliver workspace files and browser screenshots to model context (#2162)](https://github.com/mindroom-ai/mindroom/commit/a5f06d0c6) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.220/MindRoom.zip" length="122264011" type="application/octet-stream" sparkle:edSignature="tmOXiZm0O+T7cn2SQE2m5NiTaxrJ+XR4UVq4DANCVZmI8Bj4bJDFZW3A17fJnp6caUcS0Ofqj7d/sXzODCUZBQ=="/>
+        </item>
+        <item>
+            <title>2026.9.218</title>
+            <pubDate>Mon, 21 Sep 2026 22:37:31 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1535</sparkle:version>
+            <sparkle:shortVersionString>2026.9.218</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.218
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Add glass and porcelain macOS icons and GitHub social artwork (#2164)](https://github.com/mindroom-ai/mindroom/commit/438c88d61) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.218/MindRoom.zip" length="122205001" type="application/octet-stream" sparkle:edSignature="gN6jtBDnUojsjYx4E1i/tvNCcshc0Kc6vXoNsT10aDnR9v/bhjQUPJrSBMmYHc7BXL2GUCn/mMSR1ALlhRC3DQ=="/>
+        </item>
+        <item>
+            <title>2026.9.212</title>
+            <pubDate>Mon, 21 Sep 2026 16:28:06 +0000</pubDate>
+            <link>https://github.com/mindroom-ai/mindroom</link>
+            <sparkle:version>1529</sparkle:version>
+            <sparkle:shortVersionString>2026.9.212</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description sparkle:format="markdown"><![CDATA[# Release 2026.9.212
+
+## 📊 Statistics
+- 📦 **1** commits
+- 👥 **1** contributors
+
+## 📝 Changes
+
+- [Add safe transport diagnostics for OAuth refresh failures (#2159)](https://github.com/mindroom-ai/mindroom/commit/56f48aaaf) by @basnijholt
+## 👥 Contributors
+@basnijholt
+
+
+---
+🙏 Thank you for using this project! Please report any issues or feedback on the GitHub repository.
+]]></description>
+            <enclosure url="https://github.com/mindroom-ai/mindroom/releases/download/v2026.9.212/MindRoom.zip" length="119766854" type="application/octet-stream" sparkle:edSignature="5t76x7JFCk0ORPfiNrxxfhV7CCAcVcRySLoKAM4PaBsSI7PMZpOuFj1WqS4rDS5iG+xVHvDTE5lEyTGnUef1Dw=="/>
+        </item>
+        <item>
             <title>2026.9.152</title>
             <pubDate>Tue, 15 Sep 2026 15:29:01 +0000</pubDate>
             <link>https://github.com/mindroom-ai/mindroom</link>
