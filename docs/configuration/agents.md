@@ -152,6 +152,7 @@ agents:
 | `skills` | list | `[]` | Skill names the agent can use (see [Skills](../skills.md)) |
 | `instructions` | list | `[]` | Extra lines appended to the system prompt after the role |
 | `rooms` | list | `[]` | Room aliases to auto-join; rooms are created if they don't exist |
+| `participation` | object or null | `null` | Opt into adaptive replies in existing multi-human threads across authorized rooms, including ad hoc rooms; see [Adaptive Participation](#adaptive-participation) |
 | `accept_invites` | bool or list[string] | `true` | Accept all inbound Matrix room invites with `true`, none with `false` or `[]`, or only inviters matching an exact or wildcard Matrix user ID in the list. Accepted ad-hoc room IDs are persisted so memberships survive restarts and room cleanup. Approval-gated tools require the router in the room; agents can recover a missing router with their built-in zero-argument `invite_router` tool when the router's policy allows the current Matrix transport account |
 | `markdown` | bool | `null` | When enabled, the agent is instructed to format responses as Markdown. Inherits from `defaults.markdown` (default: `true`) |
 | `learning` | bool | `null` | Enable [Agno Learning](https://docs.agno.com/agents/learning) — the agent builds a persistent profile of user preferences and adapts over time. Inherits from `defaults.learning` (default: `true`) |
@@ -180,7 +181,8 @@ agents:
 Each entry in `knowledge_bases` must match a key under `knowledge_bases` in `config.yaml`.
 See [Knowledge Bases](../knowledge.md) for `mode: semantic` and `mode: files`.
 
-Per-agent fields with a `null` default inherit from the `defaults` section at runtime.
+Per-agent fields with a corresponding setting in `defaults` inherit that setting when `null`.
+`participation: null` disables adaptive participation; it does not inherit a global default.
 Per-agent values override them.
 `memory.backend` is the global memory default, and `agents.<name>.memory_backend` overrides it per agent.
 Use `memory_backend: none` for stateless agents that should skip prompt memory lookup, automatic memory persistence, and the explicit `memory` tool.
@@ -243,6 +245,24 @@ Each part of the `Personality Context` section is headed by the resolved path of
 When the rendered section exceeds `defaults.max_preload_chars`, MindRoom drops earlier file bodies first, trims the final surviving body from its end, and leaves a per-file marker giving each affected path and omitted-character count, followed by a summary marker for the section.
 A dropped file therefore still appears with its path, so the agent can open it when it needs the omitted part.
 If the configured cap cannot contain the section heading plus all required per-file and summary markers, agent materialization fails explicitly instead of silently removing source paths.
+
+## Adaptive Participation
+
+Set `agents.<name>.participation: {}` to enable adaptive participation with the defaults below.
+Omitting it or setting it to `null` disables adaptive participation for that agent.
+These settings follow the agent into all authorized rooms, including ad hoc rooms; they do not grant room access or recruit an agent into a thread it has not joined.
+Only untagged messages in threads with multiple humans and an earlier reply from that agent are eligible.
+See [Adaptive Agent Participation](index.md#adaptive-agent-participation) for the full eligibility rules and judgment backend examples.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `debounce_seconds` | number | `3.0` | Quiet window for eligible text; must be finite and between `0` and `30` seconds, inclusive |
+| `instructions` | string | `""` | Additional guidance for deciding whether the agent should participate |
+| `decline_reaction` | string or null | `null` | Reaction to a deliberate decline; nonblank and at most 64 characters, such as `"👍"`; `null` keeps declines invisible |
+| `judgment` | object or null | `null` | Optional separate judgment backend; `provider: llm` requires a configured `model` alias, while `provider: typesafe` selects System One; `null` uses the agent's reply model |
+
+The [judgment backend reference](index.md#participation-judgment-backends) documents provider-specific thresholds, timeouts, credentials, and fallback behavior.
+The retired top-level `room_participation` configuration is rejected; there are no room-level overrides.
 
 ## Per-Agent Tool Configuration
 
