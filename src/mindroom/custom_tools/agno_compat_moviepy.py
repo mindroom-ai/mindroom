@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import suppress
 from math import ceil
 from pathlib import Path
-from typing import Any, override
+from typing import Any, cast, override
 
 from agno.tools import moviepy_video as agno_moviepy
 from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
@@ -16,7 +16,7 @@ from PIL import ImageFont
 # them; create_caption_clips has no explicit font-size parameter.
 # Upstream issue: Tracking gap; no matching issue identified for caption style forwarding.
 # Upstream PR: None identified. The two copied methods retain the pinned SDK's
-# parsing, media settings, temporary output publication, and cleanup.
+# parsing, media settings, and temporary output publication.
 # Remove when: The pinned SDK applies all four embed_captions style arguments to
 # normal and highlighted clips, preserving layout and safe output publication.
 # Coverage: tests/test_moviepy_video_tools.py::test_embed_captions_applies_styles_to_text_clips.
@@ -24,8 +24,8 @@ from PIL import ImageFont
 # AGNO_COMPAT: MoviePy caption geometry clips text and overlaps wrapped words.
 # Reason: The SDK uses fixed video-height fractions for caption size/position
 # and leaves the horizontal cursor at zero after placing a wrapped word.
-# MoviePy's Pillow 11 fallback sizes words by ink height but draws at font ascent;
-# explicit font-metric height and top alignment preserve the complete glyphs.
+# MoviePy drops glyph bbox origins and can undercount height on Pillow 11.
+# Explicit canvas bounds and margins preserve bearings, accents, and outlines.
 # Upstream issue: Tracking gap; caption-layout tracking has not been verified.
 # Upstream PR: None identified.
 # Remove when: The SDK sizes and positions captions from rendered clip bounds,
@@ -41,6 +41,14 @@ from PIL import ImageFont
 # Remove when: The SDK uses a portable default while preserving explicit fonts.
 # Coverage: tests/test_moviepy_caption_layout.py and
 # tests/test_moviepy_video_tools.py::test_create_caption_clips_preserves_explicit_font.
+
+
+# AGNO_COMPAT: MoviePy leaves temporary audio behind when caption encoding fails.
+# Reason: write_videofile removes generated audio only after successful video encoding.
+# Upstream issue: Tracking gap; temporary-audio cleanup tracking has not been verified.
+# Upstream PR: None identified.
+# Remove when: MoviePy cleans temporary audio on every encoding exit.
+# Coverage: tests/test_moviepy_caption_output.py.
 
 
 class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
@@ -84,14 +92,31 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         x_buffer = frame_width * 0.1
         max_line_width = frame_width - (2 * x_buffer)
         fontsize = int(frame_height * 0.30) if font_size is None else font_size
-        pil_font = ImageFont.truetype(font, int(fontsize)) if font else ImageFont.load_default(int(fontsize))
+        pil_font = cast(
+            "ImageFont.FreeTypeFont",
+            ImageFont.truetype(font, int(fontsize)) if font else ImageFont.load_default(int(fontsize)),
+        )
         ascent, descent = pil_font.getmetrics()
         text_height = ascent + descent
+        outline_width = int(stroke_width)
+        word_bounds = [
+            pil_font.getbbox(word["word"], anchor="ls", stroke_width=outline_width)
+            for word in text_json["textcontents"]
+        ]
+        # One baseline for the batch, including glyphs beyond the font metrics.
+        caption_top = min([-ascent - outline_width, *(bounds[1] for bounds in word_bounds)])
+        caption_bottom = max([descent + outline_width, *(bounds[3] for bounds in word_bounds)])
+        top_margin = -caption_top - ascent - outline_width
+        word_canvas_height = ascent + outline_width + caption_bottom
 
         full_duration = text_json["end"] - text_json["start"]
 
-        for word_data in text_json["textcontents"]:
+        for word_data, (left, _top, right, _bottom) in zip(text_json["textcontents"], word_bounds, strict=True):
             duration = word_data["end"] - word_data["start"]
+            # TextClip draws at (left margin + stroke, top margin + ascent + stroke).
+            # Its size excludes margins, so include the bbox's right edge directly.
+            word_size = (max(1, right + outline_width), word_canvas_height)
+            word_margin = (max(0, -left - outline_width), top_margin, 0, 0)
 
             # Create base word clip using official TextClip parameters
             word_clip = (
@@ -101,8 +126,10 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                     font_size=int(fontsize),
                     color=color,
                     stroke_color=stroke_color,
-                    stroke_width=int(stroke_width),
-                    size=(None, text_height + 2 * int(stroke_width)),
+                    stroke_width=outline_width,
+                    size=word_size,
+                    margin=word_margin,
+                    horizontal_align="left",
                     vertical_align="top",
                     method="label",
                 )
@@ -118,6 +145,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                     font_size=int(fontsize),
                     color=color,
                     size=(None, text_height),
+                    horizontal_align="left",
                     vertical_align="top",
                     method="label",
                 )
@@ -131,7 +159,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                 message = "Caption word exceeds available width; use a smaller font_size."
                 raise ValueError(message)
 
-            # MoviePy's clip height includes font ascent, descent, and stroke.
+            # Clip bounds include font metrics, glyph overhangs, and stroke.
             # The cursor already includes the preceding space; trailing spaces
             # must not force an otherwise fitting word onto another row.
             if x_pos and x_pos + word_width > max_line_width:
@@ -154,8 +182,10 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
                     font_size=int(fontsize),
                     color=highlight_color,
                     stroke_color=stroke_color,
-                    stroke_width=int(stroke_width),
-                    size=(None, text_height + 2 * int(stroke_width)),
+                    stroke_width=outline_width,
+                    size=word_size,
+                    margin=word_margin,
+                    horizontal_align="left",
                     vertical_align="top",
                     method="label",
                 )
@@ -198,6 +228,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         final_video = None
         all_caption_clips = []
         temp_output_path: str | None = None
+        temp_audio_path: str | None = None
         try:
             # If no output path provided, create one based on input video
             if output_path is None:
@@ -253,10 +284,13 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
 
             # Write output with optimized settings
             temp_output_path = agno_moviepy._make_temp_output_path(output_path)
+            if final_video.audio is not None:
+                temp_audio_path = agno_moviepy._make_temp_output_path(str(Path(output_path).with_suffix(".m4a")))
             final_video.write_videofile(
                 temp_output_path,
                 codec="libx264",
                 audio_codec="aac",
+                temp_audiofile=temp_audio_path,
                 fps=video.fps,
                 preset="medium",
                 threads=4,
@@ -281,3 +315,4 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
             if video is not None:
                 with suppress(Exception):
                     video.close()
+            agno_moviepy._remove_file_if_exists(temp_audio_path)
