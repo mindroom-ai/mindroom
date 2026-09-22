@@ -207,7 +207,7 @@ Use this if you already have a Matrix homeserver and want to run MindRoom direct
     source .venv/bin/activate
     ```
 
-    Install [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+    Install Node.js 24 and [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
     Without assets and Bun, the API is available but the dashboard is unavailable.
 
 ### Configuration

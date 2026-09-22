@@ -118,7 +118,7 @@ See the [hosted Matrix deployment guide](docs/deployment/hosted-matrix.md) for f
 ### Self-hosted, from source
 
 Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
-For the dashboard in a fresh source checkout, install [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
 The repository dev shell provides Node.js 24 and Bun.
 
 ```bash
