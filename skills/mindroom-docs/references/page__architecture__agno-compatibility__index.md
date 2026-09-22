@@ -52,6 +52,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | --- | --- | --- |
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
+| Todoist project discovery treats SDK pages as individual projects. | Flatten project pages and serialize SDK date fields safely. | `tools/todoist.py`; project discovery tests cover multiple pages, empty results, and provider errors. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
 | Byte-only image dimension parsing is private. | Expose a public header parser without file/network I/O or pixel decoding. | `_embedded_image_dimensions` in `openai_models.py`. |
 | Bedrock Claude hard-codes pre-Mantle SDK clients. | Add Mantle support or public typed client factories. | `bedrock_claude.py`. |
@@ -113,6 +114,7 @@ Small owner-adjacent boundaries use the same source records:
 | Owner | Agno adaptation | Retained application behavior |
 | --- | --- | --- |
 | `knowledge/collections.py` | Operator-aware scoped deletion and probing ambiguous collection-deletion outcomes. | Source batching, collection ownership, client closure, and storage reclamation. |
+| `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
