@@ -719,6 +719,71 @@ class TestCredentialsManager:
 
         assert loaded_credentials == {"api_key": "global-ui-key", "_source": "ui"}
 
+    @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
+    def test_scoped_helpers_keep_resolved_worker_manager(
+        self,
+        temp_credentials_dir: Path,
+        worker_scope: str,
+    ) -> None:
+        """An already resolved worker store must survive subsequent credential operations."""
+        manager = CredentialsManager(temp_credentials_dir)
+        pinned_manager = manager.for_worker("authorized-worker")
+        identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
+        worker_target = _worker_target(worker_scope, "general", identity)
+        manager.save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
+        pinned_manager.save_credentials("weather", {"api_key": "pinned-key"})
+
+        assert load_scoped_credentials(
+            "weather",
+            credentials_manager=manager,
+            worker_target=worker_target,
+            worker_credentials_manager=pinned_manager,
+            allowed_shared_services=frozenset({"weather"}),
+        ) == {"api_key": "pinned-key", "shared_only": True}
+
+        save_scoped_credentials(
+            "weather",
+            {"api_key": "updated-key"},
+            credentials_manager=manager,
+            worker_target=worker_target,
+            worker_credentials_manager=pinned_manager,
+        )
+        assert pinned_manager.load_credentials("weather") == {"api_key": "updated-key"}
+
+        credentials_module.delete_scoped_credentials(
+            "weather",
+            credentials_manager=manager,
+            worker_target=worker_target,
+            worker_credentials_manager=pinned_manager,
+        )
+        assert pinned_manager.load_credentials("weather") is None
+        assert manager.load_credentials("weather") == {"api_key": "shared-key", "shared_only": True}
+
+    @pytest.mark.parametrize("allow_shared", [False, True])
+    def test_scoped_load_can_filter_shared_mirror(
+        self,
+        temp_credentials_dir: Path,
+        allow_shared: bool,
+    ) -> None:
+        """Dashboard reads must filter a shared layer even when the runtime uses a mirror."""
+        manager = CredentialsManager(temp_credentials_dir, shared_base_path=temp_credentials_dir / "mirror")
+        identity = ToolExecutionIdentity("matrix", "general", "@alice:example.org", None, None, None, None)
+        worker_target = _worker_target("shared", "general", identity)
+        manager.shared_manager().save_credentials("weather", {"api_key": "shared-key", "shared_only": True})
+        assert worker_target.worker_key is not None
+        manager.for_worker(worker_target.worker_key).save_credentials("weather", {"api_key": "worker-key"})
+
+        credentials = load_scoped_credentials(
+            "weather",
+            credentials_manager=manager,
+            worker_target=worker_target,
+            allowed_shared_services=frozenset({"weather"}) if allow_shared else None,
+            allow_shared_mirror=False,
+        )
+
+        expected = {"api_key": "worker-key", "shared_only": True} if allow_shared else {"api_key": "worker-key"}
+        assert credentials == expected
+
     def test_load_scoped_credentials_shared_scope_keeps_env_fallback(
         self,
         temp_credentials_dir: Path,
