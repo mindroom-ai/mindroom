@@ -3,6 +3,8 @@
 Run MindRoom locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
 
 Run all commands below from the repository root.
+The bootstrap and diagnostic scripts use your exported `KUBECONFIG`, or the default `~/.kube/config` when unset.
+The `test-access.sh` and `validate.sh` diagnostics explicitly select context `kind-mindroom` so changing your current context does not redirect the checks to another cluster.
 
 ## Quick Start (30 seconds)
 
