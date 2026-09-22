@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolStatus
@@ -44,5 +45,22 @@ if TYPE_CHECKING:
 def todoist_tools() -> type[TodoistTools]:
     """Return Todoist tools for task management."""
     from agno.tools.todoist import TodoistTools
+    from agno.utils.log import logger
 
-    return TodoistTools
+    # AGNO_COMPAT: Todoist project discovery treats SDK result pages as projects.
+    # Reason: The pinned SDK yields lists, and projects contain date values that
+    # require the SDK serializer instead of direct __dict__ JSON encoding.
+    # Upstream issue: Tracking gap; this adapter repairs the pinned page contract.
+    # Upstream PR: No verified fix identified.
+    # Remove when: Agno flattens SDK project pages with JSON-safe serialization.
+    # Coverage: tests/test_todoist_tools.py.
+    class MindRoomTodoistTools(TodoistTools):
+        def get_projects(self) -> str:
+            """Get all projects."""
+            try:
+                return json.dumps([project.to_dict() for page in self.api.get_projects() for project in page])
+            except Exception as error:
+                logger.exception("Failed to get projects")
+                return json.dumps({"error": str(error)})
+
+    return MindRoomTodoistTools
