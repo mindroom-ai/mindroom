@@ -8,24 +8,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
-from moviepy import ColorClip, CompositeVideoClip, TextClip
+from moviepy import ColorClip, CompositeVideoClip
 from moviepy.tools import compute_position
 
 from mindroom.custom_tools import agno_compat_moviepy as adapter
 
 if TYPE_CHECKING:
+    from moviepy import TextClip
     from numpy.typing import NDArray
-
-
-@pytest.fixture
-def bundled_font(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep real text rendering while using Pillow's bundled scalable font."""
-
-    def text_clip(**kwargs: object) -> TextClip:
-        kwargs["font"] = None
-        return TextClip(**kwargs)
-
-    monkeypatch.setattr(adapter, "TextClip", text_clip)
 
 
 def _ink_bounds(clip: TextClip) -> tuple[int, int, int, int]:
@@ -53,7 +43,6 @@ def _ink_bounds(clip: TextClip) -> tuple[int, int, int, int]:
     ],
     ids=["small-video", "large-font", "wide-word", "no-outline", "thick-outline", "wrapped-caption"],
 )
-@pytest.mark.usefixtures("bundled_font")
 def test_embed_captions_preserves_glyph_pixels_and_background(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -62,7 +51,7 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
     stroke_width: int,
     text: str,
 ) -> None:
-    """Every glyph fits both canvases and the timed background darkens video."""
+    """Default-font glyphs fit both canvases and the timed background darkens video."""
     video = ColorClip(video_size, color=(255, 255, 255), duration=3).with_fps(30)
     monkeypatch.setattr(adapter, "VideoFileClip", lambda _path: video)
     srt_path = tmp_path / "captions.srt"
@@ -111,7 +100,6 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
     assert len(rendered_frames) == 1
 
 
-@pytest.mark.usefixtures("bundled_font")
 def test_wrapped_words_advance_without_overlapping_glyphs() -> None:
     """The word after a wrap starts beyond the first word on its new row."""
     words = ["Hello", "wide", "words", "test"]
@@ -152,7 +140,6 @@ def test_wrapped_words_advance_without_overlapping_glyphs() -> None:
     ("text", "dimension"),
     [("AgypAgyp", "width"), ("Agyp Agyp Agyp", "height")],
 )
-@pytest.mark.usefixtures("bundled_font")
 def test_oversized_captions_preserve_existing_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

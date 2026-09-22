@@ -29,6 +29,15 @@ from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoFileClip
 # advances wrapped words without overlap, and rejects text that cannot fit.
 # Coverage: tests/test_moviepy_caption_layout.py.
 
+# AGNO_COMPAT: MoviePy captions assume an Arial font file is installed.
+# Reason: MoviePy resolves explicit font files, while the shipped Linux image
+# provides Liberation fonts. Pillow supplies a bundled font when font is None.
+# Upstream issue: Tracking gap; font-default tracking has not been verified.
+# Upstream PR: None identified.
+# Remove when: The SDK uses a portable default while preserving explicit fonts.
+# Coverage: tests/test_moviepy_caption_layout.py and
+# tests/test_moviepy_video_tools.py::test_create_caption_clips_preserves_explicit_font.
+
 
 class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
     """Apply advertised caption styles without shared rendering state."""
@@ -38,7 +47,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         self,
         text_json: dict[str, Any],
         frame_size: tuple[int, int],
-        font: str = "Arial",
+        font: str | None = None,
         color: str = "white",
         highlight_color: str = "yellow",
         stroke_color: str = "black",
@@ -51,7 +60,7 @@ class MindRoomMoviePyVideoTools(agno_moviepy.MoviePyVideoTools):
         Args:
             text_json: Dictionary containing text and timing information
             frame_size: Tuple of (width, height) for the video frame
-            font: Font family to use for captions
+            font: Font file path, or None to use Pillow's bundled default font.
             color: Base text color
             highlight_color: Color for highlighted words
             stroke_color: Color for text outline

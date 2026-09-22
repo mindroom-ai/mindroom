@@ -196,3 +196,19 @@ def test_embed_captions_keeps_styles_independent_between_calls(
             for call in text_clip.call_args_list
         ]
         assert actual == expected
+
+
+def test_create_caption_clips_preserves_explicit_font(
+    caption_renderer: tuple[MindRoomMoviePyVideoTools, dict[str, MagicMock]],
+) -> None:
+    """An explicit font path reaches words, spaces, and highlighted words."""
+    toolkit, factories = caption_renderer
+    line = {
+        "start": 0,
+        "end": 1,
+        "textcontents": [{"word": "Hello", "start": 0, "end": 1}],
+    }
+
+    toolkit.create_caption_clips(line, (320, 180), font="custom-caption.ttf", font_size=24)
+
+    assert [call.kwargs["font"] for call in factories["TextClip"].call_args_list] == ["custom-caption.ttf"] * 3
