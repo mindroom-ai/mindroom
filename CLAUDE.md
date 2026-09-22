@@ -621,6 +621,8 @@ bun install && bun run dev
 #### Deployment
 Run these commands from the repository root.
 For staging, copy the example values and fill in the Supabase, Stripe, and provisioner credentials before running Helm.
+This chart-managed Secret workflow also stores credentials in Helm release history; restrict access to the release Secrets as well as the populated values file.
+See [Platform Deployment](docs/deployment/kubernetes.md#platform-deployment) for credential retention and the existing external-Secret option.
 The `domain` value selects ingress hosts; the namespace alone does not select staging domains.
 For a fresh staging install, store Helm release records in `staging`; the chart creates application resources in `mindroom-staging`, matching the Terraform namespace layout.
 For an existing release, retain its original release name and namespace.

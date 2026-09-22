@@ -16,6 +16,11 @@ Empty values, `localhost`, IP addresses, single-label hosts, and values containi
 The cookie has `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`, and a one-hour lifetime.
 Setting or clearing the shared cookie also expires the older host-only cookie on the API host.
 
+Shared-cookie authentication trusts every workload receiving requests on matching subdomains, including the hosted MindRoom and Matrix services.
+A compromised receiving workload can read the cookie header and replay its Supabase token against platform APIs with that user's permissions; `HttpOnly` and the instance's `ACCOUNT_ID` check do not prevent this.
+Use this mode only when those workloads are within the platform's trust boundary.
+Deployments that must isolate platform sessions from tenant-controlled code need a separately designed authentication boundary; making this cookie host-only alone breaks the current tenant SSO flow.
+
 ## Instance Authentication Modes
 
 The runtime evaluates these modes in order:

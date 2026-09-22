@@ -47,7 +47,7 @@ Configure the environment variables below, then run from the repository root:
 ```bash
 cd saas-platform/platform-backend
 uv sync --all-extras
-uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 The installed project exposes `src/main.py` as `main`; this command serves port 8000 with development reload enabled.

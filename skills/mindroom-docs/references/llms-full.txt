@@ -22434,8 +22434,12 @@ Set `PLATFORM_DOMAIN` to the deployment domain and `SUPABASE_ACCESS_TOKEN` to th
 ```bash
 curl --fail-with-body --request POST \
   "https://api.${PLATFORM_DOMAIN}/my/instances/provision" \
-  --header "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}"
+  --header @- <<EOF
+Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}
+EOF
 ```
+
+The authorization header is read from standard input so the token does not appear in curl's process arguments.
 
 Fresh creation omits an instance ID and receives a generated ID; an existing instance for the subscription is returned or re-provisioned when deprovisioned.
 Use the returned `customer_id` with the CLI's `logs <id>` command.
@@ -22698,7 +22702,12 @@ For a fresh install, `staging` stores Helm release records; the chart creates ap
 For an existing release, retain its original release name and namespace when upgrading.
 Ingress hosts use `domain`, independently of the namespace; the base values use `mindroom.chat`, while the staging example uses `staging.mindroom.chat`.
 Populate the staging file's credentials before deploying and keep it private.
+With this chart-managed Secret workflow, Helm also retains the supplied values and rendered Secrets in release history in `staging`; anyone with permission to read those release Secrets can recover the credentials.
+Restrict access to the values file and all retained release Secrets.
 For production, set `platformSecrets.create=false` and pre-create the named Secret so API keys, webhook secrets, and Matrix OIDC private keys do not enter Helm release values.
+This external-Secret option is also available in staging; omit credential material from Helm values when using it.
+Provisioning that external Secret requires the application namespace to exist with ownership compatible with the chart, which still declares `mindroom-{environment}` regardless of `platformSecrets.create`.
+Switching to the external-Secret option does not remove credentials from earlier release revisions.
 The Secret must contain the same keys rendered by the chart-managed `platform-secrets` Secret, including `supabase_service_key`, `stripe_secret_key`, `stripe_webhook_secret`, `provisioner_api_key`, `instance_credentials_encryption_secret`, provider API keys, and the optional `matrix_oidc_*` keys.
 
 Platform ingress hosts:
