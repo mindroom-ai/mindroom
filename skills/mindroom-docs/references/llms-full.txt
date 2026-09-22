@@ -22250,8 +22250,11 @@ approvedEgress:
 The chart renders the proxy Deployment, Service, ServiceAccount, RBAC, allowlist ConfigMap, persistence PVC, worker egress NetworkPolicy, and proxy ingress NetworkPolicy.
 The chart also sets `MINDROOM_APPROVED_EGRESS_ENABLED`, `MINDROOM_APPROVED_EGRESS_API_URL`, `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH`, `MINDROOM_APPROVED_EGRESS_TOKEN`, and `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` on the MindRoom container.
 When `MINDROOM_APPROVED_EGRESS_ENABLED=true`, MindRoom adds `approved_egress` to defaults and requires Matrix approval for blocked-host `request_network_access` grant requests at runtime.
+The overlay preserves configured default tools, including the implicit `scheduler` when `defaults.tools` is omitted.
+An explicit `defaults.tools: []` receives only `approved_egress`; agents with `include_default_tools: false` do not inherit the overlay toolkit.
 Requests where every hostname is static-allowlisted skip the approval card and return that no temporary grant is needed.
 These runtime-derived entries are not written back to `config.yaml` by dashboard or API saves.
+Structured saves preserve an explicitly authored empty tool list, so disabling the overlay does not restore implicit tools that were deliberately disabled.
 Set `approvedEgress.manageRuntimeConfig: false` to keep the proxy wiring but skip the runtime config overlay, for example when the authored config assigns `approved_egress` to specific agents instead of `defaults.tools`.
 
 ## Agent Vault Chaining
