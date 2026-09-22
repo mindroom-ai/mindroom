@@ -61,11 +61,12 @@ Computer access uses the bundled Desktop Helper and does not require the local-a
 Open **Computer access** to manage its session independently.
 
 1. In a private chat with your Desktop-enabled agent, send `!desktop setup` and copy its JSON setup data.
-2. Open **Setup or reconnect** in **Computer access**, paste that data into the **Setup data** field, and select **Import Setup**.
-3. Review the controller fingerprint, requester, and agent, then sign in and choose the allowed applications.
-4. Confirm the displayed identities and save the setup, then confirm the saved identities again and claim pairing.
-5. Send the displayed `!desktop confirm ...` command back to the same chat.
-6. Check macOS permissions and start observation.
+2. In **Computer access**, choose the allowed applications and select **Continue Setup**.
+3. Paste the copied data into the **Setup data** field under **Setup or reconnect** and select **Import Setup**.
+4. Review the controller fingerprint, requester, and agent, then sign in or use the saved Matrix device.
+5. Confirm the displayed identities and select **Save Setup**, then confirm the saved identities again and select **Claim Pairing**.
+6. Send the displayed `!desktop confirm ...` command back to the same chat.
+7. Check macOS permissions and start observation.
 
 For a homeserver behind Cloudflare Access, complete the Terminal authentication flow shown in chat first.
 The existing native helper owns authentication, pairing, permissions, browser sessions, and control leases.
