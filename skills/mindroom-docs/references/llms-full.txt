@@ -10832,8 +10832,10 @@ Persisted memory IDs and file-backed `file:<path>:<line>` IDs can be used with `
 Semantic file-memory matches use `semantic:<source_file>:<rank>` read-only locators that cannot be passed to the CRUD functions.
 The tool is bound to the current agent's MindRoom scope and can reach any agent or team memories that MindRoom makes visible to that agent.
 For file-backed memory, `search_memories()` follows `memory.search.mode`.
-Keyword mode scans `MEMORY.md` and `memory/**/*.md` directly.
-Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to the fixed keyword corpus when embeddings are unavailable.
+Keyword mode searches structured entries with persisted IDs in `MEMORY.md` and both structured entries and eligible plain-text snippets in `memory/**/*.md`.
+Ordinary `MEMORY.md` prose is preloaded into the prompt instead of searched as keyword snippets.
+For prose omitted by the preload limit, read the file directly or use semantic search with `include_entrypoint: true` and a ready index.
+Semantic mode searches the agent's configured include patterns through a lazy embedding index and falls back to those keyword entries and snippets when embeddings are unavailable.
 Result metadata includes `search_mode` so callers can tell which path produced the result.
 File memory is already searchable on demand through `search_memories()`.
 When its agent-scoped semantic index is ready, configured file memory is also listed as a read-only source in `search_knowledge_base`.
@@ -15590,10 +15592,11 @@ If a checkout already holds a credential-bearing remote from before this check e
 - Semantic Git refresh then advances a candidate index, while files-only Git refresh publishes source metadata.
 - MindRoom disables implicit LFS smudge during clone, checkout, and reset for every Git-backed knowledge base.
 - When `lfs: true`, MindRoom explicitly hydrates the checkout after sync, keeping the working tree complete even when indexing filters only include some file types.
-- Local edits to Git-tracked files are discarded during refresh sync, and tracked deletions are restored from the remote checkout.
-- Change detection for Git-backed bases is the tracked revision, not file contents: while the checkout stays on the revision the index was published from, MindRoom republishes the existing index without reading the corpus.
-- Consequently an out-of-band edit to a Git-backed checkout is not indexed while the revision is unchanged.
-- The checkout is MindRoom-owned; edit the repository and sync, or force a reindex, instead of editing the working tree.
+- When sync realigns the checkout to a different fetched revision, it forcibly checks out and resets tracked files, discarding tracked edits and restoring tracked deletions.
+- If local HEAD already equals the fetched revision, sync skips that reset, so ordinary tracked edits or deletions can remain; LFS hydration is a separate step.
+- Change detection for Git-backed bases uses the tracked revision, not file contents: an ordinary refresh can republish the compatible existing index without reading the corpus when its revision is unchanged.
+- A forced reindex bypasses index reuse and rebuilds from the current checkout, but does not force Git to repair an unchanged checkout.
+- The checkout is MindRoom-owned; edit the source repository and sync instead of editing the working tree.
 - Git-backed bases reject dashboard/API file upload and delete mutations; update the repository and sync or reindex instead.
 - Successful refresh publishes a new last successfully published index while failed refresh preserves the previous one and records the error in status metadata.
 - Semantic refresh is resumable: an interrupted or failed build keeps its private candidate index and continues it on the next refresh instead of restarting from zero.
@@ -15695,13 +15698,14 @@ MindRoom never copies the token into the checkout config, credential store, refr
 
 ## Embedder Configuration
 
-Semantic knowledge bases use the same embedder configured in the `memory` section.
+Semantic knowledge bases use the embedder configured in the `memory` section.
+Semantic knowledge and file-memory indexes support `openai`, `ollama`, and `sentence_transformers`; the separate Mem0 backend also supports `huggingface`.
 File-mode knowledge bases do not use an embedder.
 
 ```yaml
 memory:
   embedder:
-    provider: openai        # or "ollama", "huggingface", or "sentence_transformers"
+    provider: openai        # or "ollama" or "sentence_transformers"
     config:
       model: text-embedding-3-small
       credentials_service: embedder # Optional strict credential binding
@@ -15735,18 +15739,20 @@ The storage path defaults to `mindroom_data/` next to your `config.yaml`, or can
 
 ## Process isolation
 
-Published semantic searches and collection probes run in short-lived subprocesses.
+Published semantic searches run in short-lived subprocesses.
 Embedding credentials and provider health stay in the application; query vectors, filters, and document data cross the typed read boundary.
 Each child exits after one operation, releasing its native Chroma memory.
-At most four read children run at once, with a 30-second timeout.
-Async searches start the child while the parent obtains the query embedding, overlapping provider latency with child imports.
-Their deadline covers both embedding and native execution; synchronous searches and collection probes use the deadline for native execution.
+At most four read children run at once.
+Async searches wait for shared read capacity without occupying executor threads, then start the child while the parent obtains the query embedding.
+Their single 30-second budget includes capacity waiting, child startup, embedding, and native execution.
+Synchronous semantic searches use the 30-second timeout for native execution and fail immediately as busy when all read slots are occupied.
 Queries spanning multiple bases search those bases sequentially so one query cannot exhaust the child limit.
-Excess reads fail immediately as busy so waiting knowledge requests cannot fill the application's shared thread pool.
 A timed-out child is killed and reaped; async cancellation or embedding failure also cleans up the child before releasing its slot.
 Providers without async embedding support run in a thread, which may continue after cancellation; the native child is still cleaned up immediately.
 Native database stalls therefore do not hold the application process's Python lock.
-Fresh processes add startup and index-loading cost to each read.
+Fresh processes add startup and index-loading cost to each semantic search.
+Collection-existence probes instead read SQLite publication metadata directly in the application, with a five-second database lock timeout and no subprocess read-slot admission.
+The probe does not initialize the native Chroma search engine; unavailable or corrupt metadata raises an error instead of being treated as a missing collection.
 
 Manual reindexing and scheduled refreshes share the existing refresh subprocess and its timeout and process-group cleanup.
 These boundaries also cover semantic file-memory knowledge overlays; the separate Mem0 backend is unchanged.
@@ -15786,7 +15792,8 @@ MindRoom supports three memory backends:
 Set the global default backend with `memory.backend`.
 Override the backend per agent with `agents.<name>.memory_backend`.
 When an agent uses `memory_backend: file`, its file memory lives in its canonical workspace root.
-When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent.
+When an agent uses `memory_backend: none`, MindRoom skips prompt memory lookup, automatic memory persistence, and the explicit `memory` tool for that agent's solo turns.
+Team memory has a separate backend selection rule described below.
 Use `agents.<name>.private` when one shared agent definition should keep file memory inside a requester-local private root.
 `private` changes where private files live.
 It does not switch the memory backend by itself.
@@ -15805,6 +15812,15 @@ Optional:
 
 Notes:
 - Team IDs are sorted agent names joined by `+`.
+
+Team memory selects one backend from the participating members' effective backends:
+
+- All members use `file`: the team uses file memory.
+- All members use `none`: team memory is disabled.
+- Every other combination uses Mem0, including `file` plus `none` even though neither member uses Mem0 alone.
+
+In the Mem0 case, team extraction and retrieval use the configured Mem0 model and embedder, and team records are stored under each participating member's distinct effective storage root.
+A member's `none` setting still disables its solo memory, but does not prevent this separate team scope from retaining conversation memory.
 
 ## Backend: `mem0`
 
@@ -15856,7 +15872,8 @@ memory:
       host: http://localhost:11434
 ```
 
-Supported embedder providers: `openai`, `ollama`, `huggingface`, `sentence_transformers`.
+Supported Mem0 embedder providers: `openai`, `ollama`, `huggingface`, `sentence_transformers`.
+Semantic knowledge and file-memory indexes support the narrower [semantic embedder provider set](https://docs.mindroom.chat/knowledge/#embedder-configuration).
 
 ### Memory LLM
 
@@ -15927,15 +15944,17 @@ memory:
 It does not relocate canonical agent file memory (which always lives under the agent's workspace root).
 It can affect team file memory when the resolution determines the configured path should be used.
 `memory.search` controls how `search_memories` reads file-backed agent memory.
-`mode: keyword` scans `MEMORY.md` and `memory/**/*.md` directly.
-`mode: semantic` builds a lazy per-agent or per-requester vector index under `mindroom_data/memory_search_db/` and uses `memory.embedder`.
+`mode: keyword` searches structured entries with persisted IDs in `MEMORY.md` and both structured entries and eligible plain-text snippets in `memory/**/*.md`.
+`mode: semantic` builds a lazy per-agent or per-requester vector index under `<storage-root>/knowledge_db/<generated-file-memory-storage-key>/` and uses `memory.embedder`.
+The generated file-memory identity includes the effective memory root and scope; see [Knowledge storage](https://docs.mindroom.chat/knowledge/#storage).
 `include` contains root-relative glob patterns for semantic search below the effective file-memory root.
 The default semantic include `memory/**/*.md` searches dated memory files and excludes `MEMORY.md`.
 Set `include_entrypoint: true` only if you also want `MEMORY.md` returned by semantic search.
 MindRoom already preloads `MEMORY.md` into the prompt, so the default avoids duplicate retrieval.
 That preload is introduced by a header naming the file's absolute path and stating that it is inlined automatically every turn, so the agent does not re-read it to recall its own memory.
 `max_entrypoint_lines` caps how much of the file is inlined; when it truncates, the preload ends with a marker reporting the included and total line counts, the active cap, and the path to read for the omitted lines.
-Semantic fallback uses the same fixed `MEMORY.md` and `memory/**/*.md` corpus as keyword mode rather than the semantic include patterns.
+Ordinary `MEMORY.md` prose is available through preload, not keyword snippets; read the file directly for omitted lines, or use semantic search with `include_entrypoint: true` once the index is ready.
+Semantic fallback uses the same keyword entries and snippets rather than the semantic include patterns.
 Semantic mode applies to the agent's own file-memory scope.
 Team-visible file memory is still keyword searched.
 File memory is already searchable on demand through `search_memories`.
@@ -15996,7 +16015,7 @@ Agent file memory is stored under each agent's canonical workspace root:
 - `agents/<agent>/workspace/MEMORY.md`
 - `agents/<agent>/workspace/memory/YYYY-MM-DD.md`
 
-Team file memory is mirrored under each participating agent's storage directory:
+When all participating team members use the `file` backend, team file memory is mirrored under each member's storage directory:
 
 - `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
 - `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
