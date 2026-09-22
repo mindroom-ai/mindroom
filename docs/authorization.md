@@ -156,6 +156,8 @@ MindRoom checks the agent's ordinary `access` policy before selecting a requeste
 
 Dashboard configuration access follows deployment authentication.
 Standalone deployments check `MINDROOM_API_KEY` when configured; Supabase deployments validate the user's token and enforce the instance account ID when configured.
+Without an API key, standalone dashboard and configuration API access is unauthenticated.
+Set `MINDROOM_API_KEY` before exposing a standalone instance outside a trusted local environment.
 These operator authentication checks are independent of the Matrix `administrators` list.
 
 With trusted upstream auth and no `MINDROOM_CONNECTIONS_AGENT`, every gateway-authenticated user can read and change dashboard configuration, regardless of `administrators`.
