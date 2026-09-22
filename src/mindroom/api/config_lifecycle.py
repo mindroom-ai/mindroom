@@ -26,9 +26,9 @@ from mindroom.config.main import (
     validate_loaded_config_source,
 )
 from mindroom.config.yaml_includes import (
-    load_yaml_config_source,
     load_yaml_config_source_with_digests,
     partial_source_files,
+    partial_source_uses_includes,
     source_files_fingerprint,
 )
 from mindroom.event_journal_open import pending_event_journal_restart
@@ -68,6 +68,7 @@ class ConfigLoadResult:
     success: bool
     error_status_code: int | None = None
     error_detail: object | None = None
+    uses_includes: bool | None = False
 
 
 @dataclass
@@ -91,6 +92,7 @@ class ApiSnapshot:
     config_load_result: ConfigLoadResult | None = None
     source_fingerprint: str | None = None
     source_files: frozenset[Path] | None = None
+    uses_includes: bool | None = None
     auth_state: Any | None = None
 
 
@@ -192,12 +194,16 @@ def _load_config_result(
     """Load and validate one config file without mutating shared app state."""
     source_fingerprint: str | None = None
     source_files: frozenset[Path] | None = None
+    uses_includes: bool | None = None
     try:
         source_bytes = runtime_paths.config_path.read_bytes()
         source_fingerprint = _source_fingerprint(source_bytes)
         # Parse the bytes already read so a mid-load file edit can never publish
         # config under a fingerprint computed from different content.
-        data, source_digests = load_yaml_config_source_with_digests(runtime_paths.config_path, source=source_bytes)
+        data, source_digests, uses_includes = load_yaml_config_source_with_digests(
+            runtime_paths.config_path,
+            source=source_bytes,
+        )
         source_files = frozenset(source_digests)
         source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
         runtime_config, source_digests = validate_loaded_config_source(
@@ -205,6 +211,7 @@ def _load_config_result(
             source_digests,
             source_bytes,
             runtime_paths,
+            uses_includes=uses_includes,
             tolerate_plugin_load_errors=True,
         )
         source_files = frozenset(source_digests)
@@ -221,8 +228,15 @@ def _load_config_result(
             # A parse-time failure never reached the full set; the files read
             # so far keep the watcher covering a broken new include file.
             source_files = partial_source_files(exc)
+        if uses_includes is None:
+            uses_includes = partial_source_uses_includes(exc)
         return (
-            ConfigLoadResult(success=False, error_status_code=422, error_detail=detail),
+            ConfigLoadResult(
+                success=False,
+                error_status_code=422,
+                error_detail=detail,
+                uses_includes=uses_includes,
+            ),
             None,
             None,
             source_fingerprint,
@@ -231,7 +245,12 @@ def _load_config_result(
     except Exception:
         logger.exception("Failed to load API config", config_path=str(runtime_paths.config_path))
         return (
-            ConfigLoadResult(success=False, error_status_code=500, error_detail="Failed to load configuration"),
+            ConfigLoadResult(
+                success=False,
+                error_status_code=500,
+                error_detail="Failed to load configuration",
+                uses_includes=uses_includes,
+            ),
             None,
             None,
             source_fingerprint,
@@ -245,17 +264,23 @@ def _load_config_result(
         )
         logger.info("loaded_agent_configuration_count", agent_count=len(runtime_config.agents))
         logger.info("Loaded API config", config_path=str(runtime_paths.config_path))
-        return ConfigLoadResult(success=True), validated_payload, runtime_config, source_fingerprint, source_files
+        return (
+            ConfigLoadResult(success=True, uses_includes=uses_includes),
+            validated_payload,
+            runtime_config,
+            source_fingerprint,
+            source_files,
+        )
 
 
 def _source_fingerprint_for_published_runtime_config(
     runtime_paths: constants.RuntimePaths,
     validated_payload: dict[str, Any],
-) -> tuple[str, frozenset[Path] | None]:
-    """Return the disk fingerprint and source set when the file still matches the runtime config.
+) -> tuple[str, frozenset[Path] | None, bool | None]:
+    """Return disk source metadata when the file still matches the runtime config.
 
-    The source set is ``None`` when the published config cannot be tied to the
-    on-disk files, so the caller keeps the snapshot's last known set.
+    The source set and include usage are ``None`` when the published config cannot
+    be tied to disk, so the caller keeps the snapshot's last known metadata.
     """
     canonical_source = yaml.dump(
         validated_payload,
@@ -266,8 +291,8 @@ def _source_fingerprint_for_published_runtime_config(
     canonical_fingerprint = _source_fingerprint(canonical_source)
     result, disk_payload, _disk_config, disk_fingerprint, disk_source_files = _load_config_result(runtime_paths)
     if result.success and disk_payload == validated_payload and disk_fingerprint is not None:
-        return disk_fingerprint, disk_source_files
-    return canonical_fingerprint, None
+        return disk_fingerprint, disk_source_files, result.uses_includes
+    return canonical_fingerprint, None, None
 
 
 def _raise_for_config_load_result(result: ConfigLoadResult | None) -> None:
@@ -286,12 +311,10 @@ def _raise_missing_loaded_config() -> NoReturn:
 
 
 class _ConfigComposedFromIncludesError(ConfigRuntimeValidationError):
-    """Structured config write rejected because the config is split across include files."""
+    """Structured config write rejected because the config uses include tags."""
 
 
-_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE = (
-    "configuration is composed from multiple files via !include; edit the source files instead"
-)
+_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE = "configuration uses !include; edit the source files instead"
 _CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE = "config_composed_from_includes"
 
 
@@ -309,26 +332,26 @@ def _composed_from_includes_http_error(exc: _ConfigComposedFromIncludesError) ->
 
 def _raise_when_composed_from_includes(
     runtime_paths: constants.RuntimePaths,
-    committed_source_files: frozenset[Path] | None,
+    committed_uses_includes: bool | None,
 ) -> None:
     """Reject structured config writes that would silently flatten include files.
 
-    The committed snapshot's source set is authoritative: it reflects the last
-    successful load even when an included file has since become unreadable, so a
-    split config cannot be flattened just because one include broke.
+    The committed snapshot's include usage is authoritative: it reflects the
+    last successful load even when an include has since become unreadable.
+    Empty included directories need the same protection as populated ones.
     """
-    if committed_source_files is not None:
-        if len(committed_source_files) > 1:
+    if committed_uses_includes is not None:
+        if committed_uses_includes:
             raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
         return
     try:
-        _, source_files = load_yaml_config_source(runtime_paths.config_path)
+        _, _source_digests, uses_includes = load_yaml_config_source_with_digests(runtime_paths.config_path)
     except CONFIG_LOAD_USER_ERROR_TYPES:
         # With no committed source metadata, an unreadable or broken on-disk
         # config stays recoverable through structured replacement, exactly like
         # before includes existed.
         return
-    if len(source_files) > 1:
+    if uses_includes:
         raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
 
 
@@ -336,10 +359,10 @@ def _save_config_to_file(
     config: dict[str, Any],
     runtime_paths: constants.RuntimePaths,
     *,
-    committed_source_files: frozenset[Path] | None,
+    committed_uses_includes: bool | None,
 ) -> str:
     """Save config to YAML file with deterministic ordering."""
-    _raise_when_composed_from_includes(runtime_paths, committed_source_files)
+    _raise_when_composed_from_includes(runtime_paths, committed_uses_includes)
     config_path = runtime_paths.config_path
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     source = yaml.dump(
@@ -381,14 +404,14 @@ def persist_runtime_validated_config(
                 continue
             locked_snapshots.append((state, snapshot))
 
-        committed_source_files = next(
-            (snapshot.source_files for _, snapshot in locked_snapshots if snapshot.source_files is not None),
-            None,
-        )
+        include_states = [
+            snapshot.uses_includes for _, snapshot in locked_snapshots if snapshot.uses_includes is not None
+        ]
+        committed_uses_includes = any(include_states) if include_states else None
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
-            committed_source_files=committed_source_files,
+            committed_uses_includes=committed_uses_includes,
         )
         for state, snapshot in locked_snapshots:
             state.snapshot = _published_snapshot(
@@ -398,6 +421,7 @@ def persist_runtime_validated_config(
                 config_load_result=ConfigLoadResult(success=True),
                 source_fingerprint=source_fingerprint,
                 source_files=frozenset({runtime_paths.config_path.resolve()}),
+                uses_includes=False,
             )
 
 
@@ -486,6 +510,7 @@ def _published_snapshot(
     config_load_result: ConfigLoadResult | None | object = _UNSET,
     source_fingerprint: str | None | object = _UNSET,
     source_files: frozenset[Path] | None | object = _UNSET,
+    uses_includes: bool | None | object = _UNSET,
     auth_state: object = _UNSET,
 ) -> ApiSnapshot:
     """Return one new published snapshot, always with a fresh commit revision."""
@@ -505,6 +530,7 @@ def _published_snapshot(
     updated_source_files = (
         snapshot.source_files if source_files is _UNSET else cast("frozenset[Path] | None", source_files)
     )
+    updated_uses_includes = snapshot.uses_includes if uses_includes is _UNSET else cast("bool | None", uses_includes)
     updated_auth_state = snapshot.auth_state if auth_state is _UNSET else auth_state
     return replace(
         snapshot,
@@ -516,6 +542,7 @@ def _published_snapshot(
         config_load_result=updated_load_result,
         source_fingerprint=updated_source_fingerprint,
         source_files=updated_source_files,
+        uses_includes=updated_uses_includes,
         auth_state=updated_auth_state,
     )
 
@@ -581,7 +608,7 @@ def _commit_mutated_snapshot[T](
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
-            committed_source_files=current.source_files,
+            committed_uses_includes=current.uses_includes,
         )
         current_state.snapshot = _published_snapshot(
             current,
@@ -590,6 +617,7 @@ def _commit_mutated_snapshot[T](
             config_load_result=ConfigLoadResult(success=True),
             source_fingerprint=source_fingerprint,
             source_files=frozenset({runtime_paths.config_path.resolve()}),
+            uses_includes=False,
         )
         return result
 
@@ -613,13 +641,14 @@ def _validate_raw_config_source(
     and yields the same include-aware fingerprint the next disk load computes,
     so a raw save of a split config does not trigger a spurious generation bump.
     """
-    data, source_digests = load_yaml_config_source_with_digests(
+    data, source_digests, uses_includes = load_yaml_config_source_with_digests(
         runtime_paths.config_path,
         source=source.encode("utf-8"),
     )
     source_files = frozenset(source_digests)
-    validate_access_migration_source(data, source_files, runtime_paths.config_path)
+    validate_access_migration_source(data, uses_includes=uses_includes)
     runtime_config = Config.validate_with_runtime(data, runtime_paths)
+    runtime_config.record_source_metadata(runtime_paths.config_path, source_digests, uses_includes=uses_includes)
     source_fingerprint = source_files_fingerprint(runtime_paths.config_path, source_digests)
     return runtime_config, runtime_config.authored_model_dump(), source_files, source_fingerprint
 
@@ -642,7 +671,7 @@ def _commit_replaced_snapshot(
         source_fingerprint = _save_config_to_file(
             validated_payload,
             runtime_paths=runtime_paths,
-            committed_source_files=current.source_files,
+            committed_uses_includes=current.uses_includes,
         )
         current_state.snapshot = _published_snapshot(
             current,
@@ -651,6 +680,7 @@ def _commit_replaced_snapshot(
             config_load_result=ConfigLoadResult(success=True),
             source_fingerprint=source_fingerprint,
             source_files=frozenset({runtime_paths.config_path.resolve()}),
+            uses_includes=False,
         )
         return current_state.snapshot.generation
 
@@ -678,9 +708,10 @@ def _commit_raw_replaced_snapshot(
             current,
             config_data=validated_payload,
             runtime_config=validated_config,
-            config_load_result=ConfigLoadResult(success=True),
+            config_load_result=ConfigLoadResult(success=True, uses_includes=validated_config.uses_includes),
             source_fingerprint=source_fingerprint,
             source_files=source_files,
+            uses_includes=validated_config.uses_includes,
         )
         return current_state.snapshot.generation
 
@@ -828,6 +859,9 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
         published_source_files = source_files if source_files is not None else current.source_files
         if not result.success and source_files is not None and current.source_files is not None:
             published_source_files = source_files | current.source_files
+        published_uses_includes = result.uses_includes if result.uses_includes is not None else current.uses_includes
+        if not result.success and current.uses_includes:
+            published_uses_includes = True
         current_state.snapshot = _published_snapshot(
             current,
             increment_generation=not same_source,
@@ -836,6 +870,7 @@ def load_config_into_app(runtime_paths: constants.RuntimePaths, api_app: FastAPI
             config_load_result=result,
             source_fingerprint=source_fingerprint,
             source_files=published_source_files,
+            uses_includes=published_uses_includes,
         )
     return result.success
 
@@ -849,7 +884,7 @@ def _publish_runtime_config_into_app(
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
     validated_payload = runtime_config.authored_model_dump()
-    source_fingerprint, source_files = _source_fingerprint_for_published_runtime_config(
+    source_fingerprint, source_files, uses_includes = _source_fingerprint_for_published_runtime_config(
         runtime_paths,
         validated_payload,
     )
@@ -871,16 +906,18 @@ def _publish_runtime_config_into_app(
             )
             return False
         same_source = source_fingerprint == current.source_fingerprint
+        published_uses_includes = uses_includes if uses_includes is not None else current.uses_includes
         current_state.snapshot = _published_snapshot(
             current,
             increment_generation=not (same_source or same_config),
             config_data=validated_payload,
             runtime_config=runtime_config,
-            config_load_result=ConfigLoadResult(success=True),
+            config_load_result=ConfigLoadResult(success=True, uses_includes=published_uses_includes),
             source_fingerprint=source_fingerprint,
             # A publish that cannot be tied to disk keeps the last known source
             # set so the watcher still covers the previous include files.
             source_files=source_files if source_files is not None else current.source_files,
+            uses_includes=published_uses_includes,
         )
     return True
 
@@ -979,9 +1016,9 @@ def config_pending_restart(request: Request) -> bool:
 
 
 def config_uses_includes(request: Request) -> bool:
-    """Return whether the committed config is composed from multiple files via !include."""
+    """Return whether the committed config uses include or expansion tags."""
     snapshot = _request_or_current_snapshot(request)
-    return snapshot.source_files is not None and len(snapshot.source_files) > 1
+    return snapshot.uses_includes is True
 
 
 def read_raw_config_source(request: Request) -> str:

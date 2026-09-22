@@ -397,6 +397,7 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _source_fingerprint: str | None = PrivateAttr(default=None)
+    _uses_includes: bool = PrivateAttr(default=False)
     _unavailable_plugin_tool_names: set[str] = PrivateAttr(default_factory=set)
     _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
     _runtime_approved_egress_injected_default_tool: bool = PrivateAttr(default=False)
@@ -1053,7 +1054,7 @@ class Config(BaseModel):
     def source_files(self) -> frozenset[Path]:
         """Files this config was loaded from: the top-level file plus every include.
 
-        Empty when the config was not loaded from disk via :func:`load_config`.
+        Empty when the config was constructed without YAML source metadata.
         """
         return self._source_files
 
@@ -1061,6 +1062,23 @@ class Config(BaseModel):
     def source_fingerprint(self) -> str | None:
         """Fingerprint of source bytes captured at load time, including includes."""
         return self._source_fingerprint
+
+    @property
+    def uses_includes(self) -> bool:
+        """Whether the loaded YAML source resolved include or expansion tags."""
+        return self._uses_includes
+
+    def record_source_metadata(
+        self,
+        config_path: Path,
+        source_digests: dict[Path, str],
+        *,
+        uses_includes: bool,
+    ) -> None:
+        """Retain the source identity and topology of one validated YAML config."""
+        self._source_files = frozenset(source_digests)
+        self._source_fingerprint = source_files_fingerprint(config_path, source_digests)
+        self._uses_includes = uses_includes
 
     @classmethod
     def validate_with_runtime(
@@ -1971,6 +1989,7 @@ def validate_loaded_config_source(
     original: bytes,
     runtime_paths: RuntimePaths,
     *,
+    uses_includes: bool,
     tolerate_plugin_load_errors: bool = False,
 ) -> tuple[Config, dict[Path, str]]:
     """Validate and, when needed, persist one already-parsed config source."""
@@ -1978,7 +1997,7 @@ def validate_loaded_config_source(
     source_files = frozenset(source_digests)
 
     try:
-        validate_access_migration_source(data, source_files, path)
+        validate_access_migration_source(data, uses_includes=uses_includes)
         migration = migrate_access_config_data(data)
         config = Config.validate_with_runtime(
             migration.data,
@@ -1991,11 +2010,10 @@ def validate_loaded_config_source(
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         # Parsing succeeded, so the full file set is known; expose it the same
         # way as parse-time failures so reload watchers keep covering it.
-        attach_partial_source_files(exc, source_files)
+        attach_partial_source_files(exc, source_files, uses_includes=uses_includes)
         exc.config_source_fingerprint = source_files_fingerprint(path, source_digests)  # ty: ignore[invalid-assignment]
         raise
-    config._source_files = frozenset(source_digests)
-    config._source_fingerprint = source_files_fingerprint(path, source_digests)
+    config.record_source_metadata(path, source_digests, uses_includes=uses_includes)
     return config, source_digests
 
 
@@ -2011,12 +2029,13 @@ def load_config(
         raise FileNotFoundError(msg)
 
     original = path.read_bytes()
-    data, source_digests = load_yaml_config_source_with_digests(path, source=original)
+    data, source_digests, uses_includes = load_yaml_config_source_with_digests(path, source=original)
     config, source_digests = validate_loaded_config_source(
         data,
         source_digests,
         original,
         runtime_paths,
+        uses_includes=uses_includes,
         tolerate_plugin_load_errors=tolerate_plugin_load_errors,
     )
     source_files = frozenset(source_digests)
