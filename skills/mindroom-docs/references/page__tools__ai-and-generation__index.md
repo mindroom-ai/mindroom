@@ -422,7 +422,7 @@ text_to_speech("The build succeeded.")
 ### What It Does
 
 `lumalabs` exposes `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-Both calls create a Luma generation job and poll until it completes or times out.
+Both calls create a Luma generation job with the configured model and, by default, poll until it completes or times out.
 `generate_video()` optionally accepts provider-style keyframes, while `image_to_video()` builds the required keyframe structure from one or two image URLs.
 Completed jobs return remote video URL attachments.
 If `wait_for_completion` is false, the current implementation returns `Async generation unsupported`.
@@ -432,6 +432,7 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Luma AI API key, with `LUMAAI_API_KEY` as the upstream fallback. |
+| `model` | `select` | `no` | `ray-2` | Dream Machine video model: `ray-2` or `ray-flash-2`; explicit `null` uses the default `ray-2`. |
 | `wait_for_completion` | `boolean` | `no` | `true` | Poll until the provider job completes. Setting it to `false` is not useful on this branch because async return is not implemented. |
 | `poll_interval` | `number` | `no` | `3` | Seconds between status polls. |
 | `max_wait_time` | `number` | `no` | `300` | Maximum wait time in seconds before timing out. |
@@ -446,6 +447,7 @@ agents:
   motion:
     tools:
       - lumalabs:
+          model: ray-2
           poll_interval: 5
           max_wait_time: 600
 ```
@@ -461,6 +463,7 @@ image_to_video(
 
 ### Notes
 
+- The available models follow the [Dream Machine video API](https://docs.lumalabs.ai/docs/video-generation).
 - `image_to_video()` requires remote image URLs, not local file paths.
 - `wait_for_completion: false` does not currently provide a job handle or async response.
 - Use [`gemini`] instead when you specifically want Google's Veo-backed video path.

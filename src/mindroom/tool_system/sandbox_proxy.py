@@ -840,7 +840,9 @@ def sandbox_proxy_enabled_for_tool(
     """
     proxy_config = sandbox_proxy_config(runtime_paths)
     metadata = TOOL_METADATA.get(tool_name)
-    if proxy_config.runner_mode or (metadata is not None and metadata.requires_primary_runtime):
+    if proxy_config.runner_mode or (
+        metadata is not None and (metadata.requires_primary_runtime or metadata.requires_room_context)
+    ):
         return False
 
     if not _sandbox_proxy_requested_for_tool(

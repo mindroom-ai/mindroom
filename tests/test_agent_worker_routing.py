@@ -6,6 +6,7 @@ import inspect
 import json
 from typing import TYPE_CHECKING
 
+import nio
 import pytest
 from agno.run import RunContext
 from agno.tools.calculator import CalculatorTools
@@ -15,11 +16,15 @@ from agno.tools.toolkit import Toolkit
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.message_target import MessageTarget
 from mindroom.shell_execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools import shell as shell_module
 from mindroom.workers.backend import WorkerBackendError
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -279,6 +284,81 @@ async def test_primary_runtime_tool_stays_local_after_real_materialization(
 
     result = json.loads(await _invoke(agent, "get_my_usage"))
     assert result["code"] == "context_unavailable"
+    assert "No tools use a worker runtime." in (agent.role or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "worker_tools"),
+    [
+        pytest.param(None, None, id="proxy-url-default"),
+        pytest.param("all", None, id="all-tools"),
+        pytest.param("off", ["scheduler"], id="explicit-worker-list"),
+    ],
+)
+async def test_room_context_tool_uses_primary_matrix_client(
+    tmp_path: Path,
+    proxy_targets: list[ResolvedWorkerTarget | None],
+    mode: str | None,
+    worker_tools: list[str] | None,
+) -> None:
+    """Worker routing must retain the live Matrix client needed to list schedules."""
+    process_env = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"}
+    if mode is not None:
+        process_env["MINDROOM_SANDBOX_EXECUTION_MODE"] = mode
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env=process_env,
+    )
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "ollama", "id": "test-model"}},
+            "agents": {
+                "routing": {
+                    "display_name": "Routing",
+                    "tools": ["scheduler"],
+                    "worker_tools": worker_tools,
+                    "include_default_tools": False,
+                    "memory_backend": "none",
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "router", "routing": "routing"})
+    target = MessageTarget.resolve(room_id="!schedules:localhost", thread_id="$thread", reply_to_event_id=None)
+    client = make_matrix_client_mock()
+    client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=target.room_id)
+    context = make_test_tool_runtime_context(
+        agent_name="routing",
+        target=target,
+        requester_id="@user:localhost",
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
+    )
+    agent = create_agent(
+        "routing",
+        config,
+        runtime_paths,
+        execution_identity=build_execution_identity_from_runtime_context(context),
+        include_interactive_questions=False,
+        persist_runtime_state=False,
+        supports_native_tool_approval=True,
+    )
+    toolkit = next(
+        tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "list_schedules" in tool.async_functions
+    )
+    with tool_runtime_context(context):
+        result = await FunctionCall(function=toolkit.async_functions["list_schedules"], arguments={}).aexecute()
+
+    assert result.status == "success"
+    assert result.result == "No scheduled tasks found."
+    client.room_get_state.assert_awaited_once_with(target.room_id)
+    assert proxy_targets == []
     assert "No tools use a worker runtime." in (agent.role or "")
 
 

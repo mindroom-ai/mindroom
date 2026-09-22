@@ -34,7 +34,8 @@ Do not require refactors of untouched code unless they have clear immediate ROI.
 - **Simplicity**: Is it not over-engineered? Remember KISS and YAGNI. No dead code paths and NO defensive programming. No unnecessary try-excepts.
 - **No pointless wrappers**: Identify functions/methods that just call another function and return its result. Callers should call the underlying function directly instead of going through unnecessary indirection.
 - **Functional style**: Does it prefer functions over classes where appropriate? Are dataclasses used instead of raw dicts?
-- **Imports**: Are all imports at the top of the file (not inside functions, unless avoiding circular imports)?
+- **Imports**: Are imports at file top, with function imports used to avoid cycles or defer heavy/optional dependencies until first use, as required by [CLAUDE.md](../../../CLAUDE.md#1-core-philosophy)?
+- **Deferred imports**: Are these explicit (`from x import Y`), annotated with `# noqa: PLC0415` where needed, and consistent with `tests/test_import_graph.py`?
 - **User experience**: Does it provide a good user experience?
 - **PR**: Is the PR description and title clear and informative?
 - **Docs**: Are docs updated anywhere the change affects users, operators, developers, configuration, tooling, workflows, or behavior that someone would need to learn later? Missing required docs is a blocker.

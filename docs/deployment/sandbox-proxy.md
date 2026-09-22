@@ -637,18 +637,24 @@ The `worker_tools` field has three states:
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
+Tools whose catalog metadata sets `requires_primary_runtime=True` or `requires_room_context=True` stay in the primary runtime even when listed.
 This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
-The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls. The generic worker runner creates a fresh toolkit for each request.
+The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls.
+The generic worker runner creates a fresh toolkit for each request.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed, subject to the limited `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` fallback described above.
 The `off`, `local`, and `disabled` modes do not override an explicit YAML list.
 If both YAML worker lists are omitted, no environment setting requests routing, and no static proxy URL is configured, simple local installs run tools in the primary MindRoom process.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
-Worker-routed media tools return typed images, audio, video, and files. The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result. Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
+Worker-routed media tools return typed images, audio, video, and files.
+The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result.
+Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
 
-Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total. Result text is limited to 4,194,304 characters and JSON metadata to 64 KiB of serialized ASCII JSON. Unsupported resources or oversized results produce a tool error. Run matching MindRoom revisions in the primary and workers so both use the same result protocol.
+Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total.
+Result text is limited to 4,194,304 characters and JSON metadata to 64 KiB of serialized ASCII JSON.
+Unsupported resources or oversized results produce a tool error.
+Run matching MindRoom revisions in the primary and workers so both use the same result protocol.
 
 ## Worker Scope
 

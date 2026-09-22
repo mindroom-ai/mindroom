@@ -7879,7 +7879,7 @@ text_to_speech("The build succeeded.")
 ### What It Does
 
 `lumalabs` exposes `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-Both calls create a Luma generation job and poll until it completes or times out.
+Both calls create a Luma generation job with the configured model and, by default, poll until it completes or times out.
 `generate_video()` optionally accepts provider-style keyframes, while `image_to_video()` builds the required keyframe structure from one or two image URLs.
 Completed jobs return remote video URL attachments.
 If `wait_for_completion` is false, the current implementation returns `Async generation unsupported`.
@@ -7889,6 +7889,7 @@ If `wait_for_completion` is false, the current implementation returns `Async gen
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `api_key` | `password` | `no` | `null` | Luma AI API key, with `LUMAAI_API_KEY` as the upstream fallback. |
+| `model` | `select` | `no` | `ray-2` | Dream Machine video model: `ray-2` or `ray-flash-2`; explicit `null` uses the default `ray-2`. |
 | `wait_for_completion` | `boolean` | `no` | `true` | Poll until the provider job completes. Setting it to `false` is not useful on this branch because async return is not implemented. |
 | `poll_interval` | `number` | `no` | `3` | Seconds between status polls. |
 | `max_wait_time` | `number` | `no` | `300` | Maximum wait time in seconds before timing out. |
@@ -7903,6 +7904,7 @@ agents:
   motion:
     tools:
       - lumalabs:
+          model: ray-2
           poll_interval: 5
           max_wait_time: 600
 ```
@@ -7918,6 +7920,7 @@ image_to_video(
 
 ### Notes
 
+- The available models follow the [Dream Machine video API](https://docs.lumalabs.ai/docs/video-generation).
 - `image_to_video()` requires remote image URLs, not local file paths.
 - `wait_for_completion: false` does not currently provide a job handle or async response.
 - Use [`gemini`] instead when you specifically want Google's Veo-backed video path.
@@ -13897,11 +13900,16 @@ MindRoom instantiates the class when building agents.
 Set `requires_room_context=True` in tool metadata when the toolkit requires the live Matrix room runtime, including its client, requester, or conversation context.
 The MCP gateway omits these toolkits from discovery and rejects direct schema and invocation requests before constructing them.
 Agent runs without a room also hide these tools using the same metadata.
+These toolkits stay in the primary runtime because workers do not provide live room context.
 This requirement describes runtime compatibility; it does not grant or replace tool authorization.
 
 Set `requires_primary_runtime=True` when a toolkit depends on process-local services or primary-runtime authority and must never be routed to a worker, even if an agent lists it in `worker_tools`.
 This also applies to toolkits that retain session state or an in-memory resource between calls: the generic worker runner creates a fresh toolkit for each request.
-This includes functions that read or mutate an injected `Agent`, `Team`, or `RunContext`. Worker call arguments accept JSON values and paths; unsupported objects are rejected before worker allocation or credential grants. For an SDK function that accepts an `agent` parameter but never uses it, list its function name in `worker_inert_agent_functions`. Only those declared functions receive `None` in place of the injected agent when routed to a worker. Do not use this declaration for functions that depend on agent identity, configuration, or session state.
+This includes functions that read or mutate an injected `Agent`, `Team`, or `RunContext`.
+Worker call arguments accept JSON values and paths; unsupported objects are rejected before worker allocation or credential grants.
+For an SDK function that accepts an `agent` parameter but never uses it, list its function name in `worker_inert_agent_functions`.
+Only those declared functions receive `None` in place of the injected agent when routed to a worker.
+Do not use this declaration for functions that depend on agent identity, configuration, or session state.
 This is distinct from `default_execution_target=PRIMARY`, which is only an overridable default.
 
 ## OAuth providers
@@ -20087,6 +20095,7 @@ Related gaps are grouped below for navigation; separate independent fixes and re
 | Chroma metadata deletion forces equality filters and spans owner collections. | Add operator-aware deletion for one explicitly selected collection. | The scoped batch delete in `knowledge/collections.py`. |
 | Chroma collection deletion returns the same false result for absence and failure. | Preserve typed errors and distinguish already-absent collections from failed deletion. | The existence probe in `knowledge/collections.py`. |
 | Concise PubMed output drops title/year when the abstract is short or absent. | Keep identifying metadata independent of summary truncation. | `tools/pubmed.py`; real parsing/formatting tests cover short, absent, and long abstracts in both output modes. |
+| Luma video creation omits the required model argument in both public methods. | Tracking gap: no matching upstream issue or fix has been verified; pass a configurable model on both creation paths. | `tools/lumalabs.py`; real factory and SDK transport coverage in `tests/test_lumalabs_tool.py`. |
 | Todoist project discovery treats SDK pages as individual projects. | Flatten project pages and serialize SDK date fields safely. | `tools/todoist.py`; project discovery tests cover multiple pages, empty results, and provider errors. |
 | Calendar construction requires broad scopes even when granular scopes cover the operations. | Validate effective permissions per registered operation. | The constructor in `custom_tools/google_calendar.py`. |
 | Byte-only image dimension parsing is private. | Expose a public header parser without file/network I/O or pixel decoding. | `_embedded_image_dimensions` in `openai_models.py`. |
@@ -20157,6 +20166,7 @@ Small owner-adjacent boundaries use the same source records:
 | `tools/pubmed.py` | Concise article formatting that retains title/year at every abstract length. | Existing result-limit behavior, XML parsing, expanded output, and fetch-error text. |
 | `tools/todoist.py` | Page flattening and SDK project serialization for `get_projects`. | Existing credential construction, registered operations, and structured provider errors. |
 | `custom_tools/google_calendar.py` | Broad construction-time scope markers alongside granular credentials. | OAuth scope selection, credential ownership, and tool permissions. |
+| `tools/lumalabs.py` | Bind the required model on each toolkit's SDK generation resource. | Tool configuration selects the model; inherited methods retain polling, video attachments, error results, and function flags. |
 | `agno_compat_provider_errors.py` | Typed cause-chain inspection for ambiguous default-502 errors, including structured SDK stream errors. | Compaction policy is unchanged; `provider_stream_retry.py` owns bounded pre-output retries and streaming media fallback defers transient errors to that owner. |
 | `openai_models.py` | Private byte-only image header parser. | Bounded local decoding, unknown-format fallback, and visual token budgets. |
 | `bedrock_claude.py` | Mantle SDK client factories using private Agno parameter construction. | AWS credentials, explicit endpoint selection, and async client lifetime. |
@@ -22498,18 +22508,24 @@ The `worker_tools` field has three states:
 
 Agent-level `worker_tools` overrides `defaults.worker_tools`.
 Registry-backed tools can be listed in `worker_tools`, and MindRoom will attempt to route them through the worker runtime.
-Tools whose catalog metadata sets `requires_primary_runtime=True` stay in the primary runtime even when listed.
+Tools whose catalog metadata sets `requires_primary_runtime=True` or `requires_room_context=True` stay in the primary runtime even when listed.
 This includes `reasoning`, `daytona`, `mem0`, `slack`, and `claude_agent`, which consume live agent or run state.
-The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls. The generic worker runner creates a fresh toolkit for each request.
+The `browserbase`, `composio`, `duckdb`, `e2b`, `pandas`, `sql`, and `zep` toolkits also stay local because they retain a browser or local shell session, database connection (including in-memory databases), execution result, named dataframe, or generated session identity between calls.
+The generic worker runner creates a fresh toolkit for each request.
 With `MINDROOM_WORKER_BACKEND=static_runner`, a sandbox proxy URL (`MINDROOM_SANDBOX_PROXY_URL`) must be configured for selected execution tools to run.
 Without that URL, explicitly selected worker-routed tools fail closed, subject to the limited `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` fallback described above.
 The `off`, `local`, and `disabled` modes do not override an explicit YAML list.
 If both YAML worker lists are omitted, no environment setting requests routing, and no static proxy URL is configured, simple local installs run tools in the primary MindRoom process.
 With `MINDROOM_WORKER_BACKEND=docker` or `MINDROOM_WORKER_BACKEND=kubernetes`, worker endpoints are resolved dynamically and `MINDROOM_SANDBOX_PROXY_URL` is not used.
 
-Worker-routed media tools return typed images, audio, video, and files. The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result. Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
+Worker-routed media tools return typed images, audio, video, and files.
+The worker reads generated files and downloads public HTTP(S) media URLs before returning inline bytes; the primary runtime never reads a worker path or follows a media URL from the result.
+Downloads use the server-fetch destination checks, including redirects, and reject local and metadata-service destinations.
 
-Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total. Result text is limited to 4,194,304 characters and JSON metadata to 64 KiB of serialized ASCII JSON. Unsupported resources or oversized results produce a tool error. Run matching MindRoom revisions in the primary and workers so both use the same result protocol.
+Each result supports at most eight media items, 10 MiB per item, and 20 MiB of media in total.
+Result text is limited to 4,194,304 characters and JSON metadata to 64 KiB of serialized ASCII JSON.
+Unsupported resources or oversized results produce a tool error.
+Run matching MindRoom revisions in the primary and workers so both use the same result protocol.
 
 ## Worker Scope
 
