@@ -345,10 +345,10 @@ def _raise_when_composed_from_includes(
         raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
     try:
         _, _source_digests, uses_includes = load_yaml_config_source_with_digests(runtime_paths.config_path)
-    except CONFIG_LOAD_USER_ERROR_TYPES:
-        # Without committed include evidence, an unreadable or broken on-disk
-        # config remains recoverable through structured replacement.
-        return
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        # Failed parses can still establish include usage. Keep monolithic
+        # configs recoverable when no include evidence was observed.
+        uses_includes = partial_source_uses_includes(exc) is True
     if uses_includes:
         raise _ConfigComposedFromIncludesError(_CONFIG_COMPOSED_FROM_INCLUDES_MESSAGE)
 

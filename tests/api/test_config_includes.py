@@ -589,17 +589,32 @@ class TestEmptyDirectoryIncludes:
         assert not path.with_name(f"{path.name}.pre-membership-access").exists()
 
 
+@pytest.mark.parametrize(
+    "failing_source",
+    [
+        pytest.param(None, id="valid"),
+        pytest.param("agents: !include missing.yaml\n", id="missing-file"),
+        pytest.param("agents: !include broken.yaml\n", id="malformed-child"),
+        pytest.param("agents: !include_dir_merge_named missing/\n", id="missing-directory"),
+    ],
+)
 @pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
 def test_structured_writes_recheck_includes_before_watcher_reload(
     stale_monolith_app: FastAPI,
     write_kind: str,
+    failing_source: str | None,
 ) -> None:
     """Unpublished include topology must protect every structured writer."""
     before = _snapshot(stale_monolith_app)
     runtime_paths = before.runtime_paths
-    source = runtime_paths.config_path.read_bytes()
     payload = load_config(runtime_paths).authored_model_dump()
     payload["timezone"] = "Europe/Amsterdam"
+    if failing_source is not None:
+        runtime_paths.config_path.with_name("broken.yaml").write_text("operator: [broken\n", encoding="utf-8")
+        runtime_paths.config_path.write_text(failing_source, encoding="utf-8")
+        with pytest.raises(yaml.YAMLError):
+            load_config(runtime_paths)
+    source = runtime_paths.config_path.read_bytes()
 
     if write_kind == "external":
         with pytest.raises(config_lifecycle._ConfigComposedFromIncludesError, match="!include"):
@@ -619,6 +634,36 @@ def test_structured_writes_recheck_includes_before_watcher_reload(
     assert runtime_paths.config_path.read_bytes() == source
     assert _snapshot(stale_monolith_app) is before
     assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
+
+
+@pytest.mark.parametrize("write_kind", ["mutation", "replacement", "external"])
+def test_structured_writes_recover_broken_monolith_before_watcher_reload(
+    stale_monolith_app: FastAPI,
+    write_kind: str,
+) -> None:
+    """A parse failure without include evidence must remain recoverable."""
+    before = _snapshot(stale_monolith_app)
+    runtime_paths = before.runtime_paths
+    runtime_paths.config_path.write_text("agents: [broken\n", encoding="utf-8")
+    payload = copy.deepcopy(before.config_data)
+    payload["timezone"] = "Europe/Amsterdam"
+
+    if write_kind == "external":
+        config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    else:
+        writer = (
+            config_lifecycle.write_committed_config
+            if write_kind == "mutation"
+            else config_lifecycle.replace_committed_config
+        )
+        update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
+        writer(_request_for(stale_monolith_app), update, error_prefix="Failed to save configuration")
+
+    after = _snapshot(stale_monolith_app)
+    assert after.revision == before.revision + 1
+    assert after.uses_includes is False
+    assert after.config_data["timezone"] == "Europe/Amsterdam"
+    assert load_config(runtime_paths).timezone == "Europe/Amsterdam"
 
 
 @pytest.mark.parametrize("operation", ["agent-create", "agent-update", "team-create", "config-patch"])
