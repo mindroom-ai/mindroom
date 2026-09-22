@@ -1894,7 +1894,6 @@ async def test_threaded_schedule_edit_preserves_persisted_placement(
             "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
             return_value=[ids["assistant"]],
         ),
-        patch("mindroom.scheduling._extract_mentioned_agents_from_text", return_value=[]),
         patch("mindroom.scheduling._parse_workflow_schedule", new=AsyncMock(return_value=parsed)),
     ):
         result = await edit_scheduled_task(
