@@ -20,6 +20,7 @@ from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.judgment.answers import JudgmentResult
 from mindroom.judgment.client import PINNED_MODEL, SystemOneClient
+from mindroom.judgment.state import JudgmentMessage
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.response_lifecycle import _QueuedMessageState
@@ -145,7 +146,16 @@ def test_queued_snapshot_keeps_text_until_exact_event_is_consumed() -> None:
 
 
 def _result(request: JudgmentRequest, decision: bool | None) -> JudgmentResult:
-    return JudgmentResult(decision, None, None, "test", 0, None, None, request.state_bytes)
+    return JudgmentResult(
+        None if decision is None else not decision,
+        None,
+        None,
+        "test",
+        0,
+        None,
+        None,
+        request.state_bytes,
+    )
 
 
 @pytest.mark.parametrize("reaction", ["", "   ", "\n", "x" * 65, 123])
@@ -542,9 +552,9 @@ async def test_configured_backends_control_resumed_turns(
                 "model": PINNED_MODEL,
                 "usage": {"input_tokens": 20, "output_tokens": 1},
                 "answers": {
-                    "finish_current_turn": {
+                    "interrupt_current_turn": {
                         "type": "noul",
-                        "noul": ("bad" if outcome == "invalid" else 0.9 if outcome == "finish" else 0.1),
+                        "noul": ("bad" if outcome == "invalid" else 0.1 if outcome == "finish" else 0.9),
                     },
                 },
             },
@@ -555,7 +565,7 @@ async def test_configured_backends_control_resumed_turns(
         TimeoutError()
         if outcome == "timeout"
         else ModelResponse(
-            content=("invalid" if outcome == "invalid" else json.dumps({"decision": outcome == "finish"})),
+            content=("invalid" if outcome == "invalid" else json.dumps({"decision": outcome != "finish"})),
         ),
     )
     monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: judge)
@@ -645,3 +655,73 @@ async def test_existing_tool_checkpoint_survives_judgment_and_cancellation(*, st
     assert "Completed action" in checkpoints[0]
     assert ("WRAP UP NOW" in checkpoints[0]) is (not cancel)
     assert len(model.requests) == (1 if cancel else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("probability", "threshold", "finish"),
+    [
+        (0.05, 0.8, True),
+        (0.2, 0.8, True),
+        (0.21, 0.8, False),
+        (0.7, 0.8, False),
+        (0.9, 0.8, False),
+        (0.1, 0.95, False),
+        (0.0, 1.0, True),
+        (1.0, 0.0, True),
+    ],
+)
+async def test_interrupt_probability_preserves_continuation_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probability: float,
+    threshold: float,
+    *,
+    finish: bool,
+) -> None:
+    """A low-confidence no-interruption answer must still request a handoff."""
+
+    async def post(_client: SystemOneClient, body: bytes) -> bytes:
+        question_id = next(iter(json.loads(body)["questions"]))
+        assert question_id == "interrupt_current_turn"
+        return json.dumps(
+            {
+                "model": PINNED_MODEL,
+                "usage": {"input_tokens": 20, "output_tokens": 1},
+                "answers": {question_id: {"type": "noul", "noul": probability}},
+            },
+        ).encode()
+
+    monkeypatch.setattr(SystemOneClient, "_post", post)
+    config = Config.model_validate(
+        {
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test",
+                    "mid_turn": {
+                        "judgment": {"provider": "typesafe", "threshold": threshold},
+                    },
+                },
+            },
+        },
+    )
+    paths = replace(test_runtime_paths(tmp_path), process_env={"TYPESAFE_API_KEY": "synthetic"})
+    gate = create_mid_turn_gate(config, paths, request_envelope(), prompt="Do the task", has_media=False)
+    assert gate is not None
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),)) is finish
+
+
+@pytest.mark.asyncio
+async def test_mid_turn_preserves_longer_public_conversation_within_byte_budget() -> None:
+    """Earlier instructions survive repeated continuations without truncating to the last few turns."""
+    context = tuple(JudgmentMessage("user", f"Accepted task constraint {i}") for i in range(12))
+    captured = []
+
+    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+        assert request.body is not None
+        captured.append(json.loads(request.body)["state"]["conversation"])
+        return _result(request, True)
+
+    gate = MidTurnGate(active_text="Continue", evaluate=evaluate, conversation_context=context)
+    assert await gate.should_finish((QueuedMessage("$new", "Thanks"),))
+    assert captured[0][:-1] == [{"role": "user", "text": message.text} for message in context]

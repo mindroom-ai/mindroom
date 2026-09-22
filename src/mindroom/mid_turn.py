@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage, JudgmentQuestion, build_judgment_request
+from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -18,19 +19,21 @@ if TYPE_CHECKING:
     from mindroom.judgment.answers import JudgmentResult
     from mindroom.judgment.state import JudgmentRequest
 
+logger = get_logger(__name__)
+
 MID_TURN_QUESTION = JudgmentQuestion(
-    id="finish_current_turn",
-    instructions="May the active task finish before the queued human messages are handled in a later turn?",
+    id="interrupt_current_turn",
+    instructions="Does any newly queued message require an immediate change to, pause of, or stop of the active task?",
     when_true=(
-        "All queued messages are clearly independent of the active task, simple acknowledgements, "
-        "or explicitly ask to continue unchanged. Finishing the original task would still respect the user's intent."
+        "A new message requests stopping or pausing the active task, corrects it, changes a relevant "
+        "requirement, or explicitly asks to switch tasks immediately. A relevant change takes priority "
+        "over praise or 'keep going' in the same message or queue."
     ),
     when_false=(
-        "Any queued message corrects, cancels, redirects, adds a relevant constraint, or changes the active task. "
-        "Also false when context is incomplete, the relationship is unclear, or continued work could conflict "
-        "with the newer instructions. Visible progress is what Matrix had acknowledged when each message "
-        "was queued, not a complete execution log or proof that operations are free of side effects. "
-        "The completed tool batch cannot be undone; wrap_up requests a handoff before further tool use."
+        "The messages acknowledge progress, express thanks, ask to continue unchanged, or request "
+        "NOT interrupting. 'Do not interrupt' means continue; 'do not continue' means stop. "
+        "Unrelated questions or tasks can wait until afterward, even without explicit 'later' wording. "
+        "Mere relevance to the task does not make praise or thanks an interruption."
     ),
 )
 
@@ -58,12 +61,20 @@ class MidTurnGate:
     active_text: str | None
     evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult]]
     instructions: str = ""
+    continuation_threshold: float = 0.8
+    conversation_context: tuple[JudgmentMessage, ...] | None = ()
     visible_response_text: str | None = ""
     on_defer: Callable[[str], Awaitable[None]] | None = None
     _acknowledged: set[str] = field(default_factory=set)
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def bind_conversation_context(self, context: tuple[JudgmentMessage, ...] | None) -> None:
+        """Freeze public history after lock acquisition, invalidating any earlier decision."""
+        self.conversation_context = context
+        self._checked = None
+        self._finish = False
 
     def record_visible_response(self, text: str) -> None:
         """Keep only bounded Matrix-acknowledged text for subsequent queue snapshots."""
@@ -77,13 +88,18 @@ class MidTurnGate:
         await self.on_defer(message.event_id)
 
     async def should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
-        """Only a valid affirmative judgment can suppress the existing wrap-up notice."""
+        """Continue only with sufficient confidence that no interruption is needed."""
         async with self._lock:
             if self._checked == pending:
                 return self._finish
-            texts = (self.active_text, *(message.text for message in pending))
+            texts = (
+                self.active_text,
+                *(message.text for message in pending),
+                *(message.text for message in self.conversation_context or ()),
+            )
             if (
-                not pending
+                self.conversation_context is None
+                or not pending
                 or len(pending) > 8
                 or any(
                     text is None
@@ -116,14 +132,30 @@ class MidTurnGate:
             )
             request = build_judgment_request(
                 MID_TURN_QUESTION,
-                (JudgmentMessage("user", evidence),),
+                (*(self.conversation_context or ()), JudgmentMessage("user", evidence)),
+                max_context_messages=64,
                 instructions=self.instructions,
             )
             finish = False
             if request.complete:
                 try:
                     result = await self.evaluate(request)
-                    finish = result.failure is None and result.decision is True
+                    finish = (
+                        result.failure is None
+                        and result.decision is not None
+                        and (
+                            1 - result.probability >= self.continuation_threshold
+                            if result.probability is not None
+                            else result.decision is False
+                        )
+                    )
+                    logger.info(
+                        "Mid-turn continuation evaluated",
+                        finish_current_turn=finish,
+                        continuation_probability=1 - result.probability if result.probability is not None else None,
+                        continuation_threshold=self.continuation_threshold if result.probability is not None else None,
+                        failure=result.failure,
+                    )
                 except Exception:
                     # Keep the existing behavior; SDK exceptions can contain private inputs.
                     finish = False

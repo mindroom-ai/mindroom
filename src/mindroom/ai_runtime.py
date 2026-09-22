@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from agno.models.response import ModelResponse
 
     from mindroom.history.session_context import ScopeSessionContext
+    from mindroom.judgment.state import JudgmentMessage
     from mindroom.mid_turn import MidTurnGate, QueuedMessage
     from mindroom.timing import DispatchPipelineTiming
 
@@ -40,6 +41,7 @@ __all__ = [
     "AttemptModelRuntime",
     "ModelRunInput",
     "attach_media_to_run_input",
+    "bind_mid_turn_conversation_context",
     "cached_agent_run",
     "copy_run_input",
     "discard_empty_completed_run",
@@ -186,6 +188,13 @@ def queued_message_signal_context(
         yield notice_context
     finally:
         _queued_message_notice_context.reset(token)
+
+
+def bind_mid_turn_conversation_context(context: tuple[JudgmentMessage, ...] | None) -> None:
+    """Bind refreshed public history to this task's active queued-message judge."""
+    notice = _queued_message_notice_context.get()
+    if notice is not None and notice.mid_turn_gate is not None:
+        notice.mid_turn_gate.bind_conversation_context(context)
 
 
 def _has_queued_notice_marker(message: Message) -> bool:
