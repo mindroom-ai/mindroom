@@ -5,6 +5,7 @@
 ### Prerequisites
 - Docker and Docker Compose installed
 - Python 3.12+ installed
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) installed and available in your shell; `deploy.py` and `bridge.py` use its script launcher
 - API keys for LLM providers (OpenAI, Anthropic, etc.)
 - Optional for HTTPS/domain routing: a Traefik container attached to the external Docker network `mynetwork`
 - HTTPS/domain routes only work when Traefik exposes entrypoint names and a certresolver that match the instance labels.
