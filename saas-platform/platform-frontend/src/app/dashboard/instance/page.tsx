@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
-import { listInstances, startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
-import { cache } from '@/lib/cache'
+import { startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
+import { getCachedInstance, loadInstance } from '@/lib/instance-resource'
 import { buildCinnyLoginUrl } from '@/lib/cinny'
 import { getRuntimeConfig } from '@/lib/runtime-config'
 import { logger } from '@/lib/logger'
@@ -14,7 +14,7 @@ type InstanceStatus = Instance['status']
 
 export default function InstancePage() {
   const router = useRouter()
-  const cachedInstance = cache.get('user-instance') as Instance | null
+  const cachedInstance = getCachedInstance()
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
@@ -47,15 +47,7 @@ export default function InstancePage() {
     if (!silent) setLoading(true)
 
     try {
-      const data = await listInstances()
-
-      if (data.instances && data.instances.length > 0) {
-        const newInstance = data.instances[0]
-        setInstance(newInstance)
-        cache.set('user-instance', newInstance)
-      } else {
-        setInstance(null)
-      }
+      setInstance(await loadInstance())
     } catch (error) {
       logger.error('Error fetching instance:', error)
     } finally {

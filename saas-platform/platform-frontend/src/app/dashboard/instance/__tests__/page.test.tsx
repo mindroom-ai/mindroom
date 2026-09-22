@@ -1,21 +1,22 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import InstancePage from '../page'
 import { listInstances } from '@/lib/api'
-import { cache } from '@/lib/cache'
+import { useInstance } from '@/hooks/useInstance'
+import { useAuth } from '@/hooks/useAuth'
+import { cache, instanceCache } from '@/lib/cache'
+
+jest.mock('@/hooks/useAuth', () => ({ useAuth: jest.fn() }))
+jest.mock('@/lib/supabase/client', () => {
+  const client = {}
+  return { createClient: () => client }
+})
 
 jest.mock('@/lib/api', () => ({
   listInstances: jest.fn(),
   restartInstance: jest.fn(),
   startInstance: jest.fn(),
   stopInstance: jest.fn(),
-}))
-
-jest.mock('@/lib/cache', () => ({
-  cache: {
-    get: jest.fn(),
-    set: jest.fn(),
-  },
 }))
 
 jest.mock('@/lib/logger', () => ({
@@ -45,11 +46,13 @@ describe('InstancePage', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
     window.__MINDROOM_CONFIG__ = {
       ...originalConfig!,
       platformDomain: 'mindroom.chat',
     }
-    ;(cache.get as jest.Mock).mockReturnValue(null)
+    cache.clear()
+    instanceCache.clear()
     ;(listInstances as jest.Mock).mockResolvedValue({
       instances: [instanceWithMissingSubdomain],
     })
@@ -57,6 +60,9 @@ describe('InstancePage', () => {
 
   afterEach(() => {
     window.__MINDROOM_CONFIG__ = originalConfig
+    cache.clear()
+    instanceCache.clear()
+    jest.useRealTimers()
   })
 
   it('does not stringify a missing subdomain in instance details or support mailto body', async () => {
@@ -74,4 +80,110 @@ describe('InstancePage', () => {
     expect(supportLink).toHaveAttribute('href', expect.not.stringContaining('null'))
     expect(supportLink).toHaveAttribute('href', expect.stringContaining('subdomain%3A%20%E2%80%94'))
   })
+
+  it('shows the shared cached instance while fetching fresh data', async () => {
+    instanceCache.set('user-instance', instanceWithMissingSubdomain)
+    ;(listInstances as jest.Mock).mockReturnValue(new Promise(() => {}))
+
+    render(<InstancePage />)
+
+    expect(screen.getByText('Instance Details')).toBeInTheDocument()
+    expect(listInstances).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the shared cache when the server no longer returns an instance', async () => {
+    instanceCache.set('user-instance', instanceWithMissingSubdomain)
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
+
+    render(<InstancePage />)
+
+    expect(await screen.findByText('No Instance Found')).toBeInTheDocument()
+    expect(instanceCache.get('user-instance')).toBeNull()
+  })
+
+  it('expires cached instances after fifteen seconds', () => {
+    jest.useFakeTimers()
+    instanceCache.set('user-instance', instanceWithMissingSubdomain)
+    jest.advanceTimersByTime(15001)
+    ;(listInstances as jest.Mock).mockReturnValue(new Promise(() => {}))
+
+    render(<InstancePage />)
+
+    expect(screen.queryByText('Instance Details')).not.toBeInTheDocument()
+    expect(listInstances).toHaveBeenCalledTimes(1)
+  })
+
+  it('polls transitional instances every five seconds and stops when running', async () => {
+    jest.useFakeTimers()
+    ;(listInstances as jest.Mock)
+      .mockResolvedValueOnce({
+        instances: [{ ...instanceWithMissingSubdomain, status: 'provisioning' }],
+      })
+      .mockResolvedValue({ instances: [{ ...instanceWithMissingSubdomain, status: 'running' }] })
+
+    render(<InstancePage />)
+    await act(async () => {})
+    expect(screen.getByText('Setting up your MindRoom instance... This may take a few minutes.')).toBeInTheDocument()
+
+    await act(async () => { jest.advanceTimersByTime(4999) })
+    expect(listInstances).toHaveBeenCalledTimes(1)
+    await act(async () => { jest.advanceTimersByTime(1) })
+    expect(listInstances).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('Instance is running and accessible')).toBeInTheDocument()
+    await act(async () => { jest.advanceTimersByTime(10000) })
+    expect(listInstances).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows loading during manual refresh and then renders the fresh result', async () => {
+    render(<InstancePage />)
+    await screen.findByText('Instance Details')
+    let finishRefresh!: (value: { instances: typeof instanceWithMissingSubdomain[] }) => void
+    ;(listInstances as jest.Mock).mockReturnValue(
+      new Promise(resolve => { finishRefresh = resolve })
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(screen.queryByText('Instance Details')).not.toBeInTheDocument()
+
+    await act(async () => { finishRefresh({ instances: [] }) })
+    expect(screen.getByText('No Instance Found')).toBeInTheDocument()
+    expect(instanceCache.get('user-instance')).toBeNull()
+  })
+  it('shares a hook-loaded instance with the detail page during background refresh', async () => {
+    const hook = renderHook(() => useInstance())
+    await waitFor(() => { expect(hook.result.current.loading).toBe(false) })
+    expect(hook.result.current.instance).toEqual(instanceWithMissingSubdomain)
+    hook.unmount()
+
+    ;(listInstances as jest.Mock).mockReturnValue(new Promise(() => {}))
+    render(<InstancePage />)
+
+    expect(screen.getByText('Instance Details')).toBeInTheDocument()
+    expect(listInstances).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for authentication before fetching and polls the hook every fifteen seconds', async () => {
+    jest.useFakeTimers()
+    ;(useAuth as jest.Mock).mockReturnValue({ user: null, loading: true })
+    const hook = renderHook(() => useInstance())
+    expect(listInstances).not.toHaveBeenCalled()
+
+    ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-1' }, loading: false })
+    await act(async () => { hook.rerender() })
+    expect(listInstances).toHaveBeenCalledTimes(1)
+    expect(hook.result.current.loading).toBe(false)
+
+    await act(async () => { jest.advanceTimersByTime(14999) })
+    expect(listInstances).toHaveBeenCalledTimes(1)
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
+    await act(async () => { jest.advanceTimersByTime(1) })
+    expect(listInstances).toHaveBeenCalledTimes(2)
+    expect(hook.result.current.instance).toBeNull()
+    expect(instanceCache.get('user-instance')).toBeNull()
+
+    hook.unmount()
+    await act(async () => { jest.advanceTimersByTime(15000) })
+    expect(listInstances).toHaveBeenCalledTimes(2)
+  })
+
 })

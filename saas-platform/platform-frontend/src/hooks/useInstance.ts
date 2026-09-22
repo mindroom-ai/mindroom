@@ -3,8 +3,8 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from './useAuth'
-import { listInstances, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
-import { instanceCache } from '@/lib/cache'
+import { restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
+import { cacheInstance, getCachedInstance, loadInstance } from '@/lib/instance-resource'
 import { logger } from '@/lib/logger'
 
 export type { Instance }
@@ -29,7 +29,7 @@ const DEV_INSTANCE: Instance | null =
     : null
 
 export function useInstance() {
-  const cachedInstance = instanceCache.get('user-instance') as Instance | null
+  const cachedInstance = getCachedInstance()
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
   const { user, loading: authLoading } = useAuth()
@@ -45,7 +45,7 @@ export function useInstance() {
     // Use dev instance if in development mode
     if (DEV_INSTANCE) {
       setInstance(DEV_INSTANCE)
-      instanceCache.set('user-instance', DEV_INSTANCE)
+      cacheInstance(DEV_INSTANCE)
       setLoading(false)
       return
     }
@@ -53,7 +53,7 @@ export function useInstance() {
     // Get user's instance through the API endpoint
     const fetchInstance = async (isInitial = false) => {
       // Check for cached data right before deciding to show loading
-      const currentCache = instanceCache.get('user-instance') as Instance | null
+      const currentCache = getCachedInstance()
 
       // Only show loading on initial fetch when there's no cached data
       if (isInitial && !currentCache && !instance) {
@@ -61,16 +61,7 @@ export function useInstance() {
       }
 
       try {
-        const data = await listInstances()
-        if (data.instances && data.instances.length > 0) {
-          const newInstance = data.instances[0]
-          setInstance(newInstance)
-          instanceCache.set('user-instance', newInstance)
-        } else {
-          // No instances found
-          setInstance(null)
-          instanceCache.delete('user-instance')
-        }
+        setInstance(await loadInstance())
       } catch (error) {
         logger.error('Error fetching instance:', error)
         // Show more details about the error
