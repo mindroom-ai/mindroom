@@ -11295,7 +11295,7 @@
       "dependencies": [
         "ddgs"
       ],
-      "description": "Search Google for web results using the WebSearch backend",
+      "description": "Search web and news through DDGS with a requested Google backend and automatic fallback",
       "display_name": "Google Search",
       "docs_url": "https://docs.agno.com/tools/toolkits/search/websearch",
       "function_names": [
