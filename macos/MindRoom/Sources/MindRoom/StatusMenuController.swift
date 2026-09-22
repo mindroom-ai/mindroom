@@ -53,45 +53,49 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     private func refresh() {
         statusItem?.button?.toolTip = "Local agents: \(runner.serviceStatus.state.shortTitle)\nComputer access: \(desktop.desktopStatusLabel)"
         menu.removeAllItems()
-        menu.addItem(disabledItem("MindRoom"))
-        menu.addItem(disabledItem("Local agents: \(runner.serviceStatus.state.shortTitle)"))
-        menu.addItem(disabledItem("Computer access: \(desktop.desktopStatusLabel)"))
+        menu.addItem(.sectionHeader(title: "MindRoom"))
+        menu.addItem(actionItem("Open MindRoom…", symbol: "macwindow", action: #selector(openWindow)))
+        menu.addItem(actionItem("Open Chat", symbol: "bubble.left.and.bubble.right", action: #selector(openChat)))
+        menu.addItem(.separator())
+        menu.addItem(actionItem(
+            "Local agents: \(runner.serviceStatus.state.shortTitle)…",
+            symbol: "server.rack", action: #selector(openLocalAgents)
+        ))
         if let title = runner.runningCommandTitle {
             menu.addItem(disabledItem("\(title)…"))
         } else if let feedback = runner.feedback, !feedback.result.isSuccess {
-            menu.addItem(actionItem("Last Action Failed — View Details…", action: #selector(openLocalAgents)))
+            menu.addItem(actionItem("Last Action Failed…", symbol: "exclamationmark.triangle", action: #selector(openLocalAgents)))
         }
-        menu.addItem(.separator())
-        menu.addItem(actionItem("Open MindRoom…", action: #selector(openWindow)))
-        menu.addItem(actionItem("Open Chat", action: #selector(openChat)))
-        menu.addItem(.separator())
-        if runner.serviceStatus.state.needsSetup {
-            menu.addItem(actionItem("Set Up Local Agents…", action: #selector(openLocalAgents)))
-        } else if let action = runner.serviceStatus.state.primaryAction {
+        if !runner.serviceStatus.state.needsSetup, let action = runner.serviceStatus.state.primaryAction {
             let title = action == .stopService ? "Stop Local Agents" : "Start Local Agents"
-            let item = actionItem(title, action: #selector(toggleLocalAgents))
+            let item = actionItem(title, symbol: action == .stopService ? "stop.circle" : "play.circle", action: #selector(toggleLocalAgents))
             item.isEnabled = !runner.isRunningCommand
             menu.addItem(item)
-        } else {
-            menu.addItem(actionItem("Refresh Local Agent Status", action: #selector(refreshStatus)))
+        } else if !runner.serviceStatus.state.needsSetup {
+            menu.addItem(actionItem("Refresh Local Agent Status", symbol: "arrow.clockwise", action: #selector(refreshStatus)))
         }
+        menu.addItem(actionItem(
+            "Computer access: \(desktop.desktopStatusLabel)…",
+            symbol: "desktopcomputer", action: #selector(openComputerAccess)
+        ))
         if desktop.status.authority.controlAvailable {
-            menu.addItem(actionItem("Revoke Computer Control", action: #selector(revokeComputerControl)))
+            menu.addItem(actionItem("Revoke Computer Control", symbol: "hand.raised", action: #selector(revokeComputerControl)))
         }
         if desktop.status.canStopBridge {
-            menu.addItem(actionItem("Stop Computer Access", action: #selector(stopComputerAccess)))
+            menu.addItem(actionItem("Stop Computer Access", symbol: "stop.circle", action: #selector(stopComputerAccess)))
         }
-        menu.addItem(actionItem("Computer Access…", action: #selector(openComputerAccess)))
         menu.addItem(.separator())
-        menu.addItem(actionItem("Settings…", action: #selector(openSettings)))
-        menu.addItem(actionItem("Quit MindRoom App", action: #selector(quit)))
-        menu.addItem(disabledItem(desktop.status.canStopBridge
-                                  ? "Computer access stops; local agents keep running."
-                                  : "Local agents keep running after quitting."))
+        menu.addItem(actionItem("Settings…", symbol: "gearshape", action: #selector(openSettings)))
+        let quitItem = actionItem("Quit MindRoom", symbol: "power", action: #selector(quit))
+        quitItem.toolTip = desktop.status.canStopBridge
+            ? "Computer access stops; local agents keep running."
+            : "Local agents keep running after quitting."
+        menu.addItem(quitItem)
     }
 
-    private func actionItem(_ title: String, action: Selector) -> NSMenuItem {
+    private func actionItem(_ title: String, symbol: String, action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         item.target = self
         return item
     }
