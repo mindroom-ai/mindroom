@@ -74,6 +74,10 @@ async function takeScreenshot() {
       'section[aria-label="Agents workspace"] [role="button"][aria-pressed="true"]',
       { visible: true, timeout: 10000 },
     );
+    await page.waitForSelector(
+      'section[aria-label="Agents workspace"] [aria-busy="false"] #display_name',
+      { visible: true, timeout: 10000 },
+    );
 
     const selectedPath = path.join(screenshotsDir, `mindroom-dashboard-agents-${timestamp}.png`);
     await page.screenshot({
@@ -88,6 +92,10 @@ async function takeScreenshot() {
       visible: true,
       timeout: 10000,
     });
+    await page.waitForSelector(
+      'section[aria-label="Models workspace"] [aria-busy="false"] [data-testid="models-table-scroll-container"]',
+      { visible: true, timeout: 10000 },
+    );
     const modelsPath = path.join(screenshotsDir, `mindroom-dashboard-models-${timestamp}.png`);
     await page.screenshot({
       path: modelsPath,
