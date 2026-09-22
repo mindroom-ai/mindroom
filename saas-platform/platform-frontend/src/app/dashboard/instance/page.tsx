@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { useAuth } from '@/hooks/useAuth'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
 import { startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { getCachedInstance, loadInstance } from '@/lib/instance-resource'
@@ -13,8 +14,14 @@ import { Card, CardHeader, CardSection } from '@/components/ui/Card'
 type InstanceStatus = Instance['status']
 
 export default function InstancePage() {
+  const { user, loading: authLoading } = useAuth()
+  const userId = user?.id ?? null
+  return <InstanceDetails key={userId ?? ''} userId={userId} authLoading={authLoading} />
+}
+
+function InstanceDetails({ userId, authLoading }: { userId: string | null; authLoading: boolean }) {
   const router = useRouter()
-  const cachedInstance = getCachedInstance()
+  const cachedInstance = getCachedInstance(userId)
   const [instance, setInstance] = useState<Instance | null>(cachedInstance)
   const [loading, setLoading] = useState(!cachedInstance)
   const [refreshing, setRefreshing] = useState(false)
@@ -23,6 +30,7 @@ export default function InstancePage() {
 
 
   useEffect(() => {
+    if (authLoading || !userId) return
     // Only fetch if no cached data, otherwise fetch silently in background
     if (!cachedInstance) {
       fetchInstance()
@@ -30,7 +38,7 @@ export default function InstancePage() {
       // Fetch silently in background to get fresh data
       fetchInstance(true)
     }
-  }, []) // Run only on mount
+  }, [userId, authLoading])
 
   useEffect(() => {
     // Poll for updates while provisioning or restarting
@@ -44,10 +52,11 @@ export default function InstancePage() {
   }, [instance?.status])
 
   const fetchInstance = async (silent = false) => {
+    if (authLoading || !userId) return
     if (!silent) setLoading(true)
 
     try {
-      setInstance(await loadInstance())
+      setInstance(await loadInstance(userId))
     } catch (error) {
       logger.error('Error fetching instance:', error)
     } finally {

@@ -1,10 +1,11 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import InstancePage from '../page'
-import { listInstances } from '@/lib/api'
+import { listInstances, type Instance } from '@/lib/api'
 import { useInstance } from '@/hooks/useInstance'
 import { useAuth } from '@/hooks/useAuth'
 import { cache, instanceCache } from '@/lib/cache'
+import { cacheInstance, getCachedInstance, loadInstance } from '@/lib/instance-resource'
 
 jest.mock('@/hooks/useAuth', () => ({ useAuth: jest.fn() }))
 jest.mock('@/lib/supabase/client', () => {
@@ -25,7 +26,7 @@ jest.mock('@/lib/logger', () => ({
   },
 }))
 
-const instanceWithMissingSubdomain = {
+const instanceWithMissingSubdomain: Instance = {
   id: 'inst-1',
   instance_id: 1,
   subscription_id: 'sub-1',
@@ -82,7 +83,7 @@ describe('InstancePage', () => {
   })
 
   it('shows the shared cached instance while fetching fresh data', async () => {
-    instanceCache.set('user-instance', instanceWithMissingSubdomain)
+    cacheInstance('user-1', instanceWithMissingSubdomain)
     ;(listInstances as jest.Mock).mockReturnValue(new Promise(() => {}))
 
     render(<InstancePage />)
@@ -92,18 +93,18 @@ describe('InstancePage', () => {
   })
 
   it('clears the shared cache when the server no longer returns an instance', async () => {
-    instanceCache.set('user-instance', instanceWithMissingSubdomain)
+    cacheInstance('user-1', instanceWithMissingSubdomain)
     ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
 
     render(<InstancePage />)
 
     expect(await screen.findByText('No Instance Found')).toBeInTheDocument()
-    expect(instanceCache.get('user-instance')).toBeNull()
+    expect(getCachedInstance('user-1')).toBeNull()
   })
 
   it('expires cached instances after fifteen seconds', () => {
     jest.useFakeTimers()
-    instanceCache.set('user-instance', instanceWithMissingSubdomain)
+    cacheInstance('user-1', instanceWithMissingSubdomain)
     jest.advanceTimersByTime(15001)
     ;(listInstances as jest.Mock).mockReturnValue(new Promise(() => {}))
 
@@ -147,7 +148,7 @@ describe('InstancePage', () => {
 
     await act(async () => { finishRefresh({ instances: [] }) })
     expect(screen.getByText('No Instance Found')).toBeInTheDocument()
-    expect(instanceCache.get('user-instance')).toBeNull()
+    expect(getCachedInstance('user-1')).toBeNull()
   })
   it('shares a hook-loaded instance with the detail page during background refresh', async () => {
     const hook = renderHook(() => useInstance())
@@ -179,11 +180,52 @@ describe('InstancePage', () => {
     await act(async () => { jest.advanceTimersByTime(1) })
     expect(listInstances).toHaveBeenCalledTimes(2)
     expect(hook.result.current.instance).toBeNull()
-    expect(instanceCache.get('user-instance')).toBeNull()
+    expect(getCachedInstance('user-1')).toBeNull()
 
     hook.unmount()
     await act(async () => { jest.advanceTimersByTime(15000) })
     expect(listInstances).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not show a previous account instance after an account switch', async () => {
+    const page = render(<InstancePage />)
+    await screen.findByText('Instance Details')
+
+    ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-2' }, loading: false })
+    ;(listInstances as jest.Mock).mockReturnValue(new Promise(() => {}))
+    page.rerender(<InstancePage />)
+
+    expect(screen.queryByText('Instance Details')).not.toBeInTheDocument()
+    expect(getCachedInstance('user-2')).toBeNull()
+  })
+
+  it('keeps a late previous-account hook response out of the current account', async () => {
+    let finishFirst!: (value: { instances: typeof instanceWithMissingSubdomain[] }) => void
+    ;(listInstances as jest.Mock).mockReturnValueOnce(
+      new Promise(resolve => { finishFirst = resolve })
+    )
+    const hook = renderHook(() => useInstance())
+    ;(useAuth as jest.Mock).mockReturnValue({ user: { id: 'user-2' }, loading: false })
+    ;(listInstances as jest.Mock).mockResolvedValue({ instances: [] })
+    await act(async () => { hook.rerender() })
+    expect(hook.result.current.instance).toBeNull()
+
+    await act(async () => { finishFirst({ instances: [instanceWithMissingSubdomain] }) })
+    expect(hook.result.current.instance).toBeNull()
+    expect(getCachedInstance('user-2')).toBeNull()
+  })
+
+  it('does not let a late load replace a newer cached result, including an empty result', async () => {
+    let finishFirst!: (value: { instances: typeof instanceWithMissingSubdomain[] }) => void
+    ;(listInstances as jest.Mock)
+      .mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve }))
+      .mockResolvedValueOnce({ instances: [] })
+    const first = loadInstance('user-1')
+    await loadInstance('user-1')
+    finishFirst({ instances: [instanceWithMissingSubdomain] })
+    await first
+
+    expect(getCachedInstance('user-1')).toBeNull()
   })
 
 })
