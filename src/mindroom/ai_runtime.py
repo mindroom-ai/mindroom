@@ -324,7 +324,7 @@ def _append_queued_notice_after_resumed_tools(messages: list[Message], *, notice
         _append_queued_notice_if_needed(messages=messages, function_call_results=results, notice_text=notice_text)
 
 
-async def _judge_queued_notice(messages: list[Message], *, completed_tools: tuple[str, ...], notice_text: str) -> None:
+async def _judge_queued_notice(messages: list[Message], *, notice_text: str) -> None:
     context = _queued_message_notice_context.get()
     if context is None or context.mid_turn_gate is None or context.state is None:
         return
@@ -333,7 +333,7 @@ async def _judge_queued_notice(messages: list[Message], *, completed_tools: tupl
         return
     if not context.notice_fired:
         try:
-            finish = await context.mid_turn_gate.should_finish(pending, completed_tools=completed_tools)
+            finish = await context.mid_turn_gate.should_finish(pending)
         except Exception:
             # Agno logs and ignores post-tool callback failures, so restore the default here.
             finish = False
@@ -350,9 +350,6 @@ async def _judge_resumed_tool_notice(messages: list[Message], *, notice_text: st
     if results is not None and not any(message.stop_after_tool_call for message in results):
         await _judge_queued_notice(
             messages,
-            completed_tools=tuple(
-                message.tool_name for message in results if message.tool_name and not message.tool_call_error
-            ),
             notice_text=notice_text,
         )
 
@@ -829,9 +826,6 @@ def install_queued_message_notice_hook(model: Model, *, notice_text: str) -> Non
             return
         await _judge_queued_notice(
             messages,
-            completed_tools=tuple(
-                message.tool_name for message in results if message.tool_name and not message.tool_call_error
-            ),
             notice_text=notice_text,
         )
 

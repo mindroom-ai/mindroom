@@ -87,6 +87,53 @@ def _result(request: JudgmentRequest, decision: bool | None) -> JudgmentResult:
 
 
 @pytest.mark.asyncio
+async def test_queued_message_freezes_visible_progress_at_admission() -> None:
+    """Later stream edits must not change the context of an earlier human message."""
+    evidence: list[dict] = []
+
+    async def evaluate(request: JudgmentRequest) -> JudgmentResult:
+        assert request.body is not None
+        evidence.append(json.loads(json.loads(request.body)["state"]["conversation"][0]["text"]))
+        return _result(request, True)
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
+    state = _QueuedMessageState(mid_turn_gate=gate)
+    gate.record_visible_response("I found the file.\n🔧 `read_file` [1]")
+    state.add_waiting_human_message("$first", text="Use that file")
+    first = state.pending_message_snapshot()
+    gate.record_visible_response("I found the file. Now editing it.")
+    assert await gate.should_finish(first)
+    assert evidence[0]["queued_messages"] == [
+        {"text": "Use that file", "visible_response": "I found the file.\n🔧 `read_file` [1]"},
+    ]
+    assert await gate.should_finish(first)
+    assert len(evidence) == 1
+    state.add_waiting_human_message("$second", text="Stop editing")
+    assert await gate.should_finish(state.pending_message_snapshot())
+    assert evidence[1]["queued_messages"][1]["visible_response"] == "I found the file. Now editing it."
+    assert "completed_tools" not in evidence[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "progress",
+    [None, "x" * 16001, '{"password": "fake_secret_for_test"}'],
+    ids=["unknown", "oversized", "secret"],
+)
+async def test_unknown_or_unsafe_visible_progress_keeps_wrap_up(progress: str | None) -> None:
+    """Unavailable or sensitive user-visible context must not leave the runtime."""
+
+    async def evaluate(_request: JudgmentRequest) -> JudgmentResult:
+        pytest.fail("Incomplete visible progress must not reach inference")
+
+    gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
+    gate.visible_response_text = progress
+    state = _QueuedMessageState(mid_turn_gate=gate)
+    state.add_waiting_human_message("$queued", text="Thanks")
+    assert not await gate.should_finish(state.pending_message_snapshot())
+
+
+@pytest.mark.asyncio
 async def test_finish_reuses_exact_queue_but_rechecks_a_new_message() -> None:
     """A later correction must not inherit approval given to unrelated chatter."""
     requests: list[dict] = []
@@ -98,18 +145,16 @@ async def test_finish_reuses_exact_queue_but_rechecks_a_new_message() -> None:
 
     gate = MidTurnGate(active_text="Install the dependencies", evaluate=evaluate)
     first = (QueuedMessage("$one", "Thanks"),)
-    assert await gate.should_finish(first, completed_tools=("shell",))
-    assert await gate.should_finish(first, completed_tools=("file",))
+    assert await gate.should_finish(first)
+    assert await gate.should_finish(first)
     assert len(requests) == 1
     assert not await gate.should_finish(
         (*first, QueuedMessage("$two", "Use the other version")),
-        completed_tools=("shell",),
     )
     assert len(requests) == 2
     evidence = requests[0]["state"]["conversation"][0]["text"]
     assert "Install the dependencies" in evidence
     assert "Thanks" in evidence
-    assert "shell" in evidence
     assert "$one" not in evidence
 
 
@@ -122,7 +167,7 @@ async def test_incomplete_or_sensitive_queue_keeps_wrap_up(text: str | None) -> 
         pytest.fail("Incomplete context must not reach inference")
 
     gate = MidTurnGate(active_text="Do the original task", evaluate=evaluate)
-    assert not await gate.should_finish((QueuedMessage("$one", text),), completed_tools=("shell",))
+    assert not await gate.should_finish((QueuedMessage("$one", text),))
 
 
 @pytest.mark.asyncio
@@ -134,7 +179,7 @@ async def test_nonapproval_keeps_wrap_up(decision: bool | None) -> None:
         return _result(request, decision)
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    assert not await gate.should_finish((QueuedMessage("$one", "Please change it"),), completed_tools=())
+    assert not await gate.should_finish((QueuedMessage("$one", "Please change it"),))
 
 
 @pytest.mark.asyncio
@@ -149,7 +194,6 @@ async def test_json_credentials_are_checked_before_evidence_encoding(*, active: 
     gate = MidTurnGate(active_text=credential_text if active else "Do the task", evaluate=evaluate)
     assert not await gate.should_finish(
         (QueuedMessage("$new", "Thanks" if active else credential_text),),
-        completed_tools=(),
     )
 
 
@@ -164,7 +208,7 @@ async def test_judgment_cancellation_propagates_without_caching_approval() -> No
         raise AssertionError
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
-    task = asyncio.create_task(gate.should_finish((QueuedMessage("$one", "Thanks"),), completed_tools=()))
+    task = asyncio.create_task(gate.should_finish((QueuedMessage("$one", "Thanks"),)))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -186,6 +230,7 @@ async def test_real_tool_loop_judges_before_next_provider_request(
     evidence: list[dict] = []
 
     def queue_followup() -> str:
+        gate.record_visible_response("Work started.\n🔧 `queue_followup` [1]")
         state.add_waiting_human_message("$new", text="Thanks for doing this")
         return "Private tool result must not reach the judge"
 
@@ -195,6 +240,7 @@ async def test_real_tool_loop_judges_before_next_provider_request(
         return _result(request, finish)
 
     gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
+    state.mid_turn_gate = gate
     model = ParticipationModel(
         ModelResponse(
             tool_calls=[
@@ -315,8 +361,8 @@ async def test_wrap_up_remains_settled_after_later_queue_changes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_denied_resumed_tool_is_not_reported_as_successful_work() -> None:
-    """A denial or failure result resolves the call but is not a completed action."""
+async def test_resumed_tools_do_not_expose_invisible_execution_details() -> None:
+    """Approval results do not add model-private execution details to visible context."""
     state = _QueuedMessageState()
     state.add_waiting_human_message("$queued", text="Thanks")
     evidence: list[dict] = []
@@ -333,7 +379,7 @@ async def test_denied_resumed_tool_is_not_reported_as_successful_work() -> None:
     install_queued_message_notice_hook(model, notice_text="WRAP UP NOW")
     with queued_message_signal_context(state, mid_turn_gate=MidTurnGate(active_text="Do the task", evaluate=evaluate)):
         await model.aresponse(messages)
-    assert evidence[0]["completed_tools"] == []
+    assert "completed_tools" not in evidence[0]
     assert any(message.content == "WRAP UP NOW" for message in model.requests[0]["messages"])
 
 

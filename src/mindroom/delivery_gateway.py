@@ -433,6 +433,7 @@ class StreamingDeliveryRequest:
     streaming_cls: type[StreamingResponse] = StreamingResponse
     pipeline_timing: DispatchPipelineTiming | None = None
     visible_event_id_callback: Callable[[str], None] | None = None
+    visible_progress_callback: Callable[[str], None] | None = None
     preserve_existing_visible_on_empty_terminal: bool = False
     completed_edit_record: Callable[[], TurnRecord | None] | None = None
     allow_new_terminal_message: Callable[[], bool] | None = None
@@ -2070,6 +2071,7 @@ class DeliveryGateway:
             tool_trace_collector=request.tool_trace_collector,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
+            visible_progress_callback=request.visible_progress_callback,
             latest_thread_event_id=latest_thread_event_id,
             preserve_existing_visible_on_empty_terminal=(
                 request.preserve_existing_visible_on_empty_terminal

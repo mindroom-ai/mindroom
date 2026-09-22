@@ -28,7 +28,8 @@ MID_TURN_QUESTION = JudgmentQuestion(
     when_false=(
         "Any queued message corrects, cancels, redirects, adds a relevant constraint, or changes the active task. "
         "Also false when context is incomplete, the relationship is unclear, or continued work could conflict "
-        "with the newer instructions. Tool names do not prove that operations are free of side effects. "
+        "with the newer instructions. Visible progress is what Matrix had acknowledged when each message "
+        "was queued, not a complete execution log or proof that operations are free of side effects. "
         "The completed tool batch cannot be undone; wrap_up requests a handoff before further tool use."
     ),
 )
@@ -47,6 +48,7 @@ class QueuedMessage:
 
     event_id: str
     text: str | None
+    visible_response: str | None = ""
 
 
 @dataclass
@@ -56,11 +58,16 @@ class MidTurnGate:
     active_text: str | None
     evaluate: Callable[[JudgmentRequest], Awaitable[JudgmentResult]]
     instructions: str = ""
+    visible_response_text: str | None = ""
     _checked: tuple[QueuedMessage, ...] | None = None
     _finish: bool = False
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    async def should_finish(self, pending: tuple[QueuedMessage, ...], *, completed_tools: tuple[str, ...]) -> bool:
+    def record_visible_response(self, text: str) -> None:
+        """Keep only bounded Matrix-acknowledged text for subsequent queue snapshots."""
+        self.visible_response_text = text if len(text) <= MAX_REQUEST_BYTES else None
+
+    async def should_finish(self, pending: tuple[QueuedMessage, ...]) -> bool:
         """Only a valid affirmative judgment can suppress the existing wrap-up notice."""
         async with self._lock:
             if self._checked == pending:
@@ -81,15 +88,20 @@ class MidTurnGate:
             ):
                 self._checked, self._finish = pending, False
                 return False
-            if any(redact_sensitive_text(name) != name for name in completed_tools):
+            if any(
+                message.visible_response is None
+                or len(message.visible_response) > MAX_REQUEST_BYTES
+                or redact_sensitive_text(message.visible_response) != message.visible_response
+                for message in pending
+            ):
                 self._checked, self._finish = pending, False
                 return False
             evidence = json.dumps(
                 {
                     "active_request": self.active_text,
-                    "queued_messages": [message.text for message in pending],
-                    "completed_tools": completed_tools,
-                    "tool_side_effects": "unknown; completed work is preserved and further tools may have side effects",
+                    "queued_messages": [
+                        {"text": message.text, "visible_response": message.visible_response} for message in pending
+                    ],
                 },
                 ensure_ascii=False,
             )

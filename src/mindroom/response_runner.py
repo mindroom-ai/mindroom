@@ -551,13 +551,16 @@ def _mid_turn_for_request(request: ResponseRequest, config: Config, runtime_path
             )
         ),
     )
-    return create_mid_turn_gate(
+    gate = create_mid_turn_gate(
         config,
         runtime_paths,
         request.response_envelope,
         prompt=request.prompt,
         has_media=has_media,
     )
+    if gate is not None and request.existing_event_id and not request.existing_event_is_placeholder:
+        gate.visible_response_text = None
+    return gate
 
 
 def _participation_for_request(
@@ -4142,6 +4145,9 @@ class ResponseRunner:
                                 streaming_cls=ReplacementStreamingResponse,
                                 pipeline_timing=request.pipeline_timing,
                                 visible_event_id_callback=_note_visible_response_event_id,
+                                visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
+                                    delivery_target,
+                                ),
                             ),
                         )
                         event_id = transport_outcome.last_physical_stream_event_id
@@ -4675,6 +4681,9 @@ class ResponseRunner:
                         streaming_cls=StreamingResponse,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=note_visible_response_event_id,
+                        visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
+                            runtime.resolved_target,
+                        ),
                         allow_new_terminal_message=lambda: (
                             runtime.participation is None or runtime.participation.approved
                         ),

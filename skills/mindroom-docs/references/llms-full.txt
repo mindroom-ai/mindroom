@@ -1236,14 +1236,20 @@ The LLM returns a boolean rather than a confidence score.
 Judgments reuse the shared participation concurrency limits and backend deadlines.
 
 The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
-It receives the active request text, up to eight pending human messages, completed tool names, and the configured guidance.
+It receives the active request text, up to eight pending human messages, and the configured guidance.
 For interactive selections, the active request includes the original question and selected option.
-Tool outputs, arguments, system prompts, memory, and attachment contents are excluded.
-Tool side effects are treated as unknown; a tool name does not establish that continuing is harmless.
-Missing text, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.
+Each pending message includes a snapshot of the active reply text last acknowledged by Matrix when that message entered the queue.
+That snapshot includes published partial text and tool names when those names appear in the visible reply, but excludes buffered text and later edits.
+It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
+Earlier conversation history, private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
+The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
+Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
+An existing reply whose visible text is unavailable retains wrap-up until a new Matrix update is acknowledged.
+Missing request text, unavailable progress, media or attachment references, detected credentials, malformed Unicode, and requests exceeding 16 KB retain wrap-up without sending incomplete context to the judge.
 Message text can still contain identifying or private information.
 
 A finish decision is reused for the same pending messages within the active response.
+Subsequent streaming updates do not replace those messages' frozen progress snapshots.
 A later queued message requires a new decision, and a queue change during inference cannot inherit approval for unseen input.
 Once a wrap-up notice is sent, later messages cannot reverse that handoff.
 The queued messages remain queued and are handled through the existing dispatch path after the active response releases its lock.

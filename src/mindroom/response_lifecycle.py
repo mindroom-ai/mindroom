@@ -142,6 +142,7 @@ class _QueuedMessageState:
     """Track queued human ingress while one response lifecycle holds the lock."""
 
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
+    mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
     _event: asyncio.Event = field(default_factory=asyncio.Event)
     _idle_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -174,7 +175,8 @@ class _QueuedMessageState:
     def add_waiting_human_message(self, source_event_id: str, *, text: str | None = None) -> bool:
         if source_event_id in self._pending_messages:
             return False
-        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text)
+        progress = self.mid_turn_gate.visible_response_text if self.mid_turn_gate is not None else ""
+        self._pending_messages[source_event_id] = QueuedMessage(source_event_id, text, progress)
         self._event.set()
         return True
 
@@ -329,6 +331,13 @@ class ResponseLifecycleCoordinator:
         signal = _QueuedMessageState()
         self._thread_queued_signals[lifecycle_key] = signal
         return signal
+
+    def visible_progress_callback(self, target: MessageTarget) -> Callable[[str], None] | None:
+        """Bind acknowledged Matrix text to the active response's opted-in judge."""
+        signal = self._thread_queued_signals.get(target.lifecycle_key)
+        if signal is None or signal.mid_turn_gate is None:
+            return None
+        return signal.mid_turn_gate.record_visible_response
 
     @staticmethod
     def _should_signal_queued_message(
@@ -498,10 +507,12 @@ class ResponseLifecycleCoordinator:
                     notice=notice,
                     queued_signal=queued_signal,
                 )
+                queued_signal.mid_turn_gate = mid_turn_gate
                 with queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context:
                     try:
                         return await locked_operation(target)
                     finally:
+                        queued_signal.mid_turn_gate = None
                         await finalize_queued_notice_response_turn_async(notice_context)
             finally:
                 if lock_acquired:
