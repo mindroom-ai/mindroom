@@ -1,7 +1,7 @@
 """Webhook handlers for external services."""
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, NotRequired, TypedDict
 
 from backend.config import STRIPE_WEBHOOK_SECRET, logger, stripe
 from backend.deps import ensure_supabase, limiter
@@ -50,14 +50,31 @@ def _get_billing_cycle_from_price(price: dict) -> str:
     raise ValueError(msg)
 
 
-def _subscription_fields(subscription: dict) -> dict[str, Any]:
+class _SubscriptionFields(TypedDict):
+    """Shared subscription persistence fields and event-specific additions."""
+
+    stripe_subscription_id: str
+    stripe_price_id: str | None
+    tier: str
+    status: str
+    max_agents: int
+    max_messages_per_day: int
+    trial_ends_at: str | None
+    updated_at: str
+    current_period_start: NotRequired[str]
+    current_period_end: NotRequired[str]
+    account_id: NotRequired[str]
+    cancelled_at: NotRequired[str | None]
+
+
+def _subscription_fields(subscription: dict) -> _SubscriptionFields:
     """Project the fields shared by subscription creation and update events."""
     price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
     tier = _get_tier_from_price(price_data)
     _get_billing_cycle_from_price(price_data)
     limits = get_plan_limits_from_metadata(tier)
 
-    subscription_data = {
+    subscription_data: _SubscriptionFields = {
         "stripe_subscription_id": subscription["id"],
         "stripe_price_id": price_data.get("id"),
         "tier": tier,
