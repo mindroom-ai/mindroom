@@ -8,7 +8,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - **Core MindRoom** (`src/mindroom/`) - AI agent orchestration system with Matrix integration
 - **SaaS Platform** (`saas-platform/`) - Kubernetes-based platform for hosting MindRoom instances
   - Platform Backend (FastAPI) - API server for subscriptions, instances, SSO
-  - Platform Frontend (Next.js 15) - Dashboard for managing instances
+  - Platform Frontend (Next.js 16) - Dashboard for managing instances
   - Instance deployment via Helm charts
 
 ## Latest Frontier Models
@@ -292,7 +292,7 @@ Matrix sync callback
 
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`
-- **Platform Frontend**: Next.js 15 with centralized API client in `saas-platform/platform-frontend/src/lib/api.ts`
+- **Platform Frontend**: Next.js 16 with centralized API client in `saas-platform/platform-frontend/src/lib/api.ts`
 - **Authentication**: SSO via HttpOnly cookies across subdomains
 - **Deployment**: Kubernetes with Helm charts, dual-mode support (platform/standalone)
 - **Database**: Supabase with comprehensive RLS policies
@@ -304,7 +304,7 @@ Matrix sync callback
 | `src/mindroom/` | Core agent runtime (Matrix orchestrator, routing, memory, tools) |
 | `frontend/` | Core MindRoom dashboard (Vite + React) |
 | `saas-platform/platform-backend/` | SaaS control-plane API (FastAPI) |
-| `saas-platform/platform-frontend/` | SaaS portal UI (Next.js 15) |
+| `saas-platform/platform-frontend/` | SaaS portal UI (Next.js 16) |
 | `saas-platform/supabase/` | Supabase migrations, policies, seeds |
 | `cluster/` | Terraform + Helm for hosted deployments |
 | `local/` | Docker Compose helpers for local dev stacks |
