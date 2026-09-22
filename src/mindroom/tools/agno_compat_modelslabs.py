@@ -36,6 +36,21 @@ def _check_provider_http_status(response: requests.Response, result: object) -> 
     response.raise_for_status()
 
 
+def _finite_provider_eta(value: object) -> int | float | None:
+    """Accept finite provider estimates, including numeric strings, without booleans."""
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return value if math.isfinite(value) else None
+    except OverflowError:
+        return None
+
+
 # AGNO_COMPAT: ModelsLab polling loses provider identity and reports unsuccessful waits as success.
 # Reason: Agno 3.0.9 sends the artifact UUID to fetch and discards the wait outcome and completed URLs.
 # Upstream issue: Tracking gap; no matching issue found on September 22, 2026.
@@ -50,7 +65,8 @@ def _check_provider_http_status(response: requests.Response, result: object) -> 
 # ::test_http_provider_rejection_preserves_explanation,
 # ::test_fractional_polling_settings_from_runtime_config,
 # ::test_zero_eta_checks_once, ::test_completed_fetch_urls_replace_queued_links,
-# ::test_numeric_provider_eta_is_polled, ::test_retryable_fetch_error_preserves_job, and nonwaiting/error controls.
+# ::test_numeric_provider_eta_is_polled, ::test_retryable_fetch_error_preserves_job,
+# ::test_provider_retry_after_stops_wait, and nonwaiting/error controls.
 class ModelsLabCompletionTools(ModelsLabTools):
     """Repair completion waiting while retaining upstream media construction."""
 
@@ -79,19 +95,14 @@ class ModelsLabCompletionTools(ModelsLabTools):
         if "error" in result:
             return ToolResult(content=f"Error: {result['error']}")
 
-        eta = result.get("eta")
-        if isinstance(eta, str):
-            try:
-                eta = float(eta)
-            except ValueError:
-                eta = None
+        eta = _finite_provider_eta(result.get("eta"))
         if result.get("status") == "success" or self.file_type in (FileType.PNG, FileType.JPG, FileType.WAV):
             url_links = result.get("output") or result.get("future_links", [])
         else:
             url_links = result.get("future_links") or result.get("output", [])
         content = f"{self.file_type.value.capitalize()} generated successfully"
         if result.get("status") != "success":
-            if isinstance(eta, int | float) and not isinstance(eta, bool) and math.isfinite(eta):
+            if eta is not None:
                 job_id = result.get("id")
                 if job_id is None:
                     content = "Cannot wait for media: provider response has no job ID. The job may still complete."
@@ -129,6 +140,8 @@ class ModelsLabCompletionTools(ModelsLabTools):
         attempt_count = min(max(1, math.ceil(eta + self.add_to_eta)), math.ceil(self.max_wait_time))
         last_fetch_error: str | None = None
         for attempt in range(attempt_count):
+            response: requests.Response | None = None
+            retryable = False
             try:
                 response = requests.post(
                     f"{self.fetch_url}/{job_id}",
@@ -136,18 +149,15 @@ class ModelsLabCompletionTools(ModelsLabTools):
                     headers={"Content-Type": "application/json"},
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
+                retryable = response.status_code == 429 or response.status_code >= 500
                 result = response.json()
                 _check_provider_http_status(response, result)
-                if (
-                    response.status_code == 429
-                    or response.status_code >= 500
-                    or result.get("code")
-                    in (
-                        "rate_limited",
-                        "upstream_unavailable",
-                        "server_error",
-                    )
-                ):
+                retryable = retryable or result.get("code") in (
+                    "rate_limited",
+                    "upstream_unavailable",
+                    "server_error",
+                )
+                if retryable:
                     last_fetch_error = str(
                         result.get("message")
                         or result.get("error")
@@ -167,6 +177,17 @@ class ModelsLabCompletionTools(ModelsLabTools):
             except RequestException as exc:
                 # A failed status check does not establish the remote job's outcome.
                 last_fetch_error = str(exc)
+            if retryable and response is not None:
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    return _JobWaitResult(
+                        content=(
+                            "Stopped waiting because the provider requested a retry delay. "
+                            f"Retry-After: {retry_after}. "
+                            "The provider job may still complete; queued media links are retained. "
+                            f"Last status-check error: {last_fetch_error}"
+                        ),
+                    )
             if attempt + 1 < attempt_count:
                 time.sleep(1)
         content = "Waiting for media timed out. The provider job may still complete; queued media links are retained."

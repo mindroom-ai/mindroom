@@ -486,6 +486,7 @@ If `wait_for_completion` is enabled and the response includes a finite numeric E
 Confirmed completion returns the fetched output URLs, replacing queued placeholders when present.
 A terminal provider rejection returns its message without unavailable media artifacts.
 Retryable service and rate-limit errors use the remaining polling attempts; exhaustion retains queued media links and the last status-check error.
+A retryable fetch response with a nonempty `Retry-After` header ends the current wait early, returning queued links, the provider explanation, and the requested retry delay without another fetch or an additional sleep.
 A timeout does not mean the remote job failed.
 If a queued response lacks the ID or finite numeric ETA needed for polling, the tool reports that completion could not be checked.
 With completion waiting enabled, generation and fetch requests each use 60-second connect and read timeouts.

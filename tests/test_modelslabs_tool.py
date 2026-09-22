@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 class _ModelsLabReply:
     status_code: int
     body: dict[str, object] | bytes
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -44,6 +45,7 @@ class _ModelsLabTransport:
         response = requests.Response()
         reply = payload if isinstance(payload, _ModelsLabReply) else _ModelsLabReply(200, payload)
         response.status_code = reply.status_code
+        response.headers.update(reply.headers)
         response._content = reply.body if isinstance(reply.body, bytes) else json.dumps(reply.body).encode()
         response.request = request
         response.url = request.url
@@ -641,3 +643,117 @@ def test_retryable_fetch_error_preserves_job(
         assert "Provider temporarily unavailable" in result.content
         assert "success" not in result.content.lower()
         assert [item.url for item in result.images] == [queued_url]
+
+
+@pytest.mark.parametrize(
+    ("http_status", "error_code", "unreadable"),
+    [
+        (429, None, False),
+        (503, None, False),
+        (200, "rate_limited", False),
+        (200, "upstream_unavailable", False),
+        (200, "server_error", False),
+        (429, None, True),
+        (503, None, True),
+    ],
+)
+@pytest.mark.parametrize("retry_after", ["30", "Wed, 23 Sep 2026 12:00:00 GMT", "not-a-delay", "0", " "])
+def test_provider_retry_after_stops_wait(
+    provider: _ModelsLabTransport,
+    http_status: int,
+    error_code: str | None,
+    unreadable: bool,
+    retry_after: str,
+) -> None:
+    """Explicit provider cooldowns end this wait without early polling or sleeping."""
+    media_url = "https://media.example.test/queued.gif"
+    error_body: dict[str, object] | bytes = {"status": "error", "message": "Provider temporarily unavailable"}
+    if error_code is not None:
+        error_body["code"] = error_code
+    if unreadable:
+        error_body = b"<html>Temporarily unavailable</html>"
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 2, "future_links": [media_url]},
+        _ModelsLabReply(http_status, error_body, {"retry-after": retry_after}),
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 2
+    assert provider.sleeps == []
+    assert "Stopped waiting" in result.content
+    assert f"Retry-After: {retry_after}" in result.content
+    assert "may still" in result.content.lower()
+    assert "success" not in result.content.lower()
+    if not unreadable:
+        assert "Provider temporarily unavailable" in result.content
+    assert result.images is not None
+    assert [item.url for item in result.images] == [media_url]
+
+
+@pytest.mark.parametrize("http_status", [200, 429])
+@pytest.mark.parametrize("retry_after", [None, ""])
+def test_rate_limit_without_retry_after_can_recover(
+    provider: _ModelsLabTransport,
+    http_status: int,
+    retry_after: str | None,
+) -> None:
+    """Absent or empty cooldown headers preserve the existing bounded retry path."""
+    media_url = "https://media.example.test/completed.gif"
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 2},
+        _ModelsLabReply(
+            http_status,
+            {"status": "error", "code": "rate_limited", "message": "Provider rate limit reached"},
+            headers,
+        ),
+        {"status": "success", "output": [media_url]},
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 3
+    assert provider.sleeps == [1]
+    assert "success" in result.content.lower()
+    assert result.images is not None
+    assert [item.url for item in result.images] == [media_url]
+
+
+def test_retry_after_without_retryable_failure_does_not_stop_polling(provider: _ModelsLabTransport) -> None:
+    """Account-limit headers alone do not turn a processing result into refusal."""
+    media_url = "https://media.example.test/completed.gif"
+    provider.payloads = [
+        {"status": "processing", "id": 74123, "eta": 2},
+        _ModelsLabReply(200, {"status": "processing"}, {"Retry-After": "30"}),
+        {"status": "success", "output": [media_url]},
+    ]
+    tool = modelslabs_tools()(
+        api_key="test-api-key",
+        file_type="gif",
+        wait_for_completion=True,
+        add_to_eta=0,
+        max_wait_time=2,
+    )
+
+    result = tool.generate_media("Make a test pattern")
+
+    assert len(provider.requests) == 3
+    assert provider.sleeps == [1]
+    assert "success" in result.content.lower()
+    assert result.images is not None
+    assert [item.url for item in result.images] == [media_url]
