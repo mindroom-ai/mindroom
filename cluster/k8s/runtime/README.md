@@ -206,6 +206,29 @@ The init container removes the target path before copying unless `overwrite: fal
 The script runs in the same bundle image, with MindRoom storage mounted at `storage.mountPath`.
 Raw `initContainers`, `extraVolumes`, and `extraVolumeMounts` still work for deployments that need lower-level Kubernetes wiring.
 
+For a writable configuration tree, transport the candidate to one directory and let the runtime initialize a separate active directory:
+
+```yaml
+contentBundles:
+  - name: config-source
+    image: registry.example.org/team/config@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    targetPath: /app/agent_data/config-source
+
+config:
+  source: file
+  path: /app/agent_data/active-config/config.yaml
+  bootstrapBundlePath: /app/agent_data/config-source
+
+workers:
+  backend: kubernetes
+```
+
+`config.bootstrapBundlePath` is optional and disabled by default. It adds `--bootstrap-config-bundle` to `mindroom run`. Native installation and validation run in the main runtime container, with its image, mounts, and environment, before runtime startup. The target directory and filename come from `config.path`; the source must contain that filename at its root. The target must be its own directory below `storage.mountPath`, not the storage root or a ConfigMap mount.
+
+Initialization preserves any existing active directory, including authored edits, across restarts and content image changes. Bundle transport can refresh the separate source directory normally. To activate a changed revision explicitly, run `mindroom config install-bundle SOURCE --target TARGET --json` in the runtime container and confirm the returned fingerprint using `mindroom config check-applied`. Restore `TARGET.previous` using the same install command with its recorded `--expected-digest` if application fails. See the [CLI reference](../../../docs/cli.md#config-install-bundle) for drift protection, rollback, and filesystem limits. Content images need no MindRoom binary.
+
+Bootstrap cannot be combined with `workers.backend: static_runner`: its sidecar starts concurrently and could capture the environment before installation. The chart rejects this combination until startup ordering is guaranteed.
+
 Reference copied plugins from `config.yaml` with absolute paths:
 
 ```yaml

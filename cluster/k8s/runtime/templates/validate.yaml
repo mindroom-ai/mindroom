@@ -38,6 +38,19 @@
 {{- fail "matrix.registrationToken cannot be set when matrix.managedAccountAuth=appservice" -}}
 {{- end -}}
 {{- $configSource := include "mindroom-runtime.configSource" . -}}
+{{- if .Values.config.bootstrapBundlePath -}}
+{{- if eq .Values.workers.backend "static_runner" -}}
+{{- fail "config.bootstrapBundlePath cannot be combined with workers.backend=static_runner; sidecar startup is concurrent" -}}
+{{- end -}}
+{{- $storageRoot := clean .Values.storage.mountPath -}}
+{{- $target := dir (clean .Values.config.path) -}}
+{{- if or (ne $configSource "file") (not (hasPrefix (printf "%s/" $storageRoot) $target)) -}}
+{{- fail "config.bootstrapBundlePath requires config.source=file and a config directory below storage.mountPath" -}}
+{{- end -}}
+{{- if not (hasPrefix "/" .Values.config.bootstrapBundlePath) -}}
+{{- fail "config.bootstrapBundlePath must be absolute" -}}
+{{- end -}}
+{{- end -}}
 {{- if not (or (eq $configSource "configMap") (eq $configSource "file")) -}}
 {{- fail "config.source must be either configMap or file" -}}
 {{- end -}}
