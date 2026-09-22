@@ -50,6 +50,32 @@ def _get_billing_cycle_from_price(price: dict) -> str:
     raise ValueError(msg)
 
 
+def _subscription_fields(subscription: dict) -> dict[str, Any]:
+    """Project the fields shared by subscription creation and update events."""
+    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
+    tier = _get_tier_from_price(price_data)
+    _get_billing_cycle_from_price(price_data)
+    limits = get_plan_limits_from_metadata(tier)
+
+    subscription_data = {
+        "stripe_subscription_id": subscription["id"],
+        "stripe_price_id": price_data.get("id"),
+        "tier": tier,
+        "status": subscription["status"],
+        "max_agents": limits.get("max_agents", 1),
+        "max_messages_per_day": limits.get("max_messages_per_day", 100),
+        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+    # Add period dates if available
+    if start := subscription.get("current_period_start"):
+        subscription_data["current_period_start"] = _timestamp_to_iso(start)
+    if end := subscription.get("current_period_end"):
+        subscription_data["current_period_end"] = _timestamp_to_iso(end)
+    return subscription_data
+
+
 def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
     """Handle Stripe subscription creation events.
 
@@ -69,31 +95,8 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         return False, None
 
     account_id = account_result.data["id"]
-
-    # Extract subscription details
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
-    tier = _get_tier_from_price(price_data)
-    _billing_cycle = _get_billing_cycle_from_price(price_data)
-    limits = get_plan_limits_from_metadata(tier)
-
-    # Prepare subscription data
-    subscription_data = {
-        "account_id": account_id,
-        "stripe_subscription_id": subscription["id"],
-        "stripe_price_id": price_data.get("id"),
-        "tier": tier,
-        "status": subscription["status"],
-        "max_agents": limits.get("max_agents", 1),
-        "max_messages_per_day": limits.get("max_messages_per_day", 100),
-        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
-        "updated_at": datetime.now(UTC).isoformat(),
-    }
-
-    # Add period dates if available
-    if start := subscription.get("current_period_start"):
-        subscription_data["current_period_start"] = _timestamp_to_iso(start)
-    if end := subscription.get("current_period_end"):
-        subscription_data["current_period_end"] = _timestamp_to_iso(end)
+    subscription_data = _subscription_fields(subscription)
+    subscription_data["account_id"] = account_id
 
     # Check if subscription already exists for this account
     existing = sb.table("subscriptions").select("id").eq("account_id", account_id).execute()
@@ -105,7 +108,12 @@ def handle_subscription_created(subscription: dict) -> tuple[bool, str | None]:
         # Create new subscription
         sb.table("subscriptions").insert(subscription_data).execute()
 
-    logger.info("Subscription created for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    logger.info(
+        "Subscription created for account %s: tier=%s, status=%s",
+        account_id,
+        subscription_data["tier"],
+        subscription["status"],
+    )
     return True, account_id
 
 
@@ -129,35 +137,18 @@ def handle_subscription_updated(subscription: dict) -> tuple[bool, str | None]:
 
     account_id = account_result.data["id"]
 
-    # Extract subscription details
-    price_data = subscription["items"]["data"][0]["price"] if subscription.get("items", {}).get("data") else {}
-    tier = _get_tier_from_price(price_data)
-    _billing_cycle = _get_billing_cycle_from_price(price_data)
-    limits = get_plan_limits_from_metadata(tier)
-
-    # Prepare subscription data
-    subscription_data = {
-        "stripe_subscription_id": subscription["id"],
-        "stripe_price_id": price_data.get("id"),
-        "tier": tier,
-        "status": subscription["status"],
-        "max_agents": limits.get("max_agents", 1),
-        "max_messages_per_day": limits.get("max_messages_per_day", 100),
-        "trial_ends_at": _maybe_timestamp_to_iso(subscription.get("trial_end")),
-        "cancelled_at": _maybe_timestamp_to_iso(subscription.get("canceled_at")),
-        "updated_at": datetime.now(UTC).isoformat(),
-    }
-
-    # Add period dates if available
-    if start := subscription.get("current_period_start"):
-        subscription_data["current_period_start"] = _timestamp_to_iso(start)
-    if end := subscription.get("current_period_end"):
-        subscription_data["current_period_end"] = _timestamp_to_iso(end)
+    subscription_data = _subscription_fields(subscription)
+    subscription_data["cancelled_at"] = _maybe_timestamp_to_iso(subscription.get("canceled_at"))
 
     # Update subscription with tenant validation
     sb.table("subscriptions").update(subscription_data).eq("account_id", account_id).execute()
 
-    logger.info("Subscription updated for account %s: tier=%s, status=%s", account_id, tier, subscription["status"])
+    logger.info(
+        "Subscription updated for account %s: tier=%s, status=%s",
+        account_id,
+        subscription_data["tier"],
+        subscription["status"],
+    )
     return True, account_id
 
 
