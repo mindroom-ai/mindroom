@@ -10,8 +10,8 @@ FastAPI service that provides:
 - Dashboard metrics and monitoring
 
 ### Key Design Decisions
-- Single-file architecture for simplicity
-- Direct kubectl commands for instance management
+- `platform-backend/src/main.py` composes modular `backend/routes/` and `backend/services/`
+- Shared provisioner service uses kubectl and Helm for instance lifecycle operations
 - Stateless design (all state in database)
 - Admin authentication via Supabase JWT
 
@@ -19,14 +19,15 @@ FastAPI service that provides:
 
 Next.js application serving:
 - Customer self-service portal
-- Admin dashboard (React Admin)
+- Admin dashboard built with custom Next.js and React components
 - Account management
 - Billing and subscription UI
 - Instance configuration
 
 ### Architecture Patterns
 - Server-side rendering for performance
-- API routes for backend communication
+- Ordinary browser requests use `platform-frontend/src/lib/api.ts` to call the platform API directly
+- Server authentication callback, session validation, admin page guards, and CSP-report route
 - Supabase client for authentication
 - Responsive design with Tailwind CSS
 
