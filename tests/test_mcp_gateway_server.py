@@ -261,6 +261,43 @@ async def test_timeout_is_bounded_and_does_not_retry_execution() -> None:
         assert calls == 1
 
 
+async def test_gateway_body_timeout_cancels_pending_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stalled request body returns 408 and cancels its read before tool dispatch."""
+    cancelled = asyncio.Event()
+    requested_timeouts: list[float | None] = []
+    original_timeout = asyncio.timeout
+
+    def expire_body_deadline(delay: float | None) -> asyncio.Timeout:
+        requested_timeouts.append(delay)
+        return original_timeout(0)
+
+    async def stalled_body() -> AsyncIterator[bytes]:
+        yield b"{"
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
+        pytest.fail("Incomplete request reached dispatcher")
+
+    async with _client(dispatch) as client:
+        with monkeypatch.context() as timing:
+            # Exercise the real timeout cancellation without waiting ten seconds.
+            timing.setattr(asyncio, "timeout", expire_body_deadline)
+            async with original_timeout(1):
+                response = await client.post(
+                    "/mcp",
+                    content=stalled_body(),
+                    headers={"Content-Type": "application/json"},
+                )
+
+    assert requested_timeouts == [10]
+    assert response.status_code == 408
+    assert response.json() == {"error": "request_timeout"}
+    assert cancelled.is_set()
+
+
 async def test_gateway_rejects_oversized_requests_and_wrong_origins() -> None:
     """Protocol limits and origin checks also protect cancellation interception."""
 

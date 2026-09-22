@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -39,6 +40,8 @@ from mindroom.script_runs.store import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.script_runs.broker import ScriptToolCallRequest
 
 
@@ -357,6 +360,42 @@ async def test_script_gateway_rejects_oversized_request_before_broker(monkeypatc
 
     assert response.status_code == 413
     assert broker.submitted is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_bytes", [0, 1], ids=["exact_limit", "overflow"])
+async def test_script_gateway_bounds_chunked_requests_without_content_length(extra_bytes: int) -> None:
+    """Streamed calls obey the 64 KiB cap before broker admission, including at the boundary."""
+    broker = _GatewayBroker(
+        submit_receipt=_receipt(ScriptCallState.COMPLETED),
+        get_receipt=_receipt(ScriptCallState.COMPLETED),
+    )
+    body = json.dumps(_payload()).encode().ljust(65536, b" ")
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield body[:32768]
+        yield body[32768:]
+        if extra_bytes:
+            yield b" "
+            pytest.fail("Read past the overflowing chunk")
+
+    async with AsyncClient(transport=ASGITransport(app=_app(broker)), base_url="http://test") as client:
+        response = await client.post(
+            "/api/script-gateway/calls",
+            content=chunks(),
+            headers={"Authorization": "Bearer secret-token", "Content-Type": "application/json"},
+        )
+
+    assert "content-length" not in response.request.headers
+    if extra_bytes:
+        assert response.status_code == 413
+        assert response.json() == {"detail": "Script call request is too large."}
+        assert broker.submitted is None
+    else:
+        assert response.status_code == 200
+        assert broker.submitted is not None
+        assert broker.submitted.arguments == {"url": "https://example.org/"}
+        assert response.json()["call_id"] == "call-1"
 
 
 @pytest.mark.asyncio
