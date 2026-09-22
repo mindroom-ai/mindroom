@@ -69,7 +69,7 @@ if TYPE_CHECKING:
             type="string[]",
             required=False,
             default=None,
-            description="Restrict tool calls to these subreddits (case-insensitive)",
+            description="Restrict posts and replies to these subreddits (case-insensitive); reads are unaffected",
         ),
     ],
     dependencies=["praw"],

@@ -196,22 +196,28 @@ For example, `"👀"` means the message was seen and deferred; it remains queued
 Omit the setting or use `null` to keep deferrals invisible.
 Like participation's `decline_reaction`, the key must be a nonblank string of at most 64 characters.
 Each message is acknowledged at most once per active response, and stable Matrix transaction IDs prevent duplicate reactions on replay.
-Negative, failed, timed-out, cancelled, or superseded judgments do not trigger the reaction.
+Judgments that request wrap-up, fail, time out, are cancelled, or are superseded do not trigger the reaction.
 Reaction delivery is best effort; failures do not change the judgment, and a correction arriving during delivery still requests wrap-up.
 
-The question is whether the active task may finish before the queued messages are handled.
-Only an affirmative answer suppresses the notice; a negative answer, abstention, timeout, missing credentials, exhausted capacity, or backend error keeps the normal wrap-up behavior.
-The TypeSafe threshold defaults to `0.8` and has not been calibrated for this task.
-The LLM returns a boolean rather than a confidence score.
+The judge asks whether any queued message requires an immediate change, pause, or stop.
+Acknowledgements, praise, thanks, "continue," and "do not interrupt" allow continuing; corrections and relevant changes take priority, even alongside praise.
+Unrelated requests wait for a later turn unless the user requests an immediate switch.
+For TypeSafe, continuation requires `1 - P(interrupt) >= threshold`; the default `0.8` permits interruption probabilities up to `0.2`.
+For the LLM backend, an explicit `false` answer permits continuation.
+Abstentions, timeouts, missing credentials, exhausted capacity, and backend errors retain the normal wrap-up behavior.
 Judgments reuse the shared participation concurrency limits and backend deadlines.
 
 The check runs between completed tool batches, including resumed approved tools, without interrupting a tool already running.
-It receives the active request text, up to eight pending human messages, and the configured guidance.
+It receives the active request text, preceding public conversation text, up to eight pending human messages, and the configured guidance.
+Conversation history is refreshed after acquiring the response lock and stops before the active request, so resumed requests such as "continue" retain earlier task instructions and accepted corrections.
+Later messages remain separate queued input; private model history is not used.
 For interactive selections, the active request includes the original question and selected option.
 Each pending message includes a snapshot of the active reply text last acknowledged by Matrix when that message entered the queue.
 That snapshot includes published partial text and tool names when those names appear in the visible reply, but excludes buffered text and later edits.
 It represents the server-published view at queue admission, not proof of which update the sender had read on their device.
-Earlier conversation history, private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
+Private tool results and arguments, system prompts, memory, attachment contents, and rich tool-trace metadata are excluded.
+Missing or partial conversation history, earlier media, more than 63 earlier messages, and context exceeding the 16 KB request limit retain wrap-up rather than silently dropping earlier instructions.
+Room-mode turns currently have no public conversation snapshot and retain normal wrap-up; empty history is sufficient only for a proven new thread.
 The agent's published prose can describe its findings; that visible text is included even when it summarizes tool results.
 Tool side effects are treated as unknown; visible progress does not establish that continuing is harmless.
 An existing reply whose visible text is unavailable retains wrap-up until a new Matrix update is acknowledged.
@@ -446,6 +452,9 @@ Set the API key for each provider you use in `config.yaml`:
 | `OLLAMA_HOST` | Ollama (host URL, not a key) |
 | `EMBEDDER_API_KEY` | Dedicated semantic-search embedder key (optional; falls back to the shared `OPENAI_API_KEY`) |
 | `OPENAI_BASE_URL` | Base URL for OpenAI-compatible APIs (e.g., local inference servers) |
+
+For `provider: openai` models, `OPENAI_BASE_URL` can come from the config-adjacent `.env` or the exported process environment; the exported value takes precedence.
+A model's `extra_kwargs.base_url` overrides this environment setting, and `extra_kwargs.client_params.base_url` overrides the model endpoint when constructing SDK clients.
 
 All API key variables also support a `_FILE` suffix for file-based secrets (e.g., `ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic-api-key`).
 See [Model Configuration — File-based Secrets](https://docs.mindroom.chat/configuration/models/#file-based-secrets) for details.
@@ -903,7 +912,7 @@ Access migration fails without changing files or creating a backup when any `!in
 See [Authorization](https://docs.mindroom.chat/authorization/) for the current access model.
 
 The root Space invitation roster is the union of managed-room `invite_users`, and those invitees do not automatically receive Space admin power.
-Root Space admin reconciliation is grant-only and preserves existing Matrix admins.
+The runtime preserves existing Space admins without adding human admins; managing Space children in a Matrix client requires sufficient existing Matrix power in that Space.
 Demote stale Space admins manually in a Matrix client when needed.
 
 ## Event Journal
