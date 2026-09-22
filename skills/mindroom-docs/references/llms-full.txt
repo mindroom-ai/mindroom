@@ -18790,7 +18790,8 @@ MindRoom's architecture consists of several key components working together.
 | `worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `bot.py` | AgentBot and TeamBot runtime shells for Matrix lifecycle and sync callbacks |
-| `matrix/journal_ingress.py` | The boundary where Matrix events become durable facts; nio provenance decides actionable vs context-only |
+| `matrix/durable_ingestion.py` | Validates owned batches, invokes journal admission, runs ordered hooks/callbacks, and acknowledges nio |
+| `matrix/journal_ingress.py` | Typed event classification from nio provenance and reconstruction of stored events |
 | `matrix/media.py` | Shared Matrix media encryption preparation, upload, download, and decryption helpers |
 | `matrix/encrypted_file.py` | Dependency-free encrypted-file serialization shared by uploads, desktop, and runtime media |
 | `event_journal/` | Durable ownership of admitted Matrix events, conversation projection, and delivery outbox |
@@ -18875,7 +18876,9 @@ Tach visibility rules keep compatibility internals behind their owning boundarie
 
 ## Data Flow
 
-1. **Message arrives** from the Matrix homeserver and is committed by `matrix/journal_ingress.py` before nio is told it was accepted; `journal_dispatch.py` then hands it through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome
+1. **Message arrives** from the Matrix homeserver; `matrix/durable_ingestion.py` validates the owned batch, invokes the journal transaction owner to commit it, runs ordered hooks/callbacks, and acknowledges nio.
+   `matrix/journal_ingress.py` supplies typed classification from nio provenance and replay reconstruction.
+   `journal_dispatch.py` hands admitted events through `bot.py` to `turn_controller.py`, which owns the turn from ingress to recorded outcome.
 2. **Input is validated, normalized, and resolved**: `ingress_validation.py` checks trust and the effective requester, deduplicates handled event ids, and drops trusted router echoes; `inbound_turn_normalizer.py` shapes raw text, voice, and media into canonical turn inputs, and `conversation_resolver.py` resolves thread identity and history; `!commands` are control inputs that dispatch directly here instead of entering coalescing
 3. **Messages are ordered and coalesced**: `ingress_lanes.py` delivers each sender's messages in receipt order (late-ready voice/STT waits in the lane), and `coalescing.py` batches each sender's live conversation burst.
    Ordinary text completes an utterance and dispatches immediately; adaptive text waits its configured quiet period.
@@ -19360,30 +19363,26 @@ main() entry
 └────────┬─────────┘
          │
          ▼
-┌──────────────────────────────────────┐
-│  Auxiliary Tasks (auto-restart)      │
-│ ─────────────────────────────────────│
-│ • config watcher (file polling)      │
-│ • skills watcher (skill cache)       │
-│ • API server (if enabled)            │
-│  (each wrapped in                    │
-│   _run_auxiliary_task_forever)        │
-└───────────────┬──────────────────────┘
-                │
-                ▼
-┌──────────────────────────────────────┐
-│  Bot Sync Tasks (asyncio.gather)     │
-│ ─────────────────────────────────────│
-│ • One sync loop per bot              │
-│ • sync_forever_with_restart()        │
-│ • Awaited until shutdown             │
-└──────────────────────────────────────┘
+┌───────────────────────────────────────────┐
+│ Auxiliary watchers (auto-restart)         │
+│ • config, plugins, and skills             │
+│ • _run_auxiliary_task_forever             │
+└─────────────────────┬─────────────────────┘
+                      │
+                      ▼
+┌───────────────────────────────────────────┐
+│ Runtime completion monitor                │
+│ • asyncio.wait(..., FIRST_COMPLETED)      │
+│ • orchestrator, shutdown, optional API    │
+│ • unexpected API exit fails the runtime   │
+└───────────────────────────────────────────┘
 ```
 
 **Key details:**
 
 - **Entity order**: Router first, then agents, then teams
 - **Room setup** (`_setup_rooms_and_memberships`): Resolve/create rooms and the root Space, join the router, reconcile managed policy once, then invite and join the remaining identities
+- **Runtime lifetime**: The orchestrator waits for explicit shutdown while individual bot sync tasks can be replaced; the completion monitor does not await only the original sync-task generation.
 - **Sync loops**: Each bot runs `sync_forever_with_restart()` with automatic retry; `matrix_sync.mode: classic` uses Classic `/v3/sync`, while `sliding` uses MSC4186 Simplified Sliding Sync on a homeserver advertising `org.matrix.simplified_msc3575`
 - **Internal user identity**: `mindroom_user.username` is the account-creation request; runtime authorization uses the persisted actual Matrix ID
 
@@ -21702,8 +21701,8 @@ curl http://localhost:8765/api/health
 MindRoom stores data in the `mindroom_data` directory by default:
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite), optionally rooted at `MINDROOM_SESSION_STORAGE_PATH`
-- `learning/` - Per-agent Agno Learning state (SQLite, persistent across restarts)
-- `chroma/` - ChromaDB vector store for agent/team memories
+- `agents/*/learning/` - Per-agent Agno Learning state when enabled (SQLite, persistent across restarts)
+- `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `knowledge_db/` - Knowledge base vector stores
 - `tracking/` - Durable response, callback-obligation, and lifecycle-hook state used to prevent duplicate work across restarts
 - `credentials/` - Synchronized secrets from `.env`
@@ -21711,7 +21710,11 @@ MindRoom stores data in the `mindroom_data` directory by default:
 - `matrix_state.yaml` - Matrix connection state
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
 
+These agent paths describe ordinary shared agents; private agents use their resolved private state roots.
+`MINDROOM_SESSION_STORAGE_PATH` relocates session storage only, leaving learning and memory at their agent state roots.
+
 Keep `tracking/` on persistent storage and include it in backups.
+Include the primary storage directory in backups, with any `learning/` and Mem0 `chroma/` directories under shared-agent or resolved private-instance state roots.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and include it in backups too.
 
 Before opening an owned agent or team session database, MindRoom checks whether its session table contains the columns required by the installed Agno version.
