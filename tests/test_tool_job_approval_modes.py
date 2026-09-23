@@ -9,12 +9,17 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agno.agent import Agent
+from agno.agent import _tools as agent_tools
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ModelResponse
+from agno.run import RunContext
 from agno.run.agent import RunOutput
 from agno.run.base import RunStatus
 from agno.run.team import TeamRunOutput
+from agno.session.agent import AgentSession
+from agno.session.team import TeamSession
 from agno.team import Team
+from agno.team import _tools as team_tools
 from agno.tools import Toolkit
 
 from mindroom.config.agent import AgentConfig
@@ -26,6 +31,7 @@ from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.wait_timeout import record_tool_wait_mode, saved_tool_wait_mode
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
@@ -45,6 +51,57 @@ async def _output(operation: Awaitable[RunOutput | TeamRunOutput] | AsyncIterato
             result = event
     assert result is not None
     return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("team", [False, True])
+@pytest.mark.parametrize("positional", [False, True])
+async def test_sdk_preparation_preserves_wait_modes_with_either_call_style(
+    tmp_path: Path,
+    *,
+    team: bool,
+    positional: bool,
+) -> None:
+    """Supported SDK positional calls carry the same saved ownership as keyword calls."""
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    run = TeamRunOutput(run_id="saved", metadata={}) if team else RunOutput(run_id="saved", metadata={})
+    run_context = RunContext(run_id="saved", session_id="session", session_state={}, metadata={})
+    record_tool_wait_mode(run.metadata, "saved", "call", "native")
+    if team:
+        prepare = team_tools._determine_tools_for_model
+        arguments = {
+            "team": Team(id="leader", members=[], tools=[]),
+            "model": model,
+            "run_response": run,
+            "run_context": run_context,
+            "team_run_context": {},
+            "session": TeamSession(session_id="session", team_id="leader"),
+        }
+    else:
+        prepare = agent_tools.determine_tools_for_model
+        arguments = {
+            "agent": Agent(id="leader"),
+            "model": model,
+            "processed_tools": [],
+            "run_response": run,
+            "run_context": run_context,
+            "session": AgentSession(session_id="session", agent_id="leader"),
+        }
+    try:
+        with tool_runtime_context(context):
+            if positional:
+                prepare(*arguments.values())
+            else:
+                prepare(**arguments)
+        assert saved_tool_wait_mode(run_context.metadata, "saved", "call") == "native"
+    finally:
+        await runtime.shutdown()
+        register_background_runtime(paths, None)
 
 
 class _NativeTools(Toolkit):

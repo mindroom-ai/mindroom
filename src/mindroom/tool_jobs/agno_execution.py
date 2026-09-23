@@ -29,6 +29,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.custom_tools.job import is_job_function
+from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.authorization import function_authority
 from mindroom.tool_jobs.consumption import consume_tool_job, consuming_function_call, session_state_delta
 from mindroom.tool_jobs.control import job_checkpoint, job_owns_execution
@@ -66,6 +67,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
+logger = get_logger(__name__)
+
+
 type ToolCallResult = tuple[bool | AgentRunException, Timer, FunctionCall, FunctionExecutionResult]
 type _Execute = Callable[[FunctionCall], Coroutine[object, object, ToolCallResult]]
 _EVENT_TYPES = {**RUN_EVENT_TYPE_REGISTRY, **TEAM_RUN_EVENT_TYPE_REGISTRY, **WORKFLOW_RUN_EVENT_TYPE_REGISTRY}
@@ -95,7 +99,7 @@ def is_framework_function(function: Function) -> bool:
     )
 
 
-def validate_wait_timeout_parameter(function: Function) -> None:
+def _validate_wait_timeout_parameter(function: Function) -> None:
     """Reject application parameters that would be consumed as framework metadata."""
     if not is_job_function(function) and "wait_timeout" in function.parameters.get("properties", {}):
         msg = (
@@ -280,7 +284,14 @@ async def _run_operation(
                 # The tool already returned; stopping its serializer must not erase that outcome.
                 return encoding.result()
     finally:
-        await reference.release()
+        try:
+            await reference.release()
+        except asyncio.CancelledError:
+            # Resource release drains before propagating cancellation. Preserve
+            # the tool's outcome (or its original exception) after that drain.
+            pass
+        except Exception:
+            logger.exception("Tool execution resource cleanup failed", tool_name=owned_call.function.name)
 
 
 async def _consume_result(
@@ -357,7 +368,7 @@ def wrap_tool_execution(original: _Execute, *, depth: int) -> _Execute:  # noqa:
         mode = call_wait_mode(call, depth=depth)
         try:
             if mode != "native":
-                validate_wait_timeout_parameter(call.function)
+                _validate_wait_timeout_parameter(call.function)
             wait_timeout = (
                 None
                 if mode == "native"

@@ -308,7 +308,15 @@ class ToolJobRuntimeCoordinator:
             key = (entity, source)
             if key not in finished:
                 record = await journal.turn_records(entity).load(source)
-                finished[key] = record is not None and record.completed
+                if record is not None:
+                    finished[key] = record.completed
+                elif (bot := self.bot_provider(entity)) is not None:
+                    principal = journal.principal(bot._journal_principal_id)
+                    finished[key] = await principal.load_event(source) is not None and not await principal.is_pending(
+                        source,
+                    )
+                else:
+                    finished[key] = False
             return finished[key]
 
         await self.runtime.expire_consumed(

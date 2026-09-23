@@ -24,7 +24,7 @@ from mindroom.delegation.background import (
     retained_child,
     start_delegation,
 )
-from mindroom.delegation.sessions import SubagentSessionError, subagent_liveness
+from mindroom.delegation.sessions import subagent_liveness
 from mindroom.delegation.state import DelegationChild
 from mindroom.hooks import HookRegistry
 from mindroom.message_target import MessageTarget
@@ -193,7 +193,14 @@ async def test_cancelled_recovered_delegation_reads_terminal_native_evidence(tmp
             await asyncio.Event().wait()
             pytest.fail("Cancellation should interrupt generic settlement")
 
-        await continue_delegation(restored, child.delegation_id, owner=_owner(), depth=0, operation=continuation)
+        await continue_delegation(
+            restored,
+            child.delegation_id,
+            owner=_owner(),
+            depth=0,
+            expected_generation=0,
+            operation=continuation,
+        )
         await settled.wait()
         result = await restored.cancel(child.delegation_id, owner=_owner(), depth=0, await_completion=True)
         assert result.status == "completed"
@@ -362,7 +369,14 @@ async def test_approval_continuation_runs_after_human_followup(tmp_path: Path) -
         human.notify()
         assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "awaiting_approval"
         assert not executed.is_set()
-        await continue_delegation(runtime, job.job_id, owner=_owner(), depth=0, operation=continuation)
+        await continue_delegation(
+            runtime,
+            job.job_id,
+            owner=_owner(),
+            depth=0,
+            expected_generation=0,
+            operation=continuation,
+        )
         await asyncio.wait_for(executed.wait(), 1)
         human.clear()
         result = await runtime.wait(job.job_id, owner=_owner(), depth=0)
@@ -574,8 +588,8 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
     owner_loop = asyncio.get_running_loop()
     original_writer = background.write_json_file_durable
 
-    def blocked_writer(path: Path, payload: object) -> None:
-        original_writer(path, payload)
+    def blocked_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
+        original_writer(path, payload, strict_atomic_replace=strict_atomic_replace)
         owner_loop.call_soon_threadsafe(written.set)
         release_writer.wait()
 
@@ -590,7 +604,14 @@ async def test_cancelled_admission_still_launches_owned_operation_once(
         return BackgroundOutcome("completed", "survived admission cancellation")
 
     admission = asyncio.create_task(
-        continue_delegation(runtime, child.delegation_id, owner=_owner(), depth=0, operation=operation)
+        continue_delegation(
+            runtime,
+            child.delegation_id,
+            owner=_owner(),
+            depth=0,
+            expected_generation=0,
+            operation=operation,
+        )
         if continuation
         else start_delegation(runtime, child, owner=_owner(), operation=operation),
     )
@@ -698,7 +719,14 @@ async def test_recovered_approval_continues_after_human_followup(tmp_path: Path,
             restored = ToolJobRuntime(tmp_path)
             await restored.recover()
         assert (await restored.lookup(job.job_id, owner=owner, depth=0)).status == "awaiting_approval"
-        await continue_delegation(restored, job.job_id, owner=owner, depth=0, operation=continuation)
+        await continue_delegation(
+            restored,
+            job.job_id,
+            owner=owner,
+            depth=0,
+            expected_generation=0,
+            operation=continuation,
+        )
         await asyncio.wait_for(executed.wait(), 1)
         result = await restored.wait(job.job_id, owner=owner, depth=0)
         assert result.job.result == "approved"
@@ -894,7 +922,7 @@ async def test_native_recovery_requires_exclusive_child_liveness(tmp_path: Path)
     )
     try:
         async with subagent_liveness(child, paths):
-            with pytest.raises(SubagentSessionError, match="still executing"):
+            with pytest.raises(background.JobRecoveryBlockedError, match="still executing"):
                 await restored.recover()
             assert calls == 0
         await restored.recover()

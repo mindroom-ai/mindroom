@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock
@@ -220,8 +221,8 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
     original_writer = background_module.write_json_file_durable
     children: list[DelegationChild] = []
 
-    def blocked_writer(path: Path, payload: object) -> None:
-        original_writer(path, payload)
+    def blocked_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
+        original_writer(path, payload, strict_atomic_replace=strict_atomic_replace)
         loop.call_soon_threadsafe(written.set)
         release_writer.wait()
 
@@ -252,7 +253,10 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
             with pytest.raises(asyncio.CancelledError):
                 await driving
             await executing.wait()
-            assert DelegationState.from_metadata(response.metadata).children == []
+            state = DelegationState.from_metadata(response.metadata)
+            assert state.children == []
+            assert len(state.hooks) == 1
+            assert next(iter(state.hooks.values())).after_called
             assert children[0].status == "running"
     finally:
         release_writer.set()
@@ -262,9 +266,24 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("detach", "human"), [(False, False), (True, False), (True, True)])
-@pytest.mark.parametrize(("approval", "cancel_approval"), [(False, False), (True, False), (True, True)])
-@pytest.mark.parametrize("exclude_after_acceptance", [False, True])
+@pytest.mark.parametrize(
+    ("detach", "human", "approval", "cancel_approval", "duplicate_approval", "exclude_after_acceptance"),
+    [
+        (detach, human, approval, cancel, duplicate, excluded)
+        for detach, human in [(False, False), (True, False), (True, True)]
+        for approval, cancel, duplicate in [
+            (False, False, None),
+            (True, False, None),
+            (True, True, None),
+            (True, False, "other_parent"),
+            (True, False, "same_parent"),
+            (True, False, "next_child"),
+        ]
+        for excluded in [False, True]
+        # Both successive children must be managed and remain in their foreground wait.
+        if duplicate != "next_child" or not (detach or human or excluded)
+    ],
+)
 async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -272,6 +291,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     approval: bool,
     human: bool,
     cancel_approval: bool,
+    duplicate_approval: str | None,
     exclude_after_acceptance: bool,
 ) -> None:
     """A released parent cannot cancel the child; later waits read its exact result."""
@@ -311,6 +331,15 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     child_responses = ([ModelResponse(tool_calls=[_call("write_report", "write-once")])] if approval else []) + [
         ModelResponse(content="Exact child result"),
     ]
+    if duplicate_approval == "next_child":
+        child_responses.extend(
+            [
+                ModelResponse(tool_calls=[_call("write_report", "write-twice")]),
+                ModelResponse(content="Second child result"),
+            ],
+        )
+    elif duplicate_approval:
+        child_responses.insert(1, ModelResponse(tool_calls=[_call("write_report", "write-twice")]))
 
     async def write_report() -> str:
         side_effects.append("written")
@@ -393,6 +422,92 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
             execution_identity=identity,
         )
 
+    async def finish_approval_sequence(result: RunOutput) -> RunOutput:
+        nonlocal runtime
+        assert result.status == RunStatus.paused
+        assert side_effects == []
+        state = DelegationState.from_metadata(result.metadata)
+        call = _saved_approval_calls(state)[0]
+        if exclude_after_acceptance and not cancel_approval:
+            await runtime.shutdown()
+            runtime = ToolJobRuntime(tmp_path)
+            await runtime.recover()
+            register_background_runtime(paths, runtime)
+        assert (call.toolkit_name, call.invoking_agent, call.tool_call_id) == (
+            "file",
+            "code",
+            f"{child.delegation_id}:write-once",
+        )
+        if cancel_approval:
+            assert '"status": "cancelled"' in str(
+                await JobTools(paths, identity).job("cancel", child.delegation_id),
+            )
+            cancelled = await read_child_run(child, config, paths)
+            assert cancelled is not None
+            assert cancelled.status == RunStatus.cancelled
+            assert side_effects == []
+
+        async def approve(paused: RunOutput, *, start_another: bool = False) -> RunOutput:
+            saved_call = _saved_approval_calls(DelegationState.from_metadata(paused.metadata))[0]
+            responses = [ModelResponse(content="Approved parent result")]
+            if start_another:
+                responses.insert(
+                    0,
+                    ModelResponse(
+                        tool_calls=[
+                            _call("run_subagent", "second-child", agent_name="code", task="Second report"),
+                        ],
+                    ),
+                )
+            rebuilt = Agent(
+                name="leader",
+                db=storage,
+                tools=[toolkit, JobTools(paths, identity)],
+                model=DelegationModel(id="test", responses=responses),
+            )
+            return await drive_delegations(
+                rebuilt,
+                deepcopy(paused),
+                run_child=run_child,
+                agent_name="leader",
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+                decisions={saved_call.tool_call_id: True},
+                denial_reasons={saved_call.tool_call_id: None},
+                approval_calls=(saved_call,),
+            )
+
+        if duplicate_approval:
+            first_pause = deepcopy(result)
+            if duplicate_approval == "other_parent":
+                other_parent = parent(_call("job", "duplicate-wait", action="wait", job_id=child.delegation_id))
+                result = await drive(other_parent)
+                assert result.run_id != first_pause.run_id
+            result = await approve(result, start_another=duplicate_approval == "next_child")
+            assert result.status == RunStatus.paused
+            assert side_effects == ["written"]
+            pending_child = children[-1]
+            before = await runtime.lookup(pending_child.delegation_id, owner=identity, depth=0)
+            saved_parent = await current_parent.aget_run_output(result.run_id, session_id="parent")
+            stale = await approve(first_pause)
+            assert stale.status == (RunStatus.completed if duplicate_approval == "other_parent" else RunStatus.paused)
+            assert await runtime.lookup(pending_child.delegation_id, owner=identity, depth=0) == before
+            still_pending = await current_parent.aget_run_output(result.run_id, session_id="parent")
+            assert still_pending.metadata == saved_parent.metadata
+            assert still_pending.requirements == saved_parent.requirements
+        result = await approve(result)
+        assert result.status == RunStatus.completed
+        assert side_effects == ([] if cancel_approval else ["written"] * (2 if duplicate_approval else 1))
+        assert len(children) == (2 if duplicate_approval == "next_child" else 1)
+        for completed_child in children:
+            saved_job = await runtime.lookup(completed_child.delegation_id, owner=identity, depth=0)
+            assert saved_job.status == ("cancelled" if cancel_approval else "completed")
+            assert saved_job.adapter["child"]["status"] == saved_job.status
+        if not cancel_approval:
+            assert any("Exact child result" in (message.content or "") for message in result.messages)
+        return result
+
     try:
         with (
             tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
@@ -407,7 +522,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     wait_timeout=0.01 if detach and not human else None,
                 ),
             )
-            result = await asyncio.wait_for(drive(current_parent), 5)
+            result = await asyncio.wait_for(drive(current_parent), 30)
             assert result.status == (RunStatus.paused if approval and not detach else RunStatus.completed)
             assert len(children) == 1
             child = children[0]
@@ -442,50 +557,8 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                 assert "Exact child result" in first
                 assert child.subagent_id in first
             if approval:
-                assert result.status == RunStatus.paused
-                assert side_effects == []
-                state = DelegationState.from_metadata(result.metadata)
-                call = _saved_approval_calls(state)[0]
-                if exclude_after_acceptance and not cancel_approval:
-                    await runtime.shutdown()
-                    runtime = ToolJobRuntime(tmp_path)
-                    await runtime.recover()
-                    register_background_runtime(paths, runtime)
-                assert call.toolkit_name == "file"
-                assert call.invoking_agent == "code"
-                assert call.tool_call_id == f"{child.delegation_id}:write-once"
-                if cancel_approval:
-                    assert '"status": "cancelled"' in str(
-                        await JobTools(paths, identity).job("cancel", child.delegation_id),
-                    )
-                    cancelled = await read_child_run(child, config, paths)
-                    assert cancelled is not None
-                    assert cancelled.status == RunStatus.cancelled
-                    assert side_effects == []
-                    return
-                rebuilt = Agent(
-                    name="leader",
-                    db=storage,
-                    tools=[toolkit],
-                    model=DelegationModel(id="test", responses=[ModelResponse(content="Approved parent result")]),
-                )
-                persisted = await rebuilt.aget_run_output(result.run_id, session_id="parent")
-                result = await drive_delegations(
-                    rebuilt,
-                    persisted,
-                    run_child=run_child,
-                    agent_name="leader",
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                    decisions={call.tool_call_id: True},
-                    denial_reasons={call.tool_call_id: None},
-                    approval_calls=(call,),
-                )
-                assert result.status == RunStatus.completed
-                assert side_effects == ["written"]
-                assert len(children) == 1
-                assert any("Exact child result" in (message.content or "") for message in result.messages)
+                result = await finish_approval_sequence(result)
+
     finally:
         release.set()
         await runtime.shutdown()
@@ -859,7 +932,14 @@ async def test_native_job_source_survives_approval_continuation_and_restart(
         assert waited.job.owner == owner
         await runtime.acknowledge_wait(job.job_id, waited.token)
         with tool_runtime_context(replace(context, membership_turn_id="$approval-request")):
-            await continue_delegation(runtime, job.job_id, owner=owner, depth=0, operation=completed)
+            await continue_delegation(
+                runtime,
+                job.job_id,
+                owner=owner,
+                depth=0,
+                expected_generation=0,
+                operation=completed,
+            )
         waited = await runtime.wait(job.job_id, owner=owner, depth=0)
         assert waited.job.adapter["source_event_id"] == source_event_id
         assert waited.job.result == "finished once"

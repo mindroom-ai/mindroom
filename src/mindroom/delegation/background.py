@@ -8,7 +8,13 @@ from weakref import WeakKeyDictionary, ref
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import DelegationChild
-from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobSpec, ToolJobRuntime
+from mindroom.tool_jobs.runtime import (
+    BackgroundJob,
+    BackgroundOutcome,
+    JobRecoveryBlockedError,
+    JobSpec,
+    ToolJobRuntime,
+)
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
@@ -87,7 +93,7 @@ async def reconcile_delegation(
             with subagent_recovery_lock(child.subagent_id, runtime_paths) as acquired:
                 if not acquired:
                     msg = "Native child is still executing; recovery cannot settle it."
-                    raise SubagentSessionError(msg)
+                    raise JobRecoveryBlockedError(msg)
                 await cleanup(child)
         else:
             await cleanup(child)
@@ -150,6 +156,7 @@ async def continue_delegation(
     *,
     owner: ToolExecutionIdentity,
     depth: int,
+    expected_generation: int | None,
     operation: Callable[[], Awaitable[BackgroundOutcome]],
 ) -> BackgroundJob:
     """Continue native approval work under the existing generic job."""
@@ -163,7 +170,14 @@ async def continue_delegation(
             # Continuation metadata is applied atomically with its outcome by the runtime.
             adapter["child"] = _child_snapshot(child)
 
-    return await runtime.continue_job(job_id, owner=owner, depth=depth, operation=run, adapter=adapter)
+    return await runtime.continue_job(
+        job_id,
+        owner=owner,
+        depth=depth,
+        expected_generation=expected_generation,
+        operation=run,
+        adapter=adapter,
+    )
 
 
 def owns_delegation(runtime: ToolJobRuntime, child: DelegationChild) -> bool:

@@ -750,9 +750,11 @@ async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boun
     result: _ToolHookResult = None
     error: BaseException | None = None
     tool_body_started_at = time.perf_counter()
+    entered_body = False
     try:
         await job_checkpoint()
         check_current_execution_authority(arguments=args)
+        entered_body = True
         result = await _call_tool(
             func,
             args,
@@ -796,43 +798,46 @@ async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boun
         error = exc
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         duration_ms = timing.mark_result_ready()
-        try:
-            failure_record = record_tool_failure(
-                tool_name=tool_name,
-                arguments=args,
-                error=error,
-                duration_ms=duration_ms,
-                timing=timing.record_timing(),
-                agent_name=resolved_context.agent_name or None,
-                room_id=resolved_context.room_id,
-                thread_id=resolved_context.thread_id,
-                reply_to_event_id=resolved_context.reply_to_event_id,
-                requester_id=resolved_context.requester_id,
-                session_id=resolved_context.session_id,
-                correlation_id=resolved_context.correlation_id,
-                execution_identity=(
-                    effective_dispatch_context.execution_identity if effective_dispatch_context is not None else None
-                ),
-                runtime_paths=resolved_context.runtime_paths,
-                origin=resolved_context.origin,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to record tool failure",
-                tool_name=tool_name,
-                correlation_id=resolved_context.correlation_id,
-            )
-        else:
-            logger.warning(
-                "Tool call failed",
-                tool_name=tool_name,
-                agent_name=resolved_context.agent_name or None,
-                error_type=failure_record.error_type,
-                error_message=failure_record.error_message,
-                duration_ms=failure_record.duration_ms,
-                correlation_id=resolved_context.correlation_id,
-                channel=resolved_context.channel,
-            )
+        if entered_body:
+            try:
+                failure_record = record_tool_failure(
+                    tool_name=tool_name,
+                    arguments=args,
+                    error=error,
+                    duration_ms=duration_ms,
+                    timing=timing.record_timing(),
+                    agent_name=resolved_context.agent_name or None,
+                    room_id=resolved_context.room_id,
+                    thread_id=resolved_context.thread_id,
+                    reply_to_event_id=resolved_context.reply_to_event_id,
+                    requester_id=resolved_context.requester_id,
+                    session_id=resolved_context.session_id,
+                    correlation_id=resolved_context.correlation_id,
+                    execution_identity=(
+                        effective_dispatch_context.execution_identity
+                        if effective_dispatch_context is not None
+                        else None
+                    ),
+                    runtime_paths=resolved_context.runtime_paths,
+                    origin=resolved_context.origin,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to record tool failure",
+                    tool_name=tool_name,
+                    correlation_id=resolved_context.correlation_id,
+                )
+            else:
+                logger.warning(
+                    "Tool call failed",
+                    tool_name=tool_name,
+                    agent_name=resolved_context.agent_name or None,
+                    error_type=failure_record.error_type,
+                    error_message=failure_record.error_message,
+                    duration_ms=failure_record.duration_ms,
+                    correlation_id=resolved_context.correlation_id,
+                    channel=resolved_context.channel,
+                )
         await _maybe_emit_after_call_timed(
             has_after_hooks=has_after_hooks,
             timing=timing,
@@ -843,13 +848,13 @@ async def _execute_bridge(  # noqa: PLR0915 - Ordered lifecycle and cleanup boun
             tool_name=tool_name,
             result=None,
             error=error,
-            blocked=False,
+            blocked=not entered_body,
             duration_ms=duration_ms,
         )
         timing.emit_finish(
             tool_name=tool_name,
             agent_name=resolved_context.agent_name or None,
-            outcome="error",
+            outcome="error" if entered_body else "blocked_before_body",
         )
         raise
 

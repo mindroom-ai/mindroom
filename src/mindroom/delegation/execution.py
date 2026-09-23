@@ -59,7 +59,13 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, format_job_handle, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    BackgroundOutcome,
+    JobAccessError,
+    JobContinuationError,
+    format_job_handle,
+    get_background_runtime,
+)
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_jobs.wait_timeout import (
     ToolWaitMode,
@@ -485,7 +491,13 @@ async def _continue_child(
     )
 
 
-def _pending_child(state: DelegationState, child: DelegationChild, outcome: _ChildOutcome) -> None:
+def _pending_child(
+    state: DelegationState,
+    child: DelegationChild,
+    outcome: _ChildOutcome,
+    *,
+    job_generation: int | None = None,
+) -> None:
     from mindroom.response_turn import paused_attempt_from_response  # noqa: PLC0415
 
     response = outcome.response
@@ -499,6 +511,7 @@ def _pending_child(state: DelegationState, child: DelegationChild, outcome: _Chi
         msg = "Delegated child paused without supported exact approval requirements"
         raise RuntimeError(msg)
     state.pending_child_id = child.delegation_id
+    state.pending_job_generation = job_generation
     state.pending_agent_name = paused.approval_agent_name or child.child_agent_name
     child_state = DelegationState.from_metadata(response.metadata)
     for tool in paused.tools:
@@ -781,6 +794,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if not state.storage_bindings and isinstance(response, RunOutput):
         state.storage_bindings = freeze_delegation_storage(config, (agent_name,))
     pending_id = state.pending_child_id
+    pending_generation = state.pending_job_generation
     prior_pending_tools = state.pending_tools
     prior_tool_sources = state.pending_tool_sources
     if decisions is not None:
@@ -898,9 +912,8 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     resolve_result(str(error))
                     continue
                 retained = retained_child(background, background_job)
-                retained.parent_requirement_id = requirement.id
                 if not any(item.delegation_id == retained.delegation_id for item in state.children):
-                    state.children.append(retained)
+                    state.children.append(replace(retained, parent_requirement_id=requirement.id))
                 child_name, task = retained.child_agent_name, retained.task
             elif tool.tool_name == "continue_subagent":
                 subagent_id, task = args.get("subagent_id"), args.get("message")
@@ -999,7 +1012,11 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 await _persist(entity, response, state)
                 return response
             if state.gates.get(requirement_key) is False:
-                resolve_result("Delegation denied by requester; child was not executed.")
+                resolve_result(
+                    "Job result retrieval denied by requester."
+                    if tool.tool_name == "job"
+                    else "Delegation denied by requester; child was not executed.",
+                )
                 continue
             if requirement.id not in state.hooks:
                 state.hooks[requirement.id] = await before_delegation(
@@ -1090,9 +1107,11 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                 depth=delegation_depth,
                             )
                             child = retained_child(background, background_job)
-                            child.parent_requirement_id = requirement.id
                             state.children = [
-                                child if item.delegation_id == child.delegation_id else item for item in state.children
+                                replace(child, parent_requirement_id=requirement.id)
+                                if item.delegation_id == child.delegation_id
+                                else item
+                                for item in state.children
                             ]
                         operation = partial(
                             _background_child_outcome,
@@ -1116,6 +1135,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     child.delegation_id,
                                     owner=caller_identity,
                                     depth=delegation_depth,
+                                    expected_generation=pending_generation,
                                     operation=operation,
                                 )
                             elif background_job is None:
@@ -1166,7 +1186,7 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                                     RunOutput.from_dict(saved["response"]),
                                     {(agent, name): toolkit for agent, name, toolkit in saved["toolkit_owners"]},
                                 )
-                                _pending_child(state, child, child_outcome)
+                                _pending_child(state, child, child_outcome, job_generation=background_job.generation)
                                 await _persist(entity, response, state)
                                 if waited.token is not None:
                                     await background.acknowledge_wait(child.delegation_id, waited.token)
@@ -1227,9 +1247,41 @@ async def drive_delegations(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         _pending_child(state, child, child_outcome)
                         await _persist(entity, response, state)
                         return response
+                except JobContinuationError as error:
+                    # A duplicate card must not overwrite a newer pause saved
+                    # by this same parent run, or touch another parent's child.
+                    latest = (
+                        await entity.aget_run_output(response.run_id, session_id=response.session_id)
+                        if response.run_id is not None
+                        else None
+                    )
+                    if latest is not None:
+                        latest_state = DelegationState.from_metadata(latest.metadata)
+                        if (latest_state.pending_child_id, latest_state.pending_job_generation) != (
+                            child.delegation_id,
+                            pending_generation,
+                        ):
+                            return latest
+                    reason = str(error)
+                    resolve_result(reason)
+                    state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
+                    if on_event is not None:
+                        _settle_pending_child_tools(response, prior_pending_tools, on_event, reason=reason)
+                    await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=reason)
+                    await _persist(entity, response, state)
+                    continue
                 except asyncio.CancelledError:
                     if background is not None and (background_job is not None or owns_delegation(background, child)):
                         state.children = [item for item in state.children if item.delegation_id != child.delegation_id]
+                        await after_delegation(
+                            hook_state,
+                            config=config,
+                            runtime_paths=runtime_paths,
+                            result=None,
+                            error=asyncio.CancelledError(
+                                "Delegation wait cancelled; accepted child remains owned by its job.",
+                            ),
+                        )
                         await _persist(entity, response, state)
                         raise
                     await interrupt_child(

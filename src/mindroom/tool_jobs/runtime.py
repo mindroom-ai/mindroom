@@ -59,6 +59,14 @@ class JobAccessError(ValueError):
     """The requested job is unavailable to this caller or runtime."""
 
 
+class JobRecoveryBlockedError(RuntimeError):
+    """Another executor still owns work that this runtime cannot safely settle."""
+
+
+class JobContinuationError(ValueError):
+    """A presented approval no longer owns the current job generation."""
+
+
 @dataclass
 class JobSpec:
     """Exact execution identity and opaque adapter metadata, independent of its caller turn."""
@@ -283,7 +291,7 @@ class ToolJobRuntime:
         path = self._path(job.job_id)
 
         def write() -> None:
-            write_json_file_durable(path, {"schema_version": 1, **asdict(job)})
+            write_json_file_durable(path, {"schema_version": 1, **asdict(job)}, strict_atomic_replace=True)
 
         try:
             await run_blocking_until_complete(write)
@@ -303,8 +311,6 @@ class ToolJobRuntime:
             for path in sorted(self._root.glob("*.json")):
                 if path.stem in self._entries:
                     continue
-                if path != self._path(path.stem):
-                    raise ValueError(_UNAVAILABLE)
                 # LEGACY_COMPAT: Discard retired metadata and duplicate native results in job snapshots.
                 # Legacy format: Schema 1 included human_paused, deliveries, and a redundant adapter.child.result.
                 # Last legacy release: Unreleased; neither the original nor restored writer is in a release tag.
@@ -317,14 +323,13 @@ class ToolJobRuntime:
                 entry = _Entry(job, saved=True)
                 interrupted = job.status not in _READY
                 if interrupted:
-                    outcome = await self._cancel(job) if self._cancel is not None else None
+                    outcome = await self._cleanup(entry)
                     self._settle_stopped(
                         entry,
                         status="interrupted",
                         reason="Tool execution was interrupted by a runtime restart; it was not replayed.",
                         outcome=outcome,
                     )
-                if interrupted:
                     await self._persist(entry)
                 self._index_consumption(entry)
                 self._cool(entry)
@@ -359,9 +364,7 @@ class ToolJobRuntime:
     ) -> BackgroundJob:
         """Durably accept exact operation ownership before spawning execution."""
         async with self._lock:
-            if self._closed:
-                msg = "Tool job runtime is closed."
-                raise RuntimeError(msg)
+            self._ensure_open()
             if reattach and spec.job_id in self._entries:
                 existing = self._entry(spec.job_id, owner, spec.depth)
                 if existing.job.result_expired:
@@ -481,17 +484,25 @@ class ToolJobRuntime:
         finally:
             if entry.job.status in _TERMINAL:
                 self._release_control(entry)
+                self._cool(entry)
 
     @staticmethod
     def _release_control(entry: _Entry) -> None:
         if entry.human_signal is not None:
             entry.human_signal.unsubscribe(entry.notify_changed)
 
-    async def lookup(self, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
+    async def lookup(
+        self,
+        job_id: str,
+        *,
+        owner: ToolExecutionIdentity,
+        depth: int,
+        include_result: bool = True,
+    ) -> BackgroundJob:
         """Inspect an exact job after validating its current caller and authorization."""
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
-            return await self._snapshot(entry)
+            return await self._snapshot(entry, include_result=include_result)
 
     def _index_consumption(self, entry: _Entry) -> None:
         if entry.job.wait_acknowledged or entry.job.user_stop_receipt_order is not None:
@@ -500,8 +511,8 @@ class ToolJobRuntime:
             self._unacknowledged.add(entry.job.job_id)
 
     def _cool(self, entry: _Entry) -> None:
-        """Keep only discovery metadata in memory after durable terminal consumption."""
-        if entry.saved and entry.job.status in _TERMINAL and entry.job.wait_acknowledged:
+        """Keep only discovery metadata in memory after durable terminal publication."""
+        if entry.saved and entry.job.status in _TERMINAL:
             entry.job = replace(
                 entry.job,
                 result=entry.job.result[: JOB_SUMMARY_MAX_CHARS + 1] if entry.job.result is not None else None,
@@ -513,7 +524,6 @@ class ToolJobRuntime:
             entry.human_signal = None
             entry.cancel = None
             entry.task = None
-            entry.cancel_task = None
 
     async def _snapshot(self, entry: _Entry, *, include_result: bool = True) -> BackgroundJob:
         if include_result and entry.cold:
@@ -734,15 +744,19 @@ class ToolJobRuntime:
                 snapshot = await self._snapshot(entry)
                 entry.cancel_task = None
                 return snapshot
-            previous_status = entry.job.status
-            previous_updated_at = entry.job.updated_at
-            was_approval = previous_status == "awaiting_approval"
+            previous = replace(entry.job)
+            previous_token = entry.wait_token
+            if entry.job.status == "awaiting_approval":
+                entry.job.generation += 1
+                entry.job.wait_acknowledged = False
+                entry.wait_token = None
             entry.job.status = "cancel_requested"
             try:
                 await self._persist(entry)
             except BaseException:
-                entry.job.status = previous_status
-                entry.job.updated_at = previous_updated_at
+                entry.job = previous
+                entry.wait_token = previous_token
+                self._index_consumption(entry)
                 raise
             entry.cancel_ready.set()
             entry.control.cancel()
@@ -756,20 +770,21 @@ class ToolJobRuntime:
         async with self._lock:
             if entry.job.status not in _TERMINAL:
                 self._settle_stopped(entry, status="cancelled", reason=None, outcome=outcome)
-            if was_approval:
-                entry.job.generation += 1
-                entry.job.wait_acknowledged = False
-                entry.wait_token = None
             entry.cancel_settlement_pending = True
             await self._persist(entry)
             self._release_control(entry)
-            return await self._snapshot(entry)
+            snapshot = await self._snapshot(entry)
+            entry.cancel_task = None
+            self._cool(entry)
+            return snapshot
 
     async def _cleanup(self, entry: _Entry) -> BackgroundOutcome | None:
         try:
             outcome = await entry.cancel(entry.job) if entry.cancel is not None else None
             if outcome is None and self._cancel is not None:
                 outcome = await self._cancel(entry.job)
+        except JobRecoveryBlockedError:
+            raise
         except Exception as error:
             return BackgroundOutcome(
                 "failed",
@@ -807,15 +822,20 @@ class ToolJobRuntime:
         *,
         owner: ToolExecutionIdentity,
         depth: int,
+        expected_generation: int | None,
         operation: Callable[[], Awaitable[BackgroundOutcome]],
         adapter: dict[str, Any] | None = None,
     ) -> BackgroundJob:
         """Continue the same job after its native approval has been resolved."""
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
-            if entry.job.status != "awaiting_approval" or entry.job.user_stop_receipt_order is not None or self._closed:
-                msg = "Tool job is not awaiting approval continuation."
-                raise ValueError(msg)
+            if (
+                entry.job.status != "awaiting_approval"
+                or entry.job.generation != expected_generation
+                or entry.job.user_stop_receipt_order is not None
+            ):
+                msg = "Approval no longer applies: tool job is not awaiting this approval generation."
+                raise JobContinuationError(msg)
             previous = deepcopy(entry.job)
             previous_token = entry.wait_token
             if adapter is not None:
@@ -951,6 +971,7 @@ class ToolJobRuntime:
                     continue
                 entry.job = replace(
                     entry.job,
+                    adapter=self._compact_adapter(entry.job.adapter),
                     result="Tool result expired after 30 days; its execution receipt prevents replay.",
                     result_payload=None,
                     approval_state={},
@@ -958,6 +979,14 @@ class ToolJobRuntime:
                 )
                 entry.cold = False
                 await self._persist(entry, update_timestamp=False)
+
+    @staticmethod
+    def _compact_adapter(adapter: dict[str, Any]) -> dict[str, Any]:
+        """Retain replay and access evidence without the original operation's input."""
+        compact = {key: value for key, value in adapter.items() if key != "arguments"}
+        if "child" in compact:
+            compact["child"] = {**compact["child"], "task": ""}
+        return compact
 
     async def shutdown(self) -> None:
         """Settle owned work as interrupted and release the process liveness lease."""
@@ -999,7 +1028,7 @@ class ToolJobRuntime:
                         outcome=outcome,
                     )
                 try:
-                    if settling or not entry.saved or not entry.job.wait_acknowledged:
+                    if settling or not entry.saved:
                         await self._persist(entry, update_timestamp=settling)
                 except Exception as error:
                     failures.append(error)

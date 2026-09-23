@@ -9,7 +9,7 @@ import threading
 import weakref
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -18,13 +18,15 @@ from mindroom.tool_jobs.control import HumanMessageSignal, job_checkpoint
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, ToolJobRuntime
 from tests.test_background_subagents import _owner
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 @pytest.mark.asyncio
-async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(tmp_path: Path) -> None:
-    """Acknowledged history keeps disk results and replay ownership without resident payloads."""
+@pytest.mark.parametrize("acknowledged", [False, True])
+async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(
+    tmp_path: Path,
+    *,
+    acknowledged: bool,
+) -> None:
+    """Terminal history keeps disk results and replay ownership without resident payloads."""
     runtime = ToolJobRuntime(tmp_path)
     value = "large result" * 10_000
     calls = 0
@@ -38,7 +40,10 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(tmp
     await runtime.start(spec, owner=_owner(), operation=operation)
     waited = await runtime.wait(spec.job_id, owner=_owner(), depth=0)
     await runtime.cancel(spec.job_id, owner=_owner(), depth=0, await_completion=True)
-    await runtime.acknowledge_wait(spec.job_id, waited.token)
+    if acknowledged:
+        await runtime.acknowledge_wait(spec.job_id, waited.token)
+    else:
+        await runtime.release_wait(spec.job_id, waited.token)
     path = tmp_path / "tool_jobs" / "consumed.json"
     published = path.stat().st_mtime_ns
     try:
@@ -46,7 +51,7 @@ async def test_consumed_payload_is_loaded_on_demand_without_startup_rewrites(tmp
         assert runtime._entries[spec.job_id].cancel_task is None
         assert len(runtime._entries[spec.job_id].job.result) < 1000
         assert (await runtime.lookup(spec.job_id, owner=_owner(), depth=0)).result_payload == {"value": value}
-        assert await runtime.pending_outcomes() == []
+        assert bool(await runtime.pending_outcomes()) is not acknowledged
     finally:
         await runtime.shutdown()
     assert path.stat().st_mtime_ns == published
@@ -107,11 +112,11 @@ async def test_shutdown_drains_a_terminal_cancellation_retry(tmp_path: Path, mon
         await asyncio.Event().wait()
         raise AssertionError
 
-    def fail_terminal(path: Path, payload: dict[str, object]) -> None:
+    def fail_terminal(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool) -> None:
         if payload["status"] == "cancelled":
             message = "terminal save failed"
             raise OSError(message)
-        writer(path, payload)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
 
     await runtime.start(JobSpec("retry", "tool", 0), owner=_owner(), operation=operation)
     with monkeypatch.context() as patch:
@@ -210,11 +215,11 @@ async def test_failed_cancellation_save_wakes_an_existing_waiter(
         cleaning.set()
         await release.wait()
 
-    def fail_terminal(path: Path, payload: dict[str, object]) -> None:
+    def fail_terminal(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool) -> None:
         if payload["status"] == "cancelled":
             message = "terminal save failed"
             raise OSError(message)
-        writer(path, payload)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
 
     await runtime.start(JobSpec("wake", "tool", 0), owner=_owner(), operation=operation, cancel=cleanup)
     waiter = asyncio.create_task(runtime.wait("wake", owner=_owner(), depth=0))
@@ -256,11 +261,11 @@ async def test_consumption_repairs_failed_cancellation_save_before_reread(
         await asyncio.Event().wait()
         raise AssertionError
 
-    def fail_terminal(path: Path, payload: dict[str, object]) -> None:
+    def fail_terminal(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool) -> None:
         if payload["status"] == "cancelled":
             message = "terminal save failed"
             raise OSError(message)
-        writer(path, payload)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
 
     try:
         await runtime.start(JobSpec("cancel-retry", "tool", 0), owner=_owner(), operation=operation)
@@ -292,8 +297,8 @@ async def test_published_continuation_failure_remains_discoverable(
     async def forbidden() -> BackgroundOutcome:
         pytest.fail("ambiguous admission must not launch execution")
 
-    def published_then_failed(path: Path, payload: dict[str, object]) -> None:
-        writer(path, payload)
+    def published_then_failed(path: Path, payload: dict[str, object], *, strict_atomic_replace: bool) -> None:
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
         if payload["generation"] == 1 and payload["status"] == "running":
             message = "directory sync failed"
             raise OSError(message)
@@ -304,7 +309,7 @@ async def test_published_continuation_failure_remains_discoverable(
         await runtime.acknowledge_wait("continued", waited.token)
         monkeypatch.setattr(runtime_module, "write_json_file_durable", published_then_failed)
         with pytest.raises(OSError, match="directory sync failed"):
-            await runtime.continue_job("continued", owner=_owner(), depth=0, operation=forbidden)
+            await runtime.continue_job("continued", owner=_owner(), depth=0, expected_generation=0, operation=forbidden)
         pending = await runtime.pending_outcomes()
         assert [(job.job_id, job.status) for job in pending] == [("continued", "interrupted")]
     finally:
@@ -343,7 +348,10 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
     """Only old consumed terminal results with a finished source may expire."""
     runtime = ToolJobRuntime(tmp_path)
     calls: list[str] = []
-    specs = [JobSpec(name, "tool", 0) for name in ("expire", "approval", "unread", "recent", "claimed")]
+    specs = [
+        JobSpec(name, "tool", 0, adapter={"arguments": {"payload": "sensitive input" * 500}})
+        for name in ("expire", "approval", "unread", "recent", "claimed")
+    ]
 
     async def completed() -> BackgroundOutcome:
         calls.append("executed")
@@ -370,6 +378,8 @@ async def test_result_expiry_preserves_receipt_and_protected_work(tmp_path: Path
         expired = await runtime.lookup("expire", owner=_owner(), depth=0)
         assert expired.result_expired
         assert expired.result_payload is None
+        assert "arguments" not in expired.adapter
+        assert "sensitive input" not in (tmp_path / "tool_jobs" / "expire.json").read_text()
         for name in ("approval", "unread", "recent", "claimed"):
             saved = await runtime.lookup(name, owner=_owner(), depth=0)
             assert not saved.result_expired
@@ -469,7 +479,8 @@ async def test_failed_admission_rolls_back_without_subscription_or_execution(
     original = runtime_module.write_json_file_durable
     calls = 0
 
-    def failed_write(_path: Path, _payload: object) -> None:
+    def failed_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
+        assert strict_atomic_replace
         msg = "disk unavailable"
         raise OSError(msg)
 
@@ -565,8 +576,8 @@ async def test_ambiguous_admission_never_launches_or_accepts_duplicate(
     writer = runtime_module.write_json_file_durable
     calls = 0
 
-    def published_then_failed(path: Path, payload: object) -> None:
-        writer(path, payload)
+    def published_then_failed(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
         msg = "durability uncertain"
         raise OSError(msg)
 
@@ -609,7 +620,8 @@ async def test_failed_continuation_preserves_approval_for_safe_retry(
         calls += 1
         return BackgroundOutcome("completed", "once")
 
-    def failed_write(_path: Path, _payload: object) -> None:
+    def failed_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
+        assert strict_atomic_replace
         msg = "write failed"
         raise OSError(msg)
 
@@ -619,10 +631,10 @@ async def test_failed_continuation_preserves_approval_for_safe_retry(
     writer = runtime_module.write_json_file_durable
     monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_write)
     with pytest.raises(OSError, match="write failed"):
-        await runtime.continue_job(job.job_id, owner=_owner(), depth=0, operation=continuation)
+        await runtime.continue_job(job.job_id, owner=_owner(), depth=0, expected_generation=0, operation=continuation)
     assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).status == "awaiting_approval"
     monkeypatch.setattr(runtime_module, "write_json_file_durable", writer)
-    await runtime.continue_job(job.job_id, owner=_owner(), depth=0, operation=continuation)
+    await runtime.continue_job(job.job_id, owner=_owner(), depth=0, expected_generation=0, operation=continuation)
     assert (await runtime.wait(job.job_id, owner=_owner(), depth=0)).job.result == "once"
     assert calls == 1
     await runtime.shutdown()
@@ -712,6 +724,108 @@ async def test_failed_cancellation_persistence_can_be_retried(
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("next_state", ["approval", "cancelled"])
+async def test_stale_approval_cannot_change_a_newer_job_generation(tmp_path: Path, next_state: str) -> None:
+    """A card authorizes only the generation originally projected to its parent."""
+    runtime = ToolJobRuntime(tmp_path)
+    executions = 0
+
+    async def approval() -> BackgroundOutcome:
+        nonlocal executions
+        executions += 1
+        return BackgroundOutcome("awaiting_approval")
+
+    try:
+        await runtime.start(JobSpec("generation", "tool", 0), owner=_owner(), operation=approval)
+        waited = await runtime.wait("generation", owner=_owner(), depth=0)
+        await runtime.acknowledge_wait("generation", waited.token)
+        if next_state == "approval":
+            await runtime.continue_job("generation", owner=_owner(), depth=0, expected_generation=0, operation=approval)
+            waited = await runtime.wait("generation", owner=_owner(), depth=0)
+            await runtime.acknowledge_wait("generation", waited.token)
+        else:
+            await runtime.cancel("generation", owner=_owner(), depth=0, await_completion=True)
+        before = await runtime.lookup("generation", owner=_owner(), depth=0)
+        with pytest.raises(ValueError, match="Approval no longer applies"):
+            await runtime.continue_job("generation", owner=_owner(), depth=0, expected_generation=0, operation=approval)
+        assert await runtime.lookup("generation", owner=_owner(), depth=0) == before
+        assert executions == (2 if next_state == "approval" else 1)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_cancellation_survives_a_crash_during_cleanup(tmp_path: Path) -> None:
+    """The durable cancellation admission already owns a fresh unconsumed generation."""
+    cleaning, release = asyncio.Event(), asyncio.Event()
+
+    async def approval() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval")
+
+    async def cleanup(_job: runtime_module.BackgroundJob) -> None:
+        cleaning.set()
+        await release.wait()
+
+    runtime = ToolJobRuntime(tmp_path, cancel=cleanup)
+    path = tmp_path / "tool_jobs" / "cancel-crash.json"
+    try:
+        await runtime.start(JobSpec("cancel-crash", "tool", 0), owner=_owner(), operation=approval)
+        waited = await runtime.wait("cancel-crash", owner=_owner(), depth=0)
+        await runtime.acknowledge_wait("cancel-crash", waited.token)
+        await runtime.cancel("cancel-crash", owner=_owner(), depth=0)
+        await cleaning.wait()
+        admitted = path.read_bytes()
+    finally:
+        release.set()
+        await runtime.shutdown()
+    path.write_bytes(admitted)
+    restored = ToolJobRuntime(tmp_path)
+    try:
+        await restored.recover()
+        outcomes = await restored.pending_outcomes()
+        assert len(outcomes) == 1
+        assert outcomes[0].status == "interrupted"
+        assert outcomes[0].generation == 1
+        assert not outcomes[0].wait_acknowledged
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_atomic_receipt_replacement_preserves_previous_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed rename cannot fall back to overwriting an existing replay receipt."""
+    runtime = ToolJobRuntime(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        await runtime.start(JobSpec("atomic", "tool", 0), owner=_owner(), operation=operation)
+        waited = await runtime.wait("atomic", owner=_owner(), depth=0)
+        path = tmp_path / "tool_jobs" / "atomic.json"
+        before = path.read_bytes()
+        original = Path.replace
+
+        def fail_replace(source: Path, target: Path) -> Path:
+            if target == path:
+                message = "receipt rename failed"
+                raise OSError(message)
+            return original(source, target)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "replace", fail_replace)
+            with pytest.raises(OSError, match="receipt rename failed"):
+                await runtime.acknowledge_wait("atomic", waited.token)
+            assert path.read_bytes() == before
+        await runtime.acknowledge_wait("atomic", waited.token)
+    finally:
         await runtime.shutdown()
 
 
@@ -875,7 +989,8 @@ async def test_reads_are_copies_and_consumption_hides_pending_results(
     await runtime.release_wait(job.job_id, result.token)
     writer = runtime_module.write_json_file_durable
 
-    def forbid_write(_path: Path, _payload: object) -> None:
+    def forbid_write(_path: Path, _payload: object, *, strict_atomic_replace: bool) -> None:
+        assert strict_atomic_replace
         msg = "read attempted durable mutation"
         raise AssertionError(msg)
 
@@ -979,9 +1094,9 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
         waiting = await runtime.wait("failed", owner=_owner(), depth=0)
         await runtime.release_wait("failed", waiting.token)
 
-    def failed_writer(path: Path, payload: object) -> None:
+    def failed_writer(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
         if published:
-            original_writer(path, payload)
+            original_writer(path, payload, strict_atomic_replace=strict_atomic_replace)
         loop.call_soon_threadsafe(writing.set)
         assert release_writer.wait(5)
         msg = "admission write failed"
@@ -989,7 +1104,7 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
 
     monkeypatch.setattr(runtime_module, "write_json_file_durable", failed_writer)
     accepting = asyncio.create_task(
-        runtime.continue_job("failed", owner=_owner(), depth=0, operation=operation)
+        runtime.continue_job("failed", owner=_owner(), depth=0, expected_generation=0, operation=operation)
         if continuation
         else runtime.start(JobSpec("failed", "tool", 0), owner=_owner(), operation=operation, human_signal=human),
     )
@@ -1011,7 +1126,7 @@ async def test_cancelled_parent_and_failed_admission_reconcile_acceptance(  # no
             assert jobs[0].status == "awaiting_approval"
             assert jobs[0].generation == 0
             assert human.has_subscribers
-            await runtime.continue_job("failed", owner=_owner(), depth=0, operation=operation)
+            await runtime.continue_job("failed", owner=_owner(), depth=0, expected_generation=0, operation=operation)
         else:
             assert jobs == []
             assert not human.has_subscribers
@@ -1143,7 +1258,8 @@ async def test_failed_cancellation_cleanup_settles_without_claiming_side_effects
 
 
 @pytest.mark.asyncio
-async def test_shutdown_cleanup_failure_does_not_strand_other_jobs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("recovery", [False, True])
+async def test_shutdown_cleanup_failure_does_not_strand_other_jobs(tmp_path: Path, *, recovery: bool) -> None:
     """One failing cleanup cannot prevent later executions from settling and releasing the lease."""
     runtime = ToolJobRuntime(tmp_path)
     cleaned: list[str] = []
@@ -1160,13 +1276,19 @@ async def test_shutdown_cleanup_failure_does_not_strand_other_jobs(tmp_path: Pat
 
     for name in ("first", "second"):
         await runtime.start(JobSpec(name, "tool", 0), owner=_owner(), operation=operation, cancel=cleanup)
+    snapshots = {path: path.read_bytes() for path in (tmp_path / "tool_jobs").glob("*.json")}
     await runtime.shutdown()
     assert cleaned == ["first", "second"]
-    restored = ToolJobRuntime(tmp_path)
+    if recovery:
+        for path, snapshot in snapshots.items():
+            path.write_bytes(snapshot)
+        cleaned.clear()
+    restored = ToolJobRuntime(tmp_path, cancel=cleanup)
     try:
         await restored.recover()
         assert (await restored.lookup("first", owner=_owner(), depth=0)).status == "failed"
         assert (await restored.lookup("second", owner=_owner(), depth=0)).status == "interrupted"
+        assert cleaned == ["first", "second"]
     finally:
         await restored.shutdown()
 

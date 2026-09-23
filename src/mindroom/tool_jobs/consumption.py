@@ -205,6 +205,26 @@ def _merge_session_state(value: Any, job: BackgroundJob, call: FunctionCall) -> 
     return value
 
 
+async def record_tool_job_receipt(
+    runtime: ToolJobRuntime,
+    job: BackgroundJob,
+    token: str,
+    *,
+    function_call: FunctionCall | None = None,
+) -> None:
+    """Retain a control or result receipt until its exact parent tool call is saved."""
+    call = function_call or _CALL.get()
+    owner = _OWNER.get()
+    try:
+        if call is not None and owner is not None:
+            owner.register(runtime, job, token, call)
+        else:
+            await runtime.release_wait(job.job_id, token)
+    except BaseException:
+        await runtime.release_wait(job.job_id, token)
+        raise
+
+
 async def consume_tool_job(
     runtime: ToolJobRuntime,
     job: BackgroundJob,
@@ -213,6 +233,8 @@ async def consume_tool_job(
     function_call: FunctionCall | None = None,
 ) -> Any:  # noqa: ANN401 - SDK tool values are intentionally heterogeneous.
     """Decode one ready outcome and retain its claim until exact parent readback."""
+    from mindroom.custom_tools.job import is_job_function  # noqa: PLC0415 - Controls also use consumption receipts.
+
     call = function_call or _CALL.get()
     value = decode_tool_result(job.result_payload["value"]) if job.result_payload else job.result
     owner = _OWNER.get()
@@ -223,17 +245,17 @@ async def consume_tool_job(
         return value
     try:
         value = _merge_session_state(value, job, call)
-        owner.register(runtime, job, token, call)
+        await record_tool_job_receipt(runtime, job, token, function_call=call)
     except BaseException:
         await runtime.release_wait(job.job_id, token)
         raise
     if job.result_payload and job.result_payload.get("control"):
         control = decode_tool_result(job.result_payload["control"])
         raise AgentRunException(control.pop("message"), **control)
-    if call.function.name == "job" and job.status == "failed":
+    if is_job_function(call.function) and job.status == "failed":
         error = job.result_payload.get("error") if isinstance(job.result_payload, dict) else None
         raise RuntimeError(str(error or job.result or "Background tool job failed."))
-    if call.function.name == "job" and job.result_payload and job.result_payload.get("events"):
+    if is_job_function(call.function) and job.result_payload and job.result_payload.get("events"):
         events = decode_tool_result(job.result_payload["events"])
         if events:
             if not isinstance(value, ToolResult):

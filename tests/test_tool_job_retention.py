@@ -32,10 +32,12 @@ if TYPE_CHECKING:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("source_completed", "approval"), [(False, False), (True, True), (True, False)])
+@pytest.mark.parametrize("source_pruned", [False, True])
 async def test_retention_preserves_pending_turns_and_conversation_approvals(
     tmp_path: Path,
     source_completed: bool,
     approval: bool,
+    source_pruned: bool,
 ) -> None:
     """An old acknowledged value remains available to an unfinished or paused SDK run."""
     bot = _bot(tmp_path)
@@ -59,11 +61,29 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     await runtime.acknowledge_wait("old", waited.token)
     runtime._entries["old"].job.updated_at = (datetime.now(UTC) - timedelta(days=31)).isoformat()
     record = TurnRecord.create(("$original",), anchor_event_id="$original", completed=source_completed)
+    principal = bot.journal_principal()
+    await principal.admit(
+        InboundEvent(
+            "$original",
+            "!room:localhost",
+            "$thread",
+            EventKind.MESSAGE,
+            EventClass.ACTIONABLE,
+            "@human:localhost",
+            1,
+            {"content": {"body": "original request"}},
+        ),
+        None,
+    )
+    if source_completed:
+        await principal.settle("$original")
     await bot._journal_store.turn_records("general").upsert(
         index_event_ids=record.indexed_event_ids,
         anchor_event_id="$original",
         record_json=json.dumps(TurnRecordCodec._to_ledger_record(record)),
     )
+    if source_pruned:
+        await bot._journal_store.turn_records("general").forget(index_event_ids=record.indexed_event_ids)
     if approval:
         principal = bot.journal_principal()
         await principal.admit(

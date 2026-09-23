@@ -21,6 +21,7 @@ from agno.tools.function import Function, FunctionCall, ToolResult
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools.job import JobTools
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.agno_execution import _drain_result
 from mindroom.tool_jobs.control import JobControl, job_control_context
@@ -55,11 +56,15 @@ async def test_application_wait_timeout_collision_fails_before_execution(tmp_pat
     function = Function.from_callable(application)
     function._agent = Agent(id="leader", model=model)
     function._run_context = RunContext(run_id="run", session_id=context.session_id, session_state={})
+    sibling = Function.from_callable(lambda: "other tool")
+    sibling.name = "sibling"
     try:
         async with execution_resources():
             with tool_runtime_context(context):
-                with pytest.raises(ValueError, match="exclude_toolkits"):
-                    model._format_tools([function])
+                schemas = model._format_tools([sibling, function])
+                assert len(schemas) == 2
+                schema = next(item["function"] for item in schemas if item["function"]["name"] == "application")
+                assert schema["parameters"]["properties"]["wait_timeout"]["type"] == "integer"
                 success, _, call, result = await model.arun_function_call(
                     FunctionCall(function=function, call_id="collision", arguments={"wait_timeout": None}),
                 )
@@ -93,13 +98,20 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
     install_tool_job_execution(model, FallbackConfig(on_error=[backup]))
     function = Function.from_callable(application)
     function._agent = Agent(id="leader", model=model)
+    controls = JobTools(paths, build_execution_identity_from_runtime_context(context)).get_async_functions()["job"]
+    controls.process_entrypoint()
     try:
         with tool_runtime_context(context):
-            formatted = (backup if fallback else model)._format_tools([function])
+            formatted = (backup if fallback else model)._format_tools([function, controls])
         schema = formatted[0]["function"]["parameters"]
         assert schema["properties"]["wait_timeout"]["anyOf"] == [{"type": "number", "minimum": 0}, {"type": "null"}]
         assert "wait_timeout" not in schema["required"]
         assert "wait_timeout" not in function.parameters["properties"]
+        control_schema = next(item["function"] for item in formatted if item["function"]["name"] == "job")
+        assert (
+            control_schema["parameters"]["properties"]["wait_timeout"]
+            == controls.parameters["properties"]["wait_timeout"]
+        )
     finally:
         register_background_runtime(paths, None)
         await runtime.shutdown()

@@ -439,7 +439,13 @@ async def test_failed_completion_admission_retries_and_new_generation_is_admitte
         assert await store.is_pending(first.event_id)
         await coordinator.deliver_pending()
         assert bot.client.joined_rooms.await_count == 2
-        await coordinator.runtime.continue_job(fixture.job_id, owner=fixture.owner, depth=0, operation=complete)
+        await coordinator.runtime.continue_job(
+            fixture.job_id,
+            owner=fixture.owner,
+            depth=0,
+            expected_generation=0,
+            operation=complete,
+        )
         waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
         await coordinator.runtime.release_wait(fixture.job_id, waited.token)
         second = completion_event(waited.job, sender_id=bot.matrix_id.full_id)

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from agno.tools import Toolkit
 
-from mindroom.tool_jobs.consumption import consume_tool_job
+from mindroom.tool_jobs.consumption import consume_tool_job, record_tool_job_receipt
 from mindroom.tool_jobs.runtime import JOB_SUMMARY_MAX_CHARS, JobAccessError, get_background_runtime
 from mindroom.tool_system.declarations import tool_schema_source
 from mindroom.tool_system.output_files import wrap_toolkit_for_output_files
@@ -156,9 +156,9 @@ class JobTools(Toolkit):
                 job = await runtime.cancel(job_id, owner=owner, depth=self._depth, await_completion=True)
                 waited = await runtime.wait(job_id, owner=owner, depth=self._depth, timeout=0)
                 if waited.token is not None:
-                    await consume_tool_job(runtime, waited.job, waited.token)
+                    await record_tool_job_receipt(runtime, waited.job, waited.token)
             elif action == "inspect":
-                job = await runtime.lookup(job_id, owner=owner, depth=self._depth)
+                job = await runtime.lookup(job_id, owner=owner, depth=self._depth, include_result=False)
             else:
                 return "Unknown job action."
             return json.dumps(_summary(job))
@@ -177,7 +177,7 @@ async def project_native_job_wait(call: FunctionCall, *, depth: int) -> None:
     if runtime is None or not isinstance(job_id, str):
         return
     try:
-        job = await runtime.lookup(job_id, owner=toolkit.caller_identity(), depth=depth)
+        job = await runtime.lookup(job_id, owner=toolkit.caller_identity(), depth=depth, include_result=False)
     except JobAccessError:
         return
     if job.kind != "delegation":

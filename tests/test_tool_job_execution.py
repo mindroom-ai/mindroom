@@ -339,7 +339,12 @@ async def test_resource_owner_releases_only_after_last_child() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("team_parent", [False, True])
-async def test_sdk_toolkit_stays_connected_after_parent_handle(tmp_path: Path, team_parent: bool) -> None:
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_sdk_toolkit_stays_connected_after_parent_handle(
+    tmp_path: Path,
+    team_parent: bool,
+    cleanup_fails: bool,
+) -> None:
     """SDK teardown cannot close a toolkit still owned by its running job."""
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -386,7 +391,15 @@ async def test_sdk_toolkit_stays_connected_after_parent_handle(tmp_path: Path, t
 
     @owned_tool_execution
     async def parent_run() -> RunOutput | TeamRunOutput:
-        return await agent.arun("start", session_id=context.session_id)
+        response = await agent.arun("start", session_id=context.session_id)
+        if cleanup_fails:
+
+            async def close_storage() -> None:
+                message = "storage close failed after execution"
+                raise OSError(message)
+
+            assert defer_execution_cleanup(close_storage)
+        return response
 
     try:
         with tool_runtime_context(context), human_message_signal_context(signal):
@@ -401,6 +414,7 @@ async def test_sdk_toolkit_stays_connected_after_parent_handle(tmp_path: Path, t
             owner = build_execution_identity_from_runtime_context(context)
             signal.clear()
             result = await runtime.wait(job_id, owner=owner, depth=0)
+            assert result.job.status == "completed"
             assert result.job.result == "connected result"
             assert toolkit.closes == 1
     finally:
@@ -807,6 +821,76 @@ async def test_fast_generator_preserves_sdk_events(tmp_path: Path) -> None:
                 ]
         assert sum(isinstance(event, RunContentEvent) and event.content == "event text" for event in events) == 1
     finally:
+        await runtime.shutdown()
+        register_background_runtime(paths, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["completed", "failed", "control"])
+async def test_cancellation_receipt_does_not_replay_the_original_outcome(tmp_path: Path, outcome: str) -> None:
+    """A saved cancel result acknowledges control without applying old errors or state changes."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader")})
+    context = _delegate_runtime_context(config, paths)
+    owner = build_execution_identity_from_runtime_context(context)
+    runtime = ToolJobRuntime(tmp_path)
+    register_background_runtime(paths, runtime)
+
+    async def original(run_context: RunContext) -> str:
+        run_context.session_state["counter"] = 1
+        if outcome == "failed":
+            message = "original execution failed"
+            raise RuntimeError(message)
+        if outcome == "control":
+            message = "original execution stopped"
+            raise StopAgentRun(message)
+        return "original output"
+
+    model = DelegationModel(id="test")
+    install_tool_job_execution(model)
+    function = Function.from_callable(original)
+    function._agent = Agent(id="leader")
+    function._run_context = RunContext(
+        run_id="original-run",
+        session_id=context.session_id,
+        session_state={"counter": 0},
+    )
+
+    def storage_factory() -> BaseDb:
+        return create_session_storage("leader", config, paths, owner)
+
+    storage = storage_factory()
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                await model.arun_function_call(FunctionCall(function=function, call_id="original-call"))
+        job = (await runtime.list_jobs(owner=owner, depth=0))[0]
+        model.responses = [
+            ModelResponse(tool_calls=[_call("job", "cancel-call", action="cancel", job_id=job.job_id)]),
+            ModelResponse(content="Cancelled."),
+        ]
+        actor = Agent(
+            id="leader",
+            model=model,
+            tools=[JobTools(paths, owner)],
+            db=storage,
+            session_state={"counter": 0},
+        )
+
+        @owned_tool_execution
+        async def cancel() -> RunOutput:
+            set_consumption_storage(storage_factory)
+            with tool_runtime_context(context):
+                return await actor.arun("cancel", session_id=context.session_id, user_id=context.requester_id)
+
+        response = await cancel()
+        assert not response.tools[0].tool_call_error
+        assert json.loads(response.tools[0].result)["job_id"] == job.job_id
+        saved = storage.get_run(response.run_id)
+        assert saved.session_state["counter"] == 0
+        assert await runtime.pending_outcomes() == []
+    finally:
+        storage.close()
         await runtime.shutdown()
         register_background_runtime(paths, None)
 

@@ -6836,6 +6836,7 @@ path = "mindroom.tool_jobs.consumption"
 depends_on = [
     "mindroom.agent_storage",
     "mindroom.tool_jobs.results",
+    "mindroom.custom_tools.job",
 ]
 visibility = [
     "mindroom.approval_execution",
@@ -6921,6 +6922,7 @@ depends_on = ["mindroom.tool_jobs.consumption", "mindroom.tool_system.runtime_co
 
 visibility = [
     "mindroom.agents",
+    "mindroom.tool_jobs.consumption",
     "mindroom.teams",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.agno_execution",
