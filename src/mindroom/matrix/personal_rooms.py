@@ -543,18 +543,22 @@ class PersonalRoomService:
         record.confirmation_event_id = delivered.event_id
         await run_blocking_until_complete(write_personal_room, path, record)
 
-    async def member_joined(self, room_id: str, user_id: str) -> None:
-        """Finish a deferred welcome only for this room's recorded human owner."""
-        if self._settings() is None:
+    async def owner_membership_event(self, room_id: str, user_id: str, membership: str) -> None:
+        """Retire observed owner enrollment before current-policy-dependent welcome work."""
+        if membership not in {"join", "leave", "ban"}:
             return
         path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
+        if not path.is_file():
+            return
         async with async_exclusive_file_lock(path.with_suffix(".lock")):
             record = await run_blocking_until_complete(read_personal_room, path)
             if record is None or record.room_id != room_id:
+                return
+            await self._observe_owner_membership(record, path, membership, False)
+            if membership != "join":
                 return
             settings = self._settings()
             if settings is None or not self._allowed(user_id, room_id):
                 return
             roster = await self._validate_room(record)
-            await self._observe_owner_membership(record, path, roster.get(user_id), False)
             await self._finish(record, path, record.source_room_id, human_joined=roster.get(user_id) == "join")

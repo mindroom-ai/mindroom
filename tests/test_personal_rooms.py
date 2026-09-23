@@ -36,6 +36,7 @@ from mindroom.matrix.personal_room_store import (
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.runtime_resolution import resolve_agent_runtime
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, install_runtime_journal_support, test_runtime_paths
@@ -301,7 +302,7 @@ async def test_dispatch_waits_for_human_join_and_keeps_requester(
     room_id = await owner.ensure("@alice:localhost", "!lobby:localhost", server)
     assert not server.messages
     server.set_member(room_id, "@alice:localhost", "join")
-    await owner.member_joined(room_id, "@alice:localhost")
+    await owner.owner_membership_event(room_id, "@alice:localhost", "join")
     content = next(iter(server.messages.values()))["content"]
     assert content[ORIGINAL_SENDER_KEY] == "@alice:localhost"
     assert content[SOURCE_KIND_KEY] == "hook_dispatch"
@@ -656,7 +657,7 @@ async def test_pending_dispatch_keeps_authorization_after_config_change(
     server.set_member(room_id, "@alice:localhost", "join")
     server.fail_send = True
     with pytest.raises(RuntimeError, match="welcome"):
-        await owner.member_joined(room_id, "@alice:localhost")
+        await owner.owner_membership_event(room_id, "@alice:localhost", "join")
     server.set_member(room_id, "@alice:localhost", "leave")
     server.fail_send = False
     owner.runtime.config.personal_rooms.welcome_dispatch = False
@@ -784,7 +785,7 @@ async def test_private_welcome_requester_reaches_existing_ingress(
     target.config.agents["helper"].private = AgentPrivateConfig(per="user")
     await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     server.set_member("!personal1:localhost", "@alice:localhost", "join")
-    await target.personal_rooms.member_joined("!personal1:localhost", "@alice:localhost")
+    await target.personal_rooms.owner_membership_event("!personal1:localhost", "@alice:localhost", "join")
     content = next(iter(server.messages.values()))["content"]
     assert (
         target._ingress_validator.requester_user_id(sender=server.user_id, source={"content": content})
@@ -1129,7 +1130,7 @@ async def test_deferred_join_rechecks_disabled_settings_after_lock(
     server.set_member(room_id, "@alice:localhost", "join")
     path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
     async with async_exclusive_file_lock(path.with_suffix(".lock")):
-        pending = asyncio.create_task(owner.member_joined(room_id, "@alice:localhost"))
+        pending = asyncio.create_task(owner.owner_membership_event(room_id, "@alice:localhost", "join"))
         await asyncio.sleep(0)
         owner.runtime.config.personal_rooms = None
     await pending
@@ -1639,7 +1640,7 @@ async def test_observed_manual_join_retires_initial_admin_authority(
     assert read_personal_room(path).initial_join_pending is True
 
     server.set_member(room_id, "@alice:localhost", "join")
-    await owner.member_joined(room_id, "@alice:localhost")
+    await owner.owner_membership_event(room_id, "@alice:localhost", "join")
     assert read_personal_room(path).initial_join_pending is False
     server.set_member(room_id, "@alice:localhost", "leave")
     await server.room_invite(room_id, "@alice:localhost")
@@ -1651,6 +1652,125 @@ async def test_observed_manual_join_retires_initial_admin_authority(
     ) == {
         "membership": "invite",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("observed_membership", "previous_membership"),
+    [("join", "invite"), ("join", "join"), ("leave", "invite"), ("ban", "invite")],
+)
+@pytest.mark.parametrize("policy_change", ["active", "disabled", "access_denied"])
+async def test_owner_event_retires_initial_join_after_later_invite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observed_membership: str,
+    previous_membership: str,
+    policy_change: str,
+) -> None:
+    """A processed owner event ends initial authority even if remote state advances."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="")
+    admin_calls = 0
+
+    async def admin_join(_client: MatrixServer, room_id: str, user_id: str) -> bool:
+        nonlocal admin_calls
+        admin_calls += 1
+        if admin_calls == 1:
+            return False
+        server.set_member(room_id, user_id, "join")
+        return True
+
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.admin_join_room_user", admin_join)
+    with pytest.raises(RuntimeError, match="initial join"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    room_id = "!personal1:localhost"
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    assert read_personal_room(path).initial_join_pending is True
+    lifecycle = PersonalRoomLifecycle(
+        "helper",
+        owner.runtime,
+        owner.runtime_paths,
+        owner,
+        lambda _agent: None,
+        lambda event: event.sender,
+    )
+    server.set_member(room_id, "@alice:localhost", observed_membership)
+    event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
+    if observed_membership == "join":
+        server.set_member(room_id, "@alice:localhost", "leave")
+        await server.room_invite(room_id, "@alice:localhost")
+    if policy_change == "disabled":
+        owner.runtime.config.personal_rooms = None
+    elif policy_change == "access_denied":
+        owner.runtime.config.agents["helper"].access.users = []
+    await lifecycle.member_event(nio.MatrixRoom(room_id, server.user_id), event)
+    assert read_personal_room(path).initial_join_pending is False
+    if observed_membership != "join":
+        server.set_member(room_id, "@alice:localhost", "leave")
+        await server.room_invite(room_id, "@alice:localhost")
+    restarted = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="")
+    assert await restarted.ensure("@alice:localhost", "!lobby:localhost", server) == room_id
+    assert admin_calls == 1
+    assert next(
+        event["content"] for event in server.state[room_id] if event.get("state_key") == "@alice:localhost"
+    ) == {"membership": "invite"}
+
+
+@pytest.mark.asyncio
+async def test_owner_event_retirement_requires_recorded_room_and_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated room or member event cannot retire another owner's intent."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch, auto_join_requester=True, welcome="")
+    monkeypatch.setattr("mindroom.matrix.personal_rooms.admin_join_room_user", AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="initial join"):
+        await owner.ensure("@alice:localhost", "!lobby:localhost", server)
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    lifecycle = PersonalRoomLifecycle(
+        "helper",
+        owner.runtime,
+        owner.runtime_paths,
+        owner,
+        lambda _agent: None,
+        lambda event: event.sender,
+    )
+    leave = _room_member_event(membership="leave", prev_membership="invite")
+    await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
+    await lifecycle.member_event(
+        nio.MatrixRoom("!personal1:localhost", server.user_id),
+        _room_member_event(user_id="@bob:localhost", membership="leave", prev_membership="invite"),
+    )
+    assert read_personal_room(path).initial_join_pending is True
+    await lifecycle.member_event(nio.MatrixRoom("!personal1:localhost", server.user_id), leave)
+    assert read_personal_room(path).initial_join_pending is False
+
+
+@pytest.mark.asyncio
+async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated member events do no disk or network setup without a record."""
+    server = MatrixServer()
+    owner = service(tmp_path, server, monkeypatch)
+    owner.runtime.config.personal_rooms = None
+    path = personal_room_record_path(owner.runtime_paths, "helper", "@alice:localhost")
+    lifecycle = PersonalRoomLifecycle(
+        "helper",
+        owner.runtime,
+        owner.runtime_paths,
+        owner,
+        lambda _agent: None,
+        lambda event: event.sender,
+    )
+    await lifecycle.member_event(
+        nio.MatrixRoom("!other:localhost", server.user_id),
+        _room_member_event(membership="leave", prev_membership="invite"),
+    )
+    assert not path.exists()
+    assert not path.with_suffix(".lock").exists()
 
 
 @pytest.mark.asyncio
@@ -1927,7 +2047,7 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     room_id = "!personal1:localhost"
     server.set_member(room_id, "@alice:localhost", "join")
-    await target.personal_rooms.member_joined(room_id, "@alice:localhost")
+    await target.personal_rooms.owner_membership_event(room_id, "@alice:localhost", "join")
     content = next(iter(server.messages.values()))["content"]
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member(server.user_id, "Helper", None)
@@ -2022,7 +2142,7 @@ async def test_deferred_welcome_freezes_intent_before_human_join(
     owner.runtime.config.personal_rooms.welcome = changed_welcome
     owner.runtime.config.personal_rooms.welcome_dispatch = False
     server.set_member(room_id, "@alice:localhost", "join")
-    await owner.member_joined(room_id, "@alice:localhost")
+    await owner.owner_membership_event(room_id, "@alice:localhost", "join")
     assert len(server.messages) == 1
     content = next(iter(server.messages.values()))["content"]
     assert content["body"] == "Original @alice:localhost"
@@ -2045,7 +2165,7 @@ async def test_unrelated_join_does_not_require_personal_authorization(
     before = dict(server.messages)
     owner.runtime.config.agents["helper"].access.users = []
     owner.runtime.config.agents["helper"].access.members_of_rooms = ["lobby"]
-    await owner.member_joined("!unrelated:localhost", "@alice:localhost")
+    await owner.owner_membership_event("!unrelated:localhost", "@alice:localhost", "join")
     assert server.messages == before
 
 
@@ -2155,9 +2275,9 @@ async def test_welcome_delivery_rechecks_policy_after_intent_write(
                 owner.runtime.config.agents["helper"].access.users = []
 
     monkeypatch.setattr("mindroom.matrix.personal_rooms.write_personal_room", write_and_revoke)
-    await owner.member_joined(room_id, "@alice:localhost")
+    await owner.owner_membership_event(room_id, "@alice:localhost", "join")
     assert not server.messages
     monkeypatch.setattr("mindroom.matrix.personal_rooms.write_personal_room", write_personal_room)
     owner.runtime.config = personal_config(welcome="Changed", welcome_dispatch=False)
-    await owner.member_joined(room_id, "@alice:localhost")
+    await owner.owner_membership_event(room_id, "@alice:localhost", "join")
     assert next(iter(server.messages.values()))["content"]["body"] == "Original @alice:localhost"

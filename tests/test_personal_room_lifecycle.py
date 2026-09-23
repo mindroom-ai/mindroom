@@ -160,7 +160,7 @@ async def test_live_membership_leaves_unknown_baseline_to_durable_gate(
     if previous is not None:
         source["unsigned"] = {"prev_content": {"membership": previous}}
     await coordination.lifecycle.member_event(room, nio.RoomMemberEvent.from_dict(source))
-    assert coordination.local.member_joined.await_count == (previous != "join")
+    coordination.local.owner_membership_event.assert_awaited_once_with(room.room_id, "@alice:localhost", "join")
     assert coordination.owner.ensure.await_count == (previous == "leave")
     if previous == "leave":
         coordination.owner.ensure.assert_awaited_once_with(
