@@ -22,7 +22,12 @@ from agno.session.team import TeamSession
 from sqlalchemy import Engine, create_engine, event, select
 from sqlalchemy.dialects.sqlite import insert
 
-from mindroom import agno_compat_session_metrics, agno_compat_session_persistence, agno_compat_sqlite
+from mindroom import (
+    agno_compat_run_messages,
+    agno_compat_session_metrics,
+    agno_compat_session_persistence,
+    agno_compat_sqlite,
+)
 from mindroom.constants import prompt_roles_for_history_storage
 from mindroom.legacy_session_storage import scrub_legacy_run_blobs
 from mindroom.legacy_usage_storage import migrate_usage_database
@@ -225,6 +230,7 @@ def _create_sqlite_state_storage(
             session_table=session_table,
         )
         agno_compat_session_metrics.register_database(database)
+        agno_compat_run_messages.install_patch()
         return database
 
 
