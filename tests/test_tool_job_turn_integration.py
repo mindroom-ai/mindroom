@@ -6,6 +6,7 @@ import asyncio
 import json
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, cast
+from unittest.mock import patch
 
 import pytest
 from agno.agent import Agent
@@ -13,6 +14,7 @@ from agno.db.base import SessionType
 from agno.db.sqlite import SqliteDb
 from agno.models.response import ModelResponse
 from agno.run.agent import RunContentEvent, RunOutput
+from agno.team import Team
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -31,6 +33,7 @@ from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -42,13 +45,16 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from agno.run.team import TeamRunOutput
+
     from mindroom.response_turn import DynamicContinuationRunState
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @pytest.mark.asyncio
-async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Path) -> None:
-    """The saved tool result is the consumption evidence, so a session's state does not grow per consumed job."""
+@pytest.mark.parametrize("team", [False, True], ids=["agent", "team_leader"])
+async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Path, team: bool) -> None:
+    """An agent's or team leader's saved tool result is the consumption evidence, so session state never grows."""
     executions: list[str] = []
 
     async def report(topic: str) -> str:
@@ -63,6 +69,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     storage_file = str(tmp_path / "turns.db")
 
@@ -78,17 +85,24 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         ]
     install_tool_job_execution(model)
     storage = storage_factory()
-    actor = Agent(id="leader", model=model, tools=[report], db=storage, telemetry=False)
+    actor = (
+        Team(id="leader", model=model, members=[], tools=[report], db=storage, telemetry=False)
+        if team
+        else Agent(id="leader", model=model, tools=[report], db=storage, telemetry=False)
+    )
 
     @owned_tool_execution
-    async def run_turn(prompt: str) -> RunOutput:
+    async def run_turn(prompt: str) -> RunOutput | TeamRunOutput:
         set_consumption_storage(storage_factory)
         return await actor.arun(prompt, session_id=context.session_id, user_id=owner.requester_id)
 
     try:
-        with tool_runtime_context(context):
+        with (
+            tool_runtime_context(context),
+            patch.object(runtime, "acknowledge_wait", wraps=runtime.acknowledge_wait) as acknowledge,
+        ):
             runs = [await run_turn(f"Report on {topic}") for topic in topics]
-        session = storage.get_session(context.session_id, session_type=SessionType.AGENT)
+        session = storage.get_session(context.session_id, session_type=SessionType.TEAM if team else SessionType.AGENT)
         assert session is not None
         assert session.session_data is not None
         assert not session.session_data.get("session_state")
@@ -100,10 +114,10 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         jobs = await runtime.list_jobs(owner=owner, depth=0)
         assert len(jobs) == len(topics)
         assert all(job.consumed for job in jobs)
+        assert sorted(call.args[0] for call in acknowledge.await_args_list) == sorted(job.job_id for job in jobs)
         assert await runtime.pending_outcomes() == []
     finally:
         storage.close()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -190,6 +204,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
     storage_file = str(tmp_path / "turns.db")
@@ -266,7 +281,6 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
             if pending is not None:
                 await asyncio.gather(pending, return_exceptions=True)
         storage.close()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -298,6 +312,7 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     storage_file = str(tmp_path / "stream.db")
 
@@ -439,5 +454,4 @@ async def test_streaming_turn_consumes_completion_only_after_active_text_boundar
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
         storage.close()
-        register_background_runtime(paths, None)
         await runtime.shutdown()

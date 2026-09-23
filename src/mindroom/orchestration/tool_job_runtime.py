@@ -17,10 +17,9 @@ from mindroom.delegation.lifecycle import active_delegation_edges
 from mindroom.delegation.recovery import interrupt_child
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_room_admin import get_joined_rooms
 from mindroom.tool_jobs.authorization import function_authority, locally_allowed
-from mindroom.tool_jobs.disabled import clear_parked_work, index_parked_work
-from mindroom.tool_jobs.execution_authority import set_execution_authorizer
+from mindroom.tool_jobs.disabled import index_parked_work
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
     CONSUMED_RESULT_RETENTION,
@@ -28,18 +27,14 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobAccessError,
     ToolJobRuntime,
-    get_background_runtime,
     register_background_runtime,
 )
-from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.user_stop import restore_user_stops
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from agno.tools.function import Function
-    from nio import AsyncClient
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot, TeamBot
@@ -75,33 +70,41 @@ class ToolJobRuntimeCoordinator:
     _runtime: ToolJobRuntime | None = field(default=None, init=False)
     _task: asyncio.Task[None] | None = field(default=None, init=False)
     _initialized: bool = field(default=False, init=False)
+    # Journal admission of a completion is idempotent, but each one is a write transaction that locks its room's
+    # membership row and wakes the dispatcher, so every retry pass would repeat it until the job is consumed.
     _admitted: set[tuple[str, int]] = field(default_factory=set, init=False)
     _journal: EventJournalStore | None = field(default=None, init=False)
 
     async def initialize(self, journal: EventJournalStore | None = None) -> None:
-        """Pin execution mode and index parked ownership before dispatch can start."""
+        """Pin execution mode, then claim job storage or index parked ownership, before dispatch can start."""
         if self._initialized:
             return
         self._journal = journal
         config = self.config_provider()
         if config is None:
             return
-        if not pin_background_tool_jobs(config, self.runtime_paths):
-            await index_parked_work(self.runtime_paths, journal)
+        instance = pin_background_tool_jobs(config, self.runtime_paths)
+        if instance.settings.enabled:
+            # The thread itself keeps the runtime, so a cancelled startup still leaves its lease for stop to release.
+            await run_blocking_until_complete(self._claim_storage)
         else:
-            # The worker publishes ownership before cancellation can leave an acquired lease behind.
-            await run_blocking_until_complete(lambda: self.runtime)
+            instance.parked = await index_parked_work(self.runtime_paths, journal)
         self._initialized = True
+
+    def _claim_storage(self) -> None:
+        self._runtime = ToolJobRuntime(
+            self.runtime_paths.storage_root,
+            authorize=self._authorized,
+            authorize_execution=self._authorize_execution,
+            cancel=self._interrupt_child,
+        )
 
     @property
     def runtime(self) -> ToolJobRuntime:
-        """Claim storage only when the service starts using the job owner."""
+        """The job owner an enabled instance created at startup; a stopped or disabled coordinator has none."""
         if self._runtime is None:
-            self._runtime = ToolJobRuntime(
-                self.runtime_paths.storage_root,
-                authorize=self._authorized,
-                cancel=self._interrupt_child,
-            )
+            msg = "Background tool jobs are not running."
+            raise RuntimeError(msg)
         return self._runtime
 
     async def _interrupt_child(self, job: BackgroundJob) -> BackgroundOutcome | None:
@@ -174,9 +177,6 @@ class ToolJobRuntimeCoordinator:
         arguments: Mapping[str, Any] | None = None,
     ) -> None:
         """Recheck retained functions immediately before application execution."""
-        context = get_tool_runtime_context()
-        if context is None or get_background_runtime(context.runtime_paths) is not self._runtime:
-            return
         if is_job_function(function):
             return  # Every action checks its exact stored owner through the runtime.
 
@@ -227,27 +227,27 @@ class ToolJobRuntimeCoordinator:
         if config is None:
             await self.stop()
             return
-        if not pin_background_tool_jobs(config, self.runtime_paths):
+        runtime = self._runtime
+        if runtime is None:
             return
         if self._task is None or self._task.done():
             if self._task is not None and not self._task.cancelled():
                 error = self._task.exception()
                 if error is not None:
                     logger.error("Tool job completion worker stopped; restarting", error=str(error))
-            await self.runtime.recover()
+            await runtime.recover()
             if self._journal is not None:
                 for entity_name in (*config.agents, *config.teams):
                     bot = self.bot_provider(entity_name)
                     if bot is not None:
                         await restore_user_stops(
-                            self.runtime,
-                            self._journal.principal(bot._journal_principal_id),
+                            runtime,
+                            bot.journal_principal(),
                             self._journal.turn_records(entity_name),
                         )
-            register_background_runtime(self.runtime_paths, self.runtime)
-            set_execution_authorizer(self.runtime_paths, self._authorize_execution)
+            register_background_runtime(self.runtime_paths, runtime)
             self._task = asyncio.create_task(self._run(), name="tool_job_completion_worker")
-        self.runtime.changed.set()
+        runtime.changed.set()
 
     async def quiesce(self) -> None:
         """Stop wakeups and execution while live response owners finish their receipts."""
@@ -267,13 +267,9 @@ class ToolJobRuntimeCoordinator:
                 if self._runtime is not None:
                     await self._runtime.shutdown()
         finally:
-            register_background_runtime(self.runtime_paths, None)
-            set_execution_authorizer(self.runtime_paths, None)
-            self._runtime = None
             release_background_tool_jobs(self.runtime_paths)
-            clear_parked_work(self.runtime_paths)
+            self._runtime = self._journal = None
             self._initialized = False
-            self._journal = None
             self._admitted.clear()
 
     async def _run(self) -> None:
@@ -293,12 +289,11 @@ class ToolJobRuntimeCoordinator:
     async def deliver_pending(self) -> None:
         """Retry pending outcomes until the durable journal owns each generation."""
         await self.runtime.cancel_revoked()
-        memberships: dict[AsyncClient, list[str] | None] = {}
         pending = await self.runtime.pending_outcomes()
         self._admitted.intersection_update((job.job_id, job.generation) for job in pending)
         for job in pending:
             try:
-                await self._deliver(job, memberships)
+                await self._deliver(job)
             except Exception:
                 logger.exception("Background tool job completion wakeup failed", job_id=job.job_id)
 
@@ -325,7 +320,7 @@ class ToolJobRuntimeCoordinator:
                 if record is not None:
                     finished[key] = record.completed
                 elif (bot := self.bot_provider(entity)) is not None:
-                    principal = journal.principal(bot._journal_principal_id)
+                    principal = bot.journal_principal()
                     finished[key] = await principal.load_event(source) is not None and not await principal.is_pending(
                         source,
                     )
@@ -338,7 +333,7 @@ class ToolJobRuntimeCoordinator:
             source_finished=source_finished,
         )
 
-    async def _deliver(self, job: BackgroundJob, memberships: dict[AsyncClient, list[str] | None]) -> None:
+    async def _deliver(self, job: BackgroundJob) -> None:
         generation = (job.job_id, job.generation)
         if generation in self._admitted:
             return
@@ -349,16 +344,10 @@ class ToolJobRuntimeCoordinator:
             or not bot.running
             or bot.client is None
             or job.owner.room_id is None
+            # Synced membership: a bot outside the room costs no homeserver request on every retry pass.
+            or job.owner.room_id not in bot.client.rooms
             or not self._authorized(job)
         ):
-            return
-        client = bot.client
-        if client not in memberships:
-            memberships[client] = await get_joined_rooms(client)
-        joined_rooms = memberships[client]
-        if joined_rooms is None or job.owner.room_id not in joined_rooms:
-            return
-        if self.bot_provider(recipient) is not bot or not bot.running or not self._authorized(job):
             return
         current = await self.runtime.outcome(job.job_id, job.generation)
         if current is not None:

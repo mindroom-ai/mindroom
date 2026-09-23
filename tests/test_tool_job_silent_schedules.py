@@ -31,6 +31,7 @@ from mindroom.response_runner import _is_silent_schedule_response, _with_silent_
 from mindroom.streaming import StreamingPresentation, strip_matching_visible_tool_markers
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.completion import completion_envelope, join_conversation_jobs
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import ToolTraceEntry, tool_markers_match_trace
@@ -82,6 +83,7 @@ async def test_silent_join_preserves_the_deliverable_report(
     context = replace(_delegate_runtime_context(config, paths), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     database = str(tmp_path / "silent.db")
     storage = SqliteDb(db_file=database)
@@ -212,7 +214,6 @@ async def test_silent_join_preserves_the_deliverable_report(
             assert answer.index("`job`") < answer.index(second)
         assert await runtime.pending_outcomes() == []
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
         storage.close()
 
@@ -241,6 +242,7 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
     assert context is not None
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -284,7 +286,6 @@ async def test_recovered_silent_schedule_retains_guidance_and_receipt(tmp_path: 
         assert len(receipts) == 1
         assert json.loads(receipts[0].read_text())["result"] == "no_report"
     finally:
-        register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()
 
 
@@ -305,6 +306,7 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
     assert context is not None
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -330,7 +332,6 @@ async def test_automatic_join_keeps_quiet_and_visible_results_separate(tmp_path:
         assert f'job_id="{"quiet" if silent else "visible"}"' in joined[0].prompt
         assert f'job_id="{"visible" if silent else "quiet"}"' not in joined[0].prompt
     finally:
-        register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()
 
 
@@ -351,6 +352,7 @@ async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp
     assert context is not None
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(bot.runtime_paths.storage_root)
+    pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
     release = asyncio.Event()
 
@@ -394,5 +396,4 @@ async def test_accepted_job_persists_silent_completion_policy_across_restart(tmp
         assert "NO_REPLY" in _with_silent_schedule_delivery((), completed)[0].text
     finally:
         release.set()
-        register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()

@@ -23,9 +23,9 @@ from mindroom.shell_execution import discard_background_record
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
-from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 from mindroom.tool_system.runtime_context import (
@@ -79,6 +79,7 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     toolkit = get_tool_by_name(
         "shell",
@@ -103,7 +104,6 @@ async def shell_runtime(tmp_path: Path, request: pytest.FixtureRequest) -> Async
                 yield actor, model, runtime, owner, toolkit
     finally:
         (tmp_path / "release").touch()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
         for handle in set(_process_registry) - existing_handles:
             task = _process_registry[handle]._monitor_task
@@ -190,6 +190,9 @@ async def test_empty_exclusion_list_includes_shell(shell_runtime: _ShellRuntime)
     context = get_tool_runtime_context()
     assert context is not None
     context.config.background_tool_jobs.exclude_toolkits.clear()
+    # Start the instance again with the explicit empty list.
+    pin_background_tool_jobs(context.config, context.runtime_paths)
+    register_background_runtime(context.runtime_paths, runtime)
     result = await _invoke(actor, model, "run_shell_command", args="printf 'managed shell'")
     assert not result.tool_call_error
     assert "managed shell" in result.result
@@ -308,8 +311,8 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
-    register_background_runtime(paths, runtime)
     pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
     excluded = excluded_name == "native_plugin"
     try:
         with isolated_plugin_runtime(config, paths), tool_runtime_context(context):
@@ -350,11 +353,11 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
                 release_background_tool_jobs(paths)
                 pin_background_tool_jobs(config, paths)
+                register_background_runtime(paths, runtime)
                 rejected = await _invoke(actor, model, "native_step", wait_timeout=3)
                 assert rejected.tool_call_error
                 assert "exclude_toolkits" in rejected.result
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         release_background_tool_jobs(paths)
-        register_background_runtime(paths, None)
         await runtime.shutdown()

@@ -29,6 +29,7 @@ from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_jobs.wait_timeout import record_tool_wait_mode, saved_tool_wait_mode
@@ -66,6 +67,7 @@ async def test_sdk_preparation_preserves_wait_modes_with_either_call_style(
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -101,7 +103,6 @@ async def test_sdk_preparation_preserves_wait_modes_with_either_call_style(
         assert saved_tool_wait_mode(run_context.metadata, "saved", "call") == "native"
     finally:
         await runtime.shutdown()
-        register_background_runtime(paths, None)
 
 
 class _NativeTools(Toolkit):
@@ -141,9 +142,16 @@ async def test_saved_approval_retains_timeout_semantics_after_exclusion_change( 
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     observed: list[int] = []
     storage = SqliteDb(db_file=str(tmp_path / "approvals.db"))
+
+    def restart_with_exclusions(exclusions: list[str]) -> None:
+        # A changed exclusion list takes effect when the instance starts again.
+        config.background_tool_jobs.exclude_toolkits = exclusions
+        pin_background_tool_jobs(config, paths)
+        register_background_runtime(paths, runtime)
 
     def actor(model: DelegationModel, *, confirm: bool = True, resuming: bool = False) -> Agent | Team:
         install_tool_job_execution(model)
@@ -207,7 +215,7 @@ async def test_saved_approval_retains_timeout_semantics_after_exclusion_change( 
                 assert observed == []
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
 
-                config.background_tool_jobs.exclude_toolkits = [] if initially_excluded else ["native_plugin"]
+                restart_with_exclusions([] if initially_excluded else ["native_plugin"])
                 restored = actor(
                     DelegationModel(
                         id="test",
@@ -239,7 +247,7 @@ async def test_saved_approval_retains_timeout_semantics_after_exclusion_change( 
                     ),
                 )
                 assert second_pause.status is RunStatus.paused
-                config.background_tool_jobs.exclude_toolkits = ["native_plugin"] if initially_excluded else []
+                restart_with_exclusions(["native_plugin"] if initially_excluded else [])
                 for requirement in second_pause.requirements or ():
                     if requirement.needs_confirmation:
                         requirement.confirm()
@@ -267,7 +275,7 @@ async def test_saved_approval_retains_timeout_semantics_after_exclusion_change( 
 
                 # A new run can inherit metadata, but must never inherit the old
                 # interpretation even if a provider reuses the same call ID.
-                config.background_tool_jobs.exclude_toolkits = [] if initially_excluded else ["native_plugin"]
+                restart_with_exclusions([] if initially_excluded else ["native_plugin"])
                 fresh_model = DelegationModel(
                     id="test",
                     responses=[
@@ -284,7 +292,6 @@ async def test_saved_approval_retains_timeout_semantics_after_exclusion_change( 
                 assert sorted(observed) == ([3, 7, 7] if initially_excluded else [5, 5, 7])
                 assert len(await runtime.list_jobs(owner=owner, depth=0)) == (2 if initially_excluded else 1)
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
         storage.close()
 
@@ -304,6 +311,7 @@ async def test_earlier_managed_call_keeps_native_approval_owned(tmp_path: Path, 
     )
     context = _delegate_runtime_context(config, paths)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",
@@ -331,7 +339,6 @@ async def test_earlier_managed_call_keeps_native_approval_owned(tmp_path: Path, 
                 assert paused.requires_background_tool_jobs
                 assert [tool.tool_call_id for tool in paused.tools] == ["pending"]
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -355,6 +362,7 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",
@@ -385,5 +393,4 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
         release.set()
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
-        register_background_runtime(paths, None)
         await runtime.shutdown()

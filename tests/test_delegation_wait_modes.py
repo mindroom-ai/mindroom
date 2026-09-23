@@ -22,9 +22,9 @@ from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.state import DelegationState
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
@@ -66,8 +66,8 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
     runtime = tool_job_runtime(tmp_path)
-    register_background_runtime(paths, runtime)
     pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
     storage = create_session_storage("leader", config, paths, owner)
     executed: list[str] = []
     child_done = asyncio.Event()
@@ -164,7 +164,6 @@ async def test_delegate_policy_approval_keeps_wait_owner_after_restart(  # noqa:
                 jobs = await runtime.list_jobs(owner=owner, depth=0)
                 assert len(jobs) == (0 if initially_excluded else 1)
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
         release_background_tool_jobs(paths)
         storage.close()

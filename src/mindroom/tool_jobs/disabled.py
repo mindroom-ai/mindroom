@@ -8,12 +8,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.event_journal import EventKind
 from mindroom.logging_config import get_logger
+from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.runtime import UnsupportedToolJobSnapshotError, read_job_snapshot, saved_job_paths
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, JournalEvent
@@ -22,24 +21,23 @@ logger = get_logger(__name__)
 
 
 @dataclass
-class _ParkedWork:
+class ParkedWork:
+    """Saved sources and approvals a disabled instance must leave untouched until an enabled restart."""
+
     sources: set[tuple[str, str]] = field(default_factory=set)
     approvals: set[str] = field(default_factory=set)
 
 
-_PARKED: dict[Path, _ParkedWork] = {}
-
-
-def clear_parked_work(runtime_paths: RuntimePaths) -> None:
-    """Release only the stopped process's passive index."""
-    _PARKED.pop(runtime_paths.storage_root, None)
+def _parked_work(runtime_paths: RuntimePaths) -> ParkedWork | None:
+    instance = tool_job_instance(runtime_paths)
+    return instance.parked if instance is not None else None
 
 
 def event_is_parked(config: Config, runtime_paths: RuntimePaths, entity_name: str, event: JournalEvent) -> bool:
     """Fence saved sources and every internal completion before any handoff."""
     if background_tool_jobs_enabled(config, runtime_paths):
         return False
-    parked = _PARKED.get(runtime_paths.storage_root)
+    parked = _parked_work(runtime_paths)
     return event.kind is EventKind.TOOL_JOB_COMPLETION or (
         parked is not None and (entity_name, event.event_id) in parked.sources
     )
@@ -47,16 +45,16 @@ def event_is_parked(config: Config, runtime_paths: RuntimePaths, entity_name: st
 
 def approval_is_parked(runtime_paths: RuntimePaths, approval_id: str) -> bool:
     """Keep parked approval owners out of startup expiry and failure cleanup."""
-    parked = _PARKED.get(runtime_paths.storage_root)
+    parked = _parked_work(runtime_paths)
     return parked is not None and approval_id in parked.approvals
 
 
-def _saved_sources(runtime_paths: RuntimePaths) -> _ParkedWork:
+def _saved_sources(runtime_paths: RuntimePaths) -> ParkedWork:
     root = runtime_paths.storage_root / "tool_jobs"
     if root.is_symlink():
         msg = "Tool job storage must not use symlinks."
         raise ValueError(msg)
-    parked = _ParkedWork()
+    parked = ParkedWork()
     for path in saved_job_paths(root):
         try:
             job = read_job_snapshot(path)
@@ -78,7 +76,7 @@ def _saved_sources(runtime_paths: RuntimePaths) -> _ParkedWork:
 async def index_parked_work(
     runtime_paths: RuntimePaths,
     journal: EventJournalStore | None = None,
-) -> None:
+) -> ParkedWork:
     """Inspect saved ownership once; never recover, acknowledge, or execute it."""
     parked = await asyncio.to_thread(_saved_sources, runtime_paths)
     if journal is not None:
@@ -98,4 +96,4 @@ async def index_parked_work(
                         (continuation.entity_name, event_id) for event_id in continuation.source_event_ids
                     )
             cursor = (owners[-1][1].entity_name, owners[-1][1].approval_id)
-    _PARKED[runtime_paths.storage_root] = parked
+    return parked

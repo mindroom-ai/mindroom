@@ -21,6 +21,7 @@ from mindroom.thread_models import resolve_thread_model_override
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_authority, bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -57,6 +58,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
     )
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     toolkit = get_tool_by_name("thread_model", paths, worker_target=None, disable_sandbox_proxy=True)
     bind_toolkit_authority(toolkit, authored_name="thread_model")
@@ -134,5 +136,4 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
         release.set()
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
-        register_background_runtime(paths, None)
         await runtime.shutdown()

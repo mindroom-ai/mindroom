@@ -41,11 +41,7 @@ from mindroom.tool_jobs.authorization import (
     function_authority,
 )
 from mindroom.tool_jobs.control import human_message_signal_context, job_checkpoint
-from mindroom.tool_jobs.execution_authority import (
-    authorized_tool_call,
-    check_current_execution_authority,
-    set_execution_authorizer,
-)
+from mindroom.tool_jobs.execution_authority import authorized_tool_call, check_current_execution_authority
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
@@ -210,7 +206,7 @@ def _delivery_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoord
     bot = MagicMock(spec=AgentBot)
     bot.running = True
     bot.client = MagicMock(spec=nio.AsyncClient)
-    bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
+    bot.client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_team:localhost")}
     bot.matrix_id = MatrixID.parse("@mindroom_team:localhost")
     return ToolJobRuntimeCoordinator(
         runtime_paths=test_runtime_paths(tmp_path),
@@ -243,6 +239,7 @@ async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_
     """Current permission loss also stops accepted work through its internal owner."""
     config = _config(tmp_path)
     coordinator = _delivery_coordinator(tmp_path, config)
+    await coordinator.initialize()
     fixture = _job()
     child = delegation_child(fixture)
     started, cancelled = asyncio.Event(), asyncio.Event()
@@ -279,10 +276,16 @@ async def test_revocation_cancels_hidden_work_without_delivering_its_result(tmp_
 
 
 @pytest.mark.asyncio
-async def test_completion_scan_shares_membership_read_for_multiple_jobs(tmp_path: Path) -> None:
-    """One bot's ready burst and inaccessible outcomes cost one remote membership read per scan."""
+async def test_retry_passes_for_unjoined_recipient_do_not_query_the_homeserver(tmp_path: Path) -> None:
+    """Retry passes check a burst of jobs for a bot outside their room against synced room state, not Matrix."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     fixture = _job()
+    bot = coordinator.bot_provider("team")
+    assert bot is not None
+    client = bot.client
+    client.rooms = {}
+    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[]))
 
     async def completed() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "result")
@@ -301,18 +304,15 @@ async def test_completion_scan_shares_membership_read_for_multiple_jobs(tmp_path
             )
             waited = await coordinator.runtime.wait(name, owner=fixture.owner, depth=0)
             await coordinator.runtime.release_wait(name, waited.claim)
-        bot = coordinator.bot_provider("team")
-        assert bot is not None
-        bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
         await coordinator.deliver_pending()
-        assert bot.client.joined_rooms.await_count == 1
+        await coordinator.deliver_pending()
+        assert len(client.method_calls) <= 1
         bot.wake_tool_job_completion.assert_not_awaited()
-        bot.client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room:localhost"])
+        client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_team:localhost")}
         await coordinator.deliver_pending()
-        assert bot.client.joined_rooms.await_count == 2
         assert bot.wake_tool_job_completion.await_count == 2
         await coordinator.deliver_pending()
-        assert bot.client.joined_rooms.await_count == 2
+        assert bot.wake_tool_job_completion.await_count == 2
     finally:
         await coordinator.stop()
 
@@ -361,6 +361,7 @@ async def test_failed_coordinator_stop_releases_pinned_state_before_restart(
 async def test_live_wait_claim_suppresses_completion_delivery(tmp_path: Path) -> None:
     """The delivery loop cannot race a result awaiting parent persistence."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     job = await _finish_job(coordinator)
     waiting = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
     bot = coordinator.bot_provider("team")
@@ -403,6 +404,7 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
     assert cancelled.is_set()
     assert get_background_runtime(coordinator.runtime_paths) is None
     restored = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await restored.initialize()
     await restored.runtime.recover()
     job = await restored.runtime.lookup(fixture.job_id, owner=fixture.owner, depth=0)
     assert job.status == "interrupted"
@@ -419,28 +421,6 @@ def test_constructing_orchestrator_support_does_not_claim_runtime_storage(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_authority_revoked_during_membership_read_prevents_send(
-    tmp_path: Path,
-) -> None:
-    """An asynchronous room check cannot preserve pre-reload requester authority."""
-    config = _config(tmp_path)
-    coordinator = _delivery_coordinator(tmp_path, config)
-    await _finish_job(coordinator)
-    bot = coordinator.bot_provider("team")
-    assert bot is not None
-    assert bot.client is not None
-
-    async def membership() -> nio.JoinedRoomsResponse:
-        config.agents["lead"].delegate_to = []
-        return nio.JoinedRoomsResponse(rooms=["!room:localhost"])
-
-    bot.client.joined_rooms = membership
-    await coordinator.deliver_pending()
-    bot.wake_tool_job_completion.assert_not_awaited()
-    await coordinator.stop()
-
-
-@pytest.mark.asyncio
 async def test_replaced_response_runner_releases_wait_without_pausing_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -448,6 +428,7 @@ async def test_replaced_response_runner_releases_wait_without_pausing_job(
     """A replacement transport must signal jobs launched by its retired runner."""
     monkeypatch.setattr(runtime_module, "interrupt_child", AsyncMock())
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     runtime = coordinator.runtime
     register_background_runtime(coordinator.runtime_paths, runtime)
     deps = MagicMock(spec=[definition.name for definition in fields(ResponseRunnerDeps)])
@@ -540,6 +521,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
 async def test_native_admission_reserves_foreground_delivery(tmp_path: Path) -> None:
     """Native admission reserves foreground delivery."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     fixture = _job()
     done = asyncio.Event()
 
@@ -573,6 +555,7 @@ async def test_completion_worker_retries_transient_authorization_scan(
 ) -> None:
     """A failed Matrix-state read cannot strand accepted outcomes or require config reload."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     runtime = coordinator.runtime
     job = await _finish_job(coordinator)
     failed, delivered = asyncio.Event(), asyncio.Event()
@@ -618,6 +601,7 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
     config = _config(tmp_path)
     config.agents["worker"].tools = ["calculator"]
     coordinator = _delivery_coordinator(tmp_path, config)
+    await coordinator.initialize()
     owner = replace(_job().owner, agent_name="worker", session_id="child_session")
     child = delegation_child(_job())
     child.execution_identity = serialize_tool_execution_identity(owner)
@@ -662,6 +646,7 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
     config.agents["lead"].tools = ["mcp_demo"]
     sync_mcp_tool_registry(config)
     coordinator = _delivery_coordinator(tmp_path, config)
+    await coordinator.initialize()
     owner = _job().owner
     toolkit = MindRoomMCPToolkit(
         server_id="demo",
@@ -675,7 +660,6 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
     bind_toolkit_authority(toolkit, authored_name="mcp_demo")
     function._agent = bind_actor_authority(Agent(), authority_snapshot(config, "lead"))
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
-    set_execution_authorizer(coordinator.runtime_paths, coordinator._authorize_execution)
     try:
         with (
             tool_runtime_context(
@@ -722,6 +706,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
     config.memory.backend = "none"
     config.models["default"] = ModelConfig(provider="openai", id="gpt-6-astra")
     coordinator = _delivery_coordinator(tmp_path, config)
+    await coordinator.initialize()
     owner = _job().owner
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
@@ -778,6 +763,7 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
     config = _config(tmp_path)
     config.agents["lead"].tools = ["calculator"]
     coordinator = _delivery_coordinator(tmp_path, config)
+    await coordinator.initialize()
     owner = _job().owner
 
     def replacement_factory() -> type[Toolkit]:

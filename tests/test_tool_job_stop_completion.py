@@ -14,6 +14,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalContinuation, ApprovalD
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.completion import completion_envelope, completion_event
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.turn_record import TurnRecord
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
@@ -66,6 +67,7 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
         ),
     )
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
     started, release = asyncio.Event(), asyncio.Event()
     sent_after_stop = []
@@ -144,7 +146,6 @@ async def test_stop_reaches_active_completion_and_its_descendant(tmp_path: Path,
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(*(task for task in (response_task, stop_task) if task is not None), return_exceptions=True)
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -180,6 +181,7 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
         ),
     )
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
 
     class RetiredGateway(_CountingGateway):
@@ -213,7 +215,6 @@ async def test_stop_after_placeholder_deletion_still_cancels_jobs(tmp_path: Path
         assert turn.response_event_id is None
         assert job.user_stop_receipt_order == 100
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -252,6 +253,7 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
         ),
     )
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
 
     async def awaiting() -> BackgroundOutcome:
@@ -332,5 +334,4 @@ async def test_stop_blocks_older_job_approval_owned_by_human_source(tmp_path: Pa
         assert settled.await_count == int(owned_approval)
         execute.assert_not_awaited()
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()

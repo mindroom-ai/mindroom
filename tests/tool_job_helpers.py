@@ -8,15 +8,22 @@ from mindroom.delegation.background import start_delegation
 from mindroom.tool_jobs.runtime import ToolJobRuntime
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
+
+    from agno.tools.function import Function
 
     from mindroom.delegation.state import DelegationChild
     from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 def _authorize_all(_job: BackgroundJob) -> bool:
     return True
+
+
+def _allow_execution(_owner: ToolExecutionIdentity, _function: Function, _arguments: Mapping[str, Any]) -> None:
+    return None
 
 
 async def _no_cleanup(_job: BackgroundJob) -> None:
@@ -27,10 +34,11 @@ def tool_job_runtime(
     storage_root: Path,
     *,
     authorize: Callable[[BackgroundJob], bool] = _authorize_all,
+    authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
 ) -> ToolJobRuntime:
-    """Build a runtime whose current grants allow every job and whose adapters need no extra cleanup."""
-    return ToolJobRuntime(storage_root, authorize=authorize, cancel=cancel)
+    """Build a runtime whose current grants allow every job and call and whose adapters need no extra cleanup."""
+    return ToolJobRuntime(storage_root, authorize=authorize, authorize_execution=authorize_execution, cancel=cancel)
 
 
 async def start_job(runtime: ToolJobRuntime, job_id: str, **options: Any) -> BackgroundJob:  # noqa: ANN401

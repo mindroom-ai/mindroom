@@ -113,7 +113,12 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
 
         statuses = {}
         if action == "create":
-            runtime = ToolJobRuntime(storage_root, authorize=lambda job: True, cancel=no_cleanup)
+            runtime = ToolJobRuntime(
+                storage_root,
+                authorize=lambda job: True,
+                authorize_execution=lambda *args: None,
+                cancel=no_cleanup,
+            )
 
             async def completed():
                 return BackgroundOutcome("completed", "saved")
@@ -144,7 +149,12 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             await asyncio.sleep(0)
             await runtime.shutdown()
         elif action == "recover":
-            runtime = ToolJobRuntime(storage_root, authorize=authorized, cancel=no_cleanup)
+            runtime = ToolJobRuntime(
+                storage_root,
+                authorize=authorized,
+                authorize_execution=lambda *args: None,
+                cancel=no_cleanup,
+            )
             await runtime.recover()
             statuses = {
                 job.job_id: job.status

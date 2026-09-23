@@ -4,27 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from pathlib import Path
+from mindroom.tool_jobs.instances import tool_job_instance
 
+if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import BackgroundToolJobsConfig
     from mindroom.constants import RuntimePaths
-
-_STARTED: dict[Path, BackgroundToolJobsConfig] = {}
-
-
-def pin_background_tool_jobs(config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Freeze the setting before any responder or recovery owner starts."""
-    return _STARTED.setdefault(
-        runtime_paths.storage_root,
-        config.background_tool_jobs.model_copy(deep=True),
-    ).enabled
-
-
-def release_background_tool_jobs(runtime_paths: RuntimePaths) -> None:
-    """Release the stopped instance's setting so a new startup can choose again."""
-    _STARTED.pop(runtime_paths.storage_root, None)
 
 
 def background_tool_jobs_enabled(config: Config, runtime_paths: RuntimePaths) -> bool:
@@ -38,7 +23,8 @@ def toolkit_is_background_excluded(name: str, config: Config, runtime_paths: Run
 
 
 def _effective_settings(config: Config, runtime_paths: RuntimePaths) -> BackgroundToolJobsConfig:
-    return _STARTED.get(runtime_paths.storage_root, config.background_tool_jobs)
+    instance = tool_job_instance(runtime_paths)
+    return instance.settings if instance is not None else config.background_tool_jobs
 
 
 def pending_background_tool_jobs_restart(config: Config, runtime_paths: RuntimePaths) -> bool:

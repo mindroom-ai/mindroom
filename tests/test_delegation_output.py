@@ -25,6 +25,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.authorization import bind_toolkit_authority
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -85,7 +86,9 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         "parent",
     )
     runtime = tool_job_runtime(tmp_path) if execution != "inline" else None
-    register_background_runtime(paths, runtime)
+    pin_background_tool_jobs(config, paths)
+    if runtime is not None:
+        register_background_runtime(paths, runtime)
     release = asyncio.Event()
     signal = HumanMessageSignal()
     if execution != "detached":
@@ -235,5 +238,4 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
         release.set()
         if runtime is not None:
             await runtime.shutdown()
-        register_background_runtime(paths, None)
         storage.close()

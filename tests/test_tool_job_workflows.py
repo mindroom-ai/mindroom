@@ -19,6 +19,7 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.hooks import HookRegistry
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -49,6 +50,7 @@ async def test_workflow_participant_runs_multiple_sync_tools(
     ]
     runtime = tool_job_runtime(context.runtime_paths.storage_root)
     if managed:
+        pin_background_tool_jobs(context.config, context.runtime_paths)
         register_background_runtime(context.runtime_paths, runtime)
     calls = [_call("add", "a", a=1, b=2), _call("multiply", "b", a=3, b=4)]
     child_model = DelegationModel(
@@ -88,7 +90,6 @@ async def test_workflow_participant_runs_multiple_sync_tools(
         outputs = [message.content for message in child_model.seen_messages if message.role == "tool"]
         assert [json.loads(output)["result"] for output in outputs] == [3, 12]
     finally:
-        register_background_runtime(context.runtime_paths, None)
         await runtime.shutdown()
 
 
@@ -105,6 +106,7 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
     context.config.background_tool_jobs.enabled = True
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(context.runtime_paths.storage_root)
+    pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
     loop = asyncio.get_running_loop()
     started = [asyncio.Event(), asyncio.Event()]
@@ -179,5 +181,4 @@ async def test_cancel_composite_job_drains_all_sync_children(  # noqa: PLR0915
             assert sorted(completed) == ([0, 1, 2] if parallel else [0, 1])
     finally:
         release.set()
-        register_background_runtime(context.runtime_paths, None)
         await runtime.shutdown()

@@ -23,6 +23,7 @@ from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
@@ -108,6 +109,7 @@ async def output_agent(tmp_path: Path, managed: bool) -> AsyncIterator[_OutputAg
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
     if managed:
+        pin_background_tool_jobs(context.config, paths)
         register_background_runtime(paths, runtime)
     agent = create_agent(
         "leader",
@@ -128,7 +130,6 @@ async def output_agent(tmp_path: Path, managed: bool) -> AsyncIterator[_OutputAg
             with tool_runtime_context(context):
                 yield _OutputAgent(agent, model, runtime, owner, workspace.root, paths, config)
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
         if agent.db is not None:
             agent.db.close()

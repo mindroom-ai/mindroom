@@ -23,6 +23,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot, bind_actor_auth
 from mindroom.tool_jobs.completion import completion_event, join_conversation_jobs
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
@@ -133,6 +134,7 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
     runner = unwrap_extracted_collaborator(bot._response_runner)
     owner = replace(_job().owner, agent_name="worker", transport_agent_name="general")
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     release = asyncio.Event()
     results = []
@@ -222,7 +224,6 @@ async def test_idle_ad_hoc_completion_reconstructs_member_for_exact_result(  # n
         assert await runtime.pending_outcomes() == []
     finally:
         release.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -233,6 +234,7 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_o
     paths = _delivery_coordinator(tmp_path, config).runtime_paths
     owner = replace(_job().owner, agent_name="worker", transport_agent_name="lead")
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=owner),
@@ -255,7 +257,6 @@ async def test_single_agent_turn_leaves_other_member_jobs_for_their_completion_o
             assert 'job_id="member"' in joined[0].prompt
         assert await runtime.outcome("member", 0) is not None
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -265,6 +266,7 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
     """Native retrieval and generic discovery enforce the same frozen caller/child storage scope."""
     config = _config(tmp_path)
     coordinator = _delivery_coordinator(tmp_path, config)
+    await coordinator.initialize()
     paths, owner = coordinator.runtime_paths, _job().owner
     child = prepare_child_turn("lead", "worker", "Work", owner=owner, config=config, runtime_paths=paths, depth=0)
     context = replace(
@@ -296,7 +298,6 @@ async def test_delegation_storage_change_revokes_discovery_and_controls(tmp_path
             with pytest.raises(JobAccessError):
                 await control(job.job_id, owner=owner, depth=0)
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 

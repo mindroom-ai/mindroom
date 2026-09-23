@@ -45,6 +45,7 @@ from mindroom.tool_jobs.completion import background_wait_notice
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.events import BackgroundWaitChunk, StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import (
@@ -93,6 +94,7 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     started, release, waiting = asyncio.Event(), asyncio.Event(), asyncio.Event()
     signal = HumanMessageSignal()
@@ -307,7 +309,6 @@ async def test_native_approval_joins_before_final_response(  # noqa: PLR0915
         release.set()
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -326,6 +327,7 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     release, waiting = asyncio.Event(), asyncio.Event()
     notices: list[StreamingPresentation] = []
@@ -452,7 +454,6 @@ async def test_blocking_agent_join_preserves_prior_text_when_approval_pauses(  #
         release.set()
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -476,6 +477,7 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     releases = [asyncio.Event(), asyncio.Event()]
     waiting = asyncio.Event()
@@ -660,5 +662,4 @@ async def test_ordinary_team_autojoin_persists_exact_result_receipt(  # noqa: C9
             release.set()
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
-        register_background_runtime(paths, None)
         await runtime.shutdown()

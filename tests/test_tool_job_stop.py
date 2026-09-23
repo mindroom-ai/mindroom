@@ -13,6 +13,7 @@ from mindroom.event_journal import DeliveryStage
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseAttempt, ResponseSources
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_jobs.user_stop import stop_conversation_jobs
 from mindroom.turn_record import TurnRecord
@@ -282,6 +283,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
         ),
     )
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     coordinator = None
 
@@ -303,7 +305,7 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
         if restart_gap:
             await bot._turn_store.record_user_stopped_response("$reply", 100, delivery_settled=True)
             await runtime.shutdown()
-            register_background_runtime(paths, None)
+            release_background_tool_jobs(paths)
             coordinator = ToolJobRuntimeCoordinator(
                 paths,
                 lambda: config,
@@ -324,5 +326,4 @@ async def test_stop_is_applied_live_and_after_crash_before_job_markers(
     finally:
         if coordinator is not None:
             await coordinator.stop()
-        register_background_runtime(paths, None)
         await runtime.shutdown()

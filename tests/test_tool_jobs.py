@@ -8,7 +8,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pytest
 
@@ -18,6 +18,9 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload,
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
 from tests.test_background_subagents import _owner
 from tests.tool_job_helpers import start_job, tool_job_runtime, wait_for_status
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
 
 
 def _age(runtime: ToolJobRuntime, job_id: str, updated_at: datetime) -> None:
@@ -184,6 +187,76 @@ async def test_settled_payload_file_is_written_once(tmp_path: Path, action: str)
     finally:
         await restored.shutdown()
     assert (payload_path.stat().st_ino, payload_path.stat().st_mtime_ns) == (written.st_ino, written.st_mtime_ns)
+
+
+@pytest.mark.asyncio
+async def test_waiter_that_missed_a_pause_claims_the_next_generation_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation queued before the waiter sees the pause cannot leave the waiter a stale claim and deliver twice."""
+    runtime = tool_job_runtime(tmp_path)
+    loop = asyncio.get_running_loop()
+    writer = runtime_module.write_json_file_durable
+    pause_writing = asyncio.Event()
+    release_pause = threading.Event()
+
+    def blocked_pause(path: Path, payload: object, *, strict_atomic_replace: bool) -> None:
+        if isinstance(payload, dict) and payload.get("status") == "awaiting_approval":
+            loop.call_soon_threadsafe(pause_writing.set)
+            assert release_pause.wait(30)
+        writer(path, payload, strict_atomic_replace=strict_atomic_replace)
+
+    async def paused() -> BackgroundOutcome:
+        return BackgroundOutcome("awaiting_approval", "paused")
+
+    async def resumed() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "resumed")
+
+    async def queued[T](started: asyncio.Event, operation: Awaitable[T]) -> T:
+        # Nothing yields between setting the event and queueing on the runtime lock.
+        started.set()
+        return await operation
+
+    monkeypatch.setattr(runtime_module, "write_json_file_durable", blocked_pause)
+    try:
+        job, claim = await runtime.start(
+            "missed",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=_owner(),
+            operation=paused,
+        )
+        # The paused outcome holds the runtime lock while its save blocks.
+        await asyncio.wait_for(pause_writing.wait(), 30)
+        waiter_queued, continuation_queued = asyncio.Event(), asyncio.Event()
+        waiter = asyncio.create_task(
+            queued(waiter_queued, runtime.wait(job.job_id, owner=_owner(), depth=0, claim=claim)),
+        )
+        await waiter_queued.wait()
+        continuation = asyncio.create_task(
+            queued(
+                continuation_queued,
+                runtime.continue_job(job.job_id, owner=_owner(), depth=0, expected_generation=0, operation=resumed),
+            ),
+        )
+        await continuation_queued.wait()
+        # The lock is FIFO: the waiter enters first, then queues behind the continuation and misses the pause.
+        release_pause.set()
+        await continuation
+        waited = await asyncio.wait_for(waiter, 30)
+        assert waited.job.status == "completed"
+        assert waited.job.generation == 1
+        assert waited.claim is not None
+        assert waited.claim.generation == 1
+        assert await runtime.pending_outcomes() == []
+        await runtime.acknowledge_wait(job.job_id, waited.claim)
+        assert (await runtime.lookup(job.job_id, owner=_owner(), depth=0)).consumed
+        assert await runtime.pending_outcomes() == []
+    finally:
+        release_pause.set()
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio

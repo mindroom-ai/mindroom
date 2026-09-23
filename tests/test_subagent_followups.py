@@ -26,6 +26,7 @@ from mindroom.delegation import sessions
 from mindroom.delegation.execution import drive_delegations
 from mindroom.delegation.recovery import resolve_subagent
 from mindroom.delegation.state import DelegationState
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import (
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("execution", ["direct", "native", "team", "excluded"])
 @pytest.mark.parametrize("model", [None, "alternate"])
-async def test_followup_reuses_child_history_after_parent_reconstruction(  # noqa: PLR0915
+async def test_followup_reuses_child_history_after_parent_reconstruction(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     execution: str,
@@ -132,7 +133,9 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             "execution_identity": identity,
         }
         runtime = tool_job_runtime(tmp_path) if execution == "excluded" else None
-        register_background_runtime(paths, runtime)
+        if runtime is not None:
+            pin_background_tool_jobs(config, paths)
+            register_background_runtime(paths, runtime)
         try:
             response = await parent.arun("Work", session_id=identity.session_id, user_id=identity.requester_id)
             response = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
@@ -177,7 +180,6 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
         finally:
             if runtime is not None:
                 await runtime.shutdown()
-            register_background_runtime(paths, None)
             storage.close()
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):

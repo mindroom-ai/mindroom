@@ -36,20 +36,16 @@ from mindroom.event_journal import (
 from mindroom.handled_turns import TurnRecordCodec
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
-from mindroom.tool_jobs.disabled import approval_is_parked, clear_parked_work, event_is_parked, index_parked_work
+from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked, index_parked_work
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundJob,
     BackgroundOutcome,
     get_background_runtime,
 )
-from mindroom.tool_jobs.settings import (
-    background_tool_jobs_enabled,
-    pending_background_tool_jobs_restart,
-    pin_background_tool_jobs,
-    release_background_tool_jobs,
-)
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
 from mindroom.turn_record import TurnRecord
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
 from tests.delegation_helpers import DelegationModel
@@ -141,6 +137,23 @@ async def test_default_startup_does_not_create_job_runtime(tmp_path: Path) -> No
         assert not (paths.storage_root / "tool_jobs").exists()
     finally:
         await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_recreated_coordinator_pins_its_own_setting(tmp_path: Path) -> None:
+    """A coordinator whose stop never ran, as when shutdown skips it for pending responses, cannot decide the next one's mode."""
+    paths = test_runtime_paths(tmp_path)
+    disabled = Config()
+    enabled = Config(background_tool_jobs=BackgroundToolJobsConfig(enabled=True))
+    stale = ToolJobRuntimeCoordinator(paths, lambda: disabled, lambda _: None, AgentReplyMembershipIndex())
+    await stale.initialize()
+    recreated = ToolJobRuntimeCoordinator(paths, lambda: enabled, lambda _: None, AgentReplyMembershipIndex())
+    try:
+        await recreated.sync()
+        assert background_tool_jobs_enabled(enabled, paths)
+        assert get_background_runtime(paths) is not None
+    finally:
+        await recreated.stop()
 
 
 @pytest.mark.asyncio
@@ -273,7 +286,7 @@ def test_reload_reports_restart_and_keeps_effective_mode(tmp_path: Path, initial
         assert lifecycle.status.status == "applied"
     finally:
         release_background_tool_jobs(paths)
-    assert pin_background_tool_jobs(changed, paths) is not initial
+    assert pin_background_tool_jobs(changed, paths).settings.enabled is not initial
     release_background_tool_jobs(paths)
 
 
@@ -497,10 +510,8 @@ async def test_disabled_startup_ignores_unreadable_snapshot(tmp_path: Path, unre
     # Payload files are not job metadata, so parking neither reads nor warns about them.
     (directory / "saved.g0.result.json").write_text("{}")
     event = JournalEvent("$saved", "!room:localhost", None, EventKind.MESSAGE, "@user:localhost", 1, {}, 1)
-    try:
-        with capture_logs() as logs:
-            await index_parked_work(paths)
-        assert [entry["path"] for entry in logs if entry["log_level"] == "warning"] == [str(directory / "retired.json")]
-        assert event_is_parked(Config(), paths, "general", event)
-    finally:
-        clear_parked_work(paths)
+    instance = pin_background_tool_jobs(Config(), paths)
+    with capture_logs() as logs:
+        instance.parked = await index_parked_work(paths)
+    assert [entry["path"] for entry in logs if entry["log_level"] == "warning"] == [str(directory / "retired.json")]
+    assert event_is_parked(Config(), paths, "general", event)

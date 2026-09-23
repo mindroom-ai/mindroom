@@ -183,6 +183,7 @@ Generic ownership lives in `src/mindroom/tool_jobs/`; native child execution and
 | `delegation/background.py` | Native child adapter for the shared job owner |
 | `tool_jobs/__init__.py` | Package boundary for generic managed tool execution |
 | `tool_jobs/runtime.py` | Managed execution, persisted outcomes, scoped discovery, interruptible waits and durable result claims |
+| `tool_jobs/instances.py` | The one per-storage-root instance: startup-pinned setting, published runtime, and parked work |
 | `tool_jobs/settings.py` / `tool_jobs/disabled.py` | Startup-pinned opt-in and passive parking of saved sources and approvals while disabled |
 | `tool_jobs/agno_compat_execution.py` / `tool_jobs/agno_compat_resources.py` | SDK schema, dispatch, and toolkit connection-lifetime bindings |
 | `tool_jobs/agno_execution.py` / `tool_jobs/consumption.py` | Original SDK result capture and exact durable consumption |

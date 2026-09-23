@@ -46,6 +46,7 @@ from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
 from mindroom.tool_jobs.disabled import approval_is_parked, event_is_parked
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.events import format_tool_started_event
@@ -104,6 +105,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     signal = HumanMessageSignal()
     storage_file = str(tmp_path / "restart.db")
@@ -223,7 +225,6 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         assert not before_restart.consumed
         assert len(await runtime.pending_outcomes()) == 1
         await runtime.shutdown()
-        register_background_runtime(paths, None)
 
         restored = tool_job_runtime(paths.storage_root)
         await restored.recover()
@@ -282,7 +283,6 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         interrupted_storage.close()
         if final_storage is not None:
             final_storage.close()
-        register_background_runtime(paths, None)
         if restored is not None:
             await restored.shutdown()
         await runtime.shutdown()
@@ -318,6 +318,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         membership_turn_id="$approval-source",
     )
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     side_effects: list[str] = []
 
@@ -427,7 +428,7 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
 
         storage.close()
         config.agents["general"].private = AgentPrivateConfig(per="user")
-        register_background_runtime(paths, None)
+        release_background_tool_jobs(paths)
         await runtime.shutdown()
         config.background_tool_jobs.enabled = False
         disabled = ToolJobRuntimeCoordinator(
@@ -445,7 +446,6 @@ async def test_native_approval_writer_marker_parks_after_storage_change(  # noqa
         assert await store.is_pending(source_event_id)
         assert side_effects == []
     finally:
-        register_background_runtime(paths, None)
         if disabled is not None:
             await disabled.stop()
         await runtime.shutdown()

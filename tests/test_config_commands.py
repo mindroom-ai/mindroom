@@ -43,7 +43,7 @@ from mindroom.handled_turns import TurnRecord
 from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
-from mindroom.tool_jobs.settings import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_system.plugins import PluginReloadResult
 from tests.authorization_helpers import (
     make_test_command_handler_context,

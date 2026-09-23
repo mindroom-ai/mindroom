@@ -47,8 +47,8 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
     runtime = tool_job_runtime(paths.storage_root)
     owner = replace(_job().owner, agent_name="general", transport_agent_name=None)
     coordinator = ToolJobRuntimeCoordinator(paths, lambda: bot.config, lambda _: bot, AgentReplyMembershipIndex())
-    coordinator._runtime = runtime
-    await coordinator.initialize(bot._journal_store)
+    # An authorize-all runtime stands in for the one initialize would create for this bot's stricter grants.
+    coordinator._runtime, coordinator._journal = runtime, bot._journal_store
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved result", result_payload={"value": "saved result"})

@@ -51,10 +51,7 @@ import mindroom.handled_turns as handled_turns_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
-import mindroom.tool_jobs.disabled as tool_jobs_disabled
-import mindroom.tool_jobs.execution_authority as tool_jobs_authority
-import mindroom.tool_jobs.runtime as tool_jobs_runtime
-import mindroom.tool_jobs.settings as tool_jobs_settings
+import mindroom.tool_jobs.instances as tool_jobs_instances
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_storage import get_agent_session, get_team_session
 from mindroom.ai import ResponseTurnContext
@@ -2961,11 +2958,8 @@ def _isolate_mcp_server_manager() -> Generator[None, None, None]:
 
 @pytest.fixture(autouse=True)
 def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Separate startup policy and service registrations; tests still own shutdown of live resources."""
-    monkeypatch.setattr(tool_jobs_runtime, "_runtimes", {})
-    monkeypatch.setattr(tool_jobs_settings, "_STARTED", {})
-    monkeypatch.setattr(tool_jobs_disabled, "_PARKED", {})
-    monkeypatch.setattr(tool_jobs_authority, "_AUTHORIZERS", {})
+    """Separate each test's pinned instances; tests still own shutdown of live resources."""
+    monkeypatch.setattr(tool_jobs_instances, "_instances", {})
 
 
 @pytest.fixture(autouse=True)

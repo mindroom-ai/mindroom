@@ -25,6 +25,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.agno_execution import _drain_result
 from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -50,6 +51,7 @@ async def test_application_wait_timeout_collision_fails_before_execution(tmp_pat
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model, depth=depth)
@@ -75,7 +77,6 @@ async def test_application_wait_timeout_collision_fails_before_execution(tmp_pat
         assert await runtime.list_jobs(owner=owner, depth=depth) == []
         assert function.parameters["properties"]["wait_timeout"]["type"] == "integer"
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -93,6 +94,7 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model, backup = DelegationModel(id="primary"), DelegationModel(id="backup")
     install_tool_job_execution(model, FallbackConfig(on_error=[backup]))
@@ -113,7 +115,6 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
             == controls.parameters["properties"]["wait_timeout"]
         )
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -138,6 +139,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -170,7 +172,6 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
                 assert jobs[0].adapter["arguments"] == encode_tool_result(arguments)
     finally:
         gate.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -198,6 +199,7 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -218,7 +220,6 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
         assert invoked == []
         assert await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0) == []
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -253,6 +254,7 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",
@@ -284,7 +286,6 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
         assert sorted(calls) == ["fast-result", "slow-result"]
     finally:
         gate.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -300,6 +301,7 @@ async def test_rich_stream_reaches_sdk_with_media_metadata_and_events(tmp_path: 
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -321,7 +323,6 @@ async def test_rich_stream_reaches_sdk_with_media_metadata_and_events(tmp_path: 
         assert replayed[0].content == "event"
         assert replayed[1:] == ["picture", "tail"]
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -341,6 +342,7 @@ async def test_owned_nested_application_cannot_create_detached_job(
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(id="test")
     install_tool_job_execution(model)
@@ -368,7 +370,6 @@ async def test_owned_nested_application_cannot_create_detached_job(
         owner = build_execution_identity_from_runtime_context(context)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -398,6 +399,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     model = DelegationModel(
         id="test",
@@ -445,5 +447,4 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
         assert len(jobs) == (0 if nested else 2)
         assert all(job.adapter["tool_call_id"] != "invalid" for job in jobs)
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()

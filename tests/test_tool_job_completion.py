@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 import pytest
 
 from mindroom.approval_response import continuation_target
+from mindroom.config.main import Config
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalCardReservation,
@@ -31,6 +32,7 @@ from mindroom.event_journal import (
 )
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.completion import admit_job_completion, completion_envelope, completion_event
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
@@ -90,6 +92,7 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         target.session_id,
     )
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(Config(), paths)
     register_background_runtime(paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -110,7 +113,6 @@ async def test_completion_requires_current_unconsumed_exact_claim(tmp_path: Path
         await runtime.acknowledge_wait("job", waited.claim)
         assert not await admit_job_completion(envelope, target=target, runtime_paths=paths)
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -137,6 +139,7 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(  # n
         target.session_id,
     )
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -247,7 +250,6 @@ async def test_consumed_completion_resumes_its_owned_approval_continuation(  # n
         assert (await store.approval_continuation(continuation.approval_id)) == claimed
         assert settled == []
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -271,6 +273,7 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         transport_agent_name="general",
     )
     runtime = tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(runner.deps.runtime.config, paths)
     register_background_runtime(paths, runtime)
     first_started, release_first = asyncio.Event(), asyncio.Event()
     settled = []
@@ -332,5 +335,4 @@ async def test_completion_rechecks_after_real_lifecycle_lock(tmp_path: Path, con
         assert executed == ([] if consume else [True])
     finally:
         release_first.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()

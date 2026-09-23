@@ -41,6 +41,7 @@ from mindroom.tool_jobs.control import (
     HumanMessageSignal,
     human_message_signal_context,
 )
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
@@ -109,6 +110,7 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
     if excluded:
         config.background_tool_jobs.exclude_toolkits.append("delegate")
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     delegate = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
     bind_toolkit_construction(delegate, ToolConstruction("delegate", None))
@@ -183,7 +185,6 @@ async def test_invalid_native_wait_resolves_exact_requirement_without_child_exec
         assert DelegationState.from_metadata(response.metadata).children == []
         assert len(await runtime.list_jobs(owner=owner, depth=0)) == (1 if tool_name == "job" else 0)
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
         storage.close()
 
@@ -209,6 +210,7 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
     )
     owner = ToolExecutionIdentity("matrix", "leader", "@alice:example.org", "!room:example.org", None, None, "parent")
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=owner)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
@@ -268,7 +270,6 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
     finally:
         release_writer.set()
         await runtime.shutdown()
-        register_background_runtime(paths, None)
         storage.close()
 
 
@@ -325,6 +326,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         "parent",
     )
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
@@ -569,7 +571,6 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
     finally:
         release.set()
         await runtime.shutdown()
-        register_background_runtime(paths, None)
         storage.close()
         for child_storage in child_storages:
             child_storage.close()
@@ -647,6 +648,8 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
     """Managed team jobs project the actual member and nested tool owner on reconstruction."""
     paths = _runtime_paths(tmp_path)
     runtime = tool_job_runtime(tmp_path)
+    # The scenario authors the default background tool job setting.
+    pin_background_tool_jobs(Config(), paths)
     register_background_runtime(paths, runtime)
     try:
         await _native_approval_scenario(
@@ -666,7 +669,6 @@ async def test_managed_team_approvals_keep_member_and_nested_ownership(
             assert delegation_child(jobs[0]).status == jobs[0].status
     finally:
         await runtime.shutdown()
-        register_background_runtime(paths, None)
 
 
 @pytest.mark.asyncio
@@ -691,6 +693,7 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
         "parent",
     )
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     toolkit = DelegateTools("leader", ["code"], paths, config, execution_identity=identity)
     apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
@@ -728,7 +731,6 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path) ->
         content = next(message.content for message in result.messages if message.tool_call_id == "missing-call")
         assert "not available in this conversation" in content
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
         storage.close()
 

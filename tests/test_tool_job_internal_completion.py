@@ -7,8 +7,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
-import nio
-
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -30,6 +28,7 @@ from mindroom.tool_jobs.completion import (
     report_background_wait,
 )
 from mindroom.tool_jobs.control import HumanMessageSignal, human_message_signal_context
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import test_runtime_paths, unwrap_extracted_collaborator
@@ -74,13 +73,14 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
     """Quiet continuations retain substantive findings while treating NO_REPLY as control data."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
     runtime = tool_job_runtime(tmp_path)
-    register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
         source_kind=SILENT_SCHEDULE_SOURCE_KIND,
     )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
     recorder = TurnRecorder(user_message="Quiet check")
     answers = iter((first, last))
 
@@ -125,7 +125,6 @@ async def test_quiet_join_preserves_findings_without_accumulating_no_reply(
                 assert answer == expected
         assert recorder.assistant_text == expected
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -211,6 +210,7 @@ async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consu
         requester_id=request.user_id or "@user:localhost",
     )
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
     order = []
     started, release = asyncio.Event(), asyncio.Event()
@@ -269,7 +269,6 @@ async def test_completion_waits_for_active_and_newer_turns(tmp_path: Path, consu
         assert order == (["stream", "human"] if consumed else ["stream", "human", "completion"])
         assert not await runner.deps.approval_store.is_pending(event.event_id)
     finally:
-        register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()
 
 
@@ -279,12 +278,13 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
     paths = test_runtime_paths(tmp_path)
     owner = _job().owner
     runtime = tool_job_runtime(tmp_path)
-    register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
     signal, finish = HumanMessageSignal(), asyncio.Event()
     attempted = set()
 
@@ -311,7 +311,6 @@ async def test_auto_join_waits_once_and_human_input_releases_only_wait(tmp_path:
             assert [item async for item in join_conversation_jobs(attempted)] == []
             assert await runtime.outcome("quiet", 0) is not None
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -324,12 +323,13 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
     """Both shared drivers continue once at the safe boundary even if the model ignores retrieval."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
     runtime = tool_job_runtime(tmp_path)
-    register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
     prompts = []
 
     async def operation() -> BackgroundOutcome:
@@ -368,7 +368,6 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
         assert 'job_id="quiet"' in prompts[1]
         assert await runtime.outcome("quiet", 0) is not None
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -376,6 +375,7 @@ async def test_response_boundary_joins_ready_results_without_repeating_ignored_p
 async def test_coordinator_wakes_conversation_without_matrix_notice(tmp_path: Path) -> None:
     """Ready work is published only to the internal response source owner."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     try:
         job = await _finish_job(coordinator)
         bot = coordinator.bot_provider("team")
@@ -391,30 +391,32 @@ async def test_coordinator_wakes_conversation_without_matrix_notice(tmp_path: Pa
 async def test_successful_completion_admission_is_not_repeated_after_bot_replacement(tmp_path: Path) -> None:
     """The durable journal owns an admitted generation, including after a bot is replaced."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     bot = _bot(tmp_path)
     bot.running = True
-    bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
     coordinator.bot_provider = lambda _name: bot
+    store = bot.journal_principal()
     try:
         job = await _finish_job(coordinator)
         event = completion_event(job, sender_id=bot.matrix_id.full_id)
-        store = bot._journal_store.principal(bot._journal_principal_id)
-        await coordinator.deliver_pending()
-        assert await store.is_pending(event.event_id)
-        await coordinator.deliver_pending()
-        bot.client.joined_rooms.assert_awaited_once()
-        replacement = _bot(tmp_path)
-        replacement.running = True
-        replacement.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
-        coordinator.bot_provider = lambda _name: replacement
-        await coordinator.deliver_pending()
-        replacement.client.joined_rooms.assert_not_awaited()
-        assert await replacement._journal_store.principal(replacement._journal_principal_id).is_pending(event.event_id)
-        await coordinator.stop()
-        await coordinator.runtime.recover()
-        await coordinator.deliver_pending()
-        replacement.client.joined_rooms.assert_awaited_once()
-        assert await store.is_pending(event.event_id)
+        with patch.object(type(store), "admit", autospec=True, side_effect=type(store).admit) as admit:
+            await coordinator.deliver_pending()
+            assert await store.is_pending(event.event_id)
+            await coordinator.deliver_pending()
+            admit.assert_awaited_once()
+            replacement = _bot(tmp_path)
+            replacement.running = True
+            coordinator.bot_provider = lambda _name: replacement
+            await coordinator.deliver_pending()
+            admit.assert_awaited_once()
+            assert await replacement.journal_principal().is_pending(event.event_id)
+            await coordinator.stop()
+            await coordinator.initialize()
+            await coordinator.runtime.recover()
+            # A restarted coordinator admits again, and the journal keeps its one pending event.
+            await coordinator.deliver_pending()
+            assert admit.await_count == 2
+            assert await store.is_pending(event.event_id)
     finally:
         await coordinator.stop()
 
@@ -423,9 +425,9 @@ async def test_successful_completion_admission_is_not_repeated_after_bot_replace
 async def test_failed_completion_admission_retries_and_new_generation_is_admitted(tmp_path: Path) -> None:
     """Only successful durable admission suppresses retries; approval outcomes keep distinct generations."""
     coordinator = _delivery_coordinator(tmp_path, _config(tmp_path))
+    await coordinator.initialize()
     bot = _bot(tmp_path)
     bot.running = True
-    bot.client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=["!room:localhost"]))
     coordinator.bot_provider = lambda _name: bot
     fixture = _job()
 
@@ -448,30 +450,31 @@ async def test_failed_completion_admission_retries_and_new_generation_is_admitte
         )
         waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
         await coordinator.runtime.release_wait(fixture.job_id, waited.claim)
-        store = bot._journal_store.principal(bot._journal_principal_id)
+        store = bot.journal_principal()
         first = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
         with patch.object(type(store), "admit", side_effect=OSError("journal unavailable")):
             await coordinator.deliver_pending()
         assert not await store.is_pending(first.event_id)
-        await coordinator.deliver_pending()
-        assert await store.is_pending(first.event_id)
-        await coordinator.deliver_pending()
-        assert bot.client.joined_rooms.await_count == 2
-        await coordinator.runtime.continue_job(
-            fixture.job_id,
-            owner=fixture.owner,
-            depth=0,
-            expected_generation=0,
-            operation=complete,
-        )
-        waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
-        await coordinator.runtime.release_wait(fixture.job_id, waited.claim)
-        second = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
-        assert second.event_id != first.event_id
-        await coordinator.deliver_pending()
-        assert await store.is_pending(second.event_id)
-        await coordinator.deliver_pending()
-        assert bot.client.joined_rooms.await_count == 3
+        with patch.object(type(store), "admit", autospec=True, side_effect=type(store).admit) as admit:
+            await coordinator.deliver_pending()
+            assert await store.is_pending(first.event_id)
+            await coordinator.deliver_pending()
+            admit.assert_awaited_once()
+            await coordinator.runtime.continue_job(
+                fixture.job_id,
+                owner=fixture.owner,
+                depth=0,
+                expected_generation=0,
+                operation=complete,
+            )
+            waited = await coordinator.runtime.wait(fixture.job_id, owner=fixture.owner, depth=0)
+            await coordinator.runtime.release_wait(fixture.job_id, waited.claim)
+            second = completion_event(waited.job, sender_id=bot.matrix_id.full_id)
+            assert second.event_id != first.event_id
+            await coordinator.deliver_pending()
+            assert await store.is_pending(second.event_id)
+            await coordinator.deliver_pending()
+            assert admit.await_count == 2
     finally:
         await coordinator.stop()
 
@@ -529,6 +532,7 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
     )
     allowed = True
     runtime = tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -565,7 +569,6 @@ async def test_replayed_human_source_uses_retained_job_without_rerunning_prompt(
         else:
             assert recovered is request
     finally:
-        register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()
 
 
@@ -636,6 +639,7 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
         resolved_thread_id=request.thread_id,
     )
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -679,7 +683,6 @@ async def test_idle_completion_defers_to_still_pending_original_source(tmp_path:
         respond.assert_awaited_once()
         assert respond.call_args.args[0].response_envelope.source_event_id == event.event_id
     finally:
-        register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()
 
 
@@ -688,12 +691,13 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
     """A pending approval reaches the existing native wait path without a join deadlock."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
     runtime = tool_job_runtime(tmp_path)
-    register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
     release = asyncio.Event()
 
     async def running() -> BackgroundOutcome:
@@ -726,7 +730,6 @@ async def test_ready_approval_is_retrieved_before_waiting_on_other_running_jobs(
         assert await runtime.outcome("approval", 0) is not None
     finally:
         release.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -736,12 +739,13 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
     """Joining or retrieving retained work cannot publish top-level completion early."""
     paths, owner = test_runtime_paths(tmp_path), _job().owner
     runtime = tool_job_runtime(tmp_path)
-    register_background_runtime(paths, runtime)
     context = replace(
         _delegate_runtime_context(_config(tmp_path), paths, execution_identity=owner),
         agent_name=owner.agent_name,
         transport_agent_name=owner.transport_agent_name,
     )
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
     finish, waiting, continuing = asyncio.Event(), asyncio.Event(), asyncio.Event()
     recorder = TurnRecorder(user_message="Original request", run_id="run-1")
     metadata: dict[str, object] = {}
@@ -808,5 +812,4 @@ async def test_blocking_join_keeps_recorder_interruptible(tmp_path: Path, failur
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         finish.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()

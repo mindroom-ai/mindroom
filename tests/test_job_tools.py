@@ -23,6 +23,7 @@ from mindroom.delegation.background import delegation_outcome
 from mindroom.tool_jobs.agno_compat_execution import install_tool_job_execution
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
@@ -47,6 +48,7 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     gate = asyncio.Event()
 
@@ -75,7 +77,6 @@ async def test_job_wait_waits_and_restores_rich_result(tmp_path: Path) -> None:
             assert json.loads(await tools.job("list"))[0]["job_id"] == "ordinary"
             assert set(tools.get_async_functions()) == {"job"}
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -95,6 +96,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     try:
         agent = create_agent("leader", config, paths, execution_identity=owner, persist_runtime_state=False)
@@ -102,7 +104,6 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
         assert "job" in names
         assert not {"inspect_subagent", "wait_subagent", "resume_subagent", "cancel_subagent"} & names
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -113,6 +114,7 @@ async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
     async def operation() -> BackgroundOutcome:
@@ -143,7 +145,6 @@ async def test_only_native_job_wait_projects_external_approval(tmp_path: Path) -
         assert response.requirements[0].needs_external_execution
         assert response.requirements[0].tool_execution.approval_type == "mindroom_job_wait"
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -175,6 +176,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
     allowed = True
     runtime = tool_job_runtime(tmp_path, authorize=lambda _: allowed)
     await runtime.recover()
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     tools = JobTools(paths, owner)
     try:
@@ -196,7 +198,6 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
             assert json.loads(await tools.job("list")) == []
             assert "not available" in await tools.job("inspect", "durable")
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -208,6 +209,7 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
     context = replace(_delegate_runtime_context(config, paths), agent_name="squad", transport_agent_name="squad")
     owner = replace(build_execution_identity_from_runtime_context(context), agent_name="leader")
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
     def storage_factory() -> BaseDb:
@@ -263,7 +265,6 @@ async def test_team_routes_member_discovery_and_consumption_on_new_turn(tmp_path
         assert (await runtime.lookup("member-job", owner=owner, depth=0)).consumed
     finally:
         storage.close()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -289,6 +290,7 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
     def storage_factory() -> BaseDb:
@@ -330,7 +332,6 @@ async def test_job_wait_replays_sdk_failure_and_acknowledges_saved_result(
         assert (await runtime.lookup("ordinary", owner=owner, depth=0)).consumed
     finally:
         storage.close()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -345,6 +346,7 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     result = "large result " * 100_000
 
@@ -377,7 +379,6 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
             assert result.startswith(summary["summary"])
             assert await tools.job("wait", "large") == result
     finally:
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -388,6 +389,7 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     gate = asyncio.Event()
 
@@ -405,7 +407,6 @@ async def test_job_wait_can_return_immediately_without_cancelling(tmp_path: Path
             assert await tools.job("wait", "ordinary", wait_timeout=None) == "answer"
     finally:
         gate.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -421,6 +422,7 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
     context = _delegate_runtime_context(Config(agents={"leader": AgentConfig(display_name="Leader")}), paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
     reading, release = asyncio.Event(), asyncio.Event()
     read_payload = runtime.read_payload
@@ -453,7 +455,6 @@ async def test_interrupted_payload_read_releases_the_wait_claim(
         await runtime.release_wait("read", retried.claim)
     finally:
         release.set()
-        register_background_runtime(paths, None)
         await runtime.shutdown()
 
 
@@ -470,6 +471,7 @@ async def test_cancel_acknowledges_only_saved_management_result(
     context = _delegate_runtime_context(config, paths)
     owner = build_execution_identity_from_runtime_context(context)
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
 
     def storage_factory() -> BaseDb:
@@ -511,5 +513,4 @@ async def test_cancel_acknowledges_only_saved_management_result(
         assert job.consumed is not save_fails
     finally:
         storage.close()
-        register_background_runtime(paths, None)
         await runtime.shutdown()

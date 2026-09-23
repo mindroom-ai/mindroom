@@ -4202,6 +4202,10 @@ async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner
         )
         orchestrator.agent_bots = {"agent1": bot}
         orchestrator._open_journal = journal
+        orchestrator._tool_job_runtime.config_provider = lambda: Config(
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        )
+        await orchestrator._tool_job_runtime.initialize()
         jobs = orchestrator._tool_job_runtime.runtime
         stopping = asyncio.create_task(orchestrator.stop())
         await finalizer_entered.wait()
@@ -4318,6 +4322,10 @@ async def test_orchestrator_retains_shared_journal_for_generic_failure_until_res
         )
         orchestrator.agent_bots = {"agent1": bot}
         orchestrator._open_journal = journal
+        orchestrator._tool_job_runtime.config_provider = lambda: Config(
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        )
+        await orchestrator._tool_job_runtime.initialize()
         jobs = orchestrator._tool_job_runtime.runtime
 
         with pytest.raises(RuntimeError, match="preparation failed before response drain") as raised:

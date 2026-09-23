@@ -9,7 +9,6 @@ import re
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -29,13 +28,16 @@ from mindroom.tool_jobs.control import (
     human_message_signal_context,
     job_control_context,
 )
+from mindroom.tool_jobs.instances import tool_job_instance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.wait_timeout import validate_wait_timeout
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
+
+    from agno.tools.function import Function
 
     from mindroom.constants import RuntimePaths
 
@@ -160,6 +162,11 @@ def _payload_name(job_id: str, generation: int) -> str:
     return f"{job_id}.g{generation}{_PAYLOAD_SUFFIX}"
 
 
+def _unlink_in_order(paths: list[Path]) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
 def saved_job_paths(root: Path) -> list[Path]:
     """List saved job metadata, leaving out the payload files it references."""
     return sorted(path for path in root.glob("*.json") if not path.name.endswith(_PAYLOAD_SUFFIX))
@@ -238,22 +245,27 @@ class _Entry:
         self.claim = JobClaim(self.job.generation, uuid4().hex)
         return self.claim
 
-
-_runtimes: dict[Path, ToolJobRuntime] = {}
+    def claim_for(self, claim: JobClaim | None) -> JobClaim | None:
+        """Keep a waiter's live claim or claim an unclaimed generation for it; None while another waiter holds it."""
+        live = self.live_claim
+        if live is None:
+            return self.mint_claim()
+        return live if live == claim else None
 
 
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
     """Find the managed Matrix runtime for one storage root, if present."""
-    return _runtimes.get(runtime_paths.storage_root)
+    instance = tool_job_instance(runtime_paths)
+    return instance.runtime if instance is not None else None
 
 
-def register_background_runtime(runtime_paths: RuntimePaths, runtime: ToolJobRuntime | None) -> None:
-    """Publish or withdraw the lifecycle-owned runtime at its storage boundary."""
-    key = runtime_paths.storage_root
-    if runtime is None:
-        _runtimes.pop(key, None)
-    else:
-        _runtimes[key] = runtime
+def register_background_runtime(runtime_paths: RuntimePaths, runtime: ToolJobRuntime) -> None:
+    """Publish the recovered runtime of the instance pinned for its storage root; releasing the instance withdraws it."""
+    instance = tool_job_instance(runtime_paths)
+    if instance is None:
+        msg = "Pin background tool jobs for this storage root before publishing its runtime."
+        raise RuntimeError(msg)
+    instance.runtime = runtime
 
 
 class ToolJobRuntime:
@@ -264,6 +276,7 @@ class ToolJobRuntime:
         storage_root: Path,
         *,
         authorize: Callable[[BackgroundJob], bool],
+        authorize_execution: Callable[[ToolExecutionIdentity, Function, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
     ) -> None:
         self._root = storage_root / "tool_jobs"
@@ -278,6 +291,7 @@ class ToolJobRuntime:
             self._lease.close()
             raise
         self._authorize = authorize
+        self._authorize_execution = authorize_execution
         self._cancel = cancel
         self._entries: dict[str, _Entry] = {}
         self._lock = asyncio.Lock()
@@ -287,6 +301,15 @@ class ToolJobRuntime:
         self._human_signals: WeakValueDictionary[tuple[str, str, str | None], HumanMessageSignal] = (
             WeakValueDictionary()
         )
+
+    def authorize_execution(
+        self,
+        owner: ToolExecutionIdentity,
+        function: Function,
+        arguments: Mapping[str, Any],
+    ) -> None:
+        """Recheck a retained function's current authority immediately before application entry; raise if revoked."""
+        self._authorize_execution(owner, function, arguments)
 
     def human_signal_for(self, transport_agent_name: str, room_id: str, thread_id: str | None) -> HumanMessageSignal:
         """Retain one conversation signal while a runner or background job uses it."""
@@ -649,10 +672,9 @@ class ToolJobRuntime:
         retained = False
         async with self._lock:
             entry = self._entry(job_id, owner, depth)
-            held = entry.live_claim
-            if held is not None and held != claim:
+            claim = entry.claim_for(claim)
+            if claim is None:
                 return _BackgroundWait(await self._snapshot(entry), delivery_queued=True)
-            claim = held or entry.mint_claim()
             human_notified = asyncio.Event()
             human_signal = entry.human_signal
             if human_signal is not None:
@@ -662,6 +684,12 @@ class ToolJobRuntime:
                 async with self._lock:
                     self._entry(job_id, owner, depth)
                     if entry.job.status in _READY:
+                        # A continuation or cancellation can start a newer generation before this waiter sees the one
+                        # it claimed; that stale claim owns nothing, so claim the ready one unless another waiter has.
+                        ready = entry.claim_for(claim)
+                        if ready is None:
+                            return _BackgroundWait(await self._snapshot(entry), delivery_queued=True)
+                        claim = ready
                         snapshot = await self._snapshot(entry)
                         retained = True
                         return _BackgroundWait(snapshot, claim)
@@ -1028,8 +1056,7 @@ class ToolJobRuntime:
                     files.append(self._path(job.job_id, entry.job.generation))
                 del self._entries[job.job_id]
                 # Metadata goes first, so a crash can leave only a payload, which recovery deletes.
-                for path in files:
-                    await run_blocking_until_complete(partial(path.unlink, missing_ok=True))
+                await run_blocking_until_complete(_unlink_in_order, files)
 
     async def quiesce(self) -> None:
         """Drain owned execution while response finalizers retain result receipt access."""

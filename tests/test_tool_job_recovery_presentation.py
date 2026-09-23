@@ -19,6 +19,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.response_runner import _EarlyPlaceholderState
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, StreamingPresentation, send_streaming_response
 from mindroom.tool_jobs.completion import _ReadyJobContinuation
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import (
     BackgroundWaitChunk,
@@ -102,6 +103,7 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
         session_id=request.response_envelope.target.session_id,
     )
     runtime = tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(bot.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
     old_trace = ToolTraceEntry("tool_call_completed", "original_tool", result_preview="saved result")
     narrative = ("Long analysis already visible. " * 100).rstrip()
@@ -157,7 +159,6 @@ async def test_recovered_job_source_preserves_latest_visible_edit(
         assert outcome.delivery.event_id == "$response"
         assert not recovered.existing_event_is_placeholder
     finally:
-        register_background_runtime(bot.runtime_paths, None)
         await runtime.shutdown()
 
 
