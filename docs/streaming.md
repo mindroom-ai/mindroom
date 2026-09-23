@@ -55,6 +55,7 @@ defaults:
     min_update_interval: 0.5     # Default: 0.5 fast-start seconds between early edits
     interval_ramp_seconds: 15.0  # Default: 15.0; set 0 to disable ramping
     max_idle: 2.0                # Default: 2.0 event-driven idle ceiling before the next edit
+    max_live_chars: 1000000      # Default: 1000000; stop progressive edits past this many characters
 ```
 
 These timing settings are global-only. Agents inherit them from `defaults` and cannot override them individually.
@@ -98,6 +99,7 @@ MindRoom throttles edits to avoid overwhelming the Matrix homeserver:
   This is event-driven and does not run on a background timer.
 - **Tool-start boundary refresh**: Visible tool-start markers request an immediate refresh so the marker can surface without waiting for later text.
   Rapid back-to-back tool starts are coalesced by the single delivery owner instead of forcing one Matrix edit per tool.
+- **Live-update ceiling**: once a streamed response exceeds `defaults.streaming.max_live_chars` characters (default: 1,000,000), MindRoom stops progressive edits and delivers the complete response when the turn ends.
 
 ## Tool Calls During Streaming
 

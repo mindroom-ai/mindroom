@@ -65,6 +65,14 @@ class StreamingConfig(BaseModel):
             "a background timer)."
         ),
     )
+    max_live_chars: int = Field(
+        default=1_000_000,
+        ge=1,
+        description=(
+            "Stop progressive edits once a streamed response exceeds this many characters; "
+            "the full response is still delivered when the turn ends"
+        ),
+    )
 
 
 class CoalescingConfig(BaseModel):

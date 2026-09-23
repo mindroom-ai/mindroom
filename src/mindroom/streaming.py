@@ -532,6 +532,7 @@ class StreamingResponse:
     min_char_update_interval: float = 0.35
     progress_update_interval: float = 1.0
     max_idle: float = 2.0
+    max_live_chars: int = 1_000_000
     latest_thread_event_id: str | None = None  # For MSC3440 compliance
     show_tool_calls: bool = True  # When False, omit inline tool call text and tool-trace metadata
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
@@ -1012,6 +1013,17 @@ class StreamingResponse:
         capture_completions: tuple[asyncio.Future[None], ...] = (),
     ) -> bool:
         """Send new message or edit existing one."""
+        if (
+            not is_final
+            and not force_nonterminal_delivery
+            and self.event_id is not None
+            and len(self.accumulated_text) > self.max_live_chars
+        ):
+            # Past the live ceiling every progressive edit would re-format and
+            # re-size the whole response on the event loop. The terminal
+            # delivery still carries the complete answer.
+            _complete_capture_completions(capture_completions)
+            return True
         prepared_delivery = await self._prepare_delivery_async(
             is_final=is_final,
             allow_empty_progress=allow_empty_progress,
@@ -2048,6 +2060,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         min_update_interval=sc.min_update_interval,
         interval_ramp_seconds=sc.interval_ramp_seconds,
         max_idle=sc.max_idle,
+        max_live_chars=sc.max_live_chars,
         pipeline_timing=pipeline_timing,
         visible_event_id_callback=visible_event_id_callback,
         visible_progress_callback=visible_progress_callback,
