@@ -70,6 +70,12 @@ export function noneLabel(node: SchemaNode): string {
   return node.hint.clears_inherited === true ? "Built-in default" : "None";
 }
 
+function noneToggleLabel(node: SchemaNode): string {
+  return node.hint.clears_inherited === true
+    ? "Use built-in default"
+    : "Set to none";
+}
+
 /** Lowercase a label for use mid-sentence, keeping leading acronyms. */
 export function inlineLabel(label: string): string {
   return /^[A-Z]{2}/.test(label)
@@ -369,6 +375,7 @@ export function ScalarInput({
     !required &&
     (!node.hasDefault || node.defaultValue == null || node.defaultValue === "");
   const isNull = value === null;
+  const placeholder = isNull ? noneLabel(node) : defaultPlaceholder(node);
   const control =
     node.kind === "number" ? (
       <NumberInput
@@ -376,6 +383,7 @@ export function ScalarInput({
         node={node}
         value={typeof value === "number" ? value : undefined}
         disabled={isNull}
+        placeholder={placeholder}
         onChange={onChange}
       />
     ) : (
@@ -384,6 +392,7 @@ export function ScalarInput({
         node={node}
         value={typeof value === "string" ? value : ""}
         disabled={isNull}
+        placeholder={placeholder}
         suggestions={
           reference === "room" || reference === "tool"
             ? references[reference]
@@ -408,9 +417,7 @@ export function ScalarInput({
           onCheckedChange={(next) => onChange(next === true ? null : undefined)}
         />
         <Label htmlFor={`${id}-none`} className="cursor-pointer text-xs">
-          {node.hint.clears_inherited === true
-            ? "Use built-in default"
-            : "Set to none"}
+          {noneToggleLabel(node)}
         </Label>
       </div>
     </div>
@@ -422,12 +429,14 @@ function NumberInput({
   node,
   value,
   disabled,
+  placeholder,
   onChange,
 }: {
   id: string;
   node: SchemaNode;
   value: number | undefined;
   disabled: boolean;
+  placeholder: string | undefined;
   onChange: (next: number | undefined) => void;
 }) {
   const external = value === undefined ? "" : String(value);
@@ -442,7 +451,7 @@ function NumberInput({
       inputMode="decimal"
       value={draft}
       disabled={disabled}
-      placeholder={defaultPlaceholder(node)}
+      placeholder={placeholder}
       // Exclusive bounds have no HTML equivalent; the backend enforces them.
       min={node.schema.minimum}
       max={node.schema.maximum}
@@ -468,6 +477,7 @@ function TextInput({
   node,
   value,
   disabled,
+  placeholder,
   suggestions,
   onChange,
 }: {
@@ -475,12 +485,12 @@ function TextInput({
   node: SchemaNode;
   value: string;
   disabled: boolean;
+  placeholder: string | undefined;
   suggestions?: string[];
   onChange: (text: string) => void;
 }) {
   const [revealed, setRevealed] = useState(false);
   const listId = `${id}-suggestions`;
-  const placeholder = defaultPlaceholder(node);
 
   if (node.hint.multiline) {
     return (
@@ -503,6 +513,7 @@ function TextInput({
           autoComplete="off"
           value={value}
           disabled={disabled}
+          placeholder={placeholder}
           onChange={(event) => onChange(event.target.value)}
         />
         <Button

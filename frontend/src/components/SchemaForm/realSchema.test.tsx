@@ -29,6 +29,7 @@ const EDITOR_DEFINITIONS = [
   "EmbedderConfig",
   "KnowledgeBaseConfig",
   "VoiceSTTConfig",
+  "CallsConfig",
   "ModelConfig",
 ];
 

@@ -2112,6 +2112,7 @@ describe("AgentEditor", () => {
     expect(mockStore.updateAgent).toHaveBeenLastCalledWith("test_agent", {
       compaction: { timeout_seconds: null },
     });
+    expect(timeout).toHaveAttribute("placeholder", "Built-in default");
 
     // An explicit null opts this agent out of an inherited fallback model.
     fireEvent.change(screen.getByRole("combobox", { name: "Fallback model" }), {

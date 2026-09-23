@@ -91,6 +91,27 @@ const ROOT: JsonSchema = {
       },
       required: ["path"],
     },
+    RealtimeProfile: {
+      type: "object",
+      properties: {
+        backend: { const: "realtime", type: "string" },
+        model: { type: "string", default: "gpt-realtime" },
+        voice: { type: "string", default: "marin" },
+      },
+      required: ["backend"],
+    },
+    CascadedProfile: {
+      type: "object",
+      properties: {
+        backend: { const: "cascaded", type: "string" },
+        model: {
+          anyOf: [{ type: "string" }, { type: "null" }],
+          default: null,
+          "x-mindroom": { reference: "model" },
+        },
+      },
+      required: ["backend"],
+    },
     RuleConfig: {
       type: "object",
       properties: { match: { type: "string", description: "Glob" } },
@@ -163,6 +184,13 @@ const ROOT: JsonSchema = {
         rules: {
           type: "array",
           items: { $ref: "#/$defs/RuleConfig" },
+        },
+        call_profile: {
+          oneOf: [
+            { $ref: "#/$defs/RealtimeProfile" },
+            { $ref: "#/$defs/CascadedProfile" },
+          ],
+          discriminator: { propertyName: "backend" },
         },
         plugins: {
           type: "array",
@@ -293,9 +321,12 @@ describe("SchemaFields", () => {
 
   it("distinguishes an explicit null from the default", () => {
     const { lastValue } = renderFixture();
+    const input = screen.getByLabelText("Temperature");
+    expect(input).toHaveAttribute("placeholder", "Default: 0.2");
     fireEvent.click(screen.getByRole("checkbox", { name: "Set to none" }));
     expect(lastValue()).toEqual({ temperature: null });
-    expect(screen.getByLabelText("Temperature")).toBeDisabled();
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute("placeholder", "None");
   });
 
   it("adds and removes list entries", () => {
@@ -517,6 +548,18 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({
       room_models: { hall: "default", dev: "sonnet" },
     });
+  });
+
+  it("drops fields whose meaning changes between union variants", () => {
+    const { lastValue } = renderFixture({
+      call_profile: { backend: "realtime", model: "gpt-realtime-2" },
+    });
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "Call profile type" }),
+      { target: { value: "1" } },
+    );
+    // A realtime model ID is not a configured model name.
+    expect(lastValue()).toEqual({ call_profile: { backend: "cascaded" } });
   });
 
   it("keeps fields both variants define when switching union variants", () => {

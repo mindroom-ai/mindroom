@@ -818,15 +818,28 @@ function UnionEditor({
   if (node.discriminator != null) {
     const discriminator = node.discriminator;
     const selected = index >= 0 ? node.variants[index] : null;
-    // Discriminated variants are objects; keep fields both variants define,
-    // such as timeout_seconds.
+    // Discriminated variants are objects; keep fields both variants define
+    // the same way, such as timeout_seconds, but not a free-form model ID that
+    // would become a configured model name.
     const switchVariant = (next: number) => {
+      const source = index >= 0 ? variantNodes[index] : null;
       const target = variantNodes[next];
+      const sameField = (key: string) => {
+        const from = source?.schema.properties![key];
+        const to = target.schema.properties![key];
+        if (from == null || to == null) {
+          return false;
+        }
+        const fromNode = classifySchemaNode(from, root);
+        const toNode = classifySchemaNode(to, root);
+        return (
+          fromNode.kind === toNode.kind &&
+          fromNode.hint.reference === toNode.hint.reference
+        );
+      };
       const shared = Object.entries(
         isPlainObject(effective) ? effective : {},
-      ).filter(
-        ([key]) => key !== discriminator && key in target.schema.properties!,
-      );
+      ).filter(([key]) => key !== discriminator && sameField(key));
       onChange({
         ...(initialValue(target, root, references) as Record<string, unknown>),
         ...Object.fromEntries(shared),
